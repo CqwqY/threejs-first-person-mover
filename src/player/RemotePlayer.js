@@ -27,11 +27,11 @@ export class RemotePlayer {
     this.target.fromJSON(stateData);
   }
 
-  // 每帧：把 state 向 target 插值，再把模型位置/朝向同步到 state
+  // 把 state 向 target 插值，再把模型位置/朝向同步到 state
   update(dt) {
-    // 简单线性插值（指数平滑）：alpha = 1 - exp(-10*dt)。
+    // 简单线性插值（指数平滑）：alpha = 1 - exp(-15*dt)。
     // dt 越大 alpha 越大，收敛越快；dt 越小越平滑，用于平滑跟随远程玩家轨迹。
-    const alpha = 1 - Math.exp(-10 * dt);
+    const alpha = 1 - Math.exp(-15 * dt);
     this.state.lerpTo(this.target, alpha);
 
     // 同步模型外观（仅使用 yaw 水平旋转）

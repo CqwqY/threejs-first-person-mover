@@ -63,19 +63,23 @@ export class PlayerManager {
     return this.players.get(this.localId);
   }
 
-  // 收到服务端玩家快照列表时调用：新增/更新，并删除已不在列表中的远程玩家
-  // players：形如 [{id, x, y, z, yaw, pitch, onGround}, ...] 的数组
+  // 收到服务端玩家快照列表时调用：新增/更新远程玩家，并删除已不在列表中的远程玩家。
+// 本地玩家会被跳过：本地位置由本地物理预测驱动，绝不能用服务器状态覆盖，否则会抖回原位。
+// players：形如 [{id, x, y, z, yaw, pitch, onGround}, ...] 的数组
   applySnapshot(players) {
     const seen = new Set();
 
     for (const data of players) {
+      // 跳过本地玩家，避免服务器状态覆盖本地预测位置
+      if (data.id === this.localId) continue;
+
       seen.add(data.id);
       const remote = this.players.get(data.id);
       if (remote) {
-        // 已有玩家：仅更新目标状态
+        // 已有玩家：仅更新目标状态，由 RemotePlayer 插值逼近
         remote.applyState(data);
       } else {
-        // 新玩家：注册并渲染
+        // 新玩家：第一次出现时创建模型并注册
         this.addPlayer(data.id, data);
       }
     }

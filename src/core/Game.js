@@ -4,7 +4,9 @@ import { Config } from '../config.js';
 import { createWorld } from '../world/World.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
+import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
+import { Network } from '../net/Network.js';
 
 export class Game {
   constructor() {
@@ -30,17 +32,19 @@ export class Game {
     this.input.setCanvas(this.renderer.domElement);
 
     // ---- 玩家管理器：维护所有玩家（本地 + 远程） ----
+    // 本地玩家的真实 id 在收到服务器 welcome 时才确定，先前保持 null
     this.playerManager = new PlayerManager(this.scene);
-    // 暂时给本地玩家一个假的 id（联机时替换为真实身份）
-    this.playerManager.setLocal('local');
 
-    // 注入本地玩家的可序列化状态（由 PlayerManager 建好模型并隐藏外观）
-    const localSeed = { id: 'local', x: 0, y: Config.PLAYER_HEIGHT, z: 0 };
-    this.playerManager.addPlayer('local', localSeed);
-    const localState = this.playerManager.getLocalPlayer().state;
+    // 本地玩家的可序列化状态（id 稍后由 welcome 消息填充）
+    this.localState = new PlayerState('', 0, Config.PLAYER_HEIGHT, 0);
 
     // 本地玩家逻辑
-    this.localPlayer = new LocalPlayer(this.camera, this.input, localState);
+    this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState);
+
+    // ---- 网络连接 ----
+    this.network = new Network('ws://localhost:8080');
+    this.network.onMessage((msg) => this._onNetworkMessage(msg));
+    this.network.connect();
 
     // 计时器与 RAF 句柄（便于停止）
     this.clock = new THREE.Clock();
@@ -59,6 +63,39 @@ export class Game {
     this.renderer.setSize(w, h);
   }
 
+  // 处理服务器发来的消息（中继协议）
+  _onNetworkMessage(msg) {
+    switch (msg.t) {
+      case 'welcome': {
+        // 确定本地 id，注册自己（模型隐藏），并加入服务器已存在的玩家
+        this.localState.id = msg.id;
+        this.playerManager.setLocal(msg.id);
+        this.playerManager.addPlayer(msg.id, this.localState);
+        for (const p of msg.players) {
+          this.playerManager.addPlayer(p.id, p);
+        }
+        break;
+      }
+      case 'join': {
+        // 有新玩家加入：注册并显示模型
+        this.playerManager.addPlayer(msg.id, msg.state);
+        break;
+      }
+      case 'leave': {
+        // 玩家断开：移除模型
+        this.playerManager.removePlayer(msg.id);
+        break;
+      }
+      case 'snapshot': {
+        // 周期快照：同步远程玩家（本地由 applySnapshot 内部跳过）
+        this.playerManager.applySnapshot(msg.players);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   // 启动主循环
   start() {
     this.clock.start();
@@ -75,6 +112,9 @@ export class Game {
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     this.localPlayer.update(dt);
     this.playerManager.update(dt);
+
+    // 上报本地状态（内部按 20Hz 节流）
+    this.network.sendState(this.localState.toJSON());
 
     // 渲染当前帧
     this.renderer.render(this.scene, this.camera);
