@@ -8,6 +8,7 @@ import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { Network } from '../net/Network.js';
+import { addDebugRig } from '../debug/SkeletonDebug.js';
 
 export class Game {
   constructor() {
@@ -53,6 +54,9 @@ export class Game {
     // 计时器与 RAF 句柄（便于停止）
     this.clock = new THREE.Clock();
     this._raf = 0;
+
+    // 调试：URL 带 ?rigdebug 时，在场景中放一个可见调试模型并画出骨骼与坐标轴
+    this.debugRig = /\brigdebug\b/.test(location.search) ? addDebugRig(this.scene) : null;
 
     // ---- 窗口尺寸自适应 ----
     window.addEventListener('resize', () => this._onResize());
@@ -122,6 +126,9 @@ export class Game {
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     this.localPlayer.update(dt);
     this.playerManager.update(dt);
+
+    // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
+    if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
 
     // 上报本地状态（内部按 20Hz 节流）
     this.network.sendState(this.localState.toJSON());
