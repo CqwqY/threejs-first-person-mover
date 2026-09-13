@@ -14,13 +14,14 @@ export class PlayerManager {
   }
 
   // 新增/获取一个玩家：创建 RemotePlayer 并把模型加入场景
-  addPlayer(id, stateData) {
+  // name 用于头顶名牌文字；缺省时由 RemotePlayer 按状态里的 num 推导
+  addPlayer(id, stateData, name) {
     // 已存在则直接返回
     if (this.players.has(id)) {
       return this.players.get(id);
     }
 
-    const remote = new RemotePlayer(id, stateData);
+    const remote = new RemotePlayer(id, stateData, name);
     this.scene.add(remote.model);
 
     // 本地玩家第一人称看不到自己，模型设为不可见

@@ -69,16 +69,20 @@ export class Game {
       case 'welcome': {
         // 确定本地 id，注册自己（模型隐藏），并加入服务器已存在的玩家
         this.localState.id = msg.id;
+        // 用服务端分配的出生点初始化本地位置/朝向，避免都堆在原点
+        this.localState.x = msg.spawn.x;
+        this.localState.z = msg.spawn.z;
+        this.localState.yaw = msg.spawn.yaw;
         this.playerManager.setLocal(msg.id);
-        this.playerManager.addPlayer(msg.id, this.localState);
+        this.playerManager.addPlayer(msg.id, this.localState, `玩家${msg.num}`);
         for (const p of msg.players) {
-          this.playerManager.addPlayer(p.id, p);
+          this.playerManager.addPlayer(p.id, p, `玩家${p.num}`);
         }
         break;
       }
       case 'join': {
-        // 有新玩家加入：注册并显示模型
-        this.playerManager.addPlayer(msg.id, msg.state);
+        // 有新玩家加入：注册并显示模型（名牌按加入序号）
+        this.playerManager.addPlayer(msg.id, msg.state, `玩家${msg.state.num}`);
         break;
       }
       case 'leave': {
