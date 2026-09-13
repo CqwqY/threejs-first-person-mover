@@ -143,18 +143,18 @@ export class Game {
 
     const rig = local.model.userData.rig;
     if (rig) {
-      const dx = this.state.x - this._tpPrevX;
-      const dz = this.state.z - this._tpPrevZ;
+      const dx = this.localState.x - this._tpPrevX;
+      const dz = this.localState.z - this._tpPrevZ;
       const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
       this._tpTime += dt;
       rig.update(this._tpTime, speed);
     }
-    this._tpPrevX = this.state.x;
-    this._tpPrevZ = this.state.z;
+    this._tpPrevX = this.localState.x;
+    this._tpPrevZ = this.localState.z;
 
     // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
-    const eye = new THREE.Vector3(this.state.x, this.state.y, this.state.z);
-    const yaw = this.state.yaw;
+    const eye = new THREE.Vector3(this.localState.x, this.localState.y, this.localState.z);
+    const yaw = this.localState.yaw;
     const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)); // 移动正前方
     const DIST = 4.0;
     const LIFT = 1.7;
