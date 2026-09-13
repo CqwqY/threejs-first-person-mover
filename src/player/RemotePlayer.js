@@ -40,13 +40,23 @@ export class RemotePlayer {
     this.target.fromJSON(stateData);
   }
 
-  // 每帧：把 state 向 target 插值，再把模型位置/朝向同步到 state
+  // 每帧：把 state 向 target 插值，再把模型位置/朝向同步到 state，并按移动速度驱动骨骼动画
   update(dt) {
     // 简单线性插值（指数平滑）：alpha = 1 - exp(-15*dt)。
     // dt 越大 alpha 越大，收敛越快；dt 越小越平滑，用于平滑跟随远程玩家轨迹。
+    const prevX = this.state.x;
+    const prevZ = this.state.z;
     const alpha = 1 - Math.exp(-15 * dt);
     this.state.lerpTo(this.target, alpha);
 
     this.syncModel();
+
+    // 用插值速度驱动骨骼动画：走动时摆臂/迈腿，静止时待机呼吸
+    const rig = this.model.userData.rig;
+    if (rig) {
+      const speed = dt > 0 ? Math.hypot(this.state.x - prevX, this.state.z - prevZ) / dt : 0;
+      this._animT = (this._animT || 0) + dt;
+      rig.update(this._animT, speed);
+    }
   }
 }

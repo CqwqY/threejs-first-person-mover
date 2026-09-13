@@ -5,6 +5,7 @@
 // 名牌挂在头顶锚点，随模型一起被隐藏/移除。
 import * as THREE from 'three';
 import { instantiate } from '../world/AssetLoader.js';
+import { autoRig } from './AutoRig.js';
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
@@ -29,13 +30,24 @@ export function createPlayerModel(label = '', gender = 'boy') {
     headAnchor.add(createNameTag(label));
   }
 
-  // ---- 异步加载人物 GLB，加载成功后替换占位身体 ----
+  // ---- 异步加载人物 GLB：成功则尝试自动上骨骼并播放动画，失败则保留占位身体 ----
   instantiate(`/assets/${gender}.glb`)
     .then((model) => {
-      model.scale.setScalar(MODEL_HEIGHT); // 缩放为人物高度
-      model.position.y = MODEL_HEIGHT / 2; // 上移一半，让脚底贴地
+      const holder = new THREE.Group();
+      // 自动绑定简易骨骼（把烘焙到脚踩地/身高=MODEL_HEIGHT 的几何蒙皮到骨骼），失败则用静态模型
+      const rig = autoRig(model, MODEL_HEIGHT);
+      if (rig) {
+        holder.add(rig.group);
+        holder.userData.rig = rig; // 供每帧按移动速度驱动行走动画
+      } else {
+        model.scale.setScalar(MODEL_HEIGHT);
+        model.position.y = MODEL_HEIGHT / 2;
+        holder.add(model);
+      }
       bodyHolder.clear();
-      bodyHolder.add(model);
+      holder.receiveShadow = true;
+      bodyHolder.add(holder);
+      group.userData.rig = holder.userData.rig;
     })
     .catch(() => {
       // 加载失败：保留占位身体即可
