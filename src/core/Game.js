@@ -82,6 +82,8 @@ export class Game {
         for (const p of msg.players) {
           this.playerManager.addPlayer(p.id, p, `玩家${p.num}`);
         }
+        // 服务器为准：移除不在当前在线列表中的远程模型/名牌（清除未加入或已断开连接的残留）
+        this.playerManager.pruneTo(msg.players.map((p) => p.id));
         break;
       }
       case 'join': {

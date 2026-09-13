@@ -1,44 +1,44 @@
-// 职责：铺设主城道路网络。十字路网（两条纵向 + 两条横向）+ 中央行人广场，纯几何铺设，无需外部模型，刷新后朝向/位置稳定。
+// 职责：把 CityGen 生成的道路网铺设成可视路面（沥青带 + 中央广场）。纯几何铺设，无外部模型。
 import * as THREE from 'three';
-import { Config } from '../config.js';
+import { getCity } from './CityGen.js';
 
-// 纵向（沿 z）道路的 x 坐标，与横向（沿 x）道路的 z 坐标，组成 4 街区网格
-const ROAD_LINES = [-10, 10];
-const ROAD_WIDTH = 6;   // 单条道路宽度（跨道路方向）
-const PLAZA_HALF = 6;   // 中央广场半宽（以喷泉为中心的行人步行区）
+const PLAZA_HALF = 5.5; // 中央广场半宽（以喷泉为中心的行人区）
 
-// createRoads() -> THREE.Group，包含沥青路面、车道中线与中央广场，已贴合地面 y≈0
+// createRoads() -> THREE.Group：按噪声道路中心线渲染沥青路面，并在原点叠加中央广场
 export function createRoads() {
+  const { roads, ROAD_WIDTH } = getCity();
+
   const group = new THREE.Group();
-  const G = Config.GROUND_SIZE; // 50，路面铺满整块地面边界
 
   const asphalt = new THREE.MeshStandardMaterial({ color: 0x3b3b3b, roughness: 0.95, metalness: 0.0 });
-  const lineMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.9, metalness: 0.0 });
   const plazaMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: 0.85, metalness: 0.0 });
 
-  // 纵向道路（沿 z 延伸），中心在 x = ±10
-  for (const x of ROAD_LINES) {
-    group.add(_strip(asphalt, ROAD_WIDTH, G, x, 0, 0.02));      // 路面
-    group.add(_strip(lineMat, 0.15, G, x, 0, 0.04));            // 车道中线
-  }
-  // 横向道路（沿 x 延伸），中心在 z = ±10
-  for (const z of ROAD_LINES) {
-    group.add(_strip(asphalt, G, ROAD_WIDTH, 0, z, 0.02));      // 路面
-    group.add(_strip(lineMat, G, 0.15, 0, z, 0.04));            // 车道中线
+  // 每条大道：沿中心线折线放置一段段薄长方体（高 0.02，贴地防 z-fighting）
+  for (const poly of roads) {
+    for (let i = 0; i < poly.length - 1; i++) {
+      const a = poly[i];
+      const b = poly[i + 1];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.001) continue;
+
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(ROAD_WIDTH, 0.02, len), asphalt);
+      seg.position.set((a.x + b.x) / 2, 0.01, (a.z + b.z) / 2);
+      seg.rotation.y = Math.atan2(dx, dz); // 让长方体 z 轴对齐道路走向
+      seg.receiveShadow = true;
+      group.add(seg);
+    }
   }
 
   // 中央广场：覆盖道路交汇中心，作为喷泉与长椅的行人区
-  const plazaSize = PLAZA_HALF * 2 + ROAD_WIDTH;
-  group.add(_strip(plazaMat, plazaSize, plazaSize, 0, 0, 0.01));
+  const plaza = new THREE.Mesh(
+    new THREE.BoxGeometry(PLAZA_HALF * 2, 0.03, PLAZA_HALF * 2),
+    plazaMat
+  );
+  plaza.position.y = 0.02;
+  plaza.receiveShadow = true;
+  group.add(plaza);
 
   return group;
-}
-
-// 生成一块水平路面条带：宽 w、深 d，中心位于 (x, z)，y 抬升至 y 层贴合地面并防 z-fighting
-function _strip(material, w, d, x, z, y) {
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, d), material);
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set(x, y, z);
-  mesh.receiveShadow = true;
-  return mesh;
 }

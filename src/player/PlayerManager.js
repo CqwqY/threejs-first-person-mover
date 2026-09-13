@@ -33,6 +33,17 @@ export class PlayerManager {
     return remote;
   }
 
+  // 把玩家集合收敛到给定 id 集合：不在集合内的远程玩家立刻移除模型与名牌。
+  // 用于 welcome 阶段去重（清除上一会话遗留、或连接上但从未真正加入的僵尸模型）。
+  pruneTo(validIds, keepLocal = true) {
+    const keep = new Set(validIds);
+    if (keepLocal && this.localId != null) keep.add(this.localId);
+    for (const id of [...this.players.keys()]) {
+      if (keep.has(id)) continue;
+      this.removePlayer(id);
+    }
+  }
+
   // 从场景移除一个玩家并释放资源
   removePlayer(id) {
     const remote = this.players.get(id);

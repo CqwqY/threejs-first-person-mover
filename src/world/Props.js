@@ -1,97 +1,87 @@
-// 职责：按布局把各类道具（树/建筑/喷泉/路灯/长椅/灌木/水塔）放置到主城地面并加入场景。布局坐标集中在此，调整只需改这里。
+// 职责：把各类道具铺到主城。中央广场（喷泉 + 长椅）、道路两旁路灯、陆地区格上的建筑/树/灌木/水塔随机排布。
+// 道路与“是否在道路上”的判定来自 CityGen（确定性噪声），保证所有道具都落在陆地（或广场）上、不压到道路。
 import * as THREE from 'three';
-import { createTree } from './props/Tree.js';
-import { createBuilding } from './props/Building.js';
+import { getCity } from './CityGen.js';
 import { createBuildingVar } from './props/BuildingVar.js';
 import { createFountain } from './props/Fountain.js';
 import { createLamp } from './props/Lamp.js';
 import { createBench } from './props/Bench.js';
+import { createTree } from './props/Tree.js';
 import { createBush } from './props/Bush.js';
 import { createTower } from './props/Tower.js';
 
-// 道具布局：type 决定 create 函数，buildingVar 通过 url/scale/size/color 指定建筑素材。
-// 地面边长 50，坐标范围约为 [-24, 24]。道路网位于 |x|=10 与 |z|=10，建筑布置在四个街区内部，路缘布置行道。
-const LAYOUT = [
-  // ==== 广场核心 ====
-  { type: 'fountain', x: 0, z: 0 },                       // 中央喷泉
-  { type: 'bench', x: 4, z: 5 },                          // 长椅环绕喷泉
-  { type: 'bench', x: -4, z: -5 },
-  { type: 'bench', x: 5, z: -4 },
-  { type: 'bench', x: -5, z: 4 },
+const PLAZA_HALF = 5.5;  // 广场半宽，与 Roads.js 一致
+const CELL = 3;           // 陆地区格采样步长
+const LAND_HALF = 21;     // 陆地区格扫描范围（±21）
 
-  // ==== 行道树 / 灌木（道路边缘与绿地）====
-  { type: 'tree', x: -8, z: -2 },
-  { type: 'tree', x: 8, z: 2 },
-  { type: 'tree', x: -2, z: 8 },
-  { type: 'tree', x: 2, z: -8 },
-  { type: 'tree', x: 13, z: 7 },
-  { type: 'tree', x: -13, z: 7 },
-  { type: 'tree', x: 13, z: -7 },
-  { type: 'tree', x: -13, z: -7 },
-  { type: 'bush', x: 9, z: 3 },
-  { type: 'bush', x: -9, z: 3 },
-  { type: 'bush', x: 9, z: -3 },
-  { type: 'bush', x: -9, z: -3 },
-  { type: 'bush', x: 3, z: 9 },
-  { type: 'bush', x: 3, z: -9 },
-  { type: 'bush', x: -3, z: 9 },
-  { type: 'bush', x: -3, z: -9 },
-
-  // ==== 路灯（沿道路排布）====
-  { type: 'lamp', x: 7, z: 0 },
-  { type: 'lamp', x: -7, z: 0 },
-  { type: 'lamp', x: 0, z: 7 },
-  { type: 'lamp', x: 0, z: -7 },
-  { type: 'lamp', x: 12, z: 3 },
-  { type: 'lamp', x: -12, z: 3 },
-  { type: 'lamp', x: 12, z: -3 },
-  { type: 'lamp', x: -12, z: -3 },
-  { type: 'lamp', x: 3, z: 12 },
-  { type: 'lamp', x: 3, z: -12 },
-  { type: 'lamp', x: -3, z: 12 },
-  { type: 'lamp', x: -3, z: -12 },
-
-  // ==== 主街区（东北）====
-  { type: 'buildingVar', url: 'building-small-a.glb', x: 18, z: 18, size: { w: 4, h: 7, d: 4 }, color: 0xd08a5a },
-  { type: 'buildingVar', url: 'building-small-b.glb', x: 13, z: 21, size: { w: 4, h: 6, d: 4 }, color: 0xb57c5a },
-  { type: 'buildingVar', url: 'building-garage.glb', x: 22, z: 13, size: { w: 4, h: 3.5, d: 4 }, color: 0x8a8a8a },
-
-  // ==== 主街区（西北）====
-  { type: 'buildingVar', url: 'building-small-b.glb', x: -18, z: 18, size: { w: 4, h: 6, d: 4 }, color: 0x9aa7b5 },
-  { type: 'buildingVar', url: 'building-small-c.glb', x: -13, z: 21, size: { w: 4, h: 9, d: 4 }, color: 0xc98a6b },
-  { type: 'tower', x: -22, z: 13 },                            // 水塔地标
-
-  // ==== 主街区（东南）====
-  { type: 'building', x: 16, z: -16 },                         // 基础大建筑
-  { type: 'buildingVar', url: 'building-small-d.glb', x: 21, z: -14, size: { w: 4, h: 6, d: 4 }, color: 0x9c7a5a },
-  { type: 'buildingVar', url: 'building-small-c.glb', x: 13, z: -22, size: { w: 4, h: 9, d: 4 }, color: 0x6b82c9 },
-
-  // ==== 主街区（西南）====
-  { type: 'buildingVar', url: 'building-small-a.glb', x: -18, z: -18, size: { w: 4, h: 7, d: 4 }, color: 0x9aa0a6 },
-  { type: 'buildingVar', url: 'building-garage.glb', x: -22, z: -13, size: { w: 4, h: 3.5, d: 4 }, color: 0x777777 },
-  { type: 'buildingVar', url: 'building-small-d.glb', x: -13, z: -21, size: { w: 4, h: 6, d: 4 }, color: 0x7a9a6b },
+// 建筑变体素材库（循环使用，呈现多样街区）
+const BUILDING_VARIANTS = [
+  { url: 'building-small-a.glb', scale: 1.8, size: { w: 4, h: 7, d: 4 }, color: 0xd08a5a },
+  { url: 'building-small-b.glb', scale: 1.8, size: { w: 4, h: 6, d: 4 }, color: 0xb57c5a },
+  { url: 'building-small-c.glb', scale: 1.8, size: { w: 4, h: 9, d: 4 }, color: 0x9aa7b5 },
+  { url: 'building-small-d.glb', scale: 1.8, size: { w: 4, h: 6, d: 4 }, color: 0x7a9a6b },
 ];
 
-const FACTORY = {
-  tree: createTree,
-  building: createBuilding,
-  buildingVar: createBuildingVar,
-  fountain: createFountain,
-  lamp: createLamp,
-  bench: createBench,
-  bush: createBush,
-  tower: createTower,
-};
-
-// createProps(scene)：把所有道具挂到场景。
+// createProps(scene)：铺装广场核心、路边路灯与陆地区格上的建筑/树/灌木/水塔
 export function createProps(scene) {
+  const { isOnRoad, lampSpots } = getCity();
+
   const group = new THREE.Group();
-  for (const item of LAYOUT) {
-    const make = FACTORY[item.type];
-    if (!make) continue;
-    const { x, z, ...rest } = item;
-    group.add(make({ x, z }, rest));
+
+  // ---- 广场核心：喷泉 + 环绕长椅 ----
+  group.add(createFountain({ x: 0, z: 0 }));
+  group.add(createBench({ x: 4, z: 5 }));
+  group.add(createBench({ x: -4, z: -5 }));
+  group.add(createBench({ x: 5, z: -4 }));
+  group.add(createBench({ x: -5, z: 4 }));
+
+  // ---- 道路两旁路灯（位置由 CityGen 提供，必落陆地）----
+  for (const spot of lampSpots) {
+    group.add(createLamp({ x: spot.x, z: spot.z }));
   }
+
+  // ---- 陆地区格采样：建筑/树/灌木/水塔 ----
+  const landCells = [];
+  for (let x = -LAND_HALF; x <= LAND_HALF; x += CELL) {
+    for (let z = -LAND_HALF; z <= LAND_HALF; z += CELL) {
+      const cx = x + CELL / 2;
+      const cz = z + CELL / 2;
+      if (Math.abs(cx) <= PLAZA_HALF && Math.abs(cz) <= PLAZA_HALF) continue; // 广场留空
+      if (isOnRoad(cx, cz)) continue; // 道路留空
+      landCells.push({ x: cx, z: cz });
+    }
+  }
+
+  let n = 0;
+  let buildings = 0;
+  let trees = 0;
+  let bushes = 0;
+
+  for (const p of landCells) {
+    // 水塔：放到西北 / 东南两个远离中心的陆地区格里做地标
+    if ((p.x < -14 && p.z > 4) || (p.x > 14 && p.z < -4)) {
+      continue; // 由专门的塔逻辑处理，避免重复占用
+    }
+    n++;
+    if (buildings < 14 && n % 3 === 0) {
+      const variant = BUILDING_VARIANTS[buildings % BUILDING_VARIANTS.length];
+      group.add(createBuildingVar({ x: p.x, z: p.z }, variant));
+      buildings++;
+    } else if (trees < 16 && (n % 3 === 1 || buildings >= 14)) {
+      group.add(createTree({ x: p.x, z: p.z }));
+      trees++;
+    } else if (bushes < 12) {
+      group.add(createBush({ x: p.x, z: p.z }));
+      bushes++;
+    }
+  }
+
+  // ---- 水塔地标：西北与东南角各一座 ----
+  const towerNW = landCells.find((p) => p.x < -14 && p.z > 4);
+  const towerSE = landCells.find((p) => p.x > 14 && p.z < -4);
+  if (towerNW) group.add(createTower({ x: towerNW.x, z: towerNW.z }));
+  if (towerSE) group.add(createTower({ x: towerSE.x, z: towerSE.z }));
+
   scene.add(group);
   return group;
 }
