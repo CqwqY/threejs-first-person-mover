@@ -3,6 +3,10 @@
 //       适合让静态角色“动起来”，但不如 Mixamo/Blender 等专业重定向精细。
 import * as THREE from 'three';
 
+// 肩部“落臂”静息偏转（弧度）：模型手臂是 T 字横放的，绑定后让肩绕 z 轴把手臂转到自然下垂方向。
+// 数值 ≈ 图(0.13 到垂直的加权)，留一点向外余量避免贴死身体。
+const ARM_FOLD = 1.3;
+
 // autoRig(scene, height)：把 scene 中最大的网格烘焙到脚踩地(y=0)、身高=height 的坐标系，
 // 绑定简易骨骼并返回 rig {group, bones, update(time,speed)}。失败返回 null（由调用方保留静态模型）。
 export function autoRig(scene, height) {
@@ -29,6 +33,10 @@ export function autoRig(scene, height) {
     const hipR = childOf(root, 0.13, -0.05, 0);
     const kneeR = childOf(hipR, 0, -0.5, 0);
     const footR = childOf(kneeR, 0, -0.42, 0);
+
+    // 落臂：把横放的 T 字手臂转到自然下垂，作为绑定姿势（applyPose 只驱动 rotation.x，此 z 偏转保留）
+    shL.rotation.z = ARM_FOLD;
+    shR.rotation.z = -ARM_FOLD;
 
     // 骨架骨骼顺序（skinIndex 按此数组下标）
     const bones = [root, spine, neck, head, shL, elbL, handL, shR, elbR, handR, hipL, kneeL, footL, hipR, kneeR, footR];
