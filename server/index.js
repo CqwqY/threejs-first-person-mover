@@ -15,11 +15,25 @@ const states = new Map();
 const spawns = new Map();
 
 let nextId = 1;
-let numCounter = 0;
+// 当前在线的玩家编号（用于头顶标记），分配时复用已释放的最小序号，避免数字因重连而无限堆高
+const usedNums = new Set();
 
-// 自增 id，确保同一进程内唯一
+// 自增 id，确保同一进程内唯一（仅用于连接唯一性，不展示给玩家）
 function newId() {
   return 'id_' + nextId++;
+}
+
+// 分配一个当前最小的空闲玩家编号：活跃玩家始终紧凑编号 1..N，断线后该编号可被复用
+function allocNum() {
+  let n = 1;
+  while (usedNums.has(n)) n++;
+  usedNums.add(n);
+  return n;
+}
+
+// 释放编号，供后续新连接复用
+function freeNum(n) {
+  usedNums.delete(n);
 }
 
 // 根据加入序号计算圆周上散布的出生点，让玩家彼此可见、不重叠在原点
@@ -56,8 +70,7 @@ function worldPlayers() {
 
 wss.on('connection', (ws) => {
   const id = newId();
-  numCounter++;
-  const num = numCounter; // 玩家加入序号（1 开始，用于头顶标记）
+  const num = allocNum(); // 复用最小空闲编号，避免重连把数字推到几十
   const spawn = spawnForNum(num);
   spawns.set(id, spawn);
 
@@ -90,6 +103,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     states.delete(id);
     spawns.delete(id);
+    freeNum(num); // 释放编号，供后续玩家复用
     // 通知所有人该玩家离开
     broadcast({ t: 'leave', id });
   });
