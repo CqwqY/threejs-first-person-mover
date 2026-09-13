@@ -1,35 +1,63 @@
-// 职责：定义玩家的“外观”模型（身体 + 头 + 头顶名牌）。只负责造型，不做逻辑。
-// 模型原点定在“脚底”，身体与头部向上生长，总高度约 1.8 米，与相机（PLAYER_HEIGHT=1.7）大致对齐。
-import * as THREE from 'three';
+// 职责：定义玩家的“外观”。
 
-// 创建玩家模型；label 为头顶名牌文字（如"玩家1"），为空则不加名牌
-export function createPlayerModel(label = '') {
+// 模型 = 人物 GLB（girl/boy）+ 头顶名牌。GLB 异步加载，加载前先用缩小版占位身体保证即时可见。
+// 人物 GLB 高约 1m 且垂直居中，放大到 1.8（PLAYER_HEIGHT 附近）并上移半个高度，让脚底落在 y=0。
+// 名牌挂在头顶锚点，随模型一起被隐藏/移除。
+import * as THREE from 'three';
+import { instantiate } from '../world/AssetLoader.js';
+
+const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
+const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
+
+// 创建玩家模型；label 为头顶名牌文字（如"玩家1"），gender 决定使用 girl/boy 素材，为空则不挂名牌
+export function createPlayerModel(label = '', gender = 'boy') {
   const group = new THREE.Group();
 
-  // ---- 身体：立方体躯干，从腰到肩 ----
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4a7cba });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.3), bodyMat);
-  body.position.y = 1.0; // 躯干范围约 0.65~1.35（脚底在 0）
-  group.add(body);
+  // ---- 占位身体：GLB 加载前的简单人形，避免一开始就“隐形” ----
+  const bodyHolder = new THREE.Group();
+  const fallbackBody = _createFallbackBody();
+  bodyHolder.add(fallbackBody);
+  group.add(bodyHolder);
 
-  // ---- 头：球，中心约在眼睛高度，不再高出相机 ----
-  const headMat = new THREE.MeshStandardMaterial({ color: 0xc7a07c });
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 16), headMat);
-  head.position.y = 1.6; // 头范围 1.44~1.76，略高于躯干
-  group.add(head);
-
-  // ---- 头顶锚点：名牌挂在头顶上方 ----
+  // ---- 头顶锚点：名牌挂在头顶上方（不随身体替换而移除）----
   const headAnchor = new THREE.Object3D();
-  headAnchor.position.y = 2.0;
+  headAnchor.position.y = NAME_TAG_Y;
   group.add(headAnchor);
   group.userData.headAnchor = headAnchor;
 
-  // 需要名牌时挂在锚点上
   if (label) {
     headAnchor.add(createNameTag(label));
   }
 
+  // ---- 异步加载人物 GLB，加载成功后替换占位身体 ----
+  instantiate(`/assets/${gender}.glb`)
+    .then((model) => {
+      model.scale.setScalar(MODEL_HEIGHT); // 缩放为人物高度
+      model.position.y = MODEL_HEIGHT / 2; // 上移一半，让脚底贴地
+      bodyHolder.clear();
+      bodyHolder.add(model);
+    })
+    .catch(() => {
+      // 加载失败：保留占位身体即可
+    });
+
   return group;
+}
+
+// 占位人形：身躯 + 头，作为 GLB 加载完成前的兜底，保证玩家一开始可见
+function _createFallbackBody() {
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4a7cba });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.3), bodyMat);
+  body.position.y = 1.0;
+
+  const headMat = new THREE.MeshStandardMaterial({ color: 0xc7a07c });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 16), headMat);
+  head.position.y = 1.6;
+
+  const holder = new THREE.Group();
+  holder.add(body);
+  holder.add(head);
+  return holder;
 }
 
 // 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）
