@@ -9,6 +9,9 @@ import { autoRig } from './AutoRig.js';
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
+// 模型本征正面沿 -X（脚趾方向实测），而 three 的“前”约定为 -Z；绕 Y 旋转 -90° 把正面转到 -Z，
+// 让角色朝向与移动方向、第三人称相机一致。
+const MODEL_YAW = -Math.PI / 2;
 
 // 创建玩家模型；label 为头顶名牌文字（如"玩家1"），gender 决定使用 girl/boy 素材，为空则不挂名牌
 export function createPlayerModel(label = '', gender = 'boy') {
@@ -34,6 +37,8 @@ export function createPlayerModel(label = '', gender = 'boy') {
   instantiate(`/assets/${gender}.glb`)
     .then((model) => {
       const holder = new THREE.Group();
+      holder.rotation.y = MODEL_YAW; // 把人物正面转到 three 的“前”(-Z)
+
       // 自动绑定简易骨骼（把烘焙到脚踩地/身高=MODEL_HEIGHT 的几何蒙皮到骨骼），失败则用静态模型
       const rig = autoRig(model, MODEL_HEIGHT);
       if (rig) {

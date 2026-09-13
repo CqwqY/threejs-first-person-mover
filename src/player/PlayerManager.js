@@ -75,6 +75,12 @@ export class PlayerManager {
     return this.players.get(this.localId);
   }
 
+  // 显示/隐藏本地玩家模型（第一人称隐藏自己，第三人称 F5 显示自己）
+  setLocalVisible(v) {
+    const local = this.players.get(this.localId);
+    if (local) local.model.visible = v;
+  }
+
   // 收到服务端玩家快照列表时调用：新增/更新远程玩家，并删除已不在列表中的远程玩家。
 // 本地玩家会被跳过：本地位置由本地物理预测驱动，绝不能用服务器状态覆盖，否则会抖回原位。
 // players：形如 [{id, x, y, z, yaw, pitch, onGround}, ...] 的数组

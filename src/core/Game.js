@@ -58,6 +58,18 @@ export class Game {
     // 调试：URL 带 ?rigdebug 时，在场景中放一个可见调试模型并画出骨骼与坐标轴
     this.debugRig = /\brigdebug\b/.test(location.search) ? addDebugRig(this.scene) : null;
 
+    // 第三人称相机（F5 切换，可看到自己的角色）
+    this.thirdPerson = false;
+    this._tpTime = 0;
+    this._tpPrevX = 0;
+    this._tpPrevZ = 0;
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F5') {
+        e.preventDefault(); // 阻止浏览器默认刷新
+        this.toggleThirdPerson();
+      }
+    });
+
     // ---- 窗口尺寸自适应 ----
     window.addEventListener('resize', () => this._onResize());
   }
@@ -116,6 +128,44 @@ export class Game {
     this._loop();
   }
 
+  // F5 切换第一/第三人称视角；第三人称时显示自己的模型
+  toggleThirdPerson() {
+    this.thirdPerson = !this.thirdPerson;
+    this.playerManager.setLocalVisible(this.thirdPerson);
+  }
+
+  // 第三人称：本地模型跟随自身位置朝向并播放行走动画，相机位于玩家后上方看向角色
+  _thirdPerson(dt) {
+    const local = this.playerManager.getLocalPlayer();
+    if (!local) return;
+
+    local.syncModel();
+
+    const rig = local.model.userData.rig;
+    if (rig) {
+      const dx = this.state.x - this._tpPrevX;
+      const dz = this.state.z - this._tpPrevZ;
+      const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
+      this._tpTime += dt;
+      rig.update(this._tpTime, speed);
+    }
+    this._tpPrevX = this.state.x;
+    this._tpPrevZ = this.state.z;
+
+    // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
+    const eye = new THREE.Vector3(this.state.x, this.state.y, this.state.z);
+    const yaw = this.state.yaw;
+    const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)); // 移动正前方
+    const DIST = 4.0;
+    const LIFT = 1.7;
+    const camPos = eye
+      .clone()
+      .add(fwd.clone().multiplyScalar(-DIST))
+      .add(new THREE.Vector3(0, LIFT, 0));
+    this.camera.position.copy(camPos);
+    this.camera.lookAt(eye.x, eye.y + 0.2, eye.z);
+  }
+
   // 主循环：计算 dt -> 更新玩家 -> 渲染
   _loop() {
     this._raf = requestAnimationFrame(() => this._loop());
@@ -129,6 +179,13 @@ export class Game {
 
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
+
+    // 第三人称：第一人称时保证本地隐藏；第三人称时让相机跟随并显示自己
+    if (this.thirdPerson) {
+      this._thirdPerson(dt);
+    } else {
+      this.playerManager.setLocalVisible(false);
+    }
 
     // 上报本地状态（内部按 20Hz 节流）
     this.network.sendState(this.localState.toJSON());
