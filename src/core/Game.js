@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { createWorld } from '../world/World.js';
+import { createProps } from '../world/Props.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
@@ -26,6 +27,9 @@ export class Game {
 
     // ---- 静态世界 ----
     createWorld(this.scene);
+
+    // ---- 场景道具（树/建筑/喷泉/路灯/长椅），接入世界 ----
+    createProps(this.scene);
 
     // ---- 输入 ----
     this.input = new Input();
