@@ -1,0 +1,11 @@
+# 依赖与构建产物不入库
+node_modules/
+dist/
+
+# 包管理器锁文件（可选，若希望锁定版本可保留 package-lock.json）
+npm-debug.log*
+
+# 编辑器 / 系统文件
+.DS_Store
+Thumbs.db
+*.local
