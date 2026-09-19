@@ -31,7 +31,7 @@ export const Config = {
   GROUND_COLOR: 0x2f6f5f,
   WALL_COLOR: 0xffffff,
   WALL_OPACITY: 0.35,
-  // 多人在线中继地址（后端已迁到远程 100.127.187.92，pm2 常驻 9000）。
-  // 纯本地调试可改回 'ws://localhost:9000'；未来部署到 GitHub Pages(HTTPS) 需改成 'wss://<域名>:443'。
-  RELAY_URL: 'ws://100.127.187.92:9000',
+  // 多人在线中继地址（后端已迁到远程，支持 HTTPS/wss，wss 走 443）。
+  // 纯本地调试可改回 'ws://localhost:9000'。
+  RELAY_URL: 'wss://game666.lshserver.dpdns.org',
 };
