@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { instantiate } from '../world/AssetLoader.js';
+import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { createSky } from '../world/SkyBox.js';
@@ -24,10 +25,11 @@ function normScale(s) {
 function defaultCollider() {
   return { enabled: true, hx: 0.5, hy: 0.5, hz: 0.5, oy: 0.5 };
 }
-// 编辑器读写自己的场景文件与模型上传；接口由 Vite 插件在同源（5173）提供，无需跨域或单独服务
-const MAP_URL = '/assets/editor-scene.json';
-const SAVE_URL = '/api/scene';
-const UPLOAD_URL = '/api/upload';
+// 编辑器读写自己的场景文件与模型上传；统一走远程后端（API_BASE），实现线上同步。
+// 保存/读取场景、素材清单、模型上传都指向同一台后端，编辑器改完线上游戏即可读到。
+const MAP_URL = API_BASE + '/api/scene';
+const SAVE_URL = API_BASE + '/api/scene';
+const UPLOAD_URL = API_BASE + '/api/upload';
 
 // 素材库：内建素材（文件名来自 /assets），统一为 {label, url} 绝对路径
 const LIBRARY = [
@@ -633,7 +635,7 @@ export function createEditor() {
   async function refreshLibrary() {
     folderItems = [];
     try {
-      const r = await fetch('/api/models');
+      const r = await fetch(API_BASE + '/api/models');
       if (r.ok) {
         const js = await r.json().catch(() => null);
         if (js && Array.isArray(js.items)) folderItems = js.items;

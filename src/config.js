@@ -35,3 +35,7 @@ export const Config = {
   // 纯本地调试可改回 'ws://localhost:9000'。
   RELAY_URL: 'wss://game666.lshserver.dpdns.org',
 };
+
+// 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
+// 部署到 GitHub Pages 后仍指向这个远程后端，从而实现「编辑器改完 → 线上游戏即生效」的在线同步。
+export const API_BASE = 'https://game666.lshserver.dpdns.org';

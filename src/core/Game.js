@@ -4,13 +4,25 @@ import { Config } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
-import { buildEditorBuildings } from '../world/EditorBuildings.js';
+import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
+
+// 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并回传碰撞体给回调
+async function _fetchRemoteScene(scene, roots, onColliders) {
+  const data = await fetchRemoteScene();
+  if (!data) return; // 拉取失败：保持打包的 editorMapData 兜底
+  try {
+    const colliders = buildEditorBuildings(scene, roots, data);
+    if (onColliders) onColliders(colliders);
+  } catch (e) {
+    console.warn('[Game] 应用远程场景失败，回退打包数据:', e);
+  }
+}
 
 export class Game {
   constructor() {
@@ -36,6 +48,14 @@ export class Game {
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
+
+    // 在线同步：运行时从后端拉取最新场景（编辑器保存的那份），拉到则替换打包数据重建。
+    // 拉取失败会自动回退到上面打包的 editorMapData，保证离线时也有内容。
+    // 注意：LocalPlayer 持有 this.colliders 的同一条数组引用，因此原地改写而不是整体替换。
+    _fetchRemoteScene(this.scene, roots, (colliders) => {
+      this.colliders.length = 0;
+      this.colliders.push(...colliders);
+    });
 
     // ---- 输入 ----
     this.input = new Input();

@@ -1,0 +1,13 @@
+{
+  "name": "fp-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "First-person-mover 多人在线中继 + 自包含数据后端（pm2 常驻）",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

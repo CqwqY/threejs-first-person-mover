@@ -1,0 +1,2 @@
+# 自包含数据目录：city-map.json / editor-scene.json / assets/(上传的 GLB 模型)
+# 启动时 server 会自动创建，无需手动放置内容。

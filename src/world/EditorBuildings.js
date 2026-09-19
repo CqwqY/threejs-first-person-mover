@@ -5,6 +5,26 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { instantiate } from './AssetLoader.js';
 import { editorMapData } from './editorMapData.js';
+import { API_BASE } from '../config.js';
+
+// 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
+let _addedHolders = [];
+function clearHolders(scene) {
+  for (const h of _addedHolders) scene.remove(h);
+  _addedHolders = [];
+}
+
+// 运行时从远程后端拉取最新编辑器场景（在线同步）；失败返回 null 由调用方回退到打包数据
+export async function fetchRemoteScene() {
+  try {
+    const r = await fetch(API_BASE + '/api/scene');
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d && typeof d === 'object' ? d : null;
+  } catch (e) {
+    return null;
+  }
+}
 
 // scale 规范化：统一为 {x,y,z}，兼容旧的单数值
 function normScale(s) {
@@ -15,11 +35,14 @@ function normScale(s) {
   return { x: v, y: v, z: v };
 }
 
-// buildEditorBuildings(scene, roots)：roots 为 buildScenery 返回的统一可编辑根列表，
+// buildEditorBuildings(scene, roots, dataOverride)：roots 为 buildScenery 返回的统一可编辑根列表，
 // 数组下标即 scenery 的 key，两侧顺序完全一致。
+// dataOverride 可选：传入运行时拉取到的后端场景数据时，用它替换打包的 editorMapData；
+// 缺省则使用打包数据，保证离线也能显示。
 // 返回世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]，供玩家碰撞使用。
-export function buildEditorBuildings(scene, roots) {
-  let data = editorMapData || {};
+export function buildEditorBuildings(scene, roots, dataOverride) {
+  clearHolders(scene); // 重跑前先移除上一次添加的 holder，避免重复叠加
+  let data = dataOverride || editorMapData || {};
   // 兼容旧格式：纯数组（仅含 placed）
   if (Array.isArray(data)) data = { scenery: [], placed: data };
 
@@ -53,6 +76,7 @@ export function buildEditorBuildings(scene, roots) {
     holder.scale.set(sc.x, sc.y, sc.z);
     holder.rotation.y = it.rotY ?? 0;
     scene.add(holder);
+    _addedHolders.push(holder); // 记录以便下次重建时移除
 
     // 统一绝对路径 /assets/xxx.glb 调用；兼容旧的内嵌 data URL 记录
     if (it.url) {

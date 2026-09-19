@@ -1,6 +1,7 @@
 // 职责：封装 GLTFLoader，对 GLB 模型做单例加载与 Promise 缓存，并暴露“克隆实例”与“占位兜底”能力。
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { API_BASE } from '../config.js';
 
 let _loader = null;
 
@@ -14,10 +15,20 @@ function normalizeUrl(url) {
   return url;
 }
 
+// 统一模型地址解析：决定每个 url 该从哪台主机加载。
+// - 已上传/导入到后端的模型（/assets/import-*.glb）→ 拼上 API_BASE 走远程后端；
+// - 其余（内建 /assets/*、旧导入 /models/*）→ 相对当前页面解析（GitHub Pages 上随站点一起托管）。
+function resolveUrl(url) {
+  if (typeof url !== 'string') return url;
+  if (/^https?:/i.test(url) || url.startsWith('//')) return url; // 已是绝对地址直接用
+  if (url.startsWith('/assets/import-')) return API_BASE + url; // 后端托管的上传模型
+  return normalizeUrl(url);
+}
+
 // 加载并解析一个 GLB，返回解析后的根场景（Object3D）。
 // 每个实例需自行 clone，因为解析结果只有一个共享的根节点。
 function loadGLB(url) {
-  url = normalizeUrl(url);
+  url = resolveUrl(url);
   if (cache.has(url)) return cache.get(url);
 
   if (!_loader) _loader = new GLTFLoader();
