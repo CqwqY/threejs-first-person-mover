@@ -1,8 +1,10 @@
 // 职责：游戏主类，负责装配三大件（渲染器/场景/相机）、输入、玩家，并驱动主循环。
 import * as THREE from 'three';
 import { Config } from '../config.js';
-import { createWorld } from '../world/World.js';
-import { createProps } from '../world/Props.js';
+import { buildScenery } from '../world/buildScenery.js';
+import { createSky } from '../world/SkyBox.js';
+import { createLights } from '../world/Lights.js';
+import { buildEditorBuildings } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
@@ -20,17 +22,20 @@ export class Game {
 
     // ---- 场景与相机 ----
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝
+    this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，天空盒覆盖其上）
+    createSky(this.scene); // 程序化天空盒
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
     this.camera.rotation.order = 'YXZ';
 
-    // ---- 静态世界 ----
-    createWorld(this.scene);
+    // ---- 静态世界（地面/道路/墙体 + 道具），返回统一的可编辑根列表 ----
+    const roots = buildScenery(this.scene);
+    // 灯光单独挂载（不作为可编辑景物）
+    this.scene.add(createLights());
 
-    // ---- 场景道具（树/建筑/喷泉/路灯/长椅），接入世界 ----
-    createProps(this.scene);
+    // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
+    this.colliders = buildEditorBuildings(this.scene, roots);
 
     // ---- 输入 ----
     this.input = new Input();
@@ -44,10 +49,10 @@ export class Game {
     this.localState = new PlayerState('', 0, Config.PLAYER_HEIGHT, 0);
 
     // 本地玩家逻辑
-    this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState);
+    this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState, this.colliders);
 
     // ---- 网络连接 ----
-    this.network = new Network('ws://localhost:8080');
+    this.network = new Network(Config.RELAY_URL);
     this.network.onMessage((msg) => this._onNetworkMessage(msg));
     this.network.connect();
 
@@ -93,6 +98,7 @@ export class Game {
         this.localState.x = msg.spawn.x;
         this.localState.z = msg.spawn.z;
         this.localState.yaw = msg.spawn.yaw;
+        this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         this.playerManager.setLocal(msg.id);
         this.playerManager.addPlayer(msg.id, this.localState, `玩家${msg.num}`);
         for (const p of msg.players) {
@@ -139,18 +145,22 @@ export class Game {
     const local = this.playerManager.getLocalPlayer();
     if (!local) return;
 
-    local.syncModel();
+    // 本地玩家不走网络插值（物理直接写 this.localState），模型须从这里取位置/朝向，
+    // 否则会一直停在出生点，切第三人称也看不到自己。
+    const s = this.localState;
+    local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT, s.z);
+    local.model.rotation.set(0, s.yaw, 0);
 
     const rig = local.model.userData.rig;
     if (rig) {
-      const dx = this.localState.x - this._tpPrevX;
-      const dz = this.localState.z - this._tpPrevZ;
+      const dx = s.x - this._tpPrevX;
+      const dz = s.z - this._tpPrevZ;
       const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
       this._tpTime += dt;
       rig.update(this._tpTime, speed);
     }
-    this._tpPrevX = this.localState.x;
-    this._tpPrevZ = this.localState.z;
+    this._tpPrevX = s.x;
+    this._tpPrevZ = s.z;
 
     // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
     const eye = new THREE.Vector3(this.localState.x, this.localState.y, this.localState.z);
@@ -180,8 +190,9 @@ export class Game {
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
 
-    // 第三人称：第一人称时保证本地隐藏；第三人称时让相机跟随并显示自己
+    // 第三人称：第一人称时保证本地隐藏；第三人称时显示自己并让相机跟随
     if (this.thirdPerson) {
+      this.playerManager.setLocalVisible(true);
       this._thirdPerson(dt);
     } else {
       this.playerManager.setLocalVisible(false);

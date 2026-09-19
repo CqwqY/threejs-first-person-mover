@@ -33,6 +33,8 @@ export class Input {
   setCanvas(canvas) {
     this.canvas = canvas;
     canvas.addEventListener('click', () => {
+      // 建筑工具开启时交由放置逻辑处理，不锁定视角
+      if (window.__BUILD_TOOL_ACTIVE__) return;
       if (document.pointerLockElement !== canvas) {
         canvas.requestPointerLock();
       }

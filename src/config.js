@@ -16,7 +16,10 @@ export const Config = {
   PLAYER_HEIGHT: 1.7,
   // 玩家碰撞半径（水平方向，用于边界限制）
   PLAYER_RADIUS: 0.4,
-  // 地面边长（整块正方形地面，单位：米）
+  // 地面尺寸（单位：米）。1 世界单位 = 1 米。宽沿 x，长沿 z。
+  GROUND_WIDTH: 160,
+  GROUND_DEPTH: 310,
+  // 旧的正方形边长（兼容历史引用；当前场景用上面的宽/深矩形）
   GROUND_SIZE: 50,
   // 四周墙面高度，防止玩家走出去
   WALL_HEIGHT: 3,
@@ -28,4 +31,7 @@ export const Config = {
   GROUND_COLOR: 0x2f6f5f,
   WALL_COLOR: 0xffffff,
   WALL_OPACITY: 0.35,
+  // 多人在线中继地址（后端已迁到远程 100.127.187.92，pm2 常驻 9000）。
+  // 纯本地调试可改回 'ws://localhost:9000'；未来部署到 GitHub Pages(HTTPS) 需改成 'wss://<域名>:443'。
+  RELAY_URL: 'ws://100.127.187.92:9000',
 };

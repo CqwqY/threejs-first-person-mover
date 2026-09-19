@@ -7,9 +7,17 @@ let _loader = null;
 // url -> Promise<scene>，同一资源只请求一次，命中缓存直接复用
 const cache = new Map();
 
+// 把绝对路径转相对：去掉前导 '/'，让 GLB 相对当前页面 URL 解析。
+// 兼容 GitHub Pages 根路径与子路径部署（如 https://host/repo/ 下 assets/building.glb 落到 /repo/assets/building.glb）。
+function normalizeUrl(url) {
+  if (typeof url === 'string' && url.startsWith('/')) return url.slice(1);
+  return url;
+}
+
 // 加载并解析一个 GLB，返回解析后的根场景（Object3D）。
 // 每个实例需自行 clone，因为解析结果只有一个共享的根节点。
 function loadGLB(url) {
+  url = normalizeUrl(url);
   if (cache.has(url)) return cache.get(url);
 
   if (!_loader) _loader = new GLTFLoader();

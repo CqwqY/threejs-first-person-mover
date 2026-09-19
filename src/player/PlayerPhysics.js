@@ -11,8 +11,9 @@ export class PlayerPhysics {
   }
 
   // 更新一帧物理。
-  // dt：秒；input：Input 实例；cameraYaw：相机水平朝向（弧度）；state：PlayerState 实例，读写它的 x/y/z/onGround。
-  update(dt, input, cameraYaw, state) {
+  // dt：秒；input：Input 实例；cameraYaw：相机水平朝向（弧度）；state：PlayerState 实例，读写它的 x/y/z/onGround；
+  // colliders：世界空间 AABB 碰撞体 [{cx,cy,cz,hx,hy,hz}]（可选）。
+  update(dt, input, cameraYaw, state, colliders = []) {
     // ---- 1. 计算水平移动方向 ----
     // 相机朝向（yaw = rotation.y，采用 plane 上方旋转）对应的前方向：
     //   相机默认看向 -Z，绕 Y 轴旋转 yaw 后，前方单位向量 = (-sin yaw, 0, -cos yaw)
@@ -54,6 +55,9 @@ export class PlayerPhysics {
     state.y += this.velocity.y * dt;
     state.z += this.velocity.z * dt;
 
+    // ---- 5.5 世界碰撞体碰撞：水平方向把玩家挡在 AABB 之外 ----
+    this._resolveWorldCollisions(state, colliders);
+
     // ---- 6. 地面碰撞：防止下穿地面，落到 PLAYER_HEIGHT 处即认为着地 ----
     if (state.y <= Config.PLAYER_HEIGHT) {
       state.y = Config.PLAYER_HEIGHT;
@@ -61,9 +65,48 @@ export class PlayerPhysics {
       state.onGround = true;
     }
 
-    // ---- 7. 边界限制：把玩家挡在地面正方形内 ----
-    const limit = Config.GROUND_SIZE / 2 - Config.PLAYER_RADIUS;
-    state.x = THREE.MathUtils.clamp(state.x, -limit, limit);
-    state.z = THREE.MathUtils.clamp(state.z, -limit, limit);
+    // ---- 7. 边界限制：把玩家挡在矩形地面内（宽 x / 长 z） ----
+    const limitX = Config.GROUND_WIDTH / 2 - Config.PLAYER_RADIUS;
+    const limitZ = Config.GROUND_DEPTH / 2 - Config.PLAYER_RADIUS;
+    state.x = THREE.MathUtils.clamp(state.x, -limitX, limitX);
+    state.z = THREE.MathUtils.clamp(state.z, -limitZ, limitZ);
+  }
+
+  // 玩家 AABB：竖直占据 [state.y - HEIGHT, state.y]（state.y 是玩家顶部 / 相机高度），
+  // 竖直中心 = state.y - HEIGHT/2；XZ 半宽 = PLAYER_RADIUS。
+  // 碰撞体为世界 AABB。沿最小穿透轴解析，从而既能挡侧面、也能从顶部顶面着陆（不能从上方穿入）。
+  _resolveWorldCollisions(state, colliders) {
+    if (!colliders || colliders.length === 0) return;
+    const pr = Config.PLAYER_RADIUS;
+    const hh = Config.PLAYER_HEIGHT / 2;
+
+    for (const b of colliders) {
+      const px = state.x;
+      const py = state.y - hh; // 玩家竖直中心（着地时 = HEIGHT/2 = 0.85）
+      const pz = state.z;
+
+      const ox = b.hx + pr - Math.abs(px - b.cx);
+      const oy = b.hy + hh - Math.abs(py - b.cy);
+      const oz = b.hz + pr - Math.abs(pz - b.cz);
+      if (ox <= 0 || oy <= 0 || oz <= 0) continue; // 三轴未同时重叠，不碰撞
+
+      // 选最小穿透轴解析（竖直优先，其次 X 再 Z，保证顶面着陆稳定）
+      if (oy <= ox && oy <= oz) {
+        if (py > b.cy) {
+          // 从上方落到顶面：站在碰撞体顶部（玩家底部落在盒子顶）
+          state.y = b.cy + b.hy + Config.PLAYER_HEIGHT;
+          if (this.velocity.y < 0) this.velocity.y = 0;
+          state.onGround = true;
+        } else {
+          // 从下方顶上去（罕见）：挡回下方，禁止穿顶（玩家顶部贴盒子底）
+          state.y = b.cy - b.hy;
+          if (this.velocity.y > 0) this.velocity.y = 0;
+        }
+      } else if (ox <= oz) {
+        state.x += px > b.cx ? ox : -ox;
+      } else {
+        state.z += pz > b.cz ? oz : -oz;
+      }
+    }
   }
 }

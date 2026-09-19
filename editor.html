@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>城市建筑编辑器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; background: #1a1a1a; color: #e0e0e0; font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
+
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+    /* ---------- 顶栏 ---------- */
+    #topbar {
+      display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 12px;
+      background: #2d2d2d; border-bottom: 1px solid #111; flex-shrink: 0;
+    }
+    #topbar .logo { font-weight: 700; color: #ffd479; letter-spacing: .5px; margin-right: 8px; }
+    #topbar .tabs { display: flex; gap: 4px; }
+    #topbar .tab {
+      padding: 4px 10px; border-radius: 4px; cursor: pointer; color: #b9c3cf; background: transparent; border: 0; font: inherit;
+    }
+    #topbar .tab.active { background: #3a6ea5; color: #fff; }
+    #topbar .spacer { flex: 1; }
+    #topbar button.action {
+      padding: 4px 12px; border-radius: 4px; cursor: pointer; border: 0; font: inherit; color: #fff;
+    }
+    #topbar button.primary { background: #2e7d5b; }
+    #topbar button.danger { background: #a33; }
+
+    /* 中部：左工具栏 + 视口 + 右侧面板 */
+    #main { display: flex; flex: 1; min-height: 0; }
+
+    #toolbar {
+      display: flex; flex-direction: column; gap: 2px; width: 58px; padding: 6px 4px;
+      background: #2a2a2a; border-right: 1px solid #111; overflow-y: auto; flex-shrink: 0;
+    }
+    #toolbar .tool {
+      display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px;
+      border-radius: 5px; cursor: pointer; color: #aab4c0; background: transparent; border: 0;
+    }
+    #toolbar .tool:hover { background: #353535; }
+    #toolbar .tool.active { background: #3a6ea5; color: #fff; }
+    #toolbar .tool .ico { font-size: 15px; line-height: 1; }
+    #toolbar .tool .lbl { font-size: 10px; }
+    #toolbar hr { border: 0; border-top: 1px solid #3a3a3a; margin: 4px 2px; }
+
+    #viewport { flex: 1; position: relative; min-width: 0; background: #262626; }
+    #viewport canvas { position: absolute; inset: 0; display: block; }
+    #viewhint {
+      position: absolute; bottom: 8px; left: 12px; color: #8a93a0; font-size: 11px; pointer-events: none;
+      background: rgba(20,20,20,.5); padding: 3px 8px; border-radius: 4px;
+    }
+
+    #right {
+      display: flex; flex-direction: column; gap: 8px; width: 240px; padding: 8px;
+      background: #2a2a2a; border-left: 1px solid #111; overflow-y: auto; flex-shrink: 0;
+    }
+    .panel-title { font-weight: 700; color: #c7d0da; margin: 2px 0 6px; border-bottom: 1px solid #3a3a3a; padding-bottom: 4px; }
+
+    /* 素材库 */
+    #library { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    #library button, .import-btn {
+      padding: 5px 4px; border-radius: 4px; cursor: pointer; border: 1px solid #3a3a3a;
+      background: #333; color: #cfd7e2; text-align: center; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #library button:hover, #library button.picked { border-color: #4aa3ff; color: #fff; }
+    .import-btn { grid-column: 1 / -1; background: #2b6f5f; color: #fff; }
+
+    /* 属性面板 */
+    .field { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    .field label { color: #8a93a0; width: 46px; flex-shrink: 0; }
+    .field input {
+      flex: 1; background: #1d1d1d; color: #e6e6e6; border: 1px solid #3a3a3a; border-radius: 3px; padding: 3px 6px;
+    }
+    .field input[type=range] { flex: 1; accent-color: #4aa3ff; padding: 0; background: transparent; border: 0; }
+
+    /* 场景列表 */
+    #outliner { list-style: none; }
+    #outliner li {
+      display: flex; align-items: center; gap: 4px; padding: 3px 4px; border-radius: 3px; cursor: pointer; color: #b9c3cf;
+    }
+    #outliner li:hover { background: #333; }
+    #outliner li.sel { background: #3a6ea5; color: #fff; }
+    #outliner li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #outliner li .del { cursor: pointer; color: #f88; background: none; border: 0; padding: 0 3px; }
+
+    /* 状态栏 */
+    #statusbar {
+      display: flex; align-items: center; gap: 18px; height: 26px; padding: 0 12px;
+      background: #2d2d2d; border-top: 1px solid #111; font-size: 11px; color: #9aa4b1; flex-shrink: 0;
+    }
+    #statusbar .snap input.accent { accent-color: #4aa3ff; margin-right: 4px; transform: translateY(1px); }
+    #statusbar .coord b { color: #ffd479; font-weight: 600; }
+    .save-status { font-size: 11px; }
+    .save-status.saved { color: #7cc87c; }
+    .save-status.dirty { color: #ffd479; }
+    .save-status.err { color: #ff8888; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="topbar">
+      <span class="logo">城市建筑编辑器</span>
+      <span class="tabs"><span class="tab">放置</span></span>
+      <span class="spacer"></span>
+      <a class="action primary" id="btnPlay" href="/" target="_blank">试玩</a>
+      <button class="action primary" id="btnSave">保存场景</button>
+      <button class="action danger" id="btnClear">清空全部</button>
+    </div>
+    <div id="main">
+      <div id="toolbar">
+        <button class="tool" id="tSelect"><span class="ico">↖</span><span class="lbl">选择</span></button>
+        <button class="tool" id="tPlace"><span class="ico">◨</span><span class="lbl">放置</span></button>
+        <button class="tool" id="tMove"><span class="ico">✥</span><span class="lbl">移动</span></button>
+        <button class="tool" id="tRot"><span class="ico">↻</span><span class="lbl">旋转</span></button>
+        <button class="tool" id="tScale"><span class="ico">⬒</span><span class="lbl">缩放</span></button>
+        <hr />
+        <button class="tool" id="tRuler"><span class="ico">↔</span><span class="lbl">测距</span></button>
+        <button class="tool" id="tDel"><span class="ico">✕</span><span class="lbl">删除</span></button>
+      </div>
+      <div id="viewport"><div id="viewhint"></div></div>
+      <div id="right">
+        <div>
+          <div class="panel-title">素材库</div>
+          <div id="library"></div>
+          <button class="import-btn" id="btnEmptyCollider" type="button">添加空碰撞体</button>
+          <label class="import-btn" for="fileIn">导入 GLB 模型</label>
+          <input id="fileIn" type="file" accept=".glb,.gltf" style="display:none" />
+        </div>
+        <div>
+          <div class="panel-title">变换（选中物件）</div>
+          <div class="field"><label>位置 X</label><input id="pX" type="number" step="0.1" /></div>
+          <div class="field"><label>位置 Z</label><input id="pZ" type="number" step="0.1" /></div>
+          <div class="field"><label>高度 Y</label><input id="pY" type="number" step="0.1" /></div>
+          <div class="field"><label>旋转 °</label><input id="pRot" type="number" step="1" /></div>
+          <div class="field"><label>缩放</label><input id="pScale" type="range" min="0.1" max="6" step="0.05" /></div>
+        </div>
+        <div id="colliderPanel" style="display:none">
+          <div class="panel-title">碰撞体（方形）</div>
+          <div class="field"><label>启用</label><input id="cEn" type="checkbox" checked /></div>
+          <div class="field"><label>半宽 X</label><input id="cHx" type="number" step="0.1" min="0" /></div>
+          <div class="field"><label>半高 Y</label><input id="cHy" type="number" step="0.1" min="0" /></div>
+          <div class="field"><label>半长 Z</label><input id="cHz" type="number" step="0.1" min="0" /></div>
+          <div class="field"><label>中心高</label><input id="cOy" type="number" step="0.1" /></div>
+          <button id="cAuto" class="import-btn" type="button">自动匹配碰撞体</button>
+        </div>
+        <div>
+          <div class="panel-title">场景</div>
+          <ul id="outliner"></ul>
+        </div>
+      </div>
+    </div>
+    <div id="statusbar">
+      <span>坐标：<span class="coord">X <b id="stX">0</b>  Z <b id="stZ">0</b></span></span>
+      <span>网格吸附 <input type="checkbox" class="accent" id="snap" checked /></span>
+      <span>吸附步长 <input type="number" id="snapStep" value="1" min="0.1" max="10" step="0.1" style="width:52px;background:#1d1d1d;color:#e6e6e6;border:1px solid #3a3a3a;border-radius:3px;padding:1px 4px" /></span>
+      <span id="status" class="save-status"></span>
+      <span style="margin-left:auto">点击模型选中 · 拖动彩色 3D 轴变换（移动/旋转/缩放随模式切换） · 空白处拖拽旋转视角 · 滚轮缩放</span>
+    </div>
+  </div>
+  <script type="module" src="./src/editor/main.js"></script>
+</body>
+</html>

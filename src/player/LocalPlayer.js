@@ -6,10 +6,12 @@ import { PlayerPhysics } from './PlayerPhysics.js';
 
 export class LocalPlayer {
   // camera：渲染相机；input：输入实例；state：本玩家的 PlayerState 实例（来自 PlayerManager）
-  constructor(camera, input, state) {
+  // colliders：世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]，参与物理碰撞。
+  constructor(camera, input, state, colliders) {
     this.camera = camera;
     this.input = input;
     this.state = state; // 读写这个 state，便于网络同步
+    this.colliders = colliders || [];
 
     // 相机旋转顺序固定为 YXZ：先绕 Y（yaw）水平转向，再绕 X（pitch）俯仰，避免万向锁混乱
     this.camera.rotation.order = 'YXZ';
@@ -30,8 +32,8 @@ export class LocalPlayer {
     const limit = THREE.MathUtils.degToRad(Config.MAX_PITCH_DEG);
     this.state.pitch = THREE.MathUtils.clamp(this.state.pitch, -limit, limit);
 
-    // ---- 2. 驱动物理：把 yaw 与 state 一并传入，物理直接写 state 的 x/y/z/onGround ----
-    this.physics.update(dt, this.input, this.state.yaw, this.state);
+    // ---- 2. 驱动物理：把 yaw、state 与世界碰撞体一并传入，物理直接写 state 的 x/y/z/onGround ----
+    this.physics.update(dt, this.input, this.state.yaw, this.state, this.colliders);
 
     // ---- 3. 同步相机位置与旋转（从 state 读取） ----
     this.camera.position.set(this.state.x, this.state.y, this.state.z);

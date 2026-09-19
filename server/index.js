@@ -1,13 +1,140 @@
-// 职责：WebSocket 中继服务器，负责连接管理、状态转发、出生点分配与周期快照广播，不做物理/碰撞/校验。
+// 职责：
+// 1) HTTP：接收「保存地图」请求，把编辑器建筑清单写入 data/ 目录；提供素材库清单 /api/models、
+//    模型上传 /api/upload 与静态 /assets/*（上传文件可直接被浏览器加载）。
+// 2) WebSocket：中继多人在线（连接管理、状态转发、出生点分配与周期快照广播），不做物理/碰撞/校验。
+// 自包含版：所有数据写入与读取均在本文件所在目录下的 data/ 内，可独立部署到任意机器（pm2 常驻）。
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
-const PORT = 8080; // 服务监听端口
+const PORT = 9000; // 服务监听端口
 const SNAPSHOT_INTERVAL = 50; // 快照广播间隔（毫秒），对应 20Hz
 const HEARTBEAT_INTERVAL = 30000; // 心跳间隔（毫秒），防止连接被中间层断开
 const SPAWN_RADIUS = 4; // 出生点离原点距离（米）
 const SPAWN_ANGLE_STEP = Math.PI / 2; // 每个玩家出生点在圆周上的夹角间隔（90°）
 
-const wss = new WebSocketServer({ port: PORT });
+// ---- 数据目录（自包含：相对本文件所在目录） ----
+const SERVER_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(SERVER_ROOT, 'data');
+const ASSETS_DIR = path.join(DATA_DIR, 'assets');
+const MAP_FILE = path.join(DATA_DIR, 'city-map.json');
+const SCENE_FILE = path.join(DATA_DIR, 'editor-scene.json');
+fs.mkdirSync(ASSETS_DIR, { recursive: true }); // 启动即确保目录存在
+
+const MAX_UPLOAD = 64 * 1024 * 1024; // 单次上传上限 64MB（导入的 GLB 模型可能较大）
+
+// 文件名消毒：只保留安全字符，避免路径注入
+function sanitizeName(name) {
+  return (name || 'import.glb').replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+// 根据扩展名返回 MIME 类型（覆盖 GLB/JSON 等）
+function mimeFor(ext) {
+  switch (ext.toLowerCase()) {
+    case '.glb': return 'model/gltf-binary';
+    case '.json': return 'application/json';
+    case '.bin': return 'application/octet-stream';
+    default: return 'application/octet-stream';
+  }
+}
+
+// HTTP 服务：承载「保存地图 / 素材清单 / 上传 / 静态资源」接口，并用 upgrade 事件转交给 WebSocket 中继
+const httpServer = http.createServer((req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-filename');
+
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // 静态资源：/assets/<file> 从 data/assets 返回（含上传的 GLB 模型）
+  if (req.method === 'GET' && url.pathname.startsWith('/assets/')) {
+    const name = decodeURIComponent(url.pathname.slice('/assets/'.length)).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const full = path.join(ASSETS_DIR, name);
+    try {
+      if (!full.startsWith(ASSETS_DIR) || !fs.existsSync(full)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'not found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': mimeFor(path.extname(name)) });
+      res.end(fs.readFileSync(full));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: String(e) }));
+    }
+    return;
+  }
+
+  // 素材库清单：读取 data/assets 下所有 .glb，供编辑器素材库使用
+  if (req.method === 'GET' && url.pathname === '/api/models') {
+    try {
+      const names = fs.readdirSync(ASSETS_DIR).filter((n) => n.toLowerCase().endsWith('.glb')).sort();
+      const items = names.map((n) => ({ name: n.replace(/\.glb$/i, ''), url: '/assets/' + n }));
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, items }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: String(e) }));
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && (url.pathname === '/api/map' || url.pathname === '/api/scene')) {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 8e6) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        // 统一写入 data/ 下 JSON（本后端为跨端共用的场景/地图数据源）
+        const target = url.pathname === '/api/scene' ? SCENE_FILE : MAP_FILE;
+        fs.writeFileSync(target, JSON.stringify(data, null, 2));
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          count: (data && data.placed ? data.placed.length : (Array.isArray(data) ? data.length : 0)),
+          file: target,
+        }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(e) }));
+      }
+    });
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/upload') {
+    const name = sanitizeName(req.headers['x-filename']);
+    const saved = 'import-' + Date.now() + '-' + name;
+    const chunks = [];
+    let total = 0;
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > MAX_UPLOAD) req.destroy();
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        fs.writeFileSync(path.join(ASSETS_DIR, saved), Buffer.concat(chunks));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, url: '/assets/' + saved }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'not found' }));
+});
+
+const wss = new WebSocketServer({ server: httpServer });
+httpServer.listen(PORT);
 
 // id -> 已上报状态 {num, x, y, z, yaw}
 const states = new Map();
@@ -36,14 +163,11 @@ function freeNum(n) {
   usedNums.delete(n);
 }
 
-// 根据加入序号计算圆周上散布的出生点，让玩家彼此可见、不重叠在原点
+// 根据加入序号返回出生点。当前固定在地面角落附近 (2, 144)，面朝场景中心
 function spawnForNum(num) {
-  const angle = (num - 1) * SPAWN_ANGLE_STEP;
-  const x = Math.cos(angle) * SPAWN_RADIUS;
-  const z = Math.sin(angle) * SPAWN_RADIUS;
-  // 让玩家面朝原点（相机前方 = (-sin yaw, -cos yaw) 指向中心）
-  const yaw = Math.atan2(x, z);
-  return { x, z, yaw };
+  // 相机前方 = (-sin yaw, -cos yaw)；要让角色看向中心 (0,0~155 范围)，令其指向 -z / 朝中心
+  const yaw = Math.atan2(2, 144); // 朝中心方向
+  return { x: 2, z: 144, yaw };
 }
 
 // 向所有已连接客户端广播一条 JSON 消息
@@ -135,4 +259,4 @@ setInterval(() => {
   }
 }, SNAPSHOT_INTERVAL);
 
-console.log(`relay server listening on ws://localhost:${PORT}`);
+console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);

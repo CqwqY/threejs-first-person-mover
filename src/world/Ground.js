@@ -3,8 +3,8 @@ import * as THREE from 'three';
 import { Config } from '../config.js';
 
 export function createGround() {
-  // 正方形地面，边长取 config.GROUND_SIZE
-  const geometry = new THREE.PlaneGeometry(Config.GROUND_SIZE, Config.GROUND_SIZE);
+  // 矩形地面，宽 = Config.GROUND_WIDTH（x 方向），深 = Config.GROUND_DEPTH（z 方向）
+  const geometry = new THREE.PlaneGeometry(Config.GROUND_WIDTH, Config.GROUND_DEPTH);
 
   const material = new THREE.MeshStandardMaterial({
     color: Config.GROUND_COLOR,
