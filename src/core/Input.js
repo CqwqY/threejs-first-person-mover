@@ -83,6 +83,11 @@ export class Input {
     return jump;
   }
 
+  // 手机跳跃按钮：与空格键同一个入队队列，LocalPlayer 消费后经 consumeJump() 复位
+  queueJump() {
+    this._jumpQueued = true;
+  }
+
   // 读取并清零本帧的鼠标移动量（像素）
   // 返回 { x, y }，LocalPlayer 据此更新 yaw / pitch
   takeMouseDelta() {

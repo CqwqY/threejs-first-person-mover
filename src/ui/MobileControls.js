@@ -23,8 +23,26 @@ export function initMobileControls(input) {
       border-radius:50%;border:1px solid rgba(255,255,255,.18)}
     .mc-knob{position:absolute;left:50%;top:50%;width:54px;height:54px;transform:translate(-50%,-50%);
       border-radius:50%;background:rgba(255,255,255,.5);box-shadow:0 4px 12px rgba(0,0,0,.3)}
+    .mc-jump{position:fixed;right:20px;bottom:24px;width:72px;height:72px;border-radius:50%;z-index:51;
+      display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.9);
+      font-size:15px;font-weight:600;letter-spacing:1px;
+      background:rgba(255,255,255,.12);border:2px solid rgba(255,255,255,.35);
+      touch-action:none;user-select:none;-webkit-user-select:none}
+    .mc-jump:active{background:rgba(255,255,255,.3)}
   `;
   document.head.appendChild(style);
+
+  // ---- 右下跳跃按钮 ----
+  const jumpBtn = document.createElement('div');
+  jumpBtn.className = 'mc-jump';
+  jumpBtn.textContent = '跳';
+  document.body.appendChild(jumpBtn);
+  const jumpPress = (e) => {
+    e.preventDefault();
+    input.queueJump();
+  };
+  jumpBtn.addEventListener('pointerdown', jumpPress);
+  jumpBtn.addEventListener('pointercancel', (e) => e.preventDefault());
 
   // ---- 左侧摇杆 ----
   const zone = document.createElement('div');
