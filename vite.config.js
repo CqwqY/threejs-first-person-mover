@@ -12,6 +12,14 @@ export default {
   // 相对 base：构建产物的入口/JS/CSS 用相对路径引用，适配 GitHub Pages 根目录或子路径部署
   base: './',
   server: { port: 5173 },
+  build: {
+    rollupOptions: {
+      input: {
+        index: path.join(root, 'index.html'),
+        editor: path.join(root, 'editor.html'),
+      },
+    },
+  },
   plugins: [
     {
       name: 'map-editor-api',
