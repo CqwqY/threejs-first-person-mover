@@ -647,8 +647,8 @@ export function createEditor() {
   function buildLibrary() {
     StepUI.library.innerHTML = '';
     const seen = new Set();
-    let items = [...folderItems, ...state.imported];
-    if (folderItems.length === 0) items = items.concat(LIBRARY); // 兜底内建
+    // 内建素材始终展示；后端清单 / 导入模型按 url 去重后并入
+    const items = [...LIBRARY, ...folderItems, ...state.imported];
     items.forEach((it) => {
       if (!it || !it.url || seen.has(it.url)) return;
       seen.add(it.url);
