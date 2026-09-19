@@ -27,9 +27,9 @@ export class PlayerPhysics {
     const move = new THREE.Vector3();
     move.addScaledVector(forward, Number(input.forwarded()) - Number(input.backwarded()));
     move.addScaledVector(right, Number(input.strafeRight()) - Number(input.strafeLeft()));
-    // 摇杆：y 前(+1)/后(-1) 沿 forward，x 右(+1)/左(-1) 沿 right
-    move.addScaledVector(forward, input.joyY());
-    move.addScaledVector(right, input.joyX());
+    // 摇杆：y 前(+1)/后(-1) 沿 forward，x 右(+1)/左(-1) 沿 right（joyX/joyY 为属性，非函数）
+    move.addScaledVector(forward, input.joyY);
+    move.addScaledVector(right, input.joyX);
 
     // 斜向移动需要归一化，否则走斜线会更快
     if (move.lengthSq() > 0) {
