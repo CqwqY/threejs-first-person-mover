@@ -12,6 +12,8 @@ export const Config = {
   GRAVITY: -20,
   // 鼠标灵敏度：缩放鼠标移动量到旋转弧度
   MOUSE_SENSITIVITY: 0.002,
+  // 手机触屏视角灵敏度：拖动像素到弧度的缩放（触屏拖动幅度通常大于鼠标位移，取更高值）
+  TOUCH_SENSITIVITY: 0.014,
   // 玩家身高，也是相机离地高度（米）
   PLAYER_HEIGHT: 1.7,
   // 玩家碰撞半径（水平方向，用于边界限制）

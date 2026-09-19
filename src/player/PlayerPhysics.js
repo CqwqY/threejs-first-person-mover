@@ -23,18 +23,24 @@ export class PlayerPhysics {
     // 右向量（前 × 上）=(cos, 0, -sin)
     const right = new THREE.Vector3(cos, 0, -sin);
 
-    // 根据 WASD 合成期望的水平移动方向（先不归一化）
+    // 根据 WASD + 手机摇杆合成期望的水平移动方向（先不归一化）
     const move = new THREE.Vector3();
     move.addScaledVector(forward, Number(input.forwarded()) - Number(input.backwarded()));
     move.addScaledVector(right, Number(input.strafeRight()) - Number(input.strafeLeft()));
+    // 摇杆：y 前(+1)/后(-1) 沿 forward，x 右(+1)/左(-1) 沿 right
+    move.addScaledVector(forward, input.joyY());
+    move.addScaledVector(right, input.joyX());
 
     // 斜向移动需要归一化，否则走斜线会更快
     if (move.lengthSq() > 0) {
       move.normalize();
     }
 
-    // 速度倍率：默认速度 ×（冲刺时乘冲刺倍率）
-    const speed = Config.MOVE_SPEED * (input.sprinting() ? Config.SPRINT_MULTIPLIER : 1);
+    // 速度倍率：默认速度 ×（冲刺时乘冲刺倍率）。手机摇杆推满也算冲刺
+    const sprint =
+      input.sprinting() ||
+      (input.joyMagnitude && input.joyMagnitude() >= 0.85);
+    const speed = Config.MOVE_SPEED * (sprint ? Config.SPRINT_MULTIPLIER : 1);
 
     // ---- 2. 水平速度 ----
     this.velocity.x = move.x * speed;

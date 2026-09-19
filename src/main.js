@@ -3,9 +3,12 @@ import { Game } from './core/Game.js';
 import { initDebugYawPanel } from './debug/DebugYawPanel.js';
 import { debugCalibFrame } from './player/PlayerModel.js';
 import { initBuildingTool } from './world/BuildingTool.js';
+import { initMobileControls } from './ui/MobileControls.js';
 
 const game = new Game();
 game.start();
+// 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过
+initMobileControls(game.input);
 
 // 暴露到全局，方便调试（联机验证 / 控制台检查玩家状态）
 window.__game = game;

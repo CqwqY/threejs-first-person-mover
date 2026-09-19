@@ -13,6 +13,8 @@ export class Input {
     this._keys = new Set();
     // 鼠标移动量缓存：LocalPlayer 每帧读取后清零
     this._mouseDelta = { x: 0, y: 0 };
+    // 虚拟摇杆轴向（手机）：x 右正，y 前正，范围 [-1,1]；无摇杆时保持 0
+    this._joy = { x: 0, y: 0 };
     // 跳跃请求：按下空格时置 true，LocalPlayer 消费后调用 consumeJump() 复位
     this._jumpQueued = false;
     // 指针是否锁定（表示正在用第一人称视角控制）
@@ -88,6 +90,25 @@ export class Input {
     this._mouseDelta.x = 0;
     this._mouseDelta.y = 0;
     return d;
+  }
+
+  // 手机触屏视角拖动：增量累加到本帧的视角移动量（与鼠标共用同一累积，LocalPlayer 无感知）
+  addLookDelta(dx, dy) {
+    this._mouseDelta.x += dx;
+    this._mouseDelta.y += dy;
+  }
+
+  // 设置虚拟摇杆轴向：x 右为正、y 前为正，范围 [-1,1]
+  setJoystick(x, y) {
+    this._joy.x = x;
+    this._joy.y = y;
+  }
+
+  // 摇杆当前轴向 / 幅度（幅度用于判断是否冲刺）
+  get joyX() { return this._joy.x; }
+  get joyY() { return this._joy.y; }
+  joyMagnitude() {
+    return Math.hypot(this._joy.x, this._joy.y);
   }
 
   // 常用键的便捷别名
