@@ -1,7 +1,7 @@
 // 城市建筑编辑器（独立开发工具，与游戏运行时无任何联动）。
-// 自由视角（OrbitControls）+ 3D 变换轴（TransformControls）。
+// 自由视角（WASD 平移 + 右键拖拽转视角 + 滚轮缩放）+ 3D 变换轴（TransformControls）。
 // 交互：点击模型即选中；移动/旋转/缩放模式会出现可拖动的彩色 3D 轴；
-// 空白处左键拖拽旋转视角、滚轮缩放。游戏景物（地形/道路/道具）在编辑器中亦可选中编辑。
+// WASD 平移视角、右键拖拽转视角、滚轮缩放。游戏景物在编辑器中亦可选中编辑。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
@@ -13,6 +13,9 @@ import { buildScenery } from '../world/buildScenery.js';
 import { createSky } from '../world/SkyBox.js';
 
 const DEG = Math.PI / 180;
+const UP = new THREE.Vector3(0, 1, 0);
+// 视角平移速度（米/秒，WASD 移动）
+const CAM_SPEED = 15;
 // scale 规范化：统一为 {x,y,z}，兼容旧的单数值
 function normScale(s) {
   if (s && typeof s === 'object' && typeof s.x === 'number') {
@@ -91,7 +94,7 @@ export function createEditor() {
   scene.add(grid);
   scene.add(new THREE.AxesHelper(5));
 
-  // 自由视角
+  // 自由视角：WASD 平移 + 右键拖拽转视角 + 滚轮缩放（左键留给选中/放置/3D 轴）
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.12;
@@ -99,6 +102,8 @@ export function createEditor() {
   controls.maxPolarAngle = Math.PI / 2 - 0.02;
   controls.minDistance = 4;
   controls.maxDistance = 400;
+  controls.staticMoving = true;
+  controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
   controls.update();
 
   // 3D 变换轴（移动/旋转/缩放），可拖动箭头/环
@@ -1033,8 +1038,37 @@ export function createEditor() {
   }
   window.addEventListener('resize', resize);
 
+  // ---------- WASD 视角平移 ----------
+  const moveKeys = new Set();
+  window.addEventListener('keydown', (e) => {
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // 输入框内不触发移动
+    moveKeys.add(e.key.toLowerCase());
+  });
+  window.addEventListener('keyup', (e) => moveKeys.delete(e.key.toLowerCase()));
+  // 每帧把 camera + controls.target 一起平移，实现 WASD 平移（视线方向不因平移改变）
+  function applyWASDMove(dt) {
+    const f = (moveKeys.has('w') ? 1 : 0) - (moveKeys.has('s') ? 1 : 0);
+    const r = (moveKeys.has('d') ? 1 : 0) - (moveKeys.has('a') ? 1 : 0);
+    const u = (moveKeys.has('q') ? 1 : 0) - (moveKeys.has('e') ? 1 : 0);
+    if (!f && !r && !u) return;
+    const spd = CAM_SPEED * (moveKeys.has('shift') ? 2 : 1) * dt;
+    const fwd = camera.getWorldDirection(new THREE.Vector3());
+    fwd.y = 0; fwd.normalize();               // 水平前向
+    const rgt = new THREE.Vector3().crossVectors(fwd, UP).normalize(); // 水平右向
+    const delta = new THREE.Vector3().addScaledVector(fwd, f * spd)
+      .addScaledVector(rgt, r * spd)          // D=+1 右移
+      .addScaledVector(UP, u * spd);          // Q 上 / E 下
+    camera.position.add(delta);
+    controls.target.add(delta);
+  }
+
   // 渲染循环
+  let _t0 = performance.now();
   function loop() {
+    const t = performance.now();
+    applyWASDMove(Math.min((t - _t0) / 1000, 0.1));
+    _t0 = t;
     controls.update();
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(loop);
