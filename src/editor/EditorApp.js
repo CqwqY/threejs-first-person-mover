@@ -1046,19 +1046,19 @@ export function createEditor() {
     moveKeys.add(e.key.toLowerCase());
   });
   window.addEventListener('keyup', (e) => moveKeys.delete(e.key.toLowerCase()));
-  // 每帧把 camera + controls.target 一起平移，实现 WASD 平移（视线方向不因平移改变）
+  // 每帧把 camera + controls.target 一起平移，实现沿视角方向自由飞行：
+  // W/S 沿视线（含俯仰）前/后，A/D 横向平移，Space 上升 / Shift 下降，视线方向不因平移改变
   function applyWASDMove(dt) {
     const f = (moveKeys.has('w') ? 1 : 0) - (moveKeys.has('s') ? 1 : 0);
     const r = (moveKeys.has('d') ? 1 : 0) - (moveKeys.has('a') ? 1 : 0);
-    const u = (moveKeys.has('q') ? 1 : 0) - (moveKeys.has('e') ? 1 : 0);
+    const u = (moveKeys.has(' ') ? 1 : 0) - (moveKeys.has('shift') ? 1 : 0); // Space 上 / Shift 下
     if (!f && !r && !u) return;
-    const spd = CAM_SPEED * (moveKeys.has('shift') ? 2 : 1) * dt;
-    const fwd = camera.getWorldDirection(new THREE.Vector3());
-    fwd.y = 0; fwd.normalize();               // 水平前向
-    const rgt = new THREE.Vector3().crossVectors(fwd, UP).normalize(); // 水平右向
+    const spd = CAM_SPEED * dt;
+    const fwd = camera.getWorldDirection(new THREE.Vector3());           // 完整视线方向（含俯仰）
+    const rgt = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion); // 相机本地右向，始终垂直于视线
     const delta = new THREE.Vector3().addScaledVector(fwd, f * spd)
-      .addScaledVector(rgt, r * spd)          // D=+1 右移
-      .addScaledVector(UP, u * spd);          // Q 上 / E 下
+      .addScaledVector(rgt, r * spd)
+      .addScaledVector(UP, u * spd);
     camera.position.add(delta);
     controls.target.add(delta);
   }
