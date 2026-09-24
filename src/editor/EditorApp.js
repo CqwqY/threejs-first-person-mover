@@ -104,7 +104,13 @@ export function createEditor() {
   // 3D 变换轴（移动/旋转/缩放），可拖动箭头/环
   const tCtl = new TransformControls(camera, renderer.domElement);
   scene.add(tCtl.getHelper());
-  tCtl.addEventListener('dragging-changed', (e) => { controls.enabled = !e.value; });
+  // 复制模式：拖动开始时先复制一份，本次拖动作用于副本，原件原地保留
+  tCtl.addEventListener('dragging-changed', (e) => {
+    if (e.value && state.copyMode && state.selected) {
+      duplicateRec(state.selected, true);
+    }
+    controls.enabled = !e.value;
+  });
   tCtl.addEventListener('objectChange', () => {
     if (state.selected) { readTransformFromObject(state.selected); }
   });
@@ -127,6 +133,7 @@ export function createEditor() {
     placed: [],       // 用户摆放的对象 {id,kind,name,url|data,x,y,z,rotY,scale,obj}
     scenery: [],      // 游戏景物（可编辑，不随保存持久化）
     placingEmpty: false, // 空碰撞体放置中：幽灵仅圆环，点击在落点生成空碰撞体
+    copyMode: false,  // 复制模式：拖动 3D 轴时先复制一份，本次拖动作用于副本
     raf: 0,
   };
   let _idSeq = 1;
@@ -339,6 +346,51 @@ export function createEditor() {
     select(rec);
     markDirty();
     outlinerUpdate();
+  }
+
+  // 复制一个对象：原样克隆网格/属性/碰撞体（线框按 collider 重建），返回新 rec
+  function duplicateRec(rec, selectIt = false) {
+    const obj = new THREE.Group();
+    (rec.obj ? rec.obj.children : []).forEach((ch) => {
+      if (ch.name === 'collider-vis') return; // 线框稍后按 collider 重建
+      obj.add(ch.clone(true));
+    });
+    const copy = {
+      id: _idSeq++, kind: rec.kind, name: rec.name, url: rec.url,
+      x: rec.x ?? rec.obj.position.x,
+      y: rec.y ?? rec.obj.position.y,
+      z: rec.z ?? rec.obj.position.z,
+      rotY: rec.rotY ?? 0,
+      scale: { ...normScale(rec.scale ?? rec.obj.scale) },
+      collider: rec.collider ? { enabled: rec.collider.enabled !== false, hx: rec.collider.hx, hy: rec.collider.hy, hz: rec.collider.hz, oy: rec.collider.oy } : defaultCollider(),
+      obj,
+    };
+    applyPlTransform(copy);
+    scene.add(obj);
+    state.placed.push(copy);
+    buildColliderVis(copy);
+    markDirty();
+    outlinerUpdate();
+    if (selectIt) select(copy);
+    return copy;
+  }
+
+  // 阵列复制：以选中对象为起点，沿 X/Z 网格生成副本（不含原件位置），返回副本总数
+  function arrayDuplicate(rec, nx, nz, sp) {
+    let n = 0;
+    const bx = rec.x ?? rec.obj.position.x;
+    const bz = rec.z ?? rec.obj.position.z;
+    for (let i = 0; i < nx; i++) {
+      for (let j = 0; j < nz; j++) {
+        if (i === 0 && j === 0) continue;
+        const copy = duplicateRec(rec);
+        copy.x = bx + i * sp;
+        copy.z = bz + j * sp;
+        applyPlTransform(copy);
+        n++;
+      }
+    }
+    return n;
   }
 
   // ---------- 选中 + 3D 轴绑定 ----------
@@ -923,6 +975,36 @@ export function createEditor() {
   StepUI.btnRuler.onclick = () => setMode('ruler');
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');
+
+  // 复制模式开关：开启后拖动 3D 轴即复制一份，拖一次复制一次（原件保留）
+  document.getElementById('tCopy').onclick = () => {
+    state.copyMode = !state.copyMode;
+    document.getElementById('tCopy').classList.toggle('active', state.copyMode);
+    StepUI.hint.textContent = state.copyMode
+      ? '复制模式：拖动（移动/旋转/缩放）即复制一份，拖一次复制一次；再点「复制」关闭'
+      : '';
+  };
+
+  // 阵列复制：弹出参数窗，以选中对象为起点沿 X/Z 网格生成副本
+  const arrModal = document.getElementById('arrayModal');
+  document.getElementById('tArray').onclick = () => {
+    if (!state.selected) {
+      StepUI.hint.textContent = '请先选中一个对象，再点「阵列」';
+      return;
+    }
+    arrModal.classList.add('open');
+  };
+  document.getElementById('arrClose').onclick = () => arrModal.classList.remove('open');
+  arrModal.addEventListener('click', (e) => { if (e.target === arrModal) arrModal.classList.remove('open'); });
+  document.getElementById('arrGo').onclick = () => {
+    if (!state.selected) { arrModal.classList.remove('open'); return; }
+    const nx = Math.max(1, parseInt(document.getElementById('arrNX').value, 10) || 1);
+    const nz = Math.max(1, parseInt(document.getElementById('arrNZ').value, 10) || 1);
+    const sp = Math.max(0.1, parseFloat(document.getElementById('arrSp').value) || 1);
+    const total = arrayDuplicate(state.selected, nx, nz, sp);
+    arrModal.classList.remove('open');
+    StepUI.hint.textContent = '已阵列生成 ' + total + ' 个副本（原件保留）';
+  };
 
   document.getElementById('btnClear').onclick = () => {
     state.placed.forEach((p) => scene.remove(p.obj));
