@@ -126,6 +126,7 @@ export function createEditor() {
     selected: null,   // 当前选中对象（置于置中的 objects / scenery / placed）
     placed: [],       // 用户摆放的对象 {id,kind,name,url|data,x,y,z,rotY,scale,obj}
     scenery: [],      // 游戏景物（可编辑，不随保存持久化）
+    placingEmpty: false, // 空碰撞体放置中：幽灵仅圆环，点击在落点生成空碰撞体
     raf: 0,
   };
   let _idSeq = 1;
@@ -158,6 +159,9 @@ export function createEditor() {
     outliner: document.getElementById('outliner'),
     btnSave: document.getElementById('btnSave'),
     status: document.getElementById('status'),
+    btnLibrary: document.getElementById('btnLibrary'),
+    libModal: document.getElementById('libModal'),
+    libClose: document.getElementById('libClose'),
     cEn: document.getElementById('cEn'),
     cHx: document.getElementById('cHx'),
     cHy: document.getElementById('cHy'),
@@ -204,7 +208,8 @@ export function createEditor() {
     state.ghost = new THREE.Group();
     state.ghost.add(makeRing());
     scene.add(state.ghost);
-    if (state.currentUrl) {
+    // 空碰撞体放置：幽灵只显示圆环，不加载模型
+    if (state.currentUrl && !state.placingEmpty) {
       instantiate(state.currentUrl)
         .then((m) => { if (state.ghost) { state.ghost.clear(); state.ghost.add(makeRing()); state.ghost.add(m); enableShadows(m); } })
         .catch(() => {});
@@ -214,10 +219,11 @@ export function createEditor() {
   function makeRing() {
     const r = new THREE.Mesh(
       new THREE.RingGeometry(0.7, 1.0, 40),
-      new THREE.MeshBasicMaterial({ color: 0x4aa3ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
+      new THREE.MeshBasicMaterial({ color: 0x4aa3ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthTest: false })
     );
     r.rotation.x = -Math.PI / 2;
     r.position.y = 0.02;
+    r.renderOrder = 999; // 图层置顶：放置圆环始终画在最上层
     return r;
   }
 
@@ -240,8 +246,13 @@ export function createEditor() {
 
   // ---------- 放置 ----------
   function place() {
-    if (!state.currentUrl) return;
     const gp = state.ghost ? state.ghost.position : null;
+    // 空碰撞体放置：复用放置模式的圆环落点
+    if (state.placingEmpty) {
+      addEmptyCollider(gp ? gp.x : 0, gp ? gp.z : 0);
+      return;
+    }
+    if (!state.currentUrl) return;
     const obj = new THREE.Group();
     const item = {
       id: _idSeq++, kind: state.imported.some((it) => it.url === state.currentUrl) ? 'import' : 'builtin',
@@ -312,15 +323,16 @@ export function createEditor() {
 
   // 添加一个「空碰撞体」：无可视模型，仅一个橙色线框方块（可拾取/编辑），
   // 数据记入 collider，游戏端据此生成不可见但可阻挡玩家的矩形碰撞体。
-  function addEmptyCollider() {
+  function addEmptyCollider(x = 0, z = 0) {
     const collider = { enabled: true, hx: 1, hy: 1, hz: 1, oy: 0.5 };
     const obj = new THREE.Group();
     const rec = {
       id: _idSeq++, kind: 'empty', name: '空碰撞体',
-      url: null, x: 0, y: 0, z: 0, rotY: 0,
+      url: null, x, y: 0, z, rotY: 0,
       scale: { x: 1, y: 1, z: 1 }, collider, obj,
     };
     obj.name = 'collider-root';
+    obj.position.set(x, 0, z);
     scene.add(obj);
     buildColliderVis(rec); // 橙色线框 = 碰撞盒可视提示（线框即拾取目标）
     state.placed.push(rec);
@@ -353,11 +365,17 @@ export function createEditor() {
   let orbitLocked = false;
 
   renderer.domElement.addEventListener('pointerdown', (e) => {
+    // 测距：Shift+左键 = 第一点，Shift+右键 = 第二点；未按 Shift 的点击交给视角拖拽
+    if (state.mode === 'ruler' && e.shiftKey) {
+      if (e.button === 0) onRulerClick(e.clientX, e.clientY, 0);
+      else if (e.button === 2) onRulerClick(e.clientX, e.clientY, 1);
+      return;
+    }
     if (e.button !== 0) return;
     downPt = { x: e.clientX, y: e.clientY };
     dragged = false;
     if (tCtl.axis) return; // 正在拖 3D 轴，交给 TransformControls
-    if (state.mode === 'ruler') { onRulerClick(e.clientX, e.clientY); return; }
+    if (state.mode === 'ruler') return;
     if (state.mode === 'place') return;
     const hitObj = pickObject(e.clientX, e.clientY);
     select(hitObj ? hitObj.rec : null);
@@ -668,13 +686,23 @@ export function createEditor() {
     state.currentLabel = label;
     buildLibrary();
     resetGhost();
+    closeLibrary(); // 选中即收起弹窗，回到视口落点放置
   }
   refreshLibrary();
+
+  // 素材库弹窗开关
+  function openLibrary() { StepUI.libModal.classList.add('open'); }
+  function closeLibrary() { StepUI.libModal.classList.remove('open'); }
+  StepUI.btnLibrary.onclick = openLibrary;
+  StepUI.libClose.onclick = closeLibrary;
+  // 点击遮罩空白处关闭；Esc 关闭
+  StepUI.libModal.addEventListener('click', (e) => { if (e.target === StepUI.libModal) closeLibrary(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLibrary(); });
 
   // 悬浮预览：独立小渲染器，hover 某素材时加载模型旋转展示
   function createPreviewWidget() {
     const el = document.createElement('div');
-    el.style.cssText = 'position:fixed;top:76px;right:16px;width:180px;height:210px;background:#14161a;border:1px solid #2c3038;border-radius:10px;display:none;z-index:30;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.55);';
+    el.style.cssText = 'position:fixed;top:76px;right:16px;width:180px;height:210px;background:#14161a;border:1px solid #2c3038;border-radius:10px;display:none;z-index:60;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.55);';
     el.style.setProperty('pointer-events', 'none');
     const cap = document.createElement('div');
     cap.style.cssText = 'position:absolute;left:9px;top:7px;color:#9aa0aa;font:12px/1.3 system-ui;pointer-events:none;text-shadow:0 1px 2px #000;';
@@ -805,8 +833,10 @@ export function createEditor() {
     rulerRemoveObjects();
     if (!p1 || !p2) return;
     const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(p1.x, p1.y, p1.z), new THREE.Vector3(p2.x, p2.y, p2.z)]);
-    rulerLine = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff5252 }));
+    const mat = new THREE.LineBasicMaterial({ color: 0xff5252, depthTest: false });
+    rulerLine = new THREE.Line(geo, mat);
     rulerLine.position.y = 0;
+    rulerLine.renderOrder = 999; // 图层置顶：测距线不被模型遮挡
     scene.add(rulerLine);
     // 水平距离
     const dHor = Math.hypot(p2.x - p1.x, p2.z - p1.z);
@@ -821,7 +851,8 @@ export function createEditor() {
     c2.fillStyle = '#fff'; c2.font = 'bold 44px sans-serif'; c2.textAlign = 'center'; c2.textBaseline = 'middle';
     c2.fillText(txt, 256, 64);
     const tex = new THREE.CanvasTexture(canvas);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    sp.renderOrder = 999; // 图层置顶：距离标签同样不被遮挡
     const mid = new THREE.Vector3((p1.x + p2.x) / 2, 0.25, (p1.z + p2.z) / 2);
     const d3 = mid.distanceTo(new THREE.Vector3(p1.x, mid.y, p1.z));
     const scale = Math.min(Math.max(d3 / 4, 0.8), 6);
@@ -835,11 +866,11 @@ export function createEditor() {
     const p = groundPos(clientX, clientY, new THREE.Vector3());
     return p ? { x: p.x, y: 0, z: p.z } : null;
   }
-  function onRulerClick(clientX, clientY) {
+  function onRulerClick(clientX, clientY, idx) {
     const gp = hitGroundPoint(clientX, clientY);
     if (!gp) return;
-    rulerPts.push(gp);
-    if (rulerPts.length > 2) rulerPts.shift();
+    // idx 0 = 第一点(Shift+左键)，1 = 第二点(Shift+右键)；可随时重设任一点
+    rulerPts[idx] = gp;
     drawRuler(rulerPts[0], rulerPts[1]);
     outlinerUpdate();
   }
@@ -860,12 +891,19 @@ export function createEditor() {
     });
     const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler };
     (map[m] || StepUI.btnSelect).classList.add('active');
-    if (m === 'ruler') { clearRuler(); }
+    if (m === 'ruler') {
+      clearRuler();
+      StepUI.hint.textContent = 'Shift+左键：第一点 · Shift+右键：第二点 · 未按 Shift 拖拽转视角';
+    } else if (StepUI.hint.textContent.includes('Shift')) {
+      StepUI.hint.textContent = '';
+    }
 
     if (m === 'place') {
       tCtl.detach(); tCtl.enabled = false;
       resetGhost();
+      if (!state.placingEmpty) StepUI.hint.textContent = '';
     } else {
+      state.placingEmpty = false; // 离开放置：退出空碰撞体放置
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
       // 已有选中对象时，按新模式挂上对应的 3D 轴
       if (state.selected && GIZMO_MODE[m]) {
@@ -878,7 +916,7 @@ export function createEditor() {
     }
   }
   StepUI.btnSelect.onclick = () => setMode('select');
-  StepUI.btnPlace.onclick = () => setMode('place');
+  StepUI.btnPlace.onclick = () => { state.placingEmpty = false; setMode('place'); };
   StepUI.btnMove.onclick = () => setMode('move');
   StepUI.btnRot.onclick = () => setMode('rot');
   StepUI.btnScale.onclick = () => setMode('scale');
@@ -894,8 +932,15 @@ export function createEditor() {
     outlinerUpdate();
   };
 
-  // 添加空碰撞体：无模型、仅线框，游戏端据此生成不可见阻挡盒
-  StepUI.btnEmptyCollider.onclick = () => addEmptyCollider();
+  // 添加空碰撞体：改用放置流程（圆环跟随鼠标，点击落点生成），可连放多个；
+  // 点「放置」工具按钮可切回正常模型放置
+  StepUI.btnEmptyCollider.onclick = () => {
+    state.placingEmpty = true;
+    setMode('place');
+    resetGhost();
+    StepUI.hint.textContent = '点击地面落点放置空碰撞体（可连放多个）· 点「放置」按钮返回模型放置';
+    closeLibrary(); // 弹窗收起，回到视口落点放置
+  };
 
   // 窗口自适应
   function resize() {
