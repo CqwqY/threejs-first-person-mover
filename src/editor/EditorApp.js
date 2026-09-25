@@ -14,8 +14,8 @@ import { createSky } from '../world/SkyBox.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
-// 视角平移速度（米/秒，WASD 移动）
-const CAM_SPEED = 15;
+// 视角飞行速度（米/秒，WASD 移动）。滚轮缩放会按远近再动态加倍，见 speedScale()
+const CAM_SPEED = 55;
 // scale 规范化：统一为 {x,y,z}，兼容旧的单数值
 function normScale(s) {
   if (s && typeof s === 'object' && typeof s.x === 'number') {
@@ -1053,7 +1053,9 @@ export function createEditor() {
     const r = (moveKeys.has('d') ? 1 : 0) - (moveKeys.has('a') ? 1 : 0);
     const u = (moveKeys.has(' ') ? 1 : 0) - (moveKeys.has('shift') ? 1 : 0); // Space 上 / Shift 下
     if (!f && !r && !u) return;
-    const spd = CAM_SPEED * dt;
+    // 速度随视距自适应：贴近地面时慢速微调，拉远视角后快速长距离飞行
+    const dist = camera.position.distanceTo(controls.target);
+    const spd = CAM_SPEED * Math.min(Math.max(dist / 25, 0.6), 5) * dt;
     const fwd = camera.getWorldDirection(new THREE.Vector3());           // 完整视线方向（含俯仰）
     const rgt = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion); // 相机本地右向，始终垂直于视线
     const delta = new THREE.Vector3().addScaledVector(fwd, f * spd)
