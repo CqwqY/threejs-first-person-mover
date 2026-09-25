@@ -141,14 +141,14 @@ export function createEditor() {
     copyMode: false,  // 复制模式：拖动 3D 轴时先复制一份，本次拖动作用于副本
     raf: 0,
   };
-  // 物体 id：每个场景内的物体都有稳定 id，随场景一起保存/还原。
-  // 规则：景物 scn-<key>（key 为 buildScenery 数组下标，天然稳定）；摆放物体 obj-<序号>。
+  // 物体 id：全局唯一的纯数字 id，随场景一起保存/还原。
+  // 编号顺序：景物先按 buildScenery 顺序占 1..N（key 固定 → id 固定），摆放物体接续往后排。
   let _idSeq = 1;
-  function nextObjId() { return 'obj-' + (_idSeq++); }
+  function nextId() { return _idSeq++; }
   // 还原时把已存在的 id 序号推高，避免后续新建对象与旧 id 撞号
   function bumpIdSeq(id) {
-    const m = /(\d+)\s*$/.exec(String(id || ''));
-    if (m) _idSeq = Math.max(_idSeq, Number(m[1]) + 1);
+    const n = Number(id);
+    if (Number.isInteger(n) && n >= _idSeq) _idSeq = n + 1;
   }
   // 把 id 挂到运行时对象上，游戏端/工具可按 userData.id 精确引用
   function tagId(rec) {
@@ -181,6 +181,7 @@ export function createEditor() {
     pRot: document.getElementById('pRot'),
     pScale: document.getElementById('pScale'),
     outliner: document.getElementById('outliner'),
+    sceneryList: document.getElementById('sceneryList'),
     btnSave: document.getElementById('btnSave'),
     status: document.getElementById('status'),
     btnLibrary: document.getElementById('btnLibrary'),
@@ -202,7 +203,7 @@ export function createEditor() {
     const groups = buildScenery(scene);
     groups.forEach((child, key) => {
       const rec = {
-        id: 'scn-' + key, key, kind: 'scenery', name: child.name || '景物',
+        id: nextId(), key, kind: 'scenery', name: child.name || '景物',
         x: child.position.x, y: child.position.y, z: child.position.z,
         rotY: child.rotation.y,
         scale: { x: child.scale.x, y: child.scale.y, z: child.scale.z },
@@ -280,7 +281,7 @@ export function createEditor() {
     if (!state.currentUrl) return;
     const obj = new THREE.Group();
     const item = {
-      id: nextObjId(), kind: state.imported.some((it) => it.url === state.currentUrl) ? 'import' : 'builtin',
+      id: nextId(), kind: state.imported.some((it) => it.url === state.currentUrl) ? 'import' : 'builtin',
       name: state.currentLabel, url: state.currentUrl,
       x: gp ? gp.x : 0, y: 0, z: gp ? gp.z : 0, rotY: 0,
       scale: { x: 1, y: 1, z: 1 }, collider: defaultCollider(), obj,
@@ -354,7 +355,7 @@ export function createEditor() {
     const collider = { enabled: true, hx: 1, hy: 1, hz: 1, oy: 0.5 };
     const obj = new THREE.Group();
     const rec = {
-      id: nextObjId(), kind: 'empty', name: '空碰撞体',
+      id: nextId(), kind: 'empty', name: '空碰撞体',
       url: null, x, y: 0, z, rotY: 0,
       scale: { x: 1, y: 1, z: 1 }, collider, obj,
     };
@@ -377,7 +378,7 @@ export function createEditor() {
       obj.add(ch.clone(true));
     });
     const copy = {
-      id: nextObjId(), kind: rec.kind, name: rec.name, url: rec.url,
+      id: nextId(), kind: rec.kind, name: rec.name, url: rec.url,
       x: rec.x ?? rec.obj.position.x,
       y: rec.y ?? rec.obj.position.y,
       z: rec.z ?? rec.obj.position.z,
@@ -581,7 +582,7 @@ export function createEditor() {
     if (state.selected) autoFitCollider(state.selected);
   };
 
-  // 大纲（只列用户摆放的对象）
+  // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
   function outlinerUpdate() {
     StepUI.outliner.innerHTML = '';
     state.placed.forEach((rec) => {
@@ -602,6 +603,23 @@ export function createEditor() {
       li.appendChild(del);
       li.onclick = () => select(rec);
       StepUI.outliner.appendChild(li);
+    });
+
+    if (!StepUI.sceneryList) return;
+    StepUI.sceneryList.innerHTML = '';
+    state.scenery.forEach((rec) => {
+      const li = document.createElement('li');
+      if (state.selected === rec) li.className = 'sel';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = rec.name;
+      li.appendChild(nm);
+      const idEl = document.createElement('span');
+      idEl.className = 'oid';
+      idEl.textContent = rec.id;
+      li.appendChild(idEl);
+      li.onclick = () => select(rec);
+      StepUI.sceneryList.appendChild(li);
     });
   }
 
@@ -667,12 +685,12 @@ export function createEditor() {
     // 兼容旧格式：纯数组仅含 placed
     const placedList = Array.isArray(data) ? data : (data && Array.isArray(data.placed) ? data.placed : []);
 
-    // 1) 按 key 把保存的景物变换套回到已注册的 state.scenery 上（id 同步回读）
+    // 1) 按 key 把保存的景物变换套回到已注册的 state.scenery 上
+    // 景物 id 由创建顺序固定推导（key 不变则 id 不变），故不需要从存档回读。
     if (data && Array.isArray(data.scenery)) {
       data.scenery.forEach((s) => {
         if (!s || typeof s.key !== 'number' || !state.scenery[s.key]) return;
         const rec = state.scenery[s.key];
-        if (s.id) rec.id = s.id;
         rec.x = s.x; rec.y = s.y; rec.z = s.z;
         rec.rotY = s.rotY; rec.scale = s.scale;
         applyPlTransform(rec);
@@ -680,11 +698,19 @@ export function createEditor() {
       });
     }
 
-    // 2) 重建用户摆放的对象（沿用已保存的 id，缺失时补发新 id）
+    // 2) 重建用户摆放的对象（沿用已保存的 id，缺失或与景物 id 冲突时补发新号）
+    const usedIds = new Set(state.scenery.map((r) => r.id));
+    const claimId = (saved) => {
+      const n = Number(saved);
+      if (Number.isInteger(n) && n > 0 && !usedIds.has(n)) { usedIds.add(n); bumpIdSeq(n); return n; }
+      let fresh = nextId();
+      while (usedIds.has(fresh)) fresh = nextId();
+      usedIds.add(fresh);
+      return fresh;
+    };
     for (const it of placedList) {
       const obj = new THREE.Group();
-      const id = it.id || nextObjId();
-      bumpIdSeq(id);
+      const id = claimId(it.id);
       const rec = {
         id, kind: it.kind, name: it.name, url: it.url,
         x: it.x, y: it.y, z: it.z, rotY: it.rotY,

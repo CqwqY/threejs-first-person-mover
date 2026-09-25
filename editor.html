@@ -83,16 +83,17 @@
     }
     .field input[type=range] { flex: 1; accent-color: #4aa3ff; padding: 0; background: transparent; border: 0; }
 
-    /* 场景列表 */
-    #outliner { list-style: none; }
-    #outliner li {
+    /* 场景列表（摆放物体 + 游戏景物） */
+    #outliner, #sceneryList { list-style: none; }
+    #sceneryList { max-height: 200px; overflow-y: auto; }
+    #outliner li, #sceneryList li {
       display: flex; align-items: center; gap: 4px; padding: 3px 4px; border-radius: 3px; cursor: pointer; color: #b9c3cf;
     }
-    #outliner li:hover { background: #333; }
-    #outliner li.sel { background: #3a6ea5; color: #fff; }
-    #outliner li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #outliner li .oid { font-size: 10px; color: #7d8894; font-family: Consolas, monospace; flex-shrink: 0; }
-    #outliner li.sel .oid { color: #dbe6f2; }
+    #outliner li:hover, #sceneryList li:hover { background: #333; }
+    #outliner li.sel, #sceneryList li.sel { background: #3a6ea5; color: #fff; }
+    #outliner li .nm, #sceneryList li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #outliner li .oid, #sceneryList li .oid { font-size: 10px; color: #7d8894; font-family: Consolas, monospace; flex-shrink: 0; }
+    #outliner li.sel .oid, #sceneryList li.sel .oid { color: #dbe6f2; }
     #outliner li .del { cursor: pointer; color: #f88; background: none; border: 0; padding: 0 3px; }
 
     /* 状态栏 */
@@ -172,6 +173,10 @@
         <div>
           <div class="panel-title">场景</div>
           <ul id="outliner"></ul>
+        </div>
+        <div>
+          <div class="panel-title">景物（游戏内建）</div>
+          <ul id="sceneryList"></ul>
         </div>
       </div>
     </div>

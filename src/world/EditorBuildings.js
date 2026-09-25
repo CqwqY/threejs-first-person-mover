@@ -52,7 +52,7 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
     scenery.forEach((s) => {
       const root = roots[s && s.key];
       if (!root) return;
-      if (s.id) root.userData.id = s.id; // 编辑器分配的稳定 id
+      if (s.id != null) root.userData.id = s.id; // 编辑器分配的数字 id
       if (typeof s.x === 'number') root.position.x = s.x;
       if (typeof s.y === 'number') root.position.y = s.y;
       if (typeof s.z === 'number') root.position.z = s.z;
@@ -73,7 +73,7 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
     // 统一挂到 holder，应用位置/轴向缩放/朝向
     const holder = new THREE.Group();
     holder.name = it.name || 'editor-object';
-    holder.userData.id = it.id || ''; // 编辑器分配的稳定 id，运行时可据此定位
+    holder.userData.id = (it.id ?? ''); // 编辑器分配的数字 id，运行时可据此定位
     holder.position.set(it.x ?? 0, it.y ?? 0, it.z ?? 0);
     holder.scale.set(sc.x, sc.y, sc.z);
     holder.rotation.y = it.rotY ?? 0;
