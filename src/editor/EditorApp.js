@@ -727,11 +727,13 @@ export function createEditor() {
     items.forEach((it) => {
       if (!it || !it.url || seen.has(it.url)) return;
       seen.add(it.url);
+      // 后端 /api/models 只给 {name,url}，没有 label；依次回退到 name、文件名，避免按钮空白
+      const label = it.label || it.name || it.url.split('/').pop().replace(/\.glb$/i, '');
       const b = document.createElement('button');
-      b.title = it.label;
-      b.textContent = it.label;
+      b.title = label;
+      b.textContent = label;
       if (state.currentUrl === it.url) b.classList.add('picked');
-      b.onclick = () => selectAsset(it.url, it.label);
+      b.onclick = () => selectAsset(it.url, label);
       b.onmouseenter = () => preview.show(it.url);
       b.onmouseleave = () => preview.hide();
       StepUI.library.appendChild(b);

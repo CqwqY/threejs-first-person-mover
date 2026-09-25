@@ -108,12 +108,12 @@
     /* 素材库弹窗 */
     #libModal, #arrayModal {
       position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 40;
-      display: none; align-items: center; justify-content: center;
+      display: none; align-items: center; justify-content: center; padding: 16px;
     }
     #libModal.open, #arrayModal.open { display: flex; }
     .lib-box {
-      display: flex; flex-direction: column; min-width: 0;
-      width: min(92vw, 680px); max-height: 80vh; padding: 12px;
+      display: flex; flex-direction: column;
+      width: 100%; max-width: 680px; max-height: 80vh; padding: 12px;
       background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px;
       box-shadow: 0 18px 50px rgba(0,0,0,.6);
     }
