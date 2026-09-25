@@ -141,7 +141,19 @@ export function createEditor() {
     copyMode: false,  // 复制模式：拖动 3D 轴时先复制一份，本次拖动作用于副本
     raf: 0,
   };
+  // 物体 id：每个场景内的物体都有稳定 id，随场景一起保存/还原。
+  // 规则：景物 scn-<key>（key 为 buildScenery 数组下标，天然稳定）；摆放物体 obj-<序号>。
   let _idSeq = 1;
+  function nextObjId() { return 'obj-' + (_idSeq++); }
+  // 还原时把已存在的 id 序号推高，避免后续新建对象与旧 id 撞号
+  function bumpIdSeq(id) {
+    const m = /(\d+)\s*$/.exec(String(id || ''));
+    if (m) _idSeq = Math.max(_idSeq, Number(m[1]) + 1);
+  }
+  // 把 id 挂到运行时对象上，游戏端/工具可按 userData.id 精确引用
+  function tagId(rec) {
+    if (rec && rec.obj) rec.obj.userData.id = rec.id;
+  }
 
   // ---------- 测距器 ----------
   let rulerPts = [];        // 已固定的测量点（最多两个）
@@ -190,12 +202,13 @@ export function createEditor() {
     const groups = buildScenery(scene);
     groups.forEach((child, key) => {
       const rec = {
-        id: _idSeq++, key, kind: 'scenery', name: child.name || '景物',
+        id: 'scn-' + key, key, kind: 'scenery', name: child.name || '景物',
         x: child.position.x, y: child.position.y, z: child.position.z,
         rotY: child.rotation.y,
         scale: { x: child.scale.x, y: child.scale.y, z: child.scale.z },
         obj: child,
       };
+      tagId(rec);
       state.scenery.push(rec);
     });
   }
@@ -267,13 +280,15 @@ export function createEditor() {
     if (!state.currentUrl) return;
     const obj = new THREE.Group();
     const item = {
-      id: _idSeq++, kind: state.imported.some((it) => it.url === state.currentUrl) ? 'import' : 'builtin',
+      id: nextObjId(), kind: state.imported.some((it) => it.url === state.currentUrl) ? 'import' : 'builtin',
       name: state.currentLabel, url: state.currentUrl,
       x: gp ? gp.x : 0, y: 0, z: gp ? gp.z : 0, rotY: 0,
       scale: { x: 1, y: 1, z: 1 }, collider: defaultCollider(), obj,
     };
+    obj.name = item.name;
     scene.add(obj);
     obj.position.copy(state.ghost.position);
+    tagId(item);
     // 放置即显示默认矩形碰撞体线框，模型异步加载完成后自动贴合实际尺寸
     state.placed.push(item);
     buildColliderVis(item);
@@ -339,13 +354,14 @@ export function createEditor() {
     const collider = { enabled: true, hx: 1, hy: 1, hz: 1, oy: 0.5 };
     const obj = new THREE.Group();
     const rec = {
-      id: _idSeq++, kind: 'empty', name: '空碰撞体',
+      id: nextObjId(), kind: 'empty', name: '空碰撞体',
       url: null, x, y: 0, z, rotY: 0,
       scale: { x: 1, y: 1, z: 1 }, collider, obj,
     };
     obj.name = 'collider-root';
     obj.position.set(x, 0, z);
     scene.add(obj);
+    tagId(rec);
     buildColliderVis(rec); // 橙色线框 = 碰撞盒可视提示（线框即拾取目标）
     state.placed.push(rec);
     select(rec);
@@ -361,7 +377,7 @@ export function createEditor() {
       obj.add(ch.clone(true));
     });
     const copy = {
-      id: _idSeq++, kind: rec.kind, name: rec.name, url: rec.url,
+      id: nextObjId(), kind: rec.kind, name: rec.name, url: rec.url,
       x: rec.x ?? rec.obj.position.x,
       y: rec.y ?? rec.obj.position.y,
       z: rec.z ?? rec.obj.position.z,
@@ -370,8 +386,10 @@ export function createEditor() {
       collider: rec.collider ? { enabled: rec.collider.enabled !== false, hx: rec.collider.hx, hy: rec.collider.hy, hz: rec.collider.hz, oy: rec.collider.oy } : defaultCollider(),
       obj,
     };
+    obj.name = copy.name;
     applyPlTransform(copy);
     scene.add(obj);
+    tagId(copy);
     state.placed.push(copy);
     buildColliderVis(copy);
     markDirty();
@@ -573,6 +591,10 @@ export function createEditor() {
       nm.className = 'nm';
       nm.textContent = rec.name;
       li.appendChild(nm);
+      const idEl = document.createElement('span');
+      idEl.className = 'oid';
+      idEl.textContent = rec.id;
+      li.appendChild(idEl);
       const del = document.createElement('span');
       del.className = 'del';
       del.textContent = '✕';
@@ -598,6 +620,7 @@ export function createEditor() {
       scenery: state.scenery.map((rec) => {
         const s = normScale(rec.scale ?? rec.obj.scale);
         return {
+          id: rec.id,
           key: rec.key,
           x: rec.x ?? rec.obj.position.x,
           y: rec.y ?? rec.obj.position.y,
@@ -610,6 +633,7 @@ export function createEditor() {
       placed: state.placed.map((rec) => {
         const s = normScale(rec.scale ?? rec.obj.scale);
         const out = {
+          id: rec.id,
           kind: rec.kind,
           name: rec.name,
           url: rec.url,
@@ -643,27 +667,32 @@ export function createEditor() {
     // 兼容旧格式：纯数组仅含 placed
     const placedList = Array.isArray(data) ? data : (data && Array.isArray(data.placed) ? data.placed : []);
 
-    // 1) 按 key 把保存的景物变换套回到已注册的 state.scenery 上
+    // 1) 按 key 把保存的景物变换套回到已注册的 state.scenery 上（id 同步回读）
     if (data && Array.isArray(data.scenery)) {
       data.scenery.forEach((s) => {
         if (!s || typeof s.key !== 'number' || !state.scenery[s.key]) return;
         const rec = state.scenery[s.key];
+        if (s.id) rec.id = s.id;
         rec.x = s.x; rec.y = s.y; rec.z = s.z;
         rec.rotY = s.rotY; rec.scale = s.scale;
         applyPlTransform(rec);
+        tagId(rec);
       });
     }
 
-    // 2) 重建用户摆放的对象
+    // 2) 重建用户摆放的对象（沿用已保存的 id，缺失时补发新 id）
     for (const it of placedList) {
       const obj = new THREE.Group();
+      const id = it.id || nextObjId();
+      bumpIdSeq(id);
       const rec = {
-        id: _idSeq++, kind: it.kind, name: it.name, url: it.url,
+        id, kind: it.kind, name: it.name, url: it.url,
         x: it.x, y: it.y, z: it.z, rotY: it.rotY,
         scale: it.scale ? { ...normScale(it.scale) } : { x: 1, y: 1, z: 1 },
         collider: it.collider ? { enabled: it.collider.enabled !== false, hx: it.collider.hx, hy: it.collider.hy, hz: it.collider.hz, oy: it.collider.oy } : defaultCollider(),
         obj,
       };
+      obj.name = rec.name || 'editor-object';
       if (it.url) {
         instantiate(it.url).then((m) => { obj.add(m); enableShadows(m); }).catch(() => {});
       } else if (it.data) {
@@ -672,6 +701,7 @@ export function createEditor() {
       }
       applyPlTransform(rec);
       scene.add(obj);
+      tagId(rec);
       state.placed.push(rec);
       buildColliderVis(rec);
     }
