@@ -154,6 +154,13 @@ export function createEditor() {
   function tagId(rec) {
     if (rec && rec.obj) rec.obj.userData.id = rec.id;
   }
+  // 从模型 url 推显示名：/assets/import-xxx-zhaji.glb → zhaji（去目录、去扩展名、解码中文）
+  function nameFromUrl(url) {
+    if (!url) return '';
+    const file = String(url).split('/').pop().split('?')[0];
+    const bare = file.replace(/\.glb$/i, '');
+    try { return decodeURIComponent(bare); } catch (e) { return bare; }
+  }
 
   // ---------- 测距器 ----------
   let rulerPts = [];        // 已固定的测量点（最多两个）
@@ -711,14 +718,16 @@ export function createEditor() {
     for (const it of placedList) {
       const obj = new THREE.Group();
       const id = claimId(it.id);
+      // 老存档可能没有 name 字段（undefined 会被 JSON.stringify 丢掉），回退到模型文件名
+      const nm = (typeof it.name === 'string' && it.name.trim()) ? it.name : (nameFromUrl(it.url) || '未命名');
       const rec = {
-        id, kind: it.kind, name: it.name, url: it.url,
+        id, kind: it.kind, name: nm, url: it.url,
         x: it.x, y: it.y, z: it.z, rotY: it.rotY,
         scale: it.scale ? { ...normScale(it.scale) } : { x: 1, y: 1, z: 1 },
         collider: it.collider ? { enabled: it.collider.enabled !== false, hx: it.collider.hx, hy: it.collider.hy, hz: it.collider.hz, oy: it.collider.oy } : defaultCollider(),
         obj,
       };
-      obj.name = rec.name || 'editor-object';
+      obj.name = nm;
       if (it.url) {
         instantiate(it.url).then((m) => { obj.add(m); enableShadows(m); }).catch(() => {});
       } else if (it.data) {

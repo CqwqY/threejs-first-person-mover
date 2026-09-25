@@ -26,6 +26,14 @@ export async function fetchRemoteScene() {
   }
 }
 
+// 从模型 url 推显示名：/assets/import-xxx-zhaji.glb → zhaji（去目录、去扩展名、解码中文）
+function nameFromUrl(url) {
+  if (!url) return '';
+  const file = String(url).split('/').pop().split('?')[0];
+  const bare = file.replace(/\.glb$/i, '');
+  try { return decodeURIComponent(bare); } catch (e) { return bare; }
+}
+
 // scale 规范化：统一为 {x,y,z}，兼容旧的单数值
 function normScale(s) {
   if (s && typeof s === 'object' && typeof s.x === 'number') {
@@ -72,7 +80,7 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
     const sc = normScale(it.scale);
     // 统一挂到 holder，应用位置/轴向缩放/朝向
     const holder = new THREE.Group();
-    holder.name = it.name || 'editor-object';
+    holder.name = it.name || nameFromUrl(it.url) || 'editor-object';
     holder.userData.id = (it.id ?? ''); // 编辑器分配的数字 id，运行时可据此定位
     holder.position.set(it.x ?? 0, it.y ?? 0, it.z ?? 0);
     holder.scale.set(sc.x, sc.y, sc.z);
