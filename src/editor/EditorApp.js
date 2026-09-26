@@ -504,7 +504,7 @@ export function createEditor() {
         if (k0b - 1 >= 0 && slabOccupied(i0b, j0b, k0b - 1, 0, 0, -1, i0b, i1b, j0b, j1b, k0b, k1b)) { k0b--; changed = true; }
       }
       // 标记覆盖并返回盒（格子坐标）
-      for (let i = i0b; i <= i1b; i++) for (let j = j0b; j <= j1b; j++) for (let k = k0b; k <= k1b; k++) CVR(i, j, k) = 1;
+      for (let i = i0b; i <= i1b; i++) for (let j = j0b; j <= j1b; j++) for (let k = k0b; k <= k1b; k++) covered[(i * ny + j) * nz + k] = 1;
       return { i0: i0b, i1: i1b, j0: j0b, j1: j1b, k0: k0b, k1: k1b };
     }
     const boxes = [];

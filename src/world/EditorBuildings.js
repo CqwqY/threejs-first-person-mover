@@ -103,8 +103,8 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       );
     }
 
-    // 碰撞体：AABB（忽略旋转），按 holder 的缩放换算到世界尺寸。
-    // 多盒优先：存在 colliders 数组时按每个盒逐个生成；否则回退单盒 collider。
+    // 碰撞体：OBB（有向包围盒），把朝向 rotY（Y 轴旋转角）一并给出，使碰撞体随模型旋转。
+    // 盒尺寸按 holder 的缩放换算到世界尺寸；多盒优先：存在 colliders 数组时按每个盒生成，否则回退单盒 collider。
     const mkColl = (hx, hy, hz, oy) => colliders.push({
       cx: it.x ?? 0,
       cy: (it.y ?? 0) + (oy ?? 0) * sc.y,
@@ -112,6 +112,7 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       hx: (hx ?? 0) * sc.x,
       hy: (hy ?? 0) * sc.y,
       hz: (hz ?? 0) * sc.z,
+      rotY: it.rotY ?? 0, // 随模型绕 Y 轴旋转，物理侧据此做 OBB 检测
     });
     if (Array.isArray(it.colliders) && it.colliders.length) {
       for (const cb of it.colliders) mkColl(cb.hx, cb.hy, cb.hz, cb.oy);

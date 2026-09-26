@@ -80,7 +80,9 @@ export class PlayerPhysics {
 
   // 玩家 AABB：竖直占据 [state.y - HEIGHT, state.y]（state.y 是玩家顶部 / 相机高度），
   // 竖直中心 = state.y - HEIGHT/2；XZ 半宽 = PLAYER_RADIUS。
-  // 碰撞体为世界 AABB。沿最小穿透轴解析，从而既能挡侧面、也能从顶部顶面着陆（不能从上方穿入）。
+  // 碰撞体为世界空间包围盒 [{cx,cy,cz,hx,hy,hz[,rotY]}]（可选）。不带 rotY 时按 AABB（未旋转盒）；
+  // 带 rotY（Y 轴旋转弧度）时该盒为 OBB，用 XZ 平面 2D SAT（玩家正方形对旋转矩形）+ Y 轴单独判定的方式检测。
+  // 沿最小穿透轴解析，从而既能挡侧面、也能从顶部顶面着陆（不能从上方穿入）。
   _resolveWorldCollisions(state, colliders) {
     if (!colliders || colliders.length === 0) return;
     const pr = Config.PLAYER_RADIUS;
@@ -91,28 +93,78 @@ export class PlayerPhysics {
       const py = state.y - hh; // 玩家竖直中心（着地时 = HEIGHT/2 = 0.85）
       const pz = state.z;
 
-      const ox = b.hx + pr - Math.abs(px - b.cx);
-      const oy = b.hy + hh - Math.abs(py - b.cy);
-      const oz = b.hz + pr - Math.abs(pz - b.cz);
-      if (ox <= 0 || oy <= 0 || oz <= 0) continue; // 三轴未同时重叠，不碰撞
+      const theta = b.rotY || 0;
 
-      // 选最小穿透轴解析（竖直优先，其次 X 再 Z，保证顶面着陆稳定）
-      if (oy <= ox && oy <= oz) {
+      // ---- AABB 快速路径：盒子未旋转，沿用原有三轴独立判定 ----
+      if (theta === 0) {
+        const ox = b.hx + pr - Math.abs(px - b.cx);
+        const oy = b.hy + hh - Math.abs(py - b.cy);
+        const oz = b.hz + pr - Math.abs(pz - b.cz);
+        if (ox <= 0 || oy <= 0 || oz <= 0) continue;
+
+        // 选最小穿透轴解析（竖直优先，其次 X 再 Z，保证顶面着陆稳定）
+        if (oy <= ox && oy <= oz) {
+          if (py > b.cy) {
+            state.y = b.cy + b.hy + Config.PLAYER_HEIGHT;
+            if (this.velocity.y < 0) this.velocity.y = 0;
+            state.onGround = true;
+          } else {
+            state.y = b.cy - b.hy;
+            if (this.velocity.y > 0) this.velocity.y = 0;
+          }
+        } else if (ox <= oz) {
+          state.x += px > b.cx ? ox : -ox;
+        } else {
+          state.z += pz > b.cz ? oz : -oz;
+        }
+        continue;
+      }
+
+      // ---- OBB：玩家（AABB）对绕 Y 轴旋转的包围盒 ----
+      // Y 轴旋转不改变顶面/底面位置，竖直重叠仍按世界 Y 独立判定。
+      const oy = b.hy + hh - Math.abs(py - b.cy);
+      if (oy <= 0) continue;
+
+      // 盒本地 X / Z 在 XZ 平面的世界方向（单位向量）
+      const cos = Math.cos(theta), sin = Math.sin(theta);
+      const u2 = { x: cos, z: -sin }; // 盒本地 +X
+      const w2 = { x: sin, z: cos };  // 盒本地 +Z
+
+      // XZ 平面 2D SAT：候选分离轴 = 玩家 X、玩家 Z、盒本地 X、盒本地 Z
+      const cand = [{ x: 1, z: 0 }, { x: 0, z: 1 }, u2, w2];
+      let minPen = Infinity;
+      let bestL = null;
+      let separated = false;
+      for (const L of cand) {
+        // 玩家正方形（XZ 半长 pr，轴对齐）在单位轴 L 上的投影 = pr*(|Lx|+|Lz|)
+        const pProj = pr * (Math.abs(L.x) + Math.abs(L.z));
+        // 旋转盒在 L 上的投影 = hx*|L·u| + hz*|L·w|
+        const bProj = b.hx * Math.abs(L.x * u2.x + L.z * u2.z)
+                    + b.hz * Math.abs(L.x * w2.x + L.z * w2.z);
+        const cDist = Math.abs((px - b.cx) * L.x + (pz - b.cz) * L.z);
+        const ovl = pProj + bProj - cDist;
+        if (ovl <= 0) { separated = true; break; } // 存在分离轴，XZ 不相交
+        if (ovl < minPen) { minPen = ovl; bestL = L; }
+      }
+      if (separated) continue;
+
+      // 竖直穿透最小 → 顶面/底面解析（保持在转动的盒顶站稳）
+      if (oy <= minPen) {
         if (py > b.cy) {
-          // 从上方落到顶面：站在碰撞体顶部（玩家底部落在盒子顶）
           state.y = b.cy + b.hy + Config.PLAYER_HEIGHT;
           if (this.velocity.y < 0) this.velocity.y = 0;
           state.onGround = true;
         } else {
-          // 从下方顶上去（罕见）：挡回下方，禁止穿顶（玩家顶部贴盒子底）
           state.y = b.cy - b.hy;
           if (this.velocity.y > 0) this.velocity.y = 0;
         }
-      } else if (ox <= oz) {
-        state.x += px > b.cx ? ox : -ox;
-      } else {
-        state.z += pz > b.cz ? oz : -oz;
+        continue;
       }
+
+      // 否则沿最小穿透的 XZ 分离轴方向，把玩家推出盒体
+      const dir = ((px - b.cx) * bestL.x + (pz - b.cz) * bestL.z) >= 0 ? 1 : -1;
+      state.x += bestL.x * minPen * dir;
+      state.z += bestL.z * minPen * dir;
     }
   }
 }
