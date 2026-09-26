@@ -315,11 +315,11 @@ export function createEditor() {
   }
 
   // 重建选中对象的碰撞体线框（挂到对象本地空间，随模型变换/缩放）。
-  // 支持两种形态：单盒 rec.collider 与多盒 rec.colliders（数组），可并存。
+  // 支持两种形态：单盒 rec.collider（细线框）与多盒 rec.colliders（半透明体积+描边，共用一个父节点），可并存。
   function buildColliderVis(rec) {
     const holder = rec.obj;
     if (!holder) return;
-    // 统一的容器：collider-vis 内的子项会在重建时整体移除
+    // 统一的容器：collider-vis 内的子项会在重建时整体移除，作为父组件承载所有碰撞盒
     let vis = holder.getObjectByName('collider-vis');
     if (vis) { holder.remove(vis); vis = null; }
     const makeWire = (hx, hy, hz, oy) => {
@@ -328,10 +328,26 @@ export function createEditor() {
       wire.position.y = oy ?? 0;
       return wire;
     };
+    // 半透明填充盒 + 描边：让多盒整体呈现为贴合模型的通透体积，结构清晰
+    const makeVolume = (hx, hy, hz, oy) => {
+      const g = new THREE.Group();
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
+        new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false })
+      );
+      const wire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2)),
+        new THREE.LineBasicMaterial({ color: 0xff8c3d })
+      );
+      g.add(mesh); g.add(wire);
+      g.position.y = oy ?? 0;
+      return g;
+    };
     const boxen = [];
+    const multi = Array.isArray(rec.colliders) && rec.colliders.length;
     // 多盒优先；否则单盒
-    if (Array.isArray(rec.colliders) && rec.colliders.length) {
-      for (const c of rec.colliders) boxen.push(makeWire(c.hx, c.hy, c.hz, c.oy));
+    if (multi) {
+      for (const c of rec.colliders) boxen.push(makeVolume(c.hx, c.hy, c.hz, c.oy));
     } else {
       const c = rec.collider;
       if (!c || !c.enabled) return;
@@ -339,6 +355,7 @@ export function createEditor() {
     }
     vis = new THREE.Group();
     vis.name = 'collider-vis';
+    if (multi) vis.name = 'collider-vis（多盒 ' + boxen.length + '）';
     boxen.forEach((w) => vis.add(w));
     holder.add(vis);
   }
