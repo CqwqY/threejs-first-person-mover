@@ -201,6 +201,10 @@ export function createEditor() {
     cOy: document.getElementById('cOy'),
     colliderPanel: document.getElementById('colliderPanel'),
     btnEmptyCollider: document.getElementById('btnEmptyCollider'),
+    cStep: document.getElementById('cStep'),
+    cMax: document.getElementById('cMax'),
+    cMultiBtn: document.getElementById('cMultiBtn'),
+    cMultiInfo: document.getElementById('cMultiInfo'),
   };
 
   // ---------- 可编辑对象：游戏景物 + 地形/道路/墙体 ----------
@@ -310,19 +314,33 @@ export function createEditor() {
     m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   }
 
-  // 重建选中对象的碰撞体线框（挂到对象本地空间，随模型变换/缩放）
+  // 重建选中对象的碰撞体线框（挂到对象本地空间，随模型变换/缩放）。
+  // 支持两种形态：单盒 rec.collider 与多盒 rec.colliders（数组），可并存。
   function buildColliderVis(rec) {
     const holder = rec.obj;
     if (!holder) return;
-    const old = holder.getObjectByName('collider-vis');
-    if (old) holder.remove(old);
-    const c = rec.collider;
-    if (!c || !c.enabled) return;
-    const box = new THREE.EdgesGeometry(new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2));
-    const wire = new THREE.LineSegments(box, new THREE.LineBasicMaterial({ color: 0xff8c3d }));
-    wire.name = 'collider-vis';
-    wire.position.y = (c.oy ?? 0);
-    holder.add(wire);
+    // 统一的容器：collider-vis 内的子项会在重建时整体移除
+    let vis = holder.getObjectByName('collider-vis');
+    if (vis) { holder.remove(vis); vis = null; }
+    const makeWire = (hx, hy, hz, oy) => {
+      const box = new THREE.EdgesGeometry(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2));
+      const wire = new THREE.LineSegments(box, new THREE.LineBasicMaterial({ color: 0xff8c3d }));
+      wire.position.y = oy ?? 0;
+      return wire;
+    };
+    const boxen = [];
+    // 多盒优先；否则单盒
+    if (Array.isArray(rec.colliders) && rec.colliders.length) {
+      for (const c of rec.colliders) boxen.push(makeWire(c.hx, c.hy, c.hz, c.oy));
+    } else {
+      const c = rec.collider;
+      if (!c || !c.enabled) return;
+      boxen.push(makeWire(c.hx, c.hy, c.hz, c.oy));
+    }
+    vis = new THREE.Group();
+    vis.name = 'collider-vis';
+    boxen.forEach((w) => vis.add(w));
+    holder.add(vis);
   }
 
   // 自适应碰撞体：遍历模型网格，按包围盒在对象本地(未缩放)空间求尺寸并写入 rec.collider。
@@ -354,6 +372,192 @@ export function createEditor() {
     buildColliderVis(rec);
     if (state.selected === rec) syncColliderUI(rec);
     markDirty();
+  }
+
+  // 自动多盒：把模型实际占用部分体素化后贪心合盒，写入 rec.colliders 数组（本地未缩放空间）。
+  // step = 体素步长（米）；cap = 盒数量上限。盒按 {hx,hy,hz,oy}（半尺寸+中心高）存储，语义同单盒。
+  function buildMultiColliders(rec, step, cap) {
+    const holder = rec.obj;
+    if (!holder) return;
+    // 1) 收集所有 mesh 的本地三角形（把几何顶点变换到 holder 本地空间）
+    const tris = [];
+    holder.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(holder.matrixWorld).invert();
+    const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+    holder.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const geo = o.geometry;
+      const pos = geo.attributes.position;
+      if (!pos) return;
+      const mtx = new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld);
+      const idx = geo.index;
+      if (idx) {
+        for (let i = 0; i < idx.count; i += 3) {
+          vA.fromBufferAttribute(pos, idx.getX(i)).applyMatrix4(mtx);
+          vB.fromBufferAttribute(pos, idx.getX(i + 1)).applyMatrix4(mtx);
+          vC.fromBufferAttribute(pos, idx.getX(i + 2)).applyMatrix4(mtx);
+          tris.push([vA.clone(), vB.clone(), vC.clone()]);
+        }
+      } else {
+        for (let i = 0; i < pos.count; i += 3) {
+          vA.fromBufferAttribute(pos, i).applyMatrix4(mtx);
+          vB.fromBufferAttribute(pos, i + 1).applyMatrix4(mtx);
+          vC.fromBufferAttribute(pos, i + 2).applyMatrix4(mtx);
+          tris.push([vA.clone(), vB.clone(), vC.clone()]);
+        }
+      }
+    });
+    if (!tris.length) return;
+
+    // 2) 总体包围盒（本地坐标），据此建体素网格
+    const bmin = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const bmax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    for (const t of tris) for (const p of t) { bmin.min(p); bmax.max(p); }
+    step = Math.max(0.05, Number(step) || 0.25);
+    cap = Math.max(1, Math.min(64, Math.floor(Number(cap) || 12)));
+    // 网格尺寸（含步长自适应，避免尺寸过小导致格数爆炸）
+    const nx = Math.max(1, Math.ceil((bmax.x - bmin.x) / step));
+    const ny = Math.max(1, Math.ceil((bmax.y - bmin.y) / step));
+    const nz = Math.max(1, Math.ceil((bmax.z - bmin.z) / step));
+    if (nx * ny * nz > 400000) step = Math.max(0.05, step * 1.5); // 极端大模型降采样保护
+    // 记录真实步长（含自适应）+ 起点
+    const sx = nx > 1 ? (bmax.x - bmin.x) / nx : step;
+    const sy = ny > 1 ? (bmax.y - bmin.y) / ny : step;
+    const sz = nz > 1 ? (bmax.z - bmin.z) / nz : step;
+
+    // 3) 体素占用：三角形落入的格子标记为实心
+    const occ = new Uint8Array(nx * ny * nz);
+    const OCC = (i, j, k) => occ[(i * ny + j) * nz + k];
+    for (const [a, b, c] of tris) {
+      const tmin = new THREE.Vector3(Math.min(a.x, b.x, c.x), Math.min(a.y, b.y, c.y), Math.min(a.z, b.z, c.z));
+      const tmax = new THREE.Vector3(Math.max(a.x, b.x, c.x), Math.max(a.y, b.y, c.y), Math.max(a.z, b.z, c.z));
+      const i0 = Math.max(0, Math.floor((tmin.x - bmin.x) / sx)), i1 = Math.min(nx - 1, Math.floor((tmax.x - bmin.x) / sx));
+      const j0 = Math.max(0, Math.floor((tmin.y - bmin.y) / sy)), j1 = Math.min(ny - 1, Math.floor((tmax.y - bmin.y) / sy));
+      const k0 = Math.max(0, Math.floor((tmin.z - bmin.z) / sz)), k1 = Math.min(nz - 1, Math.floor((tmax.z - bmin.z) / sz));
+      for (let i = i0; i <= i1; i++) {
+        for (let j = j0; j <= j1; j++) {
+          for (let k = k0; k <= k1; k++) {
+            if (OCC(i, j, k)) continue;
+            // 格心
+            const p = new THREE.Vector3(
+              bmin.x + (i + 0.5) * sx,
+              bmin.y + (j + 0.5) * sy,
+              bmin.z + (k + 0.5) * sz
+            );
+            if (ptInTri(p, a, b, c, sx, sy, sz)) occ[(i * ny + j) * nz + k] = 1;
+          }
+        }
+      }
+    }
+
+    // 4) 贪心合盒：先沿 X 把每层(slice)连续占用游程并成长条(bar)，再合并 X 范围与 Y 跨度相同、Z 相邻的长条
+    const bars = [];
+    for (let k = 0; k < nz; k++) {
+      // 每层按行(i不变,j不变)做游程——这里先按固定 (j,k) 沿 X 纵切
+      for (let j = 0; j < ny; j++) {
+        let i = 0;
+        while (i < nx) {
+          if (!OCC(i, j, k)) { i++; continue; }
+          let i2 = i;
+          while (i2 + 1 < nx && OCC(i2 + 1, j, k)) i2++;
+          bars.push({ i, i2, j, k }); // 沿 X 的实心长条（单格高度/深度）
+          i = i2 + 1;
+        }
+      }
+    }
+    // bar 合并(1)：同一 k、同一 j 不可能再扩，直接转盒；这里把 i 范围、j、k 转成体积盒
+    let boxes = bars.map((b) => ({
+      x: bmin.x + (b.i + 0.5) * sx, y: bmin.y + (b.j + 0.5) * sy, z: bmin.z + (b.k + 0.5) * sz,
+      hx: ((b.i2 - b.i + 1) * sx) / 2, hy: sy / 2, hz: sz / 2,
+    }));
+    // 合并(2)：Y 方向合并 —— X 范围(hx 与 x)完全一致且 Z(z、hz)一致时，把在 Y 上相邻的盒并高
+    function sameXZ(a, b) {
+      const eps = 1e-6;
+      return Math.abs(a.x - b.x) < eps && Math.abs(a.z - b.z) < eps &&
+             Math.abs(a.hx - b.hx) < eps && Math.abs(a.hz - b.hz) < eps;
+    }
+    function mergeY(boxes) {
+      const out = [];
+      for (const b of boxes) {
+        let merged = false;
+        for (const o of out) {
+          if (sameXZ(o, b) && Math.abs((o.y + o.hy) - (b.y - b.hy)) < 1e-6) {
+            const top = Math.max(o.y + o.hy, b.y + b.hy);
+            const bot = Math.min(o.y - o.hy, b.y - b.hy);
+            o.y = (top + bot) / 2; o.hy = (top - bot) / 2;
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) out.push({ ...b });
+      }
+      return out;
+    }
+    boxes = mergeY(boxes);
+    // 合并(3)：删除被完全包含的盒
+    function contained(a, b) { return a.hx <= b.hx + 1e-9 && a.hy <= b.hy + 1e-9 && a.hz <= b.hz + 1e-9 && bboxDist(a, b) < 1e-6; }
+    function bboxDist(a, b) {
+      return (a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2;
+    }
+    boxes = boxes.filter((a, i, arr) => !arr.some((b, j) => j !== i && contained(a, b) && bboxDist(a, b) < 1e-6));
+
+    // 5) 数量封顶：超 cap 时反复去掉对整体影响最小的一个盒（并回 AABB）直到达标
+    while (boxes.length > cap) {
+      // 直接删除一个盒对碰撞最保守的想法：优先去掉被祖包围盒覆盖最多的块——
+      // 简化：去掉体积最小的盒（贴合优先），仍超则合并不相邻但同层最接近的。
+      let best = 0, bestArea = Infinity;
+      for (let i = 0; i < boxes.length; i++) {
+        const b = boxes[i];
+        const area = (b.hx * b.hy * b.hz);
+        if (area < bestArea) { bestArea = area; best = i; }
+      }
+      boxes.splice(best, 1);
+    }
+
+    // 6) 写回 colliders（本地未缩放空间半尺寸 + 中心高）
+    rec.colliders = boxes.map((b) => ({
+      hx: Math.max(0.01, b.hx), hy: Math.max(0.01, b.hy), hz: Math.max(0.01, b.hz),
+      oy: b.y, // 中心高即盒中心 y
+    }));
+    if (rec.collider) rec.collider.enabled = false;
+    StepUI.cMultiInfo.textContent = '多盒 ' + rec.colliders.length + ' 个';
+    StepUI.cMultiInfo.style.display = 'inline';
+    buildColliderVis(rec);
+    if (state.selected === rec) syncColliderUI(rec);
+    markDirty();
+  }
+
+  // 点在三角形内（三维）：把三角形转到最稳定的两个主轴平面投影成 2D 判断，并校验格心到三角形平面距离落在 {sx..} 容差内
+  function ptInTri(p, a, b, c, sx, sy, sz) {
+    const e1 = new THREE.Vector3().subVectors(b, a);
+    const e2 = new THREE.Vector3().subVectors(c, a);
+    const n = new THREE.Vector3().crossVectors(e1, e2);
+    const len = n.length();
+    if (len < 1e-9) return false;
+    n.divideScalar(len);
+    const d = p.distanceTo(new THREE.Plane(new THREE.Vector3(), 0).setNormalAndConstant(n, -n.dot(a)).projectPoint(p, new THREE.Vector3()));
+    // 平面厚度容差取最大步长的 0.55，避免薄片模型漏格
+    const tol = Math.max(sx, sy, sz) * 0.55;
+    if (Math.abs(d) > tol) return false;
+    // 投影到绝对坐标最大的主轴平面上做 2D
+    const plan = (ax, ay) => {
+      const v0 = [a[ax], a[ay]], v1 = [b[ax], b[ay]], v2 = [c[ax], c[ay]], pp = [p[ax], p[ay]];
+      return ptInTri2D(pp, v0, v1, v2);
+    };
+    const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+    if (ax >= ay && ax >= az) return plan(1, 2);
+    if (ay >= ax && ay >= az) return plan(0, 2);
+    return plan(0, 1);
+  }
+
+  // 2D 点是否在三角形内（含边界，重心坐标法）
+  function ptInTri2D(p, a, b, c) {
+    const d1 = (b[1] - a[1]) * (p[0] - a[0]) - (b[0] - a[0]) * (p[1] - a[1]);
+    const d2 = (c[1] - b[1]) * (p[0] - b[0]) - (c[0] - b[0]) * (p[1] - b[1]);
+    const d3 = (a[1] - c[1]) * (p[0] - c[0]) - (a[0] - c[0]) * (p[1] - c[1]);
+    const neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    const pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+    return !(neg && pos);
   }
 
   // 添加一个「空碰撞体」：无可视模型，仅一个橙色线框方块（可拾取/编辑），
@@ -588,6 +792,12 @@ export function createEditor() {
   document.getElementById('cAuto').onclick = () => {
     if (state.selected) autoFitCollider(state.selected);
   };
+  StepUI.cMultiBtn.onclick = () => {
+    if (!state.selected) return;
+    const step = parseFloat(StepUI.cStep.value);
+    const cap = parseInt(StepUI.cMax.value, 10);
+    buildMultiColliders(state.selected, step, cap);
+  };
 
   // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
   function outlinerUpdate() {
@@ -668,6 +878,7 @@ export function createEditor() {
           rotY: rec.rotY ?? 0,
           scale: { x: s.x, y: s.y, z: s.z },
           collider: rec.collider ? { ...rec.collider } : null,
+          colliders: Array.isArray(rec.colliders) && rec.colliders.length ? rec.colliders.map((c) => ({ ...c })) : null,
         };
         // 兼容旧的内嵌 data URL 记录
         if (!out.url && rec.data) out.data = rec.data;
@@ -725,6 +936,7 @@ export function createEditor() {
         x: it.x, y: it.y, z: it.z, rotY: it.rotY,
         scale: it.scale ? { ...normScale(it.scale) } : { x: 1, y: 1, z: 1 },
         collider: it.collider ? { enabled: it.collider.enabled !== false, hx: it.collider.hx, hy: it.collider.hy, hz: it.collider.hz, oy: it.collider.oy } : defaultCollider(),
+        colliders: Array.isArray(it.colliders) && it.colliders.length ? it.colliders.map((c) => ({ ...c })) : null,
         obj,
       };
       obj.name = nm;

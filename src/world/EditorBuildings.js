@@ -103,17 +103,21 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       );
     }
 
-    // 碰撞体：AABB（忽略旋转），按 holder 的缩放换算到世界尺寸
-    const c = it.collider;
-    if (c && c.enabled !== false) {
-      colliders.push({
-        cx: it.x ?? 0,
-        cy: (it.y ?? 0) + (c.oy ?? 0) * sc.y,
-        cz: it.z ?? 0,
-        hx: (c.hx ?? 0) * sc.x,
-        hy: (c.hy ?? 0) * sc.y,
-        hz: (c.hz ?? 0) * sc.z,
-      });
+    // 碰撞体：AABB（忽略旋转），按 holder 的缩放换算到世界尺寸。
+    // 多盒优先：存在 colliders 数组时按每个盒逐个生成；否则回退单盒 collider。
+    const mkColl = (hx, hy, hz, oy) => colliders.push({
+      cx: it.x ?? 0,
+      cy: (it.y ?? 0) + (oy ?? 0) * sc.y,
+      cz: it.z ?? 0,
+      hx: (hx ?? 0) * sc.x,
+      hy: (hy ?? 0) * sc.y,
+      hz: (hz ?? 0) * sc.z,
+    });
+    if (Array.isArray(it.colliders) && it.colliders.length) {
+      for (const cb of it.colliders) mkColl(cb.hx, cb.hy, cb.hz, cb.oy);
+    } else {
+      const c = it.collider;
+      if (c && c.enabled !== false) mkColl(c.hx, c.hy, c.hz, c.oy);
     }
   });
   return colliders;
