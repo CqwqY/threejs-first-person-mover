@@ -639,14 +639,11 @@ export function createEditor() {
       StepUI.cHullInfo.style.display = 'inline';
       return;
     }
-    // 2) 三维凸包（ConvexHull 需要非共面点，Three 会正确生成三角面与顶点）
+    // 2) 三维凸包（Quickhull）：ConvexGeometry 直接接收 Vector3[]，
+    //    输出为三角化且顶点按三角形展开的「三角形汤」（无索引，每 3 个定点一个三角形）。
     let geo;
     try {
-      const cm = new THREE.BufferGeometry();
-      const flat = new Float32Array(pts.length * 3);
-      pts.forEach((p, i) => { flat[i * 3] = p.x; flat[i * 3 + 1] = p.y; flat[i * 3 + 2] = p.z; });
-      cm.setAttribute('position', new THREE.BufferAttribute(flat, 3));
-      geo = ConvexGeometry.fromBufferGeometry(cm); // 返回带 index 的凸包几何
+      geo = new ConvexGeometry(pts);
     } catch (err) {
       StepUI.cHullInfo.textContent = '凸包失败：' + (err && err.message ? err.message : err);
       StepUI.cHullInfo.style.display = 'inline';
@@ -654,23 +651,23 @@ export function createEditor() {
       return;
     }
     const posAttr = geo.getAttribute('position');
-    const idx = geo.getIndex();
-    if (!idx || idx.count < 3) {
+    if (!posAttr || posAttr.count < 3) {
       StepUI.cHullInfo.textContent = '凸包无有效三角面';
       StepUI.cHullInfo.style.display = 'inline';
       return;
     }
-    // 3) 写回 rec.convex（本地空间）
+    const vCount = posAttr.count;
+    // 3) 写回 rec.convex（本地空间）：vertices 三角形汤；faces 用顺序索引 [0,1,2,3,...] 表示三角
     rec.convex = {
       vertices: Array.from(posAttr.array),
-      faces: Array.from(idx.array),
+      faces: Array.from({ length: vCount }, (_, i) => i),
     };
     // 凸包优先，禁用盒类碰撞体，避免重复阻挡
     if (rec.collider) rec.collider.enabled = false;
     if (rec.colliders && rec.colliders.length) { rec.colliders = []; }
     buildColliderVis(rec);
     if (StepUI.cHullInfo) {
-      StepUI.cHullInfo.textContent = '凸包 ' + (idx.count / 3) + ' 面 / ' + (posAttr.count) + ' 点';
+      StepUI.cHullInfo.textContent = '凸包 ' + (vCount / 3) + ' 面 / ' + vCount + ' 点';
       StepUI.cHullInfo.style.display = 'inline';
     }
     if (state.selected === rec) syncColliderUI(rec);
