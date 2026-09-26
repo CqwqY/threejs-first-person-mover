@@ -471,68 +471,88 @@ export function createEditor() {
       }
     }
 
-    // 4) 贪心合盒：先沿 X 把每层(slice)连续占用游程并成长条(bar)，再合并 X 范围与 Y 跨度相同、Z 相邻的长条
-    const bars = [];
-    for (let k = 0; k < nz; k++) {
-      // 每层按行(i不变,j不变)做游程——这里先按固定 (j,k) 沿 X 纵切
-      for (let j = 0; j < ny; j++) {
-        let i = 0;
-        while (i < nx) {
-          if (!OCC(i, j, k)) { i++; continue; }
-          let i2 = i;
-          while (i2 + 1 < nx && OCC(i2 + 1, j, k)) i2++;
-          bars.push({ i, i2, j, k }); // 沿 X 的实心长条（单格高度/深度）
-          i = i2 + 1;
-        }
-      }
-    }
-    // bar 合并(1)：同一 k、同一 j 不可能再扩，直接转盒；这里把 i 范围、j、k 转成体积盒
-    let boxes = bars.map((b) => ({
-      x: bmin.x + (b.i + 0.5) * sx, y: bmin.y + (b.j + 0.5) * sy, z: bmin.z + (b.k + 0.5) * sz,
-      hx: ((b.i2 - b.i + 1) * sx) / 2, hy: sy / 2, hz: sz / 2,
-    }));
-    // 合并(2)：Y 方向合并 —— X 范围(hx 与 x)完全一致且 Z(z、hz)一致时，把在 Y 上相邻的盒并高
-    function sameXZ(a, b) {
-      const eps = 1e-6;
-      return Math.abs(a.x - b.x) < eps && Math.abs(a.z - b.z) < eps &&
-             Math.abs(a.hx - b.hx) < eps && Math.abs(a.hz - b.hz) < eps;
-    }
-    function mergeY(boxes) {
-      const out = [];
-      for (const b of boxes) {
-        let merged = false;
-        for (const o of out) {
-          if (sameXZ(o, b) && Math.abs((o.y + o.hy) - (b.y - b.hy)) < 1e-6) {
-            const top = Math.max(o.y + o.hy, b.y + b.hy);
-            const bot = Math.min(o.y - o.hy, b.y - b.hy);
-            o.y = (top + bot) / 2; o.hy = (top - bot) / 2;
-            merged = true;
-            break;
+    // 4) 最大实心盒铺盖（UE 自动凸类比的缩水版）：反复找一块「全部实心、未被覆盖」的最大长方体，
+    //    盖住尽可能多未覆盖格，镂空/凸台会被自然拆成多个大盒，而非细碎长条。
+    const covered = new Uint8Array(nx * ny * nz);
+    const CVR = (i, j, k) => covered[(i * ny + j) * nz + k];
+    // 判断第 (i,j,k) 层（沿 di/dj/dk 方向薄片）是否全为实心，且在当前盒范围内
+    function slabOccupied(i, j, k, di, dj, dk, i0, i1, j0, j1, k0, k1) {
+      // 判断第 (i,j,k) 层（沿 di/dj/dk 方向薄片）是否全为实心，且在当前盒范围内
+      const a0 = di !== 0 ? i : i0, a1 = di !== 0 ? i : i1;
+      const b0 = dj !== 0 ? j : j0, b1 = dj !== 0 ? j : j1;
+      const c0 = dk !== 0 ? k : k0, c1 = dk !== 0 ? k : k1;
+      for (let u = a0; u <= a1; u++) {
+        for (let v = b0; v <= b1; v++) {
+          for (let w = c0; w <= c1; w++) {
+            if (!OCC(u, v, w)) return false;
           }
         }
-        if (!merged) out.push({ ...b });
       }
-      return out;
+      return true;
     }
-    boxes = mergeY(boxes);
-    // 合并(3)：删除被完全包含的盒
-    function contained(a, b) { return a.hx <= b.hx + 1e-9 && a.hy <= b.hy + 1e-9 && a.hz <= b.hz + 1e-9 && bboxDist(a, b) < 1e-6; }
-    function bboxDist(a, b) {
-      return (a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2;
+    // 从种子格起贪心扩张成一个「尽最大」的实心盒（任一方向不可再扩即停）
+    function growMaxBox(i0, j0, k0) {
+      let i0b = i0, i1b = i0, j0b = j0, j1b = j0, k0b = k0, k1b = k0;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        if (i1b + 1 < nx && slabOccupied(i1b + 1, j0b, k0b, 1, 0, 0, i0b, i1b, j0b, j1b, k0b, k1b)) { i1b++; changed = true; }
+        if (i0b - 1 >= 0 && slabOccupied(i0b - 1, j0b, k0b, -1, 0, 0, i0b, i1b, j0b, j1b, k0b, k1b)) { i0b--; changed = true; }
+        if (j1b + 1 < ny && slabOccupied(i0b, j1b + 1, k0b, 0, 1, 0, i0b, i1b, j0b, j1b, k0b, k1b)) { j1b++; changed = true; }
+        if (j0b - 1 >= 0 && slabOccupied(i0b, j0b - 1, k0b, 0, -1, 0, i0b, i1b, j0b, j1b, k0b, k1b)) { j0b--; changed = true; }
+        if (k1b + 1 < nz && slabOccupied(i0b, j0b, k1b + 1, 0, 0, 1, i0b, i1b, j0b, j1b, k0b, k1b)) { k1b++; changed = true; }
+        if (k0b - 1 >= 0 && slabOccupied(i0b, j0b, k0b - 1, 0, 0, -1, i0b, i1b, j0b, j1b, k0b, k1b)) { k0b--; changed = true; }
+      }
+      // 标记覆盖并返回盒（格子坐标）
+      for (let i = i0b; i <= i1b; i++) for (let j = j0b; j <= j1b; j++) for (let k = k0b; k <= k1b; k++) CVR(i, j, k) = 1;
+      return { i0: i0b, i1: i1b, j0: j0b, j1: j1b, k0: k0b, k1: k1b };
     }
-    boxes = boxes.filter((a, i, arr) => !arr.some((b, j) => j !== i && contained(a, b) && bboxDist(a, b) < 1e-6));
+    const boxes = [];
+    for (let i = 0; i < nx && boxes.length < 96; i++) {
+      for (let j = 0; j < ny; j++) {
+        for (let k = 0; k < nz; k++) {
+          if (OCC(i, j, k) && !CVR(i, j, k)) {
+            const b = growMaxBox(i, j, k);
+            // 转体积盒（中心 + 半尺寸，本地未缩放空间）
+            const x = bmin.x + ((b.i0 + b.i1 + 1) / 2) * sx;
+            const y = bmin.y + ((b.j0 + b.j1 + 1) / 2) * sy;
+            const z = bmin.z + ((b.k0 + b.k1 + 1) / 2) * sz;
+            boxes.push({
+              x, y, z,
+              hx: (((b.i1 - b.i0 + 1) * sx)) / 2,
+              hy: (((b.j1 - b.j0 + 1) * sy)) / 2,
+              hz: (((b.k1 - b.k0 + 1) * sz)) / 2,
+            });
+          }
+        }
+      }
+    }
 
-    // 5) 数量封顶：超 cap 时反复去掉对整体影响最小的一个盒（并回 AABB）直到达标
+    // 5) 数量封顶：超 cap 时反复合并「合并后 AABB 增量空体积最小」的两盒，直到 ≤ cap
     while (boxes.length > cap) {
-      // 直接删除一个盒对碰撞最保守的想法：优先去掉被祖包围盒覆盖最多的块——
-      // 简化：去掉体积最小的盒（贴合优先），仍超则合并不相邻但同层最接近的。
-      let best = 0, bestArea = Infinity;
-      for (let i = 0; i < boxes.length; i++) {
-        const b = boxes[i];
-        const area = (b.hx * b.hy * b.hz);
-        if (area < bestArea) { bestArea = area; best = i; }
+      let bi = 0, bj = 1, bestExtra = Infinity;
+      for (let a = 0; a < boxes.length; a++) {
+        for (let b = a + 1; b < boxes.length; b++) {
+          const A = boxes[a], B = boxes[b];
+          const ax0 = Math.min(A.x - A.hx, B.x - B.hx), ax1 = Math.max(A.x + A.hx, B.x + B.hx);
+          const ay0 = Math.min(A.y - A.hy, B.y - B.hy), ay1 = Math.max(A.y + A.hy, B.y + B.hy);
+          const az0 = Math.min(A.z - A.hz, B.z - B.hz), az1 = Math.max(A.z + A.hz, B.z + B.hz);
+          const union = (ax1 - ax0) * (ay1 - ay0) * (az1 - az0);
+          const extra = union - (2 * A.hx * A.hy * A.hz) - (0); // 用 union 减两盒体积的近似
+          if (extra < bestExtra) { bestExtra = extra; bi = a; bj = b; }
+        }
       }
-      boxes.splice(best, 1);
+      const A = boxes[bi], B = boxes[bj];
+      const ax0 = Math.min(A.x - A.hx, B.x - B.hx), ax1 = Math.max(A.x + A.hx, B.x + B.hx);
+      const ay0 = Math.min(A.y - A.hy, B.y - B.hy), ay1 = Math.max(A.y + A.hy, B.y + B.hy);
+      const az0 = Math.min(A.z - A.hz, B.z - B.hz), az1 = Math.max(A.z + A.hz, B.z + B.hz);
+      const merged = {
+        x: (ax0 + ax1) / 2, y: (ay0 + ay1) / 2, z: (az0 + az1) / 2,
+        hx: (ax1 - ax0) / 2, hy: (ay1 - ay0) / 2, hz: (az1 - az0) / 2,
+      };
+      boxes.splice(Math.max(bi, bj), 1);
+      boxes.splice(Math.min(bi, bj), 1);
+      boxes.push(merged);
     }
 
     // 6) 写回 colliders（本地未缩放空间半尺寸 + 中心高）
