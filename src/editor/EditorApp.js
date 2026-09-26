@@ -424,7 +424,11 @@ export function createEditor() {
         }
       }
     });
-    if (!tris.length) return;
+    if (!tris.length) {
+      StepUI.cMultiInfo.textContent = '该对象暂无可用网格（模型可能仍在加载，或这是一个空碰撞体）';
+      StepUI.cMultiInfo.style.display = 'inline';
+      return;
+    }
 
     // 2) 总体包围盒（本地坐标），据此建体素网格
     const bmin = new THREE.Vector3(Infinity, Infinity, Infinity);
@@ -810,10 +814,20 @@ export function createEditor() {
     if (state.selected) autoFitCollider(state.selected);
   };
   StepUI.cMultiBtn.onclick = () => {
-    if (!state.selected) return;
+    if (!state.selected) {
+      StepUI.cMultiInfo.textContent = '请先选中一个模型再点「自动多盒」';
+      StepUI.cMultiInfo.style.display = 'inline';
+      return;
+    }
     const step = parseFloat(StepUI.cStep.value);
     const cap = parseInt(StepUI.cMax.value, 10);
-    buildMultiColliders(state.selected, step, cap);
+    try {
+      buildMultiColliders(state.selected, step, cap);
+    } catch (err) {
+      StepUI.cMultiInfo.textContent = '生成失败：' + (err && err.message ? err.message : err);
+      StepUI.cMultiInfo.style.display = 'inline';
+      console.error(err);
+    }
   };
 
   // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
