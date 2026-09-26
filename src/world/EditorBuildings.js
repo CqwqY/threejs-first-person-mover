@@ -123,7 +123,7 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
 
     // 凸包碰撞体（优先于盒类）：把本地凸包顶点按 holder 的 位置/旋转(rotY)/缩放 变换到世界空间。
     // 玩家物理按凸包面法线 + 世界三轴做 SAT 检测。多凸包(convexParts，V-HACD 凸分解)优先于单凸包。
-    const pushHull = (hull) => {
+    const pushHull = (hull, mtx) => {
       const sv = hull.vertices;
       if (!Array.isArray(sv) || sv.length < 9) return;
       const wv = new Float64Array(sv.length);
@@ -148,12 +148,10 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
     };
     if (Array.isArray(it.convexParts) && it.convexParts.length) {
       holder.updateMatrixWorld(true);
-      const mtx = holder.matrixWorld;
-      for (const hull of it.convexParts) pushHull(hull);
+      for (const hull of it.convexParts) pushHull(hull, holder.matrixWorld);
     } else if (it.convex && Array.isArray(it.convex.vertices) && Array.isArray(it.convex.faces) && it.convex.faces.length >= 3) {
       holder.updateMatrixWorld(true);
-      const mtx = holder.matrixWorld;
-      pushHull(it.convex);
+      pushHull(it.convex, holder.matrixWorld);
     }
   });
   return colliders;
