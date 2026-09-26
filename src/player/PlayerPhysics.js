@@ -222,16 +222,29 @@ export class PlayerPhysics {
     }
     if (!minAxis) return;
 
-    // 世界 Y 轴穿透最小且玩家在凸包上方 → 顶面着陆；在下方 → 挡回下方
+    // 世界 Y 轴穿透最小：玩家整体在凸包顶之上 → 顶面着陆；整体在底之下 → 挡回；
+    // 竖直中心嵌在凸包内（侧面撞进/陷在内部）→ 沿水平穿透更小的方向推出，避免把玩家「顶高」。
     const isY = Math.abs(minAxis.y) > 0.999;
     if (isY) {
-      if (py > cC.y) {
+      if (py > b.maxY) {
         state.y = b.maxY + Config.PLAYER_HEIGHT;
         if (this.velocity.y < 0) this.velocity.y = 0;
         state.onGround = true;
-      } else {
+      } else if (py < b.minY) {
         state.y = b.minY;
         if (this.velocity.y > 0) this.velocity.y = 0;
+      } else {
+        // 玩家中心在凸包竖直范围内：按 X / Z 中穿透更小的轴水平推出
+        let vMinX = Infinity, vMaxX = -Infinity, vMinZ = Infinity, vMaxZ = -Infinity;
+        for (let i = 0; i < V.length; i += 3) {
+          const vx = V[i], vz = V[i + 2];
+          if (vx < vMinX) vMinX = vx; if (vx > vMaxX) vMaxX = vx;
+          if (vz < vMinZ) vMinZ = vz; if (vz > vMaxZ) vMaxZ = vz;
+        }
+        const ox = Math.min(px + pr, vMaxX) - Math.max(px - pr, vMinX);
+        const oz = Math.min(pz + pr, vMaxZ) - Math.max(pz - pr, vMinZ);
+        if (ox <= oz) state.x += px > b.cx ? ox : -ox;
+        else state.z += pz > b.cz ? oz : -oz;
       }
       return;
     }
