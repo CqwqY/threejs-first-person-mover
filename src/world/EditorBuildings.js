@@ -121,12 +121,11 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       if (c && c.enabled !== false) mkColl(c.hx, c.hy, c.hz, c.oy);
     }
 
-    // 凸包碰撞体（优先于盒类）：把本地顶点按 holder 的 位置/旋转(rotY)/缩放 变换到世界空间。
-    // 玩家物理按凸包面法线 + 世界三轴做 SAT 检测。
-    if (it.convex && Array.isArray(it.convex.vertices) && Array.isArray(it.convex.faces) && it.convex.faces.length >= 3) {
-      holder.updateMatrixWorld(true);
-      const mtx = holder.matrixWorld;
-      const sv = it.convex.vertices;
+    // 凸包碰撞体（优先于盒类）：把本地凸包顶点按 holder 的 位置/旋转(rotY)/缩放 变换到世界空间。
+    // 玩家物理按凸包面法线 + 世界三轴做 SAT 检测。多凸包(convexParts，V-HACD 凸分解)优先于单凸包。
+    const pushHull = (hull) => {
+      const sv = hull.vertices;
+      if (!Array.isArray(sv) || sv.length < 9) return;
       const wv = new Float64Array(sv.length);
       const p = new THREE.Vector3();
       let minY = Infinity, maxY = -Infinity;
@@ -142,10 +141,19 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       colliders.push({
         type: 'convex',
         vertices: Array.from(wv),
-        faces: it.convex.faces.slice(),
+        faces: hull.faces.slice(),
         minY, maxY,
         cx: cx / n, cy: cy / n, cz: cz / n, // 世界空间质心，用于解析方向判断
       });
+    };
+    if (Array.isArray(it.convexParts) && it.convexParts.length) {
+      holder.updateMatrixWorld(true);
+      const mtx = holder.matrixWorld;
+      for (const hull of it.convexParts) pushHull(hull);
+    } else if (it.convex && Array.isArray(it.convex.vertices) && Array.isArray(it.convex.faces) && it.convex.faces.length >= 3) {
+      holder.updateMatrixWorld(true);
+      const mtx = holder.matrixWorld;
+      pushHull(it.convex);
     }
   });
   return colliders;

@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+import { ConvexMeshDecomposition } from 'vhacd-js';
 import { instantiate } from '../world/AssetLoader.js';
 import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
@@ -346,21 +347,24 @@ export function createEditor() {
       g.position.y = oy ?? 0;
       return g;
     };
+    const makeConvex = (hull) => {
+      const bg = new THREE.BufferGeometry();
+      bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(hull.vertices), 3));
+      bg.setIndex(hull.faces);
+      bg.computeVertexNormals();
+      const g = new THREE.Group();
+      g.add(new THREE.Mesh(bg, new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide })));
+      g.add(new THREE.LineSegments(new THREE.EdgesGeometry(bg.clone()), new THREE.LineBasicMaterial({ color: 0xff8c3d })));
+      return g;
+    };
     const boxen = [];
     const multi = Array.isArray(rec.colliders) && rec.colliders.length;
-    // 凸包优先；次多盒；再单盒
-    if (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3) {
-      const bg = new THREE.BufferGeometry();
-      bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(rec.convex.vertices), 3));
-      bg.setIndex(rec.convex.faces);
-      bg.computeVertexNormals();
-      const hull = new THREE.Group();
-      hull.add(new THREE.Mesh(
-        bg,
-        new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide })
-      ));
-      hull.add(new THREE.LineSegments(new THREE.EdgesGeometry(bg.clone()), new THREE.LineBasicMaterial({ color: 0xff8c3d })));
-      boxen.push(hull);
+    const parts = Array.isArray(rec.convexParts) && rec.convexParts.length;
+    // 多凸包(V-HACD)优先；次单凸包；再轴对齐多盒；最后单盒
+    if (parts) {
+      for (const h of rec.convexParts) boxen.push(makeConvex(h));
+    } else if (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3) {
+      boxen.push(makeConvex(rec.convex));
     } else if (multi) {
       for (const c of rec.colliders) boxen.push(makeVolume(c.hx, c.hy, c.hz, c.oy));
     } else {
@@ -368,10 +372,12 @@ export function createEditor() {
       if (!c || !c.enabled) return;
       boxen.push(makeWire(c.hx, c.hy, c.hz, c.oy));
     }
+    let name = 'collider-vis';
+    if (parts) { let t = 0; rec.convexParts.forEach((h) => t += h.faces.length / 3); name = 'collider-vis（凸分解 ' + rec.convexParts.length + ' 段 / ' + t + ' 面）'; }
+    else if (rec.convex && rec.convex.vertices && rec.convex.faces.length >= 3) name = 'collider-vis（凸包 ' + (rec.convex.faces.length / 3) + ' 面）';
+    else if (multi) name = 'collider-vis（多盒 ' + boxen.length + '）';
     vis = new THREE.Group();
-    vis.name = 'collider-vis';
-    if (rec.convex && rec.convex.vertices && rec.convex.faces.length >= 3) vis.name = 'collider-vis（凸包 ' + (rec.convex.faces.length / 3) + ' 面）';
-    else if (multi) vis.name = 'collider-vis（多盒 ' + boxen.length + '）';
+    vis.name = name;
     boxen.forEach((w) => vis.add(w));
     holder.add(vis);
   }
@@ -606,6 +612,92 @@ export function createEditor() {
     if (ax >= ay && ax >= az) return plan(1, 2);
     if (ay >= ax && ay >= az) return plan(0, 2);
     return plan(0, 1);
+  }
+
+  // 收集模型所有 mesh 的三角为本地空间（positions Float64Array + indices Uint32Array），供凸分解使用。
+  function collectLocalTris(holder) {
+    const positions = [];
+    const indices = [];
+    holder.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(holder.matrixWorld).invert();
+    const t = new THREE.Matrix4();
+    const v = new THREE.Vector3();
+    holder.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const pos = o.geometry.attributes.position;
+      if (!pos) return;
+      t.multiplyMatrices(inv, o.matrixWorld);
+      const base = positions.length / 3;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(t);
+        positions.push(v.x, v.y, v.z);
+      }
+      const idx = o.geometry.index;
+      if (idx) {
+        for (let i = 0; i < idx.count; i++) indices.push(base + idx.getX(i));
+      } else {
+        for (let i = 0; i < pos.count; i++) indices.push(base + i);
+      }
+    });
+    return { positions: new Float64Array(positions), indices: new Uint32Array(indices) };
+  }
+
+  let _decomposer = null; // V-HACD WASM 单例
+  async function getDecomposer() {
+    if (!_decomposer) _decomposer = await ConvexMeshDecomposition.create();
+    return _decomposer;
+  }
+
+  // V-HACD 自动凸分解（UE Auto Convex 同款算法）：沿凹度把模型切成若干「凸包」，
+  // 贴合凹形/镂空/曲面（区别于旧的轴对齐多盒）。结果存 rec.convexParts=[{vertices,faces}...]，本地空间。
+  async function buildVhacdConvexParts(rec, maxHulls) {
+    const holder = rec.obj;
+    if (!holder) return;
+    const { positions, indices } = collectLocalTris(holder);
+    if (indices.length < 3) {
+      StepUI.cMultiInfo.textContent = '该对象暂无可用网格（模型可能仍在加载）';
+      StepUI.cMultiInfo.style.display = 'inline';
+      return;
+    }
+    StepUI.cMultiInfo.textContent = '凸分解中（加载 WASM + 计算）…';
+    StepUI.cMultiInfo.style.display = 'inline';
+    try {
+      const deco = await getDecomposer();
+      const hulls = deco.computeConvexHulls(
+        { positions, indices },
+        {
+          maxHulls: Math.max(1, Math.floor(Number(maxHulls) || 16)),
+          maxVerticesPerHull: 64,
+          voxelResolution: 400000,
+          fillMode: 'flood', // 体素填充内部（UE 默认），对中空也不会散成碎壳
+          messages: 'none',
+        }
+      );
+      if (!hulls || !hulls.length) {
+        StepUI.cMultiInfo.textContent = '未生成凸包';
+        StepUI.cMultiInfo.style.display = 'inline';
+        return;
+      }
+      // 写回多凸包（本地空间）
+      rec.convexParts = hulls.map((h) => ({
+        vertices: Array.from(h.positions),
+        faces: Array.from(h.indices),
+      }));
+      // 凸包优先，禁用其余盒类/单凸包
+      if (rec.collider) rec.collider.enabled = false;
+      if (rec.colliders && rec.colliders.length) rec.colliders = [];
+      if (rec.convex) rec.convex = null;
+      buildColliderVis(rec);
+      let tri = 0; for (const h of hulls) tri += h.indices.length / 3;
+      StepUI.cMultiInfo.textContent = '凸分解 ' + hulls.length + ' 段 / ' + tri + ' 三角';
+      StepUI.cMultiInfo.style.display = 'inline';
+      if (state.selected === rec) syncColliderUI(rec);
+      markDirty();
+    } catch (err) {
+      StepUI.cMultiInfo.textContent = '凸分解失败：' + (err && err.message ? err.message : err);
+      StepUI.cMultiInfo.style.display = 'inline';
+      console.error(err);
+    }
   }
 
   // 生成凸包碰撞体：把模型网格顶点（本地未缩放空间）求三维凸包（Quickhull，走 Three 的 ConvexGeometry），
@@ -918,19 +1010,12 @@ export function createEditor() {
   };
   StepUI.cMultiBtn.onclick = () => {
     if (!state.selected) {
-      StepUI.cMultiInfo.textContent = '请先选中一个模型再点「自动多盒」';
+      StepUI.cMultiInfo.textContent = '请先选中一个模型再点「自动凸分解」';
       StepUI.cMultiInfo.style.display = 'inline';
       return;
     }
-    const step = parseFloat(StepUI.cStep.value);
     const cap = parseInt(StepUI.cMax.value, 10);
-    try {
-      buildMultiColliders(state.selected, step, cap);
-    } catch (err) {
-      StepUI.cMultiInfo.textContent = '生成失败：' + (err && err.message ? err.message : err);
-      StepUI.cMultiInfo.style.display = 'inline';
-      console.error(err);
-    }
+    buildVhacdConvexParts(state.selected, cap);
   };
   StepUI.cHullBtn.onclick = () => {
     if (!state.selected) {
@@ -1029,6 +1114,8 @@ export function createEditor() {
           colliders: Array.isArray(rec.colliders) && rec.colliders.length ? rec.colliders.map((c) => ({ ...c })) : null,
           convex: (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3)
             ? { vertices: rec.convex.vertices.slice(), faces: rec.convex.faces.slice() } : null,
+          convexParts: (Array.isArray(rec.convexParts) && rec.convexParts.length)
+            ? rec.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
         };
         // 兼容旧的内嵌 data URL 记录
         if (!out.url && rec.data) out.data = rec.data;
@@ -1089,6 +1176,8 @@ export function createEditor() {
         colliders: Array.isArray(it.colliders) && it.colliders.length ? it.colliders.map((c) => ({ ...c })) : null,
         convex: (it.convex && Array.isArray(it.convex.vertices) && it.convex.faces.length >= 3)
           ? { vertices: it.convex.vertices.slice(), faces: it.convex.faces.slice() } : null,
+        convexParts: (Array.isArray(it.convexParts) && it.convexParts.length)
+          ? it.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
         obj,
       };
       obj.name = nm;
