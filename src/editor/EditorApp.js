@@ -548,18 +548,19 @@ export function createEditor() {
     markDirty();
   }
 
-  // 点在三角形内（三维）：把三角形转到最稳定的两个主轴平面投影成 2D 判断，并校验格心到三角形平面距离落在 {sx..} 容差内
+  // 点在三角形内（三维）：把三角形转到最稳定的两个主轴平面投影成 2D 判断，并校验格心到三角形平面距离落在容差内
   function ptInTri(p, a, b, c, sx, sy, sz) {
     const e1 = new THREE.Vector3().subVectors(b, a);
     const e2 = new THREE.Vector3().subVectors(c, a);
     const n = new THREE.Vector3().crossVectors(e1, e2);
     const len = n.length();
     if (len < 1e-9) return false;
-    n.divideScalar(len);
-    const d = p.distanceTo(new THREE.Plane(new THREE.Vector3(), 0).setNormalAndConstant(n, -n.dot(a)).projectPoint(p, new THREE.Vector3()));
+    n.multiplyScalar(1 / len); // 单位法向量
+    // 点到平面(a,n)的垂直距离 = |n·(p-a)|，n 已归一化
+    const d = Math.abs(n.x * (p.x - a.x) + n.y * (p.y - a.y) + n.z * (p.z - a.z));
     // 平面厚度容差取最大步长的 0.55，避免薄片模型漏格
     const tol = Math.max(sx, sy, sz) * 0.55;
-    if (Math.abs(d) > tol) return false;
+    if (d > tol) return false;
     // 投影到绝对坐标最大的主轴平面上做 2D
     const plan = (ax, ay) => {
       const v0 = [a[ax], a[ay]], v1 = [b[ax], b[ay]], v2 = [c[ax], c[ay]], pp = [p[ax], p[ay]];
