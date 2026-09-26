@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { instantiate } from '../world/AssetLoader.js';
 import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
@@ -205,6 +206,8 @@ export function createEditor() {
     cMax: document.getElementById('cMax'),
     cMultiBtn: document.getElementById('cMultiBtn'),
     cMultiInfo: document.getElementById('cMultiInfo'),
+    cHullBtn: document.getElementById('cHullBtn'),
+    cHullInfo: document.getElementById('cHullInfo'),
   };
 
   // ---------- 可编辑对象：游戏景物 + 地形/道路/墙体 ----------
@@ -345,8 +348,20 @@ export function createEditor() {
     };
     const boxen = [];
     const multi = Array.isArray(rec.colliders) && rec.colliders.length;
-    // 多盒优先；否则单盒
-    if (multi) {
+    // 凸包优先；次多盒；再单盒
+    if (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3) {
+      const bg = new THREE.BufferGeometry();
+      bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(rec.convex.vertices), 3));
+      bg.setIndex(rec.convex.faces);
+      bg.computeVertexNormals();
+      const hull = new THREE.Group();
+      hull.add(new THREE.Mesh(
+        bg,
+        new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide })
+      ));
+      hull.add(new THREE.LineSegments(new THREE.EdgesGeometry(bg.clone()), new THREE.LineBasicMaterial({ color: 0xff8c3d })));
+      boxen.push(hull);
+    } else if (multi) {
       for (const c of rec.colliders) boxen.push(makeVolume(c.hx, c.hy, c.hz, c.oy));
     } else {
       const c = rec.collider;
@@ -355,7 +370,8 @@ export function createEditor() {
     }
     vis = new THREE.Group();
     vis.name = 'collider-vis';
-    if (multi) vis.name = 'collider-vis（多盒 ' + boxen.length + '）';
+    if (rec.convex && rec.convex.vertices && rec.convex.faces.length >= 3) vis.name = 'collider-vis（凸包 ' + (rec.convex.faces.length / 3) + ' 面）';
+    else if (multi) vis.name = 'collider-vis（多盒 ' + boxen.length + '）';
     boxen.forEach((w) => vis.add(w));
     holder.add(vis);
   }
@@ -590,6 +606,75 @@ export function createEditor() {
     if (ax >= ay && ax >= az) return plan(1, 2);
     if (ay >= ax && ay >= az) return plan(0, 2);
     return plan(0, 1);
+  }
+
+  // 生成凸包碰撞体：把模型网格顶点（本地未缩放空间）求三维凸包（Quickhull，走 Three 的 ConvexGeometry），
+  // 存入 rec.convex = { vertices:[x,y,z,...], faces:[a,b,c,a,b,c,...] }（本地空间，随模型旋转/缩放）。
+  // 凸包贴合任意朝向、带斜面的外形，但对 L 型/镂空凹模型会被凸包整体包裹而膨胀。
+  function buildConvexCollider(rec) {
+    const holder = rec.obj;
+    if (!holder) return;
+    // 1) 收集所有 mesh 顶点（本地空间），去重后喂给 ConvexHull
+    holder.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(holder.matrixWorld).invert();
+    const pts = [];
+    const HASH = (x, y, z) => x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3);
+    const seen = new Set();
+    const v = new THREE.Vector3();
+    holder.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const pos = o.geometry.attributes.position;
+      if (!pos) return;
+      const mtx = new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld);
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(mtx);
+        const k = HASH(v.x, v.y, v.z);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        pts.push(v.clone());
+      }
+    });
+    if (pts.length < 4) {
+      StepUI.cHullInfo.textContent = '顶点不足（<4），无法构成凸包';
+      StepUI.cHullInfo.style.display = 'inline';
+      return;
+    }
+    // 2) 三维凸包（ConvexHull 需要非共面点，Three 会正确生成三角面与顶点）
+    let geo;
+    try {
+      const cm = new THREE.BufferGeometry();
+      const flat = new Float32Array(pts.length * 3);
+      pts.forEach((p, i) => { flat[i * 3] = p.x; flat[i * 3 + 1] = p.y; flat[i * 3 + 2] = p.z; });
+      cm.setAttribute('position', new THREE.BufferAttribute(flat, 3));
+      geo = ConvexGeometry.fromBufferGeometry(cm); // 返回带 index 的凸包几何
+    } catch (err) {
+      StepUI.cHullInfo.textContent = '凸包失败：' + (err && err.message ? err.message : err);
+      StepUI.cHullInfo.style.display = 'inline';
+      console.error(err);
+      return;
+    }
+    const posAttr = geo.getAttribute('position');
+    const idx = geo.getIndex();
+    if (!idx || idx.count < 3) {
+      StepUI.cHullInfo.textContent = '凸包无有效三角面';
+      StepUI.cHullInfo.style.display = 'inline';
+      return;
+    }
+    // 3) 写回 rec.convex（本地空间）
+    rec.convex = {
+      vertices: Array.from(posAttr.array),
+      faces: Array.from(idx.array),
+    };
+    // 凸包优先，禁用盒类碰撞体，避免重复阻挡
+    if (rec.collider) rec.collider.enabled = false;
+    if (rec.colliders && rec.colliders.length) { rec.colliders = []; }
+    buildColliderVis(rec);
+    if (StepUI.cHullInfo) {
+      StepUI.cHullInfo.textContent = '凸包 ' + (idx.count / 3) + ' 面 / ' + (posAttr.count) + ' 点';
+      StepUI.cHullInfo.style.display = 'inline';
+    }
+    if (state.selected === rec) syncColliderUI(rec);
+    markDirty();
   }
 
   // 2D 点是否在三角形内（含边界，重心坐标法）
@@ -850,6 +935,20 @@ export function createEditor() {
       console.error(err);
     }
   };
+  StepUI.cHullBtn.onclick = () => {
+    if (!state.selected) {
+      StepUI.cHullInfo.textContent = '请先选中一个模型再点「生成凸包」';
+      StepUI.cHullInfo.style.display = 'inline';
+      return;
+    }
+    try {
+      buildConvexCollider(state.selected);
+    } catch (err) {
+      StepUI.cHullInfo.textContent = '生成失败：' + (err && err.message ? err.message : err);
+      StepUI.cHullInfo.style.display = 'inline';
+      console.error(err);
+    }
+  };
 
   // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
   function outlinerUpdate() {
@@ -931,6 +1030,8 @@ export function createEditor() {
           scale: { x: s.x, y: s.y, z: s.z },
           collider: rec.collider ? { ...rec.collider } : null,
           colliders: Array.isArray(rec.colliders) && rec.colliders.length ? rec.colliders.map((c) => ({ ...c })) : null,
+          convex: (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3)
+            ? { vertices: rec.convex.vertices.slice(), faces: rec.convex.faces.slice() } : null,
         };
         // 兼容旧的内嵌 data URL 记录
         if (!out.url && rec.data) out.data = rec.data;
@@ -989,6 +1090,8 @@ export function createEditor() {
         scale: it.scale ? { ...normScale(it.scale) } : { x: 1, y: 1, z: 1 },
         collider: it.collider ? { enabled: it.collider.enabled !== false, hx: it.collider.hx, hy: it.collider.hy, hz: it.collider.hz, oy: it.collider.oy } : defaultCollider(),
         colliders: Array.isArray(it.colliders) && it.colliders.length ? it.colliders.map((c) => ({ ...c })) : null,
+        convex: (it.convex && Array.isArray(it.convex.vertices) && it.convex.faces.length >= 3)
+          ? { vertices: it.convex.vertices.slice(), faces: it.convex.faces.slice() } : null,
         obj,
       };
       obj.name = nm;

@@ -120,6 +120,33 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       const c = it.collider;
       if (c && c.enabled !== false) mkColl(c.hx, c.hy, c.hz, c.oy);
     }
+
+    // 凸包碰撞体（优先于盒类）：把本地顶点按 holder 的 位置/旋转(rotY)/缩放 变换到世界空间。
+    // 玩家物理按凸包面法线 + 世界三轴做 SAT 检测。
+    if (it.convex && Array.isArray(it.convex.vertices) && Array.isArray(it.convex.faces) && it.convex.faces.length >= 3) {
+      holder.updateMatrixWorld(true);
+      const mtx = holder.matrixWorld;
+      const sv = it.convex.vertices;
+      const wv = new Float64Array(sv.length);
+      const p = new THREE.Vector3();
+      let minY = Infinity, maxY = -Infinity;
+      let cx = 0, cy = 0, cz = 0;
+      for (let i = 0; i < sv.length; i += 3) {
+        p.set(sv[i], sv[i + 1], sv[i + 2]).applyMatrix4(mtx);
+        wv[i] = p.x; wv[i + 1] = p.y; wv[i + 2] = p.z;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+        cx += p.x; cy += p.y; cz += p.z;
+      }
+      const n = sv.length / 3;
+      colliders.push({
+        type: 'convex',
+        vertices: Array.from(wv),
+        faces: it.convex.faces.slice(),
+        minY, maxY,
+        cx: cx / n, cy: cy / n, cz: cz / n, // 世界空间质心，用于解析方向判断
+      });
+    }
   });
   return colliders;
 }

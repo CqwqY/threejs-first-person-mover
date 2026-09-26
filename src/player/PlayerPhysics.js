@@ -93,6 +93,12 @@ export class PlayerPhysics {
       const py = state.y - hh; // 玩家竖直中心（着地时 = HEIGHT/2 = 0.85）
       const pz = state.z;
 
+      // ---- 凸包碰撞体：玩家 AABB 对凸多面体，用「凸包面法线 + 世界三轴」做 SAT ----
+      if (b.type === 'convex') {
+        this._resolveConvex(state, b, px, py, pz, pr, hh);
+        continue;
+      }
+
       const theta = b.rotY || 0;
 
       // ---- AABB 快速路径：盒子未旋转，沿用原有三轴独立判定 ----
@@ -166,5 +172,75 @@ export class PlayerPhysics {
       state.x += bestL.x * minPen * dir;
       state.z += bestL.z * minPen * dir;
     }
+  }
+
+  // 玩家 AABB 对凸多面体（凸包）碰撞：SAT。
+  // 分离轴 = 世界 X/Y/Z（玩家面法线）+ 凸包各三角面法线（去重、封顶）。
+  // 取最小穿透轴解析：若为世界 Y 且玩家在凸包质心上方则顶面着陆（站在凸包顶部），否则沿该轴推出。
+  _resolveConvex(state, b, px, py, pz, pr, hh) {
+    const V = b.vertices;
+    const F = b.faces;
+    const pC = { x: px, y: py, z: pz };
+    const cC = { x: b.cx, y: b.cy, z: b.cz };
+
+    // 候选轴：世界三轴 + 去重后的凸包面法线
+    const axes = [{ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }];
+    const seen = new Set();
+    for (let i = 0; i + 2 < F.length; i += 3) {
+      const i0 = F[i] * 3, i1 = F[i + 1] * 3, i2 = F[i + 2] * 3;
+      const ax = V[i1] - V[i0], ay = V[i1 + 1] - V[i0 + 1], az = V[i1 + 2] - V[i0 + 2];
+      const bx = V[i2] - V[i0], by = V[i2 + 1] - V[i0 + 1], bz = V[i2 + 2] - V[i0 + 2];
+      let nx = ay * bz - az * by;
+      let ny = az * bx - ax * bz;
+      let nz = ax * by - ay * bx;
+      let len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len < 1e-9) continue;
+      nx /= len; ny /= len; nz /= len;
+      const key = nx.toFixed(3) + ',' + ny.toFixed(3) + ',' + nz.toFixed(3);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      axes.push({ x: nx, y: ny, z: nz });
+      if (axes.length >= 48) break; // 面数很多时封顶，避免每帧过重
+    }
+
+    let minOverlap = Infinity;
+    let minAxis = null;
+    for (const L of axes) {
+      // 玩家 AABB 在该轴上的投影半宽 = pr*|Lx| + hh*|Ly| + pr*|Lz|
+      const wA = pr * (Math.abs(L.x) + Math.abs(L.z)) + hh * Math.abs(L.y);
+      const cA = pC.x * L.x + pC.y * L.y + pC.z * L.z;
+      // 凸包顶点在该轴上的投影范围
+      let vMin = Infinity, vMax = -Infinity;
+      for (let i = 0; i < V.length; i += 3) {
+        const d = V[i] * L.x + V[i + 1] * L.y + V[i + 2] * L.z;
+        if (d < vMin) vMin = d;
+        if (d > vMax) vMax = d;
+      }
+      const overlap = Math.min(cA + wA, vMax) - Math.max(cA - wA, vMin);
+      if (overlap <= 1e-6) return; // 存在分离轴，不相交
+      if (overlap < minOverlap) { minOverlap = overlap; minAxis = L; }
+    }
+    if (!minAxis) return;
+
+    // 世界 Y 轴穿透最小且玩家在凸包上方 → 顶面着陆；在下方 → 挡回下方
+    const isY = Math.abs(minAxis.y) > 0.999;
+    if (isY) {
+      if (py > cC.y) {
+        state.y = b.maxY + Config.PLAYER_HEIGHT;
+        if (this.velocity.y < 0) this.velocity.y = 0;
+        state.onGround = true;
+      } else {
+        state.y = b.minY;
+        if (this.velocity.y > 0) this.velocity.y = 0;
+      }
+      return;
+    }
+
+    // 沿最小穿透轴把玩家推出凸包
+    const sd = (px - cC.x) * minAxis.x + (py - cC.y) * minAxis.y + (pz - cC.z) * minAxis.z;
+    const dir = sd >= 0 ? 1 : -1;
+    state.x += minAxis.x * minOverlap * dir;
+    state.y += minAxis.y * minOverlap * dir;
+    state.z += minAxis.z * minOverlap * dir;
   }
 }
