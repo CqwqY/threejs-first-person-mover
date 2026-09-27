@@ -300,6 +300,9 @@ export class PlayerPhysics {
   _snapToGround(state, colliders) {
     if (this.velocity.y > 0) return; // 上升（跳跃）中不吸附
     if (!state.onGround) return; // 空中不吸附，正常下落交给碰撞解析
+    // 正在坠落时不吸附：onGround 可能是「走下平台」前的残留状态，
+    // 此时若吸附会把玩家在离地仍有一段距离时就拉到地面并清零竖直速度，表现为「坠落震一下」。
+    if (this.velocity.y < -Config.GROUND_SNAP_MAX_FALL_SPEED) return;
 
     const pr = Config.PLAYER_RADIUS;
     const feet = state.y - Config.PLAYER_HEIGHT; // 脚底高度
@@ -322,7 +325,7 @@ export class PlayerPhysics {
     }
 
     if (best === -Infinity) return;
-    if (feet - best > snap) return; // 地面太远，说明已离开地面（正常下落）
+    if (feet - best > Math.min(snap, Config.GROUND_SNAP_MAX_GAP)) return; // 落差过大 = 正在下落，交给碰撞解析正常着陆
 
     state.y = best + Config.PLAYER_HEIGHT;
     if (this.velocity.y < 0) this.velocity.y = 0;
