@@ -270,9 +270,18 @@ export class Game {
       this.playerManager.setLocalVisible(false);
     }
 
-    // ---- 5.2 阴影跟随玩家：target 挪到玩家脚下，阳光随相对偏移平移，保持光向不变 ----
+    // ---- 5.2 阴影跟随玩家：把阴影焦点按「像素世界尺寸」取整到网格再贴，阳光随相对偏移平移，光向不变 ----
+    // 直接每帧亚像素级移动焦点会让阴影贴图来回平移，投影出现「泳动/抖动」；
+    // 取整到整 texel 让贴图每次只整体移一格，画面稳定不抖。
     const st = this._sunTarget;
-    st.position.set(this.localState.x, 0, this.localState.z);
+    const sc = this._sun.shadow.camera;
+    const R = (sc.right - sc.left) / 2;
+    const texel = (R * 2) / this._sun.shadow.mapSize.x; // 单个阴影 texel 对应的世界尺寸
+    st.position.set(
+      Math.round(this.localState.x / texel) * texel,
+      0,
+      Math.round(this.localState.z / texel) * texel
+    );
     this._sun.position.copy(st.position).add(this._sunOffset);
     st.updateMatrixWorld();
 

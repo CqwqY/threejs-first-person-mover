@@ -1607,8 +1607,15 @@ export function createEditor() {
     applyWASDMove(Math.min((t - _t0) / 1000, 0.1));
     _t0 = t;
     controls.update();
-    // 阴影跟随相机：target 挪到相机脚下的地面，阳光随其相对偏移平移，保持光向不变
-    sunTarget.position.set(camera.position.x, 0, camera.position.z);
+    // 阴影跟随相机：把焦点按「像素世界尺寸」取整到网格再贴，阳光随其相对偏移平移，保持光向不变。
+    // 取整避免亚像素级移动导致阴影贴图来回平移而出现的「泳动/抖动」。
+    const R = (sun.shadow.camera.right - sun.shadow.camera.left) / 2;
+    const texel = (R * 2) / sun.shadow.mapSize.x; // 单个阴影 texel 对应的世界尺寸
+    sunTarget.position.set(
+      Math.round(camera.position.x / texel) * texel,
+      0,
+      Math.round(camera.position.z / texel) * texel
+    );
     sun.position.copy(sunTarget.position).add(sunOffset);
     sunTarget.updateMatrixWorld();
     renderer.render(scene, camera);
