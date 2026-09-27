@@ -234,17 +234,22 @@ export class Game {
     this._tpPrevZ = s.z;
 
     // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
+    // 俯仰（pitch）必须参与：否则鼠标上下拖动在第三人称下毫无反应。
+    // 做法：把 pitch 合进「视线方向」，相机沿视线反方向后退，再按视线方向瞄准。
     const eye = new THREE.Vector3(this.localState.x, this.localState.y, this.localState.z);
     const yaw = this.localState.yaw;
-    const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)); // 移动正前方
+    const cosP = Math.cos(this.localState.pitch);
+    const sinP = Math.sin(this.localState.pitch);
+    // 含俯仰的视线单位方向（与第一人称一致：yaw 水平转向 + pitch 俯仰）
+    const viewDir = new THREE.Vector3(-Math.sin(yaw) * cosP, sinP, -Math.cos(yaw) * cosP);
     const DIST = 4.0;
-    const LIFT = 1.7;
-    const camPos = eye
-      .clone()
-      .add(fwd.clone().multiplyScalar(-DIST))
-      .add(new THREE.Vector3(0, LIFT, 0));
+    const LIFT = 1.0; // 相机相对眼睛再抬高一点，形成略微俯视的肩后视角
+    const camPos = eye.clone().addScaledVector(viewDir, -DIST).add(new THREE.Vector3(0, LIFT, 0));
+    if (camPos.y < 0.4) camPos.y = 0.4; // 抬头时相机可能钻到地面以下，夹住下限
     this.camera.position.copy(camPos);
-    this.camera.lookAt(eye.x, eye.y + 0.2, eye.z);
+    // 沿视线方向瞄准远处一点：俯仰角直接体现为看向的高度
+    const aim = eye.clone().addScaledVector(viewDir, 10);
+    this.camera.lookAt(aim.x, aim.y, aim.z);
   }
 
   // 主循环：计算 dt -> 更新玩家 -> 渲染
