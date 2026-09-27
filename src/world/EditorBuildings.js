@@ -105,20 +105,68 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
 
     // 碰撞体：OBB（有向包围盒），把朝向 rotY（Y 轴旋转角）一并给出，使碰撞体随模型旋转。
     // 盒尺寸按 holder 的缩放换算到世界尺寸；多盒优先：存在 colliders 数组时按每个盒生成，否则回退单盒 collider。
-    const mkColl = (hx, hy, hz, oy) => colliders.push({
-      cx: it.x ?? 0,
-      cy: (it.y ?? 0) + (oy ?? 0) * sc.y,
-      cz: it.z ?? 0,
-      hx: (hx ?? 0) * sc.x,
-      hy: (hy ?? 0) * sc.y,
-      hz: (hz ?? 0) * sc.z,
-      rotY: it.rotY ?? 0, // 随模型绕 Y 轴旋转，物理侧据此做 OBB 检测
-    });
-    if (Array.isArray(it.colliders) && it.colliders.length) {
-      for (const cb of it.colliders) mkColl(cb.hx, cb.hy, cb.hz, cb.oy);
-    } else {
-      const c = it.collider;
-      if (c && c.enabled !== false) mkColl(c.hx, c.hy, c.hz, c.oy);
+    // P1：逐盒支持 ox/oz（水平偏移）与可选四元数（逐盒朝向）。缺省 ox/oz=0、无四元数 → 与旧行为完全一致。
+    //   - 合成朝向为纯 Y 旋转 → 仍走盒快路径（物理侧 OBB/rotY），无需新增代码路径
+    //   - 合成朝向含 X/Z 分量 → 展开 8 角点为凸包（复用现有凸包 SAT）
+    holder.updateMatrixWorld(true);
+    const _corner = new THREE.Vector3();
+    const _q = new THREE.Quaternion();
+    // 盒的 8 角点索引：bit2=+X, bit1=+Y, bit0=+Z；面按外法线 CCW 缠绕
+    const BOX_FACES = [
+      4, 6, 7, 4, 7, 5, // +X
+      0, 1, 3, 0, 3, 2, // -X
+      2, 3, 7, 2, 7, 6, // +Y
+      0, 4, 5, 0, 5, 1, // -Y
+      1, 5, 7, 1, 7, 3, // +Z
+      0, 2, 6, 0, 6, 4, // -Z
+    ];
+    const mkColl = (cb) => {
+      const hx = cb.hx ?? 0, hy = cb.hy ?? 0, hz = cb.hz ?? 0;
+      const ox = cb.ox ?? 0, oy = cb.oy ?? 0, oz = cb.oz ?? 0;
+      const bx = hx * sc.x, by = hy * sc.y, bz = hz * sc.z; // 世界半尺寸
+      // 盒本地中心 → 世界中心（经 holder 矩阵，含位置/rotY/缩放）
+      _corner.set(ox, oy, oz).applyMatrix4(holder.matrixWorld);
+      const cx = _corner.x, cy = _corner.y, cz = _corner.z;
+
+      // 合成朝向 = 物体朝向(仅 rotY) ∘ 盒四元数
+      let pureY = true;
+      let rotY = it.rotY ?? 0;
+      if (typeof cb.qw === 'number') {
+        _q.set(cb.qx ?? 0, cb.qy ?? 0, cb.qz ?? 0, cb.qw);
+        if (Math.abs(cb.qx ?? 0) > 1e-6 || Math.abs(cb.qz ?? 0) > 1e-6) pureY = false;
+        else rotY = (it.rotY ?? 0) + 2 * Math.atan2(cb.qy ?? 0, cb.qw);
+      }
+
+      if (pureY) {
+        colliders.push({ cx, cy, cz, hx: bx, hy: by, hz: bz, rotY });
+        return;
+      }
+
+      // 含非 Y 分量：展开 8 角点为世界凸包（物理侧走凸包 SAT）
+      const verts = new Float64Array(24);
+      for (let i = 0; i < 8; i++) {
+        const sx = (i & 4) ? 1 : -1, sy = (i & 2) ? 1 : -1, sz = (i & 1) ? 1 : -1;
+        _corner.set(ox + sx * hx, oy + sy * hy, oz + sz * hz).applyMatrix4(holder.matrixWorld);
+        verts[i * 3] = _corner.x; verts[i * 3 + 1] = _corner.y; verts[i * 3 + 2] = _corner.z;
+      }
+      let minY = Infinity, maxY = -Infinity;
+      for (let i = 1; i < 24; i += 3) { if (verts[i] < minY) minY = verts[i]; if (verts[i] > maxY) maxY = verts[i]; }
+      colliders.push({
+        type: 'convex',
+        vertices: Array.from(verts),
+        faces: BOX_FACES.slice(),
+        minY, maxY,
+        cx, cy, cz,
+      });
+    };
+    // collisionMode：simple（默认）走逐盒/凸包生成；complex 由运行时从渲染网格烘焙，此处不生成
+    if (it.collisionMode !== 'complex') {
+      if (Array.isArray(it.colliders) && it.colliders.length) {
+        for (const cb of it.colliders) mkColl(cb);
+      } else {
+        const c = it.collider;
+        if (c && c.enabled !== false) mkColl(c);
+      }
     }
 
     // 凸包碰撞体（优先于盒类）：把本地凸包顶点按 holder 的 位置/旋转(rotY)/缩放 变换到世界空间。
