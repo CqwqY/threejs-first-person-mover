@@ -56,6 +56,10 @@ export const Config = {
   PLAYER_HEIGHT: 1.35,
   // 玩家碰撞半径（水平方向，用于边界限制）
   PLAYER_RADIUS: 0.4,
+  // 第一人称走路晃动幅度（米）：上下起伏的峰值；左右摇摆为其 0.6 倍
+  BOB_AMPLITUDE: 0.04,
+  // 走路晃动相位推进速度（弧度/米）：越大步伐越急促；约每 1.6m 走完一个完整起伏周期
+  BOB_SPEED: 1.8,
   // 地面尺寸（单位：米）。1 世界单位 = 1 米。宽沿 x，长沿 z。
   GROUND_WIDTH: 160,
   GROUND_DEPTH: 310,

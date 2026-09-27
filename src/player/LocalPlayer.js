@@ -18,6 +18,11 @@ export class LocalPlayer {
 
     // 物理模块（内部只持有速度，位置读写 state）
     this.physics = new PlayerPhysics();
+    // 走路晃动状态：相位按实际移动距离推进；bobEnabled 由 Game 按视角切换（仅第一人称开启）
+    this.bobEnabled = true;
+    this._bobPhase = 0;
+    this._prevX = this.state.x;
+    this._prevZ = this.state.z;
   }
 
   // 更新一帧
@@ -39,6 +44,27 @@ export class LocalPlayer {
     this.camera.position.set(this.state.x, this.state.y, this.state.z);
     this.camera.rotation.y = this.state.yaw;
     this.camera.rotation.x = this.state.pitch;
+
+    // ---- 4. 第一人称走路晃动：按本帧实际移动距离推进相位，叠加轻微上下起伏与左右摇摆 ----
+    // 幅度随实际速度缩放，所以贴墙原地推着不会抖；离地或停下时相位归零，避免落地瞬间跳一下。
+    const dx = this.state.x - this._prevX;
+    const dz = this.state.z - this._prevZ;
+    this._prevX = this.state.x;
+    this._prevZ = this.state.z;
+    if (this.bobEnabled && this.state.onGround) {
+      const dist = Math.hypot(dx, dz);
+      const v = dt > 0 ? dist / dt : 0;
+      const amp = Math.min(v / Config.MOVE_SPEED, 1) * Config.BOB_AMPLITUDE;
+      this._bobPhase += dist * Config.BOB_SPEED;
+      // 上下起伏：一个步幅一次，所以用 phase * 2
+      this.camera.position.y += Math.sin(this._bobPhase * 2) * amp;
+      // 左右摇摆：沿相机右方向（cos yaw, 0, -sin yaw）偏移，形成自然的重心摆动
+      const sway = Math.cos(this._bobPhase) * amp * 0.6;
+      this.camera.position.x += Math.cos(this.state.yaw) * sway;
+      this.camera.position.z -= Math.sin(this.state.yaw) * sway;
+    } else {
+      this._bobPhase = 0;
+    }
   }
 
   // 返回本地玩家的可序列化状态，供网络层读取

@@ -247,9 +247,9 @@ export class Game {
     const camPos = eye.clone().addScaledVector(viewDir, -DIST).add(new THREE.Vector3(0, LIFT, 0));
     if (camPos.y < 0.4) camPos.y = 0.4; // 抬头时相机可能钻到地面以下，夹住下限
     this.camera.position.copy(camPos);
-    // 沿视线方向瞄准远处一点：俯仰角直接体现为看向的高度
-    const aim = eye.clone().addScaledVector(viewDir, 10);
-    this.camera.lookAt(aim.x, aim.y, aim.z);
+    // 直接用与第一人称相同的欧拉角（pitch, yaw）来定朝向，俯仰一定跟着鼠标走，
+    // 不依赖 lookAt 的推算，避免「第三人称锁俯仰」。
+    this.camera.rotation.set(this.localState.pitch, this.localState.yaw, 0);
   }
 
   // 主循环：计算 dt -> 更新玩家 -> 渲染
@@ -269,9 +269,11 @@ export class Game {
     // 第三人称：第一人称时保证本地隐藏；第三人称时显示自己并让相机跟随
     if (this.thirdPerson) {
       this.playerManager.setLocalVisible(true);
+      this.localPlayer.bobEnabled = false; // 第三人称不做头部晃动
       this._thirdPerson(dt);
     } else {
       this.playerManager.setLocalVisible(false);
+      this.localPlayer.bobEnabled = true; // 第一人称开启走路晃动
     }
 
     // ---- 5.2 阴影跟随玩家：把阴影焦点按「像素世界尺寸」取整到网格再贴，阳光随相对偏移平移，光向不变 ----
