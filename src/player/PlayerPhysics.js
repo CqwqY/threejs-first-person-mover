@@ -64,6 +64,11 @@ export class PlayerPhysics {
     // ---- 5.5 世界碰撞体碰撞：水平方向把玩家挡在 AABB 之外 ----
     this._resolveWorldCollisions(state, colliders);
 
+    // ---- 5.6 地面吸附：脚底仍贴近可站立地面（坡面 / 盒顶 / 平地）时把 y 吸附上去 ----
+    // 目的：重力每帧把玩家往坡面里嵌、再被碰撞解析推出，会让玩家沿坡持续下滑（像踩冰）。
+    // 吸附只做竖直修正（不产生任何水平位移），因此输入为零时玩家能稳稳停在坡上。
+    this._snapToGround(state, colliders);
+
     // ---- 6. 地面碰撞：防止下穿地面，落到 PLAYER_HEIGHT 处即认为着地 ----
     if (state.y <= Config.PLAYER_HEIGHT) {
       state.y = Config.PLAYER_HEIGHT;
@@ -249,11 +254,137 @@ export class PlayerPhysics {
       return;
     }
 
-    // 沿最小穿透轴把玩家推出凸包
+    // 统一把最小穿透轴的方向翻向「玩家所在的一侧」（翻转不改变推出量，只让后续符号判断简单）
     const sd = (px - cC.x) * minAxis.x + (py - cC.y) * minAxis.y + (pz - cC.z) * minAxis.z;
     const dir = sd >= 0 ? 1 : -1;
+    const nx = minAxis.x * dir, ny = minAxis.y * dir, nz = minAxis.z * dir;
+
+    // ---- 可站立斜面：最小穿透轴是坡面法线（竖直分量达阈值，且不是世界 Y 轴）----
+    // 这种面视为「地面」而不是「墙」：推出方向仍取坡面法线（所以上坡方向可行走、不会被当成墙挡住），
+    // 但把推出量的水平分量按 SLOPE_GRIP 抵消、改用等量的竖直吸附补齐（推导见下）。
+    // 这样重力每帧把玩家嵌入斜面时不再每帧产生一点水平推出，从而不会沿坡持续下滑；输入为零即可稳停。
+    // 穿透过深（超过地面吸附距离，如高速坠落穿入）时仍走原有法线推出，避免一帧内瞬移。
+    const absNy = Math.abs(ny);
+    if (absNy >= Config.SLOPE_MAX_NORMAL_Y && absNy < 0.999 && minOverlap <= Config.GROUND_SNAP_DISTANCE) {
+      const horiz = 1 - Config.SLOPE_GRIP; // 水平分量保留比例（抓地越强保留越少）
+      // 需要的位移 d 要满足 n·d = minOverlap：水平分量取 n.xz*minOverlap*horiz，
+      // 则竖直分量 dy = minOverlap * (1 - horiz * (1 - ny^2)) / ny。
+      // 校验：SLOPE_GRIP=0（horiz=1）→ dy = minOverlap*ny，与旧的法线推出完全等价；
+      //       SLOPE_GRIP=1（horiz=0）→ 水平为 0、dy = minOverlap/ny，即纯竖直吸附到坡面。
+      state.x += nx * minOverlap * horiz;
+      state.z += nz * minOverlap * horiz;
+      state.y += minOverlap * (1 - horiz * (1 - ny * ny)) / ny;
+      if (ny > 0) {
+        // 玩家在坡面之上：算着地，清掉向下速度（否则重力会逐帧累加，导致每帧更深地嵌入）
+        if (this.velocity.y < 0) this.velocity.y = 0;
+        state.onGround = true;
+      } else if (this.velocity.y > 0) {
+        // 玩家在坡面之下（顶到坡的底面）：挡回向上速度
+        this.velocity.y = 0;
+      }
+      return;
+    }
+
+    // 其余情况（墙面 / 陡面 / 深穿透）：沿最小穿透轴把玩家推出凸包，保持原有行为
     state.x += minAxis.x * minOverlap * dir;
     state.y += minAxis.y * minOverlap * dir;
     state.z += minAxis.z * minOverlap * dir;
+  }
+
+  // ---- 地面吸附（ground snap）----
+  // 玩家仍处于着地状态（且不在上升）时，在脚底下方 GROUND_SNAP_DISTANCE 范围内找「最高的可站立地面」，
+  // 把玩家沿竖直方向吸附到该地面高度：上坡时 y 跟着坡面抬升、下坡时 y 跟着坡面下降（不掉空、不微跳），
+  // 停坡时每帧的微小嵌入被竖直补齐而不是被水平推出，因此不会持续下滑。
+  // 只做竖直修正、绝不产生水平位移；且只在「地面位于脚底之下」时生效，所以不会顺着吸附爬台阶/爬墙。
+  // 可站立地面 = 平地(y=0) / 盒与绕 Y 旋转盒的顶面 / 凸包上法线竖直分量达阈值的面（含斜面）。
+  _snapToGround(state, colliders) {
+    if (this.velocity.y > 0) return; // 上升（跳跃）中不吸附
+    if (!state.onGround) return; // 空中不吸附，正常下落交给碰撞解析
+
+    const pr = Config.PLAYER_RADIUS;
+    const feet = state.y - Config.PLAYER_HEIGHT; // 脚底高度
+    const snap = Config.GROUND_SNAP_DISTANCE;
+
+    // 候选地面高度：取脚底及其以下（含极小容差）中最高的一个
+    let best = feet + 1e-4 >= 0 ? 0 : -Infinity; // 平地（y = 0）
+    for (const b of colliders) {
+      let y = null;
+      if (b.type === 'convex') {
+        // 粗筛：凸包整体都在脚底之上、或最高点已经低于吸附范围时，不可能成为支撑面
+        if (b.minY !== undefined && b.minY > feet + 1e-4) continue;
+        if (b.maxY !== undefined && b.maxY < feet - snap) continue;
+        y = this._convexStandHeight(b, state.x, state.z, pr);
+      } else if (this._overFootprint(state.x, state.z, pr, b)) {
+        y = b.cy + b.hy; // 盒顶面（绕 Y 旋转不改变顶面高度）
+      }
+      if (y === null || y > feet + 1e-4) continue; // 面在脚底之上：不吸附（交给碰撞解析）
+      if (y > best) best = y;
+    }
+
+    if (best === -Infinity) return;
+    if (feet - best > snap) return; // 地面太远，说明已离开地面（正常下落）
+
+    state.y = best + Config.PLAYER_HEIGHT;
+    if (this.velocity.y < 0) this.velocity.y = 0;
+    state.onGround = true;
+  }
+
+  // 求凸包在 (x,z) 处「可站立面」的接触高度（没有可站立面则返回 null）。
+  // 与 _resolveConvex 的推出约定保持一致：以玩家 AABB 脚底角点中沿坡面法线最低者刚触面为准，
+  // 故接触高度 = 该面在 (x,z) 的平面高度 + pr*(|nx|+|nz|)/ny（面越斜，这一补偿越大）。
+  // 两者用同一约定，才不会出现「解析抬一点、吸附压一点」的来回抖动。
+  _convexStandHeight(b, x, z, pr) {
+    const V = b.vertices;
+    const F = b.faces;
+    if (!Array.isArray(V) || !Array.isArray(F)) return null;
+    const minNy = Config.SLOPE_MAX_NORMAL_Y;
+    let best = null;
+    for (let i = 0; i + 2 < F.length; i += 3) {
+      const i0 = F[i] * 3, i1 = F[i + 1] * 3, i2 = F[i + 2] * 3;
+      // 三角面法线 = 两边叉乘后归一化
+      const eax = V[i1] - V[i0], eay = V[i1 + 1] - V[i0 + 1], eaz = V[i1 + 2] - V[i0 + 2];
+      const ebx = V[i2] - V[i0], eby = V[i2 + 1] - V[i0 + 1], ebz = V[i2 + 2] - V[i0 + 2];
+      let nx = eay * ebz - eaz * eby;
+      let ny = eaz * ebx - eax * ebz;
+      let nz = eax * eby - eay * ebx;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len < 1e-9) continue;
+      nx /= len; ny /= len; nz /= len;
+      if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; } // 统一朝上，便于按平面求高度
+      if (ny < minNy) continue; // 陡面 / 竖直面：不可站立，按墙处理
+      // 面所在平面 n·p = d，再求 (x,z) 处的高度并做「脚底角点触面」补偿
+      const d = nx * V[i0] + ny * V[i0 + 1] + nz * V[i0 + 2];
+      const h = (d - nx * x - nz * z + pr * (Math.abs(nx) + Math.abs(nz))) / ny;
+      if (best !== null && h <= best) continue; // 已有更高的可站面
+      // 只在 (x,z) 落在该三角面的 XZ 投影内时才有效（否则是外推出来的假地面）
+      if (!this._pointInTriXZ(x, z, V[i0], V[i0 + 2], V[i1], V[i1 + 2], V[i2], V[i2 + 2])) continue;
+      best = h;
+    }
+    return best;
+  }
+
+  // (x,z) 是否落在三角形 (ax,az)/(bx,bz)/(cx,cz) 的 XZ 投影内（含边界，同号判定）
+  _pointInTriXZ(x, z, ax, az, bx, bz, cx, cz) {
+    const d1 = (x - bx) * (az - bz) - (z - bz) * (ax - bx);
+    const d2 = (x - cx) * (bz - cz) - (z - cz) * (bx - cx);
+    const d3 = (x - ax) * (cz - az) - (z - az) * (cx - ax);
+    const neg = d1 < -1e-9 || d2 < -1e-9 || d3 < -1e-9;
+    const pos = d1 > 1e-9 || d2 > 1e-9 || d3 > 1e-9;
+    return !(neg && pos);
+  }
+
+  // 玩家水平正方形（半宽 pr）是否与盒（AABB / 绕 Y 旋转的 OBB）的顶面投影相交。
+  // 用于判断脚下这块盒顶能否作为吸附地面（仅高度判断，不做穿透解析）。
+  _overFootprint(x, z, pr, b) {
+    const dx = x - b.cx, dz = z - b.cz;
+    const theta = b.rotY || 0;
+    if (theta === 0) {
+      return Math.abs(dx) <= b.hx + pr && Math.abs(dz) <= b.hz + pr;
+    }
+    // 把偏移投影到盒本地 X / Z 轴（本地 +X = (cos,-sin)，本地 +Z = (sin,cos)），按玩家半径做圆近似
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    const lu = dx * cos - dz * sin;
+    const lw = dx * sin + dz * cos;
+    return Math.abs(lu) <= b.hx + pr && Math.abs(lw) <= b.hz + pr;
   }
 }
