@@ -90,6 +90,9 @@ export function createEditor() {
   const sun = new THREE.DirectionalLight(0xffffff, DEFAULT_SETTINGS.sun);
   sun.castShadow = true;
   sun.shadow.mapSize.set(DEFAULT_SETTINGS.shadowSize, DEFAULT_SETTINGS.shadowSize);
+  // 阴影痤疮修复：bias 轻微下压深度，normalBias 沿法线推开采样点，消除平面上的「一条一条」条纹
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 1.0;
   const SHADOW_R = DEFAULT_SETTINGS.shadowR; // 阴影覆盖半宽（以 sunTarget 为中心，范围跟视距）
   sun.shadow.camera.left = -SHADOW_R;
   sun.shadow.camera.right = SHADOW_R;

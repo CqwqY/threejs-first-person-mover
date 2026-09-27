@@ -25,6 +25,9 @@ export function createLights() {
   const directional = new THREE.DirectionalLight(0xffffff, DEFAULT_SETTINGS.sun);
   directional.castShadow = true;
   directional.shadow.mapSize.set(DEFAULT_SETTINGS.shadowSize, DEFAULT_SETTINGS.shadowSize);
+  // 阴影痤疮修复：bias 轻微下压深度，normalBias 沿法线推开采样点，消除平面上的「一条一条」条纹
+  directional.shadow.bias = -0.0004;
+  directional.shadow.normalBias = 1.0;
   const R = DEFAULT_SETTINGS.shadowR; // 阴影覆盖半宽（以 sunTarget 为中心）
   directional.shadow.camera.left = -R;
   directional.shadow.camera.right = R;
