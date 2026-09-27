@@ -12,7 +12,7 @@ import { instantiate } from '../world/AssetLoader.js';
 import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
-import { createSky } from '../world/SkyBox.js';
+import { attachSky } from '../world/SkyBox.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -69,7 +69,7 @@ export function createEditor() {
   renderer.setSize(w0, h0);
 
   const scene = new THREE.Scene();
-  createSky(scene); // 程序化天空盒
+  attachSky(scene); // 城市天空贴图（优先）→ 程序化天空兜底
 
   const camera = new THREE.PerspectiveCamera(55, w0 / h0, 0.1, 500);
   camera.position.set(32, 24, 32);
@@ -77,16 +77,23 @@ export function createEditor() {
 
   // 灯光
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  // 阴影跟随相机：阳光的阴影相机始终以 sunTarget 为中心，每帧把 sunTarget 挪到相机附近，
+  // 这样近处模型和地面都能收到清晰投射，远处自然淡出，性能也更可控。
+  const sunTarget = new THREE.Object3D();
+  scene.add(sunTarget);
+  const sunOffset = new THREE.Vector3(30, 40, 20); // 阳光相对 target 的固定偏移（保持整体光向不变）
   const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-  sun.position.set(30, 40, 20);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
-  sun.shadow.camera.left = -40;
-  sun.shadow.camera.right = 40;
-  sun.shadow.camera.top = 40;
-  sun.shadow.camera.bottom = -40;
-  sun.shadow.camera.near = 1;
+  sun.shadow.mapSize.set(2048, 2048);
+  const SHADOW_R = 28; // 阴影覆盖半宽（以 sunTarget 为中心）
+  sun.shadow.camera.left = -SHADOW_R;
+  sun.shadow.camera.right = SHADOW_R;
+  sun.shadow.camera.top = SHADOW_R;
+  sun.shadow.camera.bottom = -SHADOW_R;
+  sun.shadow.camera.near = 0.5;
   sun.shadow.camera.far = 120;
+  sun.target = sunTarget; // 方向光朝向跟随目标，阴影随其框
+  sun.position.copy(sunTarget.position).add(sunOffset);
   scene.add(sun);
 
   // 底景与游戏景物：由 adoptGameScenery() 里 buildScenery 统一构建（地形/道路/墙体 + 道具）
@@ -1592,6 +1599,10 @@ export function createEditor() {
     applyWASDMove(Math.min((t - _t0) / 1000, 0.1));
     _t0 = t;
     controls.update();
+    // 阴影跟随相机：target 挪到相机脚下的地面，阳光随其相对偏移平移，保持光向不变
+    sunTarget.position.set(camera.position.x, 0, camera.position.z);
+    sun.position.copy(sunTarget.position).add(sunOffset);
+    sunTarget.updateMatrixWorld();
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(loop);
   }

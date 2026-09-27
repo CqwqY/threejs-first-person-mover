@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { createSky } from '../world/SkyBox.js';
+import { attachSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
@@ -29,13 +29,15 @@ export class Game {
     // ---- 渲染器 ----
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     document.getElementById('app').appendChild(this.renderer.domElement);
 
     // ---- 场景与相机 ----
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，天空盒覆盖其上）
-    createSky(this.scene); // 程序化天空盒
+    this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，贴图/天空盒覆盖其上）
+    attachSky(this.scene); // 城市天空贴图（优先）→ 程序化天空兜底
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
@@ -43,8 +45,12 @@ export class Game {
 
     // ---- 静态世界（地面/道路/墙体 + 道具），返回统一的可编辑根列表 ----
     const roots = buildScenery(this.scene);
-    // 灯光单独挂载（不作为可编辑景物）
-    this.scene.add(createLights());
+    // 灯光单独挂载（不作为可编辑景物）；阴影聚焦目标随玩家移动
+    const lights = createLights();
+    this.scene.add(lights.group);
+    this._sunTarget = lights.sunTarget;
+    this._sunOffset = lights.offset;
+    this._sun = lights.sun;
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
@@ -217,6 +223,12 @@ export class Game {
     } else {
       this.playerManager.setLocalVisible(false);
     }
+
+    // ---- 5.2 阴影跟随玩家：target 挪到玩家脚下，阳光随相对偏移平移，保持光向不变 ----
+    const st = this._sunTarget;
+    st.position.set(this.localState.x, 0, this.localState.z);
+    this._sun.position.copy(st.position).add(this._sunOffset);
+    st.updateMatrixWorld();
 
     // 上报本地状态（内部按 20Hz 节流）
     this.network.sendState(this.localState.toJSON());
