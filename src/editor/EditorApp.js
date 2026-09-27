@@ -1199,7 +1199,9 @@ export function createEditor() {
     renderColliderList(rec);
     outlinerUpdate();
     markDirty();
-    StepUI.cGridInfo.textContent = '盒 ' + res.boxes.length + ' / 凸包 ' + res.hulls.length + ' / 跳过 ' + res.skipped;
+    const none = (res.diag || []).filter((d) => !d.boxes && !d.hulls);
+    StepUI.cGridInfo.textContent = '盒 ' + res.boxes.length + ' / 凸包 ' + res.hulls.length + ' / 跳过 ' + res.skipped
+      + (none.length ? ' / 未产出 ' + none.length + ' 个 mesh（详见控制台）' : '');
     StepUI.cGridInfo.style.display = 'inline';
   }
 

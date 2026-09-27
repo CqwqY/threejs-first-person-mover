@@ -251,44 +251,77 @@ export async function generateSimple(object3D, opts = {}) {
     else if (failed) skipped++;
   };
 
+  // 诊断：逐 mesh 记录处理结果。用于定位「某个构件（如地板/天花板）有厚度却没生成」的原因——
+  // 不可见 / 无 position 属性 / 无 primitive 范围 这类静默跳过此前不计数，肉眼看不出来。
+  const diag = [];
   object3D.traverse((o) => {
     if (!o.isMesh || !o.geometry) return;
-    if (!o.geometry.attributes.position) return;
-    if (!isVisible(o)) return;
-    if (inColliderVis(o)) return; // 跳过上一次生成的碰撞体可视化产物
-
-    mtx.multiplyMatrices(inv, o.matrixWorld);
-    const ranges = primitiveRanges(o.geometry);
-    if (!ranges.length) return;
-
-    // ---- 先整体判定：整个 mesh 就是一个轴对齐盒 ----
-    // 必要：three 的 BoxGeometry 等会把一个盒子按面拆成 6 个 group，
-    // 若只按 group 抽，盒子会退化成 6 张零厚度薄片。整体判定可避免这种退化。
-    pts.length = 0;
-    seen.clear();
-    collectPoints(o.geometry, 0, Infinity, mtx, pts, seen);
-    if (pts.length >= 4) {
-      aabbOf(pts);
-      const wholeBox = boxFromPoints(pts, min, max);
-      if (wholeBox) { boxes.push(toBox(wholeBox)); return; }
-      // 整体就是一块水平薄板（地板/天花板/楼板）→ 补厚成实心板
-      const wholeSlab = slabFromPoints(pts, min, max);
-      if (wholeSlab) { boxes.push(toBox(wholeSlab)); return; }
-    }
-
-    // ---- 再逐 primitive（group）抽取 ----
-    for (const r of ranges) {
-      if (ranges.length > 1) {
+    const nm = o.name || '(未命名)';
+    const nBox0 = boxes.length, nHull0 = hulls.length, nSkip0 = skipped;
+    let note = '';
+    if (!o.geometry.attributes.position) {
+      note = '无 position 属性';
+    } else if (!isVisible(o)) {
+      note = '不可见（自身或父级 visible=false）';
+    } else if (inColliderVis(o)) {
+      return; // 上一次生成的碰撞体可视化产物，按设计忽略，不诊断
+    } else {
+      mtx.multiplyMatrices(inv, o.matrixWorld);
+      const ranges = primitiveRanges(o.geometry);
+      if (!ranges.length) {
+        note = '无可用的 primitive 范围';
+      } else {
+        // ---- 先整体判定：整个 mesh 就是一个轴对齐盒 ----
+        // 必要：three 的 BoxGeometry 等会把一个盒子按面拆成 6 个 group，
+        // 若只按 group 抽，盒子会退化成 6 张零厚度薄片。整体判定可避免这种退化。
         pts.length = 0;
         seen.clear();
-        collectPoints(o.geometry, r.start, r.count, mtx, pts, seen);
+        collectPoints(o.geometry, 0, Infinity, mtx, pts, seen);
+        const wholeVerts = pts.length;
+        if (pts.length >= 4) {
+          aabbOf(pts);
+          const wholeBox = boxFromPoints(pts, min, max);
+          if (wholeBox) {
+            boxes.push(toBox(wholeBox));
+          } else {
+            // 整体就是一块水平薄板（地板/天花板/楼板）→ 补厚成实心板
+            const wholeSlab = slabFromPoints(pts, min, max);
+            if (wholeSlab) boxes.push(toBox(wholeSlab));
+          }
+        }
+        // ---- 整体没产出结果时，再逐 primitive（group）抽取 ----
+        if (boxes.length === nBox0) {
+          for (const r of ranges) {
+            if (ranges.length > 1) {
+              pts.length = 0;
+              seen.clear();
+              collectPoints(o.geometry, r.start, r.count, mtx, pts, seen);
+            }
+            if (pts.length < 4) { skipped++; continue; } // 面片/点线：构不成立体
+            emitPrimitive();
+          }
+        }
+        if (note === '' && wholeVerts < 4) note = '唯一顶点不足 4（退化面片）';
+        if (note === '' && boxes.length === nBox0 && hulls.length === nHull0) {
+          note = skipped > nSkip0 ? '凸包退化或超出安全上限（已计入跳过）' : '未产出';
+        }
       }
-      if (pts.length < 4) { skipped++; continue; } // 面片/点线：构不成立体
-      emitPrimitive();
     }
+    diag.push({
+      name: nm,
+      boxes: boxes.length - nBox0,
+      hulls: hulls.length - nHull0,
+      skipped: skipped - nSkip0,
+      note,
+    });
   });
+  if (diag.length) {
+    console.groupCollapsed('[simpleGen] 逐 mesh 处理结果（共 ' + diag.length + ' 个 mesh）');
+    console.table(diag);
+    console.groupEnd();
+  }
 
   // ---- 保守共面合并（只减少盒数量，不改变体积）----
   const finalBoxes = doMerge ? mergeAdjacentBoxes(boxes) : boxes;
-  return { boxes: finalBoxes, hulls, skipped };
+  return { boxes: finalBoxes, hulls, skipped, diag };
 }
