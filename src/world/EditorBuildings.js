@@ -144,9 +144,13 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
 
       // 含非 Y 分量：展开 8 角点为世界凸包（物理侧走凸包 SAT）
       const verts = new Float64Array(24);
+      const _v = new THREE.Vector3();
       for (let i = 0; i < 8; i++) {
         const sx = (i & 4) ? 1 : -1, sy = (i & 2) ? 1 : -1, sz = (i & 1) ? 1 : -1;
-        _corner.set(ox + sx * hx, oy + sy * hy, oz + sz * hz).applyMatrix4(holder.matrixWorld);
+        // 先按盒四元数绕盒中心旋转，再加上盒偏移，最后经 holder 矩阵变换到世界
+        _v.set(sx * hx, sy * hy, sz * hz);
+        if (typeof cb.qw === 'number') _v.applyQuaternion(_q);
+        _corner.set(ox + _v.x, oy + _v.y, oz + _v.z).applyMatrix4(holder.matrixWorld);
         verts[i * 3] = _corner.x; verts[i * 3 + 1] = _corner.y; verts[i * 3 + 2] = _corner.z;
       }
       let minY = Infinity, maxY = -Infinity;

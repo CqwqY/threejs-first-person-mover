@@ -9,6 +9,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { ConvexMeshDecomposition } from 'vhacd-js';
 import { instantiate } from '../world/AssetLoader.js';
+import { generateSimple } from '../world/collision/simpleGen.js';
 import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
@@ -225,6 +226,11 @@ export function createEditor() {
     cMultiInfo: document.getElementById('cMultiInfo'),
     cHullBtn: document.getElementById('cHullBtn'),
     cHullInfo: document.getElementById('cHullInfo'),
+    cMode: document.getElementById('cMode'),
+    cSimpleArea: document.getElementById('cSimpleArea'),
+    cGridBtn: document.getElementById('cGridBtn'),
+    cGridInfo: document.getElementById('cGridInfo'),
+    cList: document.getElementById('cList'),
   };
 
   // ---------- 可编辑对象：游戏景物 + 地形/道路/墙体 ----------
@@ -315,7 +321,7 @@ export function createEditor() {
       id: nextId(), kind: state.imported.some((it) => it.url === state.currentUrl) ? 'import' : 'builtin',
       name: state.currentLabel, url: state.currentUrl,
       x: gp ? gp.x : 0, y: 0, z: gp ? gp.z : 0, rotY: 0,
-      scale: { x: 1, y: 1, z: 1 }, collider: defaultCollider(), obj,
+      scale: { x: 1, y: 1, z: 1 }, collisionMode: 'simple', collider: defaultCollider(), obj,
     };
     obj.name = item.name;
     scene.add(obj);
@@ -334,34 +340,53 @@ export function createEditor() {
     m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   }
 
+  // 是否位于碰撞体可视化节点（collider-vis*）内部：这些橙色的体积盒/凸包是「可视化产物」，
+  // 不能当成模型参与任何几何抽取（否则会越生成越大）。
+  function underColliderVis(o) {
+    let p = o;
+    while (p) {
+      if (typeof p.name === 'string' && p.name.startsWith('collider-vis')) return true;
+      p = p.parent;
+    }
+    return false;
+  }
+
   // 重建选中对象的碰撞体线框（挂到对象本地空间，随模型变换/缩放）。
   // 支持两种形态：单盒 rec.collider（细线框）与多盒 rec.colliders（半透明体积+描边，共用一个父节点），可并存。
   function buildColliderVis(rec) {
     const holder = rec.obj;
     if (!holder) return;
-    // 统一的容器：collider-vis 内的子项会在重建时整体移除，作为父组件承载所有碰撞盒
-    let vis = holder.getObjectByName('collider-vis');
-    if (vis) { holder.remove(vis); vis = null; }
-    const makeWire = (hx, hy, hz, oy) => {
-      const box = new THREE.EdgesGeometry(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2));
+    // 统一的容器：collider-vis（含带后缀的改名节点）内的子项会在重建时整体移除
+    const stale = [];
+    holder.children.forEach((ch) => {
+      if (typeof ch.name === 'string' && ch.name.startsWith('collider-vis')) stale.push(ch);
+    });
+    stale.forEach((ch) => holder.remove(ch));
+    // 盒的可视化统一走这里：支持逐盒 ox/oy/oz 偏移与可选四元数（P1 新增字段），
+    // 没有 ox/oz/q 时退化为旧的「只有 oy 的轴对齐盒」行为。
+    const applyBoxXform = (obj, c) => {
+      obj.position.set(c.ox ?? 0, c.oy ?? 0, c.oz ?? 0);
+      if (typeof c.qw === 'number') obj.quaternion.set(c.qx ?? 0, c.qy ?? 0, c.qz ?? 0, c.qw).normalize();
+      return obj;
+    };
+    const makeWire = (c) => {
+      const box = new THREE.EdgesGeometry(new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2));
       const wire = new THREE.LineSegments(box, new THREE.LineBasicMaterial({ color: 0xff8c3d }));
-      wire.position.y = oy ?? 0;
-      return wire;
+      return applyBoxXform(wire, c);
     };
     // 半透明填充盒 + 描边：让多盒整体呈现为贴合模型的通透体积，结构清晰
-    const makeVolume = (hx, hy, hz, oy) => {
+    const makeVolume = (c) => {
       const g = new THREE.Group();
       const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
+        new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2),
         new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false })
       );
       const wire = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2)),
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2)),
         new THREE.LineBasicMaterial({ color: 0xff8c3d })
       );
       g.add(mesh); g.add(wire);
-      g.position.y = oy ?? 0;
-      return g;
+      return applyBoxXform(g, c);
     };
     const makeConvex = (hull) => {
       const bg = new THREE.BufferGeometry();
@@ -376,23 +401,29 @@ export function createEditor() {
     const boxen = [];
     const multi = Array.isArray(rec.colliders) && rec.colliders.length;
     const parts = Array.isArray(rec.convexParts) && rec.convexParts.length;
-    // 多凸包(V-HACD)优先；次单凸包；再轴对齐多盒；最后单盒
+    const singleHull = !!(rec.convex && Array.isArray(rec.convex.vertices) && Array.isArray(rec.convex.faces) && rec.convex.faces.length >= 3);
+    // 盒与凸包可以并存（simple 逐网格生成会同时产出两类），两类都画；
+    // 旧数据（V-HACD 只有凸分解 / 只有单盒）行为不变。
+    if (multi) {
+      for (const c of rec.colliders) boxen.push(makeVolume(c));
+    }
     if (parts) {
       for (const h of rec.convexParts) boxen.push(makeConvex(h));
-    } else if (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3) {
+    } else if (singleHull) {
       boxen.push(makeConvex(rec.convex));
-    } else if (multi) {
-      for (const c of rec.colliders) boxen.push(makeVolume(c.hx, c.hy, c.hz, c.oy));
-    } else {
+    }
+    if (!multi && !parts && !singleHull) {
       const c = rec.collider;
       if (!c || !c.enabled) return;
-      boxen.push(makeWire(c.hx, c.hy, c.hz, c.oy));
+      boxen.push(makeWire(c));
     }
     let name = 'collider-vis';
-    if (parts) { let t = 0; rec.convexParts.forEach((h) => t += h.faces.length / 3); name = 'collider-vis（凸分解 ' + rec.convexParts.length + ' 段 / ' + t + ' 面）'; }
-    else if (rec.convex && rec.convex.vertices && rec.convex.faces.length >= 3) name = 'collider-vis（凸包 ' + (rec.convex.faces.length / 3) + ' 面）';
-    else if (multi) name = 'collider-vis（多盒 ' + boxen.length + '）';
-    vis = new THREE.Group();
+    const tag = [];
+    if (parts) tag.push('凸分解 ' + rec.convexParts.length + ' 段');
+    else if (singleHull) tag.push('凸包 ' + (rec.convex.faces.length / 3) + ' 面');
+    if (multi) tag.push('多盒 ' + rec.colliders.length);
+    if (tag.length) name = 'collider-vis（' + tag.join(' / ') + '）';
+    const vis = new THREE.Group();
     vis.name = name;
     boxen.forEach((w) => vis.add(w));
     holder.add(vis);
@@ -409,6 +440,7 @@ export function createEditor() {
     const inv = new THREE.Matrix4().copy(holder.matrixWorld).invert();
     holder.traverse((o) => {
       if (!o.isMesh || !o.geometry) return;
+      if (underColliderVis(o)) return; // 跳过碰撞体可视化产物
       o.geometry.computeBoundingBox();
       const gb = o.geometry.boundingBox;
       if (!gb) return;
@@ -441,6 +473,7 @@ export function createEditor() {
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
     holder.traverse((o) => {
       if (!o.isMesh || !o.geometry) return;
+      if (underColliderVis(o)) return; // 跳过碰撞体可视化产物
       const geo = o.geometry;
       const pos = geo.attributes.position;
       if (!pos) return;
@@ -640,6 +673,7 @@ export function createEditor() {
     const v = new THREE.Vector3();
     holder.traverse((o) => {
       if (!o.isMesh || !o.geometry) return;
+      if (underColliderVis(o)) return; // 跳过碰撞体可视化产物
       const pos = o.geometry.attributes.position;
       if (!pos) return;
       t.multiplyMatrices(inv, o.matrixWorld);
@@ -731,6 +765,7 @@ export function createEditor() {
     const v = new THREE.Vector3();
     holder.traverse((o) => {
       if (!o.isMesh || !o.geometry) return;
+      if (underColliderVis(o)) return; // 跳过碰撞体可视化产物
       const pos = o.geometry.attributes.position;
       if (!pos) return;
       const mtx = new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld);
@@ -800,7 +835,7 @@ export function createEditor() {
     const rec = {
       id: nextId(), kind: 'empty', name: '空碰撞体',
       url: null, x, y: 0, z, rotY: 0,
-      scale: { x: 1, y: 1, z: 1 }, collider, obj,
+      scale: { x: 1, y: 1, z: 1 }, collisionMode: 'simple', collider, obj,
     };
     obj.name = 'collider-root';
     obj.position.set(x, 0, z);
@@ -817,11 +852,12 @@ export function createEditor() {
   function duplicateRec(rec, selectIt = false) {
     const obj = new THREE.Group();
     (rec.obj ? rec.obj.children : []).forEach((ch) => {
-      if (ch.name === 'collider-vis') return; // 线框稍后按 collider 重建
+      if (typeof ch.name === 'string' && ch.name.startsWith('collider-vis')) return; // 线框稍后按 collider 重建
       obj.add(ch.clone(true));
     });
     const copy = {
       id: nextId(), kind: rec.kind, name: rec.name, url: rec.url,
+      collisionMode: rec.collisionMode === 'complex' ? 'complex' : 'simple',
       x: rec.x ?? rec.obj.position.x,
       y: rec.y ?? rec.obj.position.y,
       z: rec.z ?? rec.obj.position.z,
@@ -954,6 +990,7 @@ export function createEditor() {
     if (!rec) {
       ['pX', 'pZ', 'pY'].forEach((id) => { document.getElementById(id).value = ''; });
       StepUI.pRot.value = 0; StepUI.pScale.value = 1;
+      syncColliderUI(null); // 未选中时收起碰撞体面板并清空碰撞体列表
       return;
     }
     StepUI.pX.value = Math.round((rec.x ?? rec.obj.position.x) * 100) / 100;
@@ -990,10 +1027,21 @@ export function createEditor() {
   bindProp('pScale', (rec, v) => { rec.scale = { x: v, y: v, z: v }; });
 
   // ---------- 碰撞体面板（仅对用户放置对象显示） ----------
+  // simple / complex 两种碰撞复杂度（对齐 UE）：simple 用编辑器生成的盒/凸包；complex 由运行时从渲染网格烘焙。
+  function isComplex(rec) { return !!rec && rec.collisionMode === 'complex'; }
+  // 模式相关的 UI：complex 时收起所有 simple 专属的生成/手工盒控件
+  function applyModeUI(rec) {
+    const complex = isComplex(rec);
+    if (StepUI.cMode) StepUI.cMode.value = complex ? 'complex' : 'simple';
+    if (StepUI.cSimpleArea) StepUI.cSimpleArea.style.display = complex ? 'none' : 'block';
+  }
+
   function syncColliderUI(rec) {
     const canEdit = rec && rec.kind !== 'scenery';
     StepUI.colliderPanel.style.display = canEdit ? 'block' : 'none';
-    if (!canEdit) return;
+    // 切换选中对象时清掉上一个对象残留的生成信息
+    if (StepUI.cGridInfo) StepUI.cGridInfo.style.display = 'none';
+    if (!canEdit) { renderColliderList(null); return; }
     if (!rec.collider) rec.collider = defaultCollider();
     const c = rec.collider;
     StepUI.cEn.checked = !!c.enabled;
@@ -1001,7 +1049,126 @@ export function createEditor() {
     StepUI.cHy.value = c.hy;
     StepUI.cHz.value = c.hz;
     StepUI.cOy.value = c.oy;
+    applyModeUI(rec);
+    renderColliderList(rec);
   }
+
+  // 碰撞体列表：分类显示当前选中对象的碰撞体（盒 / 凸包），每项可单独删除。
+  // 删除后立即重建可视化并标记未保存，避免「生成了却删不掉」。
+  function renderColliderList(rec) {
+    const wrap = StepUI.cList;
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!rec || rec.kind === 'scenery') return;
+
+    const refresh = () => {
+      buildColliderVis(rec);
+      renderColliderList(rec);
+      markDirty();
+    };
+    const addGroup = (title) => {
+      const h = document.createElement('div');
+      h.className = 'cgroup';
+      h.textContent = title;
+      wrap.appendChild(h);
+    };
+    const addItem = (text, onDel) => {
+      const li = document.createElement('div');
+      li.className = 'citem';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = text;
+      li.appendChild(nm);
+      const del = document.createElement('span');
+      del.className = 'del';
+      del.textContent = '✕';
+      del.title = '删除该碰撞体';
+      del.onclick = (e) => { e.stopPropagation(); onDel(); };
+      li.appendChild(del);
+      wrap.appendChild(li);
+    };
+
+    const boxes = Array.isArray(rec.colliders) ? rec.colliders : [];
+    const hulls = Array.isArray(rec.convexParts) ? rec.convexParts : [];
+    const singleHull = (rec.convex && Array.isArray(rec.convex.vertices) && Array.isArray(rec.convex.faces) && rec.convex.faces.length >= 3) ? rec.convex : null;
+    const single = rec.collider;
+    const boxCount = boxes.length || ((single && single.enabled !== false) ? 1 : 0);
+    const hullCount = hulls.length || (singleHull ? 1 : 0);
+    if (!boxCount && !hullCount) return;
+
+    if (boxCount) {
+      addGroup('盒（' + boxCount + '）');
+      if (boxes.length) {
+        boxes.forEach((b, i) => {
+          const size = (b.hx * 2).toFixed(2) + '×' + (b.hy * 2).toFixed(2) + '×' + (b.hz * 2).toFixed(2);
+          const pos = '中心 ('
+            + (b.ox ?? 0).toFixed(2) + ', ' + (b.oy ?? 0).toFixed(2) + ', ' + (b.oz ?? 0).toFixed(2) + ')';
+          addItem('盒 ' + (i + 1) + ' · ' + size + ' m · ' + pos, () => {
+            rec.colliders.splice(i, 1);
+            if (!rec.colliders.length) rec.colliders = null;
+            refresh();
+          });
+        });
+      } else {
+        const size = (single.hx * 2).toFixed(2) + '×' + (single.hy * 2).toFixed(2) + '×' + (single.hz * 2).toFixed(2);
+        addItem('单盒 · ' + size + ' m · 中心 (0.00, ' + (single.oy ?? 0).toFixed(2) + ', 0.00)', () => {
+          single.enabled = false;
+          StepUI.cEn.checked = false;
+          refresh();
+        });
+      }
+    }
+    if (hullCount) {
+      addGroup('凸包（' + hullCount + '）');
+      if (hulls.length) {
+        hulls.forEach((h, i) => {
+          const tri = Math.floor(h.faces.length / 3);
+          const vn = Math.floor(h.vertices.length / 3);
+          addItem('凸包 ' + (i + 1) + ' · ' + tri + ' 面 / ' + vn + ' 点', () => {
+            rec.convexParts.splice(i, 1);
+            if (!rec.convexParts.length) rec.convexParts = null;
+            refresh();
+          });
+        });
+      } else {
+        addItem('凸包 · ' + Math.floor(singleHull.faces.length / 3) + ' 面', () => {
+          rec.convex = null;
+          refresh();
+        });
+      }
+    }
+  }
+
+  // 「按网格生成（室内）」：逐 mesh/primitive 抽盒 + 凸包（不做体素填充，保留中庭/天井/房间）
+  async function buildGridColliders(rec) {
+    let res;
+    try {
+      res = await generateSimple(rec.obj);
+    } catch (err) {
+      console.error(err);
+      StepUI.cGridInfo.textContent = '生成失败：' + (err && err.message ? err.message : err);
+      StepUI.cGridInfo.style.display = 'inline';
+      return;
+    }
+    if (!res.boxes.length && !res.hulls.length) {
+      StepUI.cGridInfo.textContent = '该对象暂无可用网格（模型可能仍在加载，或这是一个空碰撞体）';
+      StepUI.cGridInfo.style.display = 'inline';
+      return;
+    }
+    // 写入生成结果，并关闭旧的碰撞字段，避免同一次摆放上出现两套重复阻挡
+    rec.colliders = res.boxes.length ? res.boxes : null;
+    rec.convexParts = res.hulls.length ? res.hulls : null;
+    if (rec.collider) rec.collider.enabled = false;
+    rec.convex = null;
+    buildColliderVis(rec);
+    if (state.selected === rec) { syncColliderUI(rec); }
+    renderColliderList(rec);
+    outlinerUpdate();
+    markDirty();
+    StepUI.cGridInfo.textContent = '盒 ' + res.boxes.length + ' / 凸包 ' + res.hulls.length + ' / 跳过 ' + res.skipped;
+    StepUI.cGridInfo.style.display = 'inline';
+  }
+
   function readColliderFields() {
     if (!state.selected || !state.selected.collider) return;
     const c = state.selected.collider;
@@ -1046,6 +1213,28 @@ export function createEditor() {
       StepUI.cHullInfo.style.display = 'inline';
       console.error(err);
     }
+  };
+
+  // 碰撞模式下拉：simple（编辑器生成盒/凸包，默认）/ complex（运行时从渲染网格烘焙，编辑器零存储）
+  StepUI.cMode.onchange = () => {
+    if (!state.selected) {
+      applyModeUI(null);
+      return;
+    }
+    const rec = state.selected;
+    rec.collisionMode = StepUI.cMode.value === 'complex' ? 'complex' : 'simple';
+    applyModeUI(rec);
+    markDirty();
+  };
+
+  // 「按网格生成（室内）」：对选中对象逐 mesh/primitive 抽碰撞体
+  StepUI.cGridBtn.onclick = () => {
+    if (!state.selected) {
+      StepUI.cGridInfo.textContent = '请先选中一个模型再点「按网格生成（室内）」';
+      StepUI.cGridInfo.style.display = 'inline';
+      return;
+    }
+    buildGridColliders(state.selected);
   };
 
   // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
@@ -1134,6 +1323,7 @@ export function createEditor() {
           z: rec.z ?? rec.obj.position.z,
           rotY: rec.rotY ?? 0,
           scale: { x: s.x, y: s.y, z: s.z },
+          collisionMode: rec.collisionMode === 'complex' ? 'complex' : 'simple',
           collider: rec.collider ? { ...rec.collider } : null,
           colliders: Array.isArray(rec.colliders) && rec.colliders.length ? rec.colliders.map((c) => ({ ...c })) : null,
           convex: (rec.convex && Array.isArray(rec.convex.vertices) && rec.convex.faces.length >= 3)
@@ -1196,6 +1386,7 @@ export function createEditor() {
         id, kind: it.kind, name: nm, url: it.url,
         x: it.x, y: it.y, z: it.z, rotY: it.rotY,
         scale: it.scale ? { ...normScale(it.scale) } : { x: 1, y: 1, z: 1 },
+        collisionMode: it.collisionMode === 'complex' ? 'complex' : 'simple',
         collider: it.collider ? { enabled: it.collider.enabled !== false, hx: it.collider.hx, hy: it.collider.hy, hz: it.collider.hz, oy: it.collider.oy } : defaultCollider(),
         colliders: Array.isArray(it.colliders) && it.colliders.length ? it.colliders.map((c) => ({ ...c })) : null,
         convex: (it.convex && Array.isArray(it.convex.vertices) && it.convex.faces.length >= 3)
