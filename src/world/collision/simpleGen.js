@@ -65,6 +65,23 @@ function primitiveRanges(geo) {
   return total > 0 ? [{ start: 0, count: total }] : [];
 }
 
+// 极薄水平面（地板 / 天花板 / 楼板）补厚：
+// 室内模型的地板/天花板/楼板常是「零厚度单面」，boxFromPoints 会因某一轴≈0 判为非盒，
+// 结果退化成零厚度凸包 —— 物理上无法稳定着地、也无法可靠挡住跳跃。
+// 这里对水平薄面补一个最小厚度，使其成为有厚度的实心板。板体以原平面为中心对称加厚，
+// 因此地板/天花板角色不需要法线即可统一处理（上下各 1/2 厚度）。
+const MIN_SLAB_T = 0.12; // 水平薄板的最小厚度（米）
+function slabFromPoints(pts, min, max) {
+  const ex = max.x - min.x, ey = max.y - min.y, ez = max.z - min.z;
+  if (ey > 2 * EPS) return null; // 不是水平面（竖直墙面/斜面交给凸包）
+  if (ex < 0.2 || ez < 0.2) return null; // 太小的碎面不补，避免凭空多出小块
+  const t = MIN_SLAB_T / 2;
+  return {
+    hx: ex / 2, hy: t, hz: ez / 2,
+    ox: (min.x + max.x) / 2, oy: (min.y + max.y) / 2, oz: (min.z + max.z) / 2,
+  };
+}
+
 // 判断一组点是否恰好构成「轴对齐盒」：每个点都必须落在包围盒角点上，且 8 个角点齐全。
 // 这样既能认 8 顶点的盒子，也能认按面拆成 24/36 顶点的盒子（后者只需顶点全在角点上）。
 // 返回盒（本地空间半尺寸 + 中心）或 null。
@@ -219,6 +236,9 @@ export async function generateSimple(object3D, opts = {}) {
     aabbOf(pts);
     const b = boxFromPoints(pts, min, max);
     if (b) { boxes.push(toBox(b)); return; }
+    // 水平薄板补厚（地板/天花板/楼板），避免退化成零厚度凸包导致站不住/挡不住
+    const slab = slabFromPoints(pts, min, max);
+    if (slab) { boxes.push(toBox(slab)); return; }
     let failed = false;
     if (pts.length > maxHullVerts) {
       failed = true; // 超大 primitive 直接跳过，避免卡死（这里不跑重型 V-HACD）
@@ -251,6 +271,9 @@ export async function generateSimple(object3D, opts = {}) {
       aabbOf(pts);
       const wholeBox = boxFromPoints(pts, min, max);
       if (wholeBox) { boxes.push(toBox(wholeBox)); return; }
+      // 整体就是一块水平薄板（地板/天花板/楼板）→ 补厚成实心板
+      const wholeSlab = slabFromPoints(pts, min, max);
+      if (wholeSlab) { boxes.push(toBox(wholeSlab)); return; }
     }
 
     // ---- 再逐 primitive（group）抽取 ----
