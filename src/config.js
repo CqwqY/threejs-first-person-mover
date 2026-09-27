@@ -39,7 +39,8 @@ export const Config = {
   // 每个子步内去穿透（接触解析）的最大迭代次数：多面夹角（地板+墙）需要几轮才能收敛。
   TRIMESH_CONTACT_ITERATIONS: 6,
   // step-up 可自动跨上的最大台阶高度（米）：水平推进被竖直面挡住、抬升该高度后能继续走时自动上台阶。
-  TRIMESH_STEP_UP_HEIGHT: 0.35,
+  // 取约「角色高度的 1/3」：角色高 1.6m → 1.6 / 3 ≈ 0.53，低于此高度的矮墙/台阶自动迈上去。
+  TRIMESH_STEP_UP_HEIGHT: 0.53,
   // 3D 宽相位的 XZ 格子尺寸（米）：大合并网格里用均匀格子把候选三角形限制在玩家附近。
   TRIMESH_CELL_SIZE: 2.0,
   // 3D 宽相位的 Y 分层高度（米）：多层建筑的各层三角形按 Y 分桶，
@@ -52,7 +53,7 @@ export const Config = {
   // 手机触屏视角灵敏度：拖动像素到弧度的缩放（触屏拖动幅度通常大于鼠标位移，取更高值）
   TOUCH_SENSITIVITY: 0.014,
   // 玩家身高，也是相机离地高度（米）
-  PLAYER_HEIGHT: 1.5,
+  PLAYER_HEIGHT: 1.35,
   // 玩家碰撞半径（水平方向，用于边界限制）
   PLAYER_RADIUS: 0.4,
   // 地面尺寸（单位：米）。1 世界单位 = 1 米。宽沿 x，长沿 z。
