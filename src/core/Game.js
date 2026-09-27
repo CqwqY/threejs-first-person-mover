@@ -4,6 +4,7 @@ import { Config } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
+import { createSettingsPanel, createSettingsButton } from '../ui/SettingsPanel.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
@@ -51,6 +52,7 @@ export class Game {
     this._sunTarget = lights.sunTarget;
     this._sunOffset = lights.offset;
     this._sun = lights.sun;
+    this._ambient = lights.ambient; // 供画面面板绑定；游戏端不透出强度调整
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
@@ -103,6 +105,40 @@ export class Game {
 
     // ---- 窗口尺寸自适应 ----
     window.addEventListener('resize', () => this._onResize());
+
+    // ---- 画面设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
+    this.settingsPanel = createSettingsPanel(
+      {
+        viewFar: (v) => {
+          this.camera.far = v;
+          this.camera.updateProjectionMatrix();
+        },
+        shadowR: (v) => {
+          const cam = this._sun.shadow.camera;
+          cam.left = -v;
+          cam.right = v;
+          cam.top = v;
+          cam.bottom = -v;
+          cam.updateProjectionMatrix();
+        },
+        shadowSize: (v) => {
+          this._sun.shadow.mapSize.set(v, v);
+          if (this._sun.shadow.map) {
+            this._sun.shadow.map.dispose();
+            this._sun.shadow.map = null;
+          }
+        },
+        castShadow: (v) => {
+          this.renderer.shadowMap.enabled = !!v;
+          this._sun.castShadow = !!v;
+        },
+      },
+      {
+        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow'],
+        storeKey: 'scene-settings-game-v1',
+      }
+    );
+    createSettingsButton({ text: '画面', panel: this.settingsPanel });
   }
 
   // 窗口尺寸变化时更新相机纵横比和渲染器尺寸

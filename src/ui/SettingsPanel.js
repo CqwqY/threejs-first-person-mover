@@ -5,36 +5,39 @@
 // 每项是一个 (value) => void 的 setter，面板在初始化、改动、恢复默认时都会调用对应 setter 立即应用。
 
 export const DEFAULT_SETTINGS = {
-  ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）
-  sun: 1.4, // 阳光强度（提亮受光面）
-  shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心，跟视距）
+  ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）—— 仅编辑器可调
+  sun: 1.4, // 阳光强度（提亮受光面）—— 仅编辑器可调
+  viewFar: 500, // 视距（相机远裁剪面 / 绘制距离）
+  shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心，范围跟视距）
   shadowSize: 2048, // 阴影贴图边长
   castShadow: true, // 阴影总开关
 };
 
 const STORE_KEY = 'scene-settings-v1';
+const GAME_STORE_KEY = 'scene-settings-game-v1';
 
-export function loadSettings() {
+export function loadSettings(storeKey = STORE_KEY) {
   let saved = {};
   try {
-    saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {};
+    saved = JSON.parse(localStorage.getItem(storeKey) || '{}') || {};
   } catch {
     saved = {};
   }
   return { ...DEFAULT_SETTINGS, ...saved };
 }
 
-export function saveSettings(s) {
+export function saveSettings(s, storeKey = STORE_KEY) {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(s));
+    localStorage.setItem(storeKey, JSON.stringify(s));
   } catch {
     /* 忽略存储失败 */
   }
 }
 
 const FIELDS = [
-  { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01 },
-  { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05 },
+  { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01, editorOnly: true },
+  { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05, editorOnly: true },
+  { id: 'viewFar', label: '视距', kind: 'range', min: 200, max: 1000, step: 10 },
   { id: 'shadowR', label: '阴影范围', kind: 'range', min: 15, max: 120, step: 1 },
   {
     id: 'shadowSize',
@@ -94,9 +97,18 @@ function fmt(v) {
 //   binds = { [FieldId]: (value) => void }
 // 返回 { open, close, toggle, root, get() }。
 // open/close/toggle 控制浮层显隐；get() 返回当前设置对象。
-export function createSettingsPanel(binds) {
+// opts：{ storeKey?, fields? } —— storeKey 指定独立的持久化键；fields 限制只渲染哪些设置项。
+export function createSettingsPanel(binds, opts = {}) {
   injectStyle();
-  const settings = loadSettings();
+  const storeKey = opts.storeKey || STORE_KEY;
+  const include = Array.isArray(opts.fields) ? opts.fields : null;
+  const fields = include ? FIELDS.filter((f) => include.includes(f.id)) : FIELDS;
+
+  const loaded = loadSettings(storeKey);
+  const settings = {};
+  for (const f of fields) {
+    settings[f.id] = typeof loaded[f.id] !== 'undefined' ? loaded[f.id] : DEFAULT_SETTINGS[f.id];
+  }
 
   const root = document.createElement('div');
   root.className = 'gx-win hidden';
@@ -118,7 +130,7 @@ export function createSettingsPanel(binds) {
     if (el) el.textContent = fmt(settings[id]);
   };
 
-  for (const f of FIELDS) {
+  for (const f of fields) {
     const row = document.createElement('div');
     row.className = 'gx-field';
     if (f.kind === 'range') {
@@ -134,7 +146,7 @@ export function createSettingsPanel(binds) {
         settings[f.id] = parseFloat(input.value);
         renderValue(f.id);
         applyOne(f.id, settings[f.id]);
-        saveSettings(settings);
+        saveSettings(settings, storeKey);
       });
       row.appendChild(input);
       inputs[f.id] = input;
@@ -151,7 +163,7 @@ export function createSettingsPanel(binds) {
       select.addEventListener('change', () => {
         settings[f.id] = parseFloat(select.value);
         applyOne(f.id, settings[f.id]);
-        saveSettings(settings);
+        saveSettings(settings, storeKey);
       });
       row.appendChild(select);
       inputs[f.id] = select;
@@ -165,7 +177,7 @@ export function createSettingsPanel(binds) {
       cb.addEventListener('change', () => {
         settings[f.id] = cb.checked;
         applyOne(f.id, settings[f.id]);
-        saveSettings(settings);
+        saveSettings(settings, storeKey);
       });
       row.appendChild(lab);
       row.appendChild(cb);
@@ -179,9 +191,9 @@ export function createSettingsPanel(binds) {
   reset.className = 'gx-reset';
   reset.textContent = '恢复默认';
   reset.addEventListener('click', () => {
-    Object.assign(settings, DEFAULT_SETTINGS);
+    for (const f of fields) settings[f.id] = DEFAULT_SETTINGS[f.id];
     // 同步控件显示
-    for (const f of FIELDS) {
+    for (const f of fields) {
       if (f.kind === 'range') {
         inputs[f.id].value = settings[f.id];
         renderValue(f.id);
@@ -192,7 +204,7 @@ export function createSettingsPanel(binds) {
       }
       applyOne(f.id, settings[f.id]);
     }
-    saveSettings(settings);
+    saveSettings(settings, storeKey);
   });
   body.appendChild(reset);
 

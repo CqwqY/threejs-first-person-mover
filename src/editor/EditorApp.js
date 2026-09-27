@@ -1636,13 +1636,17 @@ export function createEditor() {
       sun.castShadow = !!v;
     },
   };
-  const settingsPanel = createSettingsPanel({
-    ambient: (v) => (ambient.intensity = v),
-    sun: (v) => (sun.intensity = v),
-    shadowR: sunShadow.shadowR,
-    shadowSize: sunShadow.shadowSize,
-    castShadow: sunShadow.castShadow,
-  });
+  const settingsPanel = createSettingsPanel(
+    {
+      ambient: (v) => (ambient.intensity = v),
+      sun: (v) => (sun.intensity = v),
+      shadowR: sunShadow.shadowR,
+      shadowSize: sunShadow.shadowSize,
+      castShadow: sunShadow.castShadow,
+    },
+    // 编辑器面板：只给强度 + 阴影调节，不透出视距（视距由游戏客户端可调）
+    { fields: ['ambient', 'sun', 'shadowR', 'shadowSize', 'castShadow'] }
+  );
   const btnSettings = document.getElementById('btnSettings');
   if (btnSettings) btnSettings.onclick = () => settingsPanel.toggle();
   state.settingsPanel = settingsPanel;
