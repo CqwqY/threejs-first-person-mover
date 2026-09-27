@@ -156,7 +156,8 @@ const httpServer = http.createServer((req, res) => {
   res.end(JSON.stringify({ ok: false, error: 'not found' }));
 });
 
-const wss = new WebSocketServer({ server: httpServer });
+// noDelay: 关闭 Nagle 算法，小状态包立即发出；否则内核会攒包等 ACK，白加几十毫秒延迟。
+const wss = new WebSocketServer({ server: httpServer, noDelay: true });
 httpServer.listen(PORT);
 
 // id -> 已上报状态 {num, x, y, z, yaw}
