@@ -3,11 +3,15 @@
 // 这样同一个物理逻辑既可驱动本地玩家，也可把结果序列化用于网络同步。
 import * as THREE from 'three';
 import { Config } from '../config.js';
+import { resolveMove } from '../world/collision/characterSolver.js';
 
 export class PlayerPhysics {
   constructor() {
     // 速度是物理过程量，仍由物理模块内部维护
     this.velocity = new THREE.Vector3(0, 0, 0);
+    // complex（trimesh）与 simple（盒/凸包）两类碰撞体的每帧拆分缓冲（复用，避免每帧分配）
+    this._trimeshes = [];
+    this._simples = [];
   }
 
   // 更新一帧物理。
@@ -57,17 +61,33 @@ export class PlayerPhysics {
     }
 
     // ---- 5. 积分更新位置：把位置写入 state，供相机与网络读取 ----
-    state.x += this.velocity.x * dt;
-    state.y += this.velocity.y * dt;
-    state.z += this.velocity.z * dt;
+    // complex（trimesh）与 simple（盒/凸包）分成两条互不干扰的解析路径：
+    //   - complex：位移交给 characterSolver 的子步进解算（含垂直子步进，防高速下落穿透薄楼板）；
+    //   - simple：保持原有单步积分 + AABB/OBB/凸包解析，行为完全不变。
+    const trimeshes = this._trimeshes;
+    const simples = this._simples;
+    trimeshes.length = 0;
+    simples.length = 0;
+    for (const c of colliders) {
+      if (c && c.type === 'trimesh') trimeshes.push(c);
+      else simples.push(c);
+    }
 
-    // ---- 5.5 世界碰撞体碰撞：水平方向把玩家挡在 AABB 之外 ----
-    this._resolveWorldCollisions(state, colliders);
+    if (trimeshes.length) {
+      resolveMove(state, this.velocity, trimeshes, dt); // 位置在解算器内部按子步推进
+    } else {
+      state.x += this.velocity.x * dt;
+      state.y += this.velocity.y * dt;
+      state.z += this.velocity.z * dt;
+    }
 
-    // ---- 5.6 地面吸附：脚底仍贴近可站立地面（坡面 / 盒顶 / 平地）时把 y 吸附上去 ----
+    // ---- 5.5 世界碰撞体碰撞：水平方向把玩家挡在 AABB 之外（simple 碰撞体，行为不变）----
+    this._resolveWorldCollisions(state, simples);
+
+    // ---- 5.6 地面吸附：脚底仍贴近可站立地面（坡面 / 盒顶 / 平地）时把 y 吸附上去（simple 碰撞体）----
     // 目的：重力每帧把玩家往坡面里嵌、再被碰撞解析推出，会让玩家沿坡持续下滑（像踩冰）。
     // 吸附只做竖直修正（不产生任何水平位移），因此输入为零时玩家能稳稳停在坡上。
-    this._snapToGround(state, colliders);
+    this._snapToGround(state, simples);
 
     // ---- 6. 地面碰撞：防止下穿地面，落到 PLAYER_HEIGHT 处即认为着地 ----
     if (state.y <= Config.PLAYER_HEIGHT) {

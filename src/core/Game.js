@@ -13,13 +13,15 @@ import { LocalPlayer } from '../player/LocalPlayer.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 
-// 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并回传碰撞体给回调
-async function _fetchRemoteScene(scene, roots, onColliders) {
+// 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
+// target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
+// 异步烘焙出的 trimesh 都 push 进这个引用，否则异步结果会落进一个没人读的临时数组。
+async function _fetchRemoteScene(scene, roots, target) {
   const data = await fetchRemoteScene();
   if (!data) return; // 拉取失败：保持打包的 editorMapData 兜底
   try {
-    const colliders = buildEditorBuildings(scene, roots, data);
-    if (onColliders) onColliders(colliders);
+    target.length = 0;
+    buildEditorBuildings(scene, roots, data, target);
   } catch (e) {
     console.warn('[Game] 应用远程场景失败，回退打包数据:', e);
   }
@@ -70,10 +72,7 @@ export class Game {
     // 在线同步：运行时从后端拉取最新场景（编辑器保存的那份），拉到则替换打包数据重建。
     // 拉取失败会自动回退到上面打包的 editorMapData，保证离线时也有内容。
     // 注意：LocalPlayer 持有 this.colliders 的同一条数组引用，因此原地改写而不是整体替换。
-    _fetchRemoteScene(this.scene, roots, (colliders) => {
-      this.colliders.length = 0;
-      this.colliders.push(...colliders);
-    });
+    _fetchRemoteScene(this.scene, roots, this.colliders);
 
     // ---- 输入 ----
     this.input = new Input();

@@ -6,9 +6,13 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { instantiate } from './AssetLoader.js';
 import { editorMapData } from './editorMapData.js';
 import { API_BASE } from '../config.js';
+import { bakeTriMeshAsync } from './collision/trimesh.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
 let _addedHolders = [];
+// 构建代数：异步 trimesh 烘焙是「先返回、后回调」的，
+// 回调里必须校验代数，避免上一份场景的烘焙结果被 push 进重建后的碰撞体数组。
+let _buildGen = 0;
 function clearHolders(scene) {
   for (const h of _addedHolders) scene.remove(h);
   _addedHolders = [];
@@ -43,13 +47,16 @@ function normScale(s) {
   return { x: v, y: v, z: v };
 }
 
-// buildEditorBuildings(scene, roots, dataOverride)：roots 为 buildScenery 返回的统一可编辑根列表，
+// buildEditorBuildings(scene, roots, dataOverride, outColliders)：roots 为 buildScenery 返回的统一可编辑根列表，
 // 数组下标即 scenery 的 key，两侧顺序完全一致。
 // dataOverride 可选：传入运行时拉取到的后端场景数据时，用它替换打包的 editorMapData；
 // 缺省则使用打包数据，保证离线也能显示。
-// 返回世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]，供玩家碰撞使用。
-export function buildEditorBuildings(scene, roots, dataOverride) {
+// outColliders 可选：碰撞体的输出数组（调用方传入自己的「共享数组」，异步烘焙结果也会 push 进同一个引用）；
+// 缺省则新建一个数组并返回。
+// 返回世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]（complex 物体额外异步 push {type:'trimesh',...}）。
+export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
   clearHolders(scene); // 重跑前先移除上一次添加的 holder，避免重复叠加
+  const gen = ++_buildGen; // 本次构建代数（异步烘焙回调据此丢弃过期结果）
   let data = dataOverride || editorMapData || {};
   // 兼容旧格式：纯数组（仅含 placed）
   if (Array.isArray(data)) data = { scenery: [], placed: data };
@@ -73,7 +80,7 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
   }
 
   // ---- 2) 渲染编辑器新建的建筑，并收集其世界空间碰撞体 ----
-  const colliders = [];
+  const colliders = outColliders || [];
   const placed = Array.isArray(data.placed) ? data.placed : [];
   placed.forEach((it) => {
     if (!it) return;
@@ -88,16 +95,31 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
     scene.add(holder);
     _addedHolders.push(holder); // 记录以便下次重建时移除
 
+    // ---- complex 模式：模型加载完成后，从渲染网格异步烘焙 trimesh（运行时零存储）----
+    // 为什么必须在这里烘焙：室内模型常把「一整块合并的大地面 + 多层楼板」放进同一个 mesh，
+    // 逐 mesh 求盒/凸包只会得到一个罩住整栋楼的大凸包，完全不可用；trimesh 直接取三角形本身，
+    // 再配合 3D 宽相位（XZ 分格 + Y 分层）与 BVH，多层楼板才能各自正确碰撞。
+    const isComplex = it.collisionMode === 'complex';
+    const bakeComplex = () => {
+      holder.updateMatrixWorld(true);
+      bakeTriMeshAsync(holder)
+        .then((tm) => {
+          if (gen !== _buildGen) return; // 场景已重建：丢弃过期结果
+          if (tm && tm.triCount > 0) colliders.push(tm);
+        })
+        .catch(() => {});
+    };
+
     // 统一绝对路径 /assets/xxx.glb 调用；兼容旧的内嵌 data URL 记录
     if (it.url) {
       instantiate(it.url)
-        .then((m) => { holder.add(m); enableShadows(m); })
+        .then((m) => { holder.add(m); enableShadows(m); if (isComplex) bakeComplex(); })
         .catch(() => {});
     } else if (it.data) {
       const loader = new GLTFLoader();
       loader.load(
         it.data,
-        (gltf) => { holder.add(gltf.scene); enableShadows(gltf.scene); },
+        (gltf) => { holder.add(gltf.scene); enableShadows(gltf.scene); if (isComplex) bakeComplex(); },
         undefined,
         () => {}
       );
@@ -199,11 +221,15 @@ export function buildEditorBuildings(scene, roots, dataOverride) {
       });
     };
     if (Array.isArray(it.convexParts) && it.convexParts.length) {
-      holder.updateMatrixWorld(true);
-      for (const hull of it.convexParts) pushHull(hull, holder.matrixWorld);
+      if (!isComplex) { // complex：碰撞完全由 trimesh 提供，不再产出凸包（避免与 trimesh 重复/罩住整栋楼）
+        holder.updateMatrixWorld(true);
+        for (const hull of it.convexParts) pushHull(hull, holder.matrixWorld);
+      }
     } else if (it.convex && Array.isArray(it.convex.vertices) && Array.isArray(it.convex.faces) && it.convex.faces.length >= 3) {
-      holder.updateMatrixWorld(true);
-      pushHull(it.convex, holder.matrixWorld);
+      if (!isComplex) {
+        holder.updateMatrixWorld(true);
+        pushHull(it.convex, holder.matrixWorld);
+      }
     }
   });
   return colliders;
