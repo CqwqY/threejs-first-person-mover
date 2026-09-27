@@ -52,7 +52,7 @@ export const Config = {
   // 手机触屏视角灵敏度：拖动像素到弧度的缩放（触屏拖动幅度通常大于鼠标位移，取更高值）
   TOUCH_SENSITIVITY: 0.014,
   // 玩家身高，也是相机离地高度（米）
-  PLAYER_HEIGHT: 1.7,
+  PLAYER_HEIGHT: 1.5,
   // 玩家碰撞半径（水平方向，用于边界限制）
   PLAYER_RADIUS: 0.4,
   // 地面尺寸（单位：米）。1 世界单位 = 1 米。宽沿 x，长沿 z。
