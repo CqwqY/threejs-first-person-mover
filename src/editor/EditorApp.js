@@ -13,7 +13,7 @@ import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
-import { createSettingsPanel, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
+import { createSettingsPanel, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -1614,7 +1614,7 @@ export function createEditor() {
   loop();
   resize();
 
-  // ---- 画面设置面板：环境光/阳光/阴影范围/阴影分辨率/阴影开关，即时生效并持久化 ----
+  // ---- 画面设置面板：光照设计(环境光/阳光强度、阳光角度)+阴影，即时生效并持久化给客户端 ----
   // 阴影相机范围、贴图分辨率、开关都是可运行时调整项；范围跟视距（编辑器中与相机距离相关）
   const sunShadow = {
     shadowR: (v) => {
@@ -1636,16 +1636,32 @@ export function createEditor() {
       sun.castShadow = !!v;
     },
   };
+  // 阳光方向由高度角/方位角换算，重算偏移并落到 sun 上（每帧 loop 会以 sunOffset 跟随相机）
+  let sunElev = DEFAULT_SETTINGS.sunElev;
+  let sunAz = DEFAULT_SETTINGS.sunAz;
+  const applySunAngle = () => {
+    const o = computeSunOffset(sunElev, sunAz);
+    sunOffset.set(o.x, o.y, o.z);
+    sun.position.copy(sunTarget.position).add(sunOffset);
+  };
   const settingsPanel = createSettingsPanel(
     {
       ambient: (v) => (ambient.intensity = v),
       sun: (v) => (sun.intensity = v),
+      sunElev: (v) => {
+        sunElev = v;
+        applySunAngle();
+      },
+      sunAz: (v) => {
+        sunAz = v;
+        applySunAngle();
+      },
       shadowR: sunShadow.shadowR,
       shadowSize: sunShadow.shadowSize,
       castShadow: sunShadow.castShadow,
     },
-    // 编辑器面板：只给强度 + 阴影调节，不透出视距（视距由游戏客户端可调）
-    { fields: ['ambient', 'sun', 'shadowR', 'shadowSize', 'castShadow'] }
+    // 编辑器面板：光照设计(强度+角度) + 阴影，不透出视距（视距由游戏客户端可调）
+    { fields: ['ambient', 'sun', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'] }
   );
   const btnSettings = document.getElementById('btnSettings');
   if (btnSettings) btnSettings.onclick = () => settingsPanel.toggle();

@@ -1,20 +1,23 @@
 // 职责：统一的「画面设置」浮层，编辑器与游戏共用。
-// 可调项：环境光强度、阳光强度、阴影覆盖范围、阴影贴图分辨率、阴影总开关。
+// 可调项：环境光强度、阳光强度、阳光角度、视距、阴影覆盖范围、阴影贴图分辨率、阴影总开关。
 // 所有值持久化到 localStorage，改动即时生效；「恢复默认」一键还原。
-// 绑定方式：调用方传入 binds，形如 { ambient, sun, shadowR, shadowSize, castShadow }，
+// 绑定方式：调用方传入 binds，形如 { ambient, sun, sunElev, sunAz, viewFar, shadowR, shadowSize, castShadow }，
 // 每项是一个 (value) => void 的 setter，面板在初始化、改动、恢复默认时都会调用对应 setter 立即应用。
+// 编辑器写入的「光照设计」（环境光/阳光强度、阳光角度）会保存到设计键，客户端读取并应用同一份。
 
 export const DEFAULT_SETTINGS = {
-  ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）—— 仅编辑器可调
-  sun: 1.4, // 阳光强度（提亮受光面）—— 仅编辑器可调
-  viewFar: 500, // 视距（相机远裁剪面 / 绘制距离）
-  shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心，范围跟视距）
+  ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）—— 编辑器中可调，会保存给客户端
+  sun: 1.4, // 阳光强度（提亮受光面）—— 编辑器中可调，会保存给客户端
+  sunElev: 48, // 阳光高度角（°）—— 编辑器中可调，会保存给客户端
+  sunAz: 56, // 阳光方位角（°）—— 编辑器中可调，会保存给客户端
+  viewFar: 500, // 视距（相机远裁剪面 / 绘制距离）—— 客户端本地可调
+  shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心）
   shadowSize: 2048, // 阴影贴图边长
   castShadow: true, // 阴影总开关
 };
 
-const STORE_KEY = 'scene-settings-v1';
-const GAME_STORE_KEY = 'scene-settings-game-v1';
+const STORE_KEY = 'scene-settings-v1'; // 编辑器「光照设计」键：客户端也读取此键应用光照
+const GAME_STORE_KEY = 'scene-settings-game-v1'; // 客户端图形设置键（视距/阴影本地可调）
 
 export function loadSettings(storeKey = STORE_KEY) {
   let saved = {};
@@ -34,9 +37,24 @@ export function saveSettings(s, storeKey = STORE_KEY) {
   }
 }
 
+// 由高度角/方位角换算出阳光相对 sunTarget 的偏移向量，保持 y 向上的球面分布。
+// 编辑器改角度时用它重算偏移，客户端加载时用它把方向还原成设计师调好的样子。
+const SUN_DIST = 53.85;
+export function computeSunOffset(elev, az, dist = SUN_DIST) {
+  const e = (elev * Math.PI) / 180;
+  const a = (az * Math.PI) / 180;
+  return {
+    x: dist * Math.cos(e) * Math.sin(a),
+    y: dist * Math.sin(e),
+    z: dist * Math.cos(e) * Math.cos(a),
+  };
+}
+
 const FIELDS = [
   { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01, editorOnly: true },
   { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05, editorOnly: true },
+  { id: 'sunElev', label: '阳光高度角', kind: 'range', min: 0, max: 90, step: 1, editorOnly: true },
+  { id: 'sunAz', label: '阳光方位角', kind: 'range', min: 0, max: 360, step: 1, editorOnly: true },
   { id: 'viewFar', label: '视距', kind: 'range', min: 200, max: 1000, step: 10 },
   { id: 'shadowR', label: '阴影范围', kind: 'range', min: 15, max: 120, step: 1 },
   {
