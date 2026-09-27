@@ -231,6 +231,7 @@ export function createEditor() {
     cGridBtn: document.getElementById('cGridBtn'),
     cGridInfo: document.getElementById('cGridInfo'),
     cList: document.getElementById('cList'),
+    cClearAll: document.getElementById('cClearAll'),
   };
 
   // ---------- 可编辑对象：游戏景物 + 地形/道路/墙体 ----------
@@ -369,34 +370,56 @@ export function createEditor() {
       if (typeof c.qw === 'number') obj.quaternion.set(c.qx ?? 0, c.qy ?? 0, c.qz ?? 0, c.qw).normalize();
       return obj;
     };
-    const makeWire = (c) => {
+    // 选中高亮：state.selColl = { kind, i }（kind: box/hull/sbox/shull）。
+    // 选中项用亮蓝色 + 关闭 depthTest 显示 —— 即使被模型包住也能「穿透」看到，并拉高 renderOrder 画在最上层。
+    const sel = state.selColl;
+    const BASE = 0xff8c3d; // 默认橙
+    const HL = 0x4ea1ff; // 选中高亮色
+    const isSel = (kind, i) => !!sel && sel.kind === kind && sel.i === i;
+    const styleMat = (m, kind, i) => {
+      if (!isSel(kind, i)) return m;
+      m.color.setHex(HL);
+      m.depthTest = false; // 穿透模型
+      m.depthWrite = false;
+      m.transparent = true;
+      return m;
+    };
+    const finish = (obj, kind, i) => {
+      if (isSel(kind, i)) obj.renderOrder = 999;
+      return obj;
+    };
+    const makeWire = (c, kind, i) => {
       const box = new THREE.EdgesGeometry(new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2));
-      const wire = new THREE.LineSegments(box, new THREE.LineBasicMaterial({ color: 0xff8c3d }));
-      return applyBoxXform(wire, c);
+      const wire = new THREE.LineSegments(box, styleMat(new THREE.LineBasicMaterial({ color: BASE }), kind, i));
+      applyBoxXform(wire, c);
+      return finish(wire, kind, i);
     };
     // 半透明填充盒 + 描边：让多盒整体呈现为贴合模型的通透体积，结构清晰
-    const makeVolume = (c) => {
+    const makeVolume = (c, kind, i) => {
+      const hi = isSel(kind, i);
       const g = new THREE.Group();
       const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2),
-        new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false })
+        styleMat(new THREE.MeshBasicMaterial({ color: BASE, transparent: true, opacity: hi ? 0.34 : 0.18, depthWrite: false }), kind, i)
       );
       const wire = new THREE.LineSegments(
         new THREE.EdgesGeometry(new THREE.BoxGeometry(c.hx * 2, c.hy * 2, c.hz * 2)),
-        new THREE.LineBasicMaterial({ color: 0xff8c3d })
+        styleMat(new THREE.LineBasicMaterial({ color: BASE }), kind, i)
       );
       g.add(mesh); g.add(wire);
-      return applyBoxXform(g, c);
+      applyBoxXform(g, c);
+      return finish(g, kind, i);
     };
-    const makeConvex = (hull) => {
+    const makeConvex = (hull, kind, i) => {
+      const hi = isSel(kind, i);
       const bg = new THREE.BufferGeometry();
       bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(hull.vertices), 3));
       bg.setIndex(hull.faces);
       bg.computeVertexNormals();
       const g = new THREE.Group();
-      g.add(new THREE.Mesh(bg, new THREE.MeshBasicMaterial({ color: 0xff8c3d, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide })));
-      g.add(new THREE.LineSegments(new THREE.EdgesGeometry(bg.clone()), new THREE.LineBasicMaterial({ color: 0xff8c3d })));
-      return g;
+      g.add(new THREE.Mesh(bg, styleMat(new THREE.MeshBasicMaterial({ color: BASE, transparent: true, opacity: hi ? 0.34 : 0.18, depthWrite: false, side: THREE.DoubleSide }), kind, i)));
+      g.add(new THREE.LineSegments(new THREE.EdgesGeometry(bg.clone()), styleMat(new THREE.LineBasicMaterial({ color: BASE }), kind, i)));
+      return finish(g, kind, i);
     };
     const boxen = [];
     const multi = Array.isArray(rec.colliders) && rec.colliders.length;
@@ -405,17 +428,17 @@ export function createEditor() {
     // 盒与凸包可以并存（simple 逐网格生成会同时产出两类），两类都画；
     // 旧数据（V-HACD 只有凸分解 / 只有单盒）行为不变。
     if (multi) {
-      for (const c of rec.colliders) boxen.push(makeVolume(c));
+      rec.colliders.forEach((c, i) => boxen.push(makeVolume(c, 'box', i)));
     }
     if (parts) {
-      for (const h of rec.convexParts) boxen.push(makeConvex(h));
+      rec.convexParts.forEach((h, i) => boxen.push(makeConvex(h, 'hull', i)));
     } else if (singleHull) {
-      boxen.push(makeConvex(rec.convex));
+      boxen.push(makeConvex(rec.convex, 'shull', 0));
     }
     if (!multi && !parts && !singleHull) {
       const c = rec.collider;
       if (!c || !c.enabled) return;
-      boxen.push(makeWire(c));
+      boxen.push(makeWire(c, 'sbox', 0));
     }
     let name = 'collider-vis';
     const tag = [];
@@ -1055,13 +1078,17 @@ export function createEditor() {
 
   // 碰撞体列表：分类显示当前选中对象的碰撞体（盒 / 凸包），每项可单独删除。
   // 删除后立即重建可视化并标记未保存，避免「生成了却删不掉」。
+  let _lastListRec = null;
   function renderColliderList(rec) {
     const wrap = StepUI.cList;
     if (!wrap) return;
+    // 切换到另一个对象时清空碰撞体选中高亮（同一对象内的重渲染保留选中）
+    if (rec !== _lastListRec) { state.selColl = null; _lastListRec = rec; }
     wrap.innerHTML = '';
     if (!rec || rec.kind === 'scenery') return;
 
     const refresh = () => {
+      state.selColl = null; // 结构变化（删除/重建）后清空选中，避免索引错位高亮到别的盒
       buildColliderVis(rec);
       renderColliderList(rec);
       markDirty();
@@ -1072,9 +1099,10 @@ export function createEditor() {
       h.textContent = title;
       wrap.appendChild(h);
     };
-    const addItem = (text, onDel) => {
+    const addItem = (text, onDel, kind, i) => {
       const li = document.createElement('div');
-      li.className = 'citem';
+      const isSelected = !!state.selColl && state.selColl.kind === kind && state.selColl.i === i;
+      li.className = isSelected ? 'citem sel' : 'citem';
       const nm = document.createElement('span');
       nm.className = 'nm';
       nm.textContent = text;
@@ -1085,6 +1113,12 @@ export function createEditor() {
       del.title = '删除该碰撞体';
       del.onclick = (e) => { e.stopPropagation(); onDel(); };
       li.appendChild(del);
+      // 点击列表项：选中对应碰撞体 → 视口里高亮并以穿透方式显示（再点一次取消）
+      li.onclick = () => {
+        state.selColl = isSelected ? null : { kind, i };
+        buildColliderVis(rec);
+        renderColliderList(rec);
+      };
       wrap.appendChild(li);
     };
 
@@ -1107,7 +1141,7 @@ export function createEditor() {
             rec.colliders.splice(i, 1);
             if (!rec.colliders.length) rec.colliders = null;
             refresh();
-          });
+          }, 'box', i);
         });
       } else {
         const size = (single.hx * 2).toFixed(2) + '×' + (single.hy * 2).toFixed(2) + '×' + (single.hz * 2).toFixed(2);
@@ -1115,7 +1149,7 @@ export function createEditor() {
           single.enabled = false;
           StepUI.cEn.checked = false;
           refresh();
-        });
+        }, 'sbox', 0);
       }
     }
     if (hullCount) {
@@ -1128,13 +1162,13 @@ export function createEditor() {
             rec.convexParts.splice(i, 1);
             if (!rec.convexParts.length) rec.convexParts = null;
             refresh();
-          });
+          }, 'hull', i);
         });
       } else {
         addItem('凸包 · ' + Math.floor(singleHull.faces.length / 3) + ' 面', () => {
           rec.convex = null;
           refresh();
-        });
+        }, 'shull', 0);
       }
     }
   }
@@ -1168,6 +1202,27 @@ export function createEditor() {
     StepUI.cGridInfo.textContent = '盒 ' + res.boxes.length + ' / 凸包 ' + res.hulls.length + ' / 跳过 ' + res.skipped;
     StepUI.cGridInfo.style.display = 'inline';
   }
+
+  // 全部删除：一键清空该对象的所有碰撞体（单盒/多盒/单凸包/凸分解），并清掉选中高亮
+  StepUI.cClearAll.onclick = () => {
+    const rec = state.selected;
+    if (!rec || rec.kind === 'scenery') {
+      StepUI.cGridInfo.textContent = '请先选中一个模型再点';
+      StepUI.cGridInfo.style.display = 'inline';
+      return;
+    }
+    rec.colliders = null;
+    rec.convexParts = null;
+    rec.convex = null;
+    if (rec.collider) rec.collider.enabled = false;
+    if (StepUI.cEn) StepUI.cEn.checked = false;
+    state.selColl = null;
+    buildColliderVis(rec);
+    renderColliderList(rec);
+    markDirty();
+    StepUI.cGridInfo.textContent = '已删除全部碰撞体';
+    StepUI.cGridInfo.style.display = 'inline';
+  };
 
   function readColliderFields() {
     if (!state.selected || !state.selected.collider) return;

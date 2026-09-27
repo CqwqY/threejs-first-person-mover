@@ -96,6 +96,9 @@
     #cList .citem:hover { background: #333; }
     #cList .citem .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #cList .citem .del { cursor: pointer; color: #f88; padding: 0 3px; }
+    /* 选中项：高亮，并在视口里以穿透（depthTest 关闭）方式显示对应碰撞体 */
+    #cList .citem.sel { background: #2f5c8a; color: #fff; }
+    #cList .citem.sel .del { color: #ffb3b3; }
 
     /* 场景列表（摆放物体 + 游戏景物） */
     #outliner, #sceneryList { list-style: none; }
@@ -203,7 +206,10 @@
             <button id="cHullBtn" class="import-btn" type="button">生成凸包（贴合外形）</button>
             <div id="cHullInfo" style="display:none;color:#ffd479;font-size:11px;margin-top:2px"></div>
           </div>
-          <div class="panel-title" style="margin-top:8px">碰撞体列表</div>
+          <div class="panel-title" style="margin-top:8px;display:flex;align-items:center;justify-content:space-between">
+            <span>碰撞体列表</span>
+            <button id="cClearAll" type="button" style="background:#a33;border:0;color:#fff;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer">全部删除</button>
+          </div>
           <div id="cList"></div>
         </div>
         <div>
