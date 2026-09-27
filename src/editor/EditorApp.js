@@ -13,6 +13,7 @@ import { API_BASE } from '../config.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
+import { createSettingsPanel, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -75,17 +76,18 @@ export function createEditor() {
   camera.position.set(32, 24, 32);
   camera.lookAt(0, 0, 0);
 
-  // 灯光
-  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  // 灯光：默认值跟随画面设置（SettingsPanel），可在「画面」面板里即时调整并持久化
+  const ambient = new THREE.AmbientLight(0xffffff, DEFAULT_SETTINGS.ambient);
+  scene.add(ambient);
   // 阴影跟随相机：阳光的阴影相机始终以 sunTarget 为中心，每帧把 sunTarget 挪到相机附近，
   // 这样近处模型和地面都能收到清晰投射，远处自然淡出，性能也更可控。
   const sunTarget = new THREE.Object3D();
   scene.add(sunTarget);
   const sunOffset = new THREE.Vector3(30, 40, 20); // 阳光相对 target 的固定偏移（保持整体光向不变）
-  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  const sun = new THREE.DirectionalLight(0xffffff, DEFAULT_SETTINGS.sun);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  const SHADOW_R = 28; // 阴影覆盖半宽（以 sunTarget 为中心）
+  sun.shadow.mapSize.set(DEFAULT_SETTINGS.shadowSize, DEFAULT_SETTINGS.shadowSize);
+  const SHADOW_R = DEFAULT_SETTINGS.shadowR; // 阴影覆盖半宽（以 sunTarget 为中心，范围跟视距）
   sun.shadow.camera.left = -SHADOW_R;
   sun.shadow.camera.right = SHADOW_R;
   sun.shadow.camera.top = SHADOW_R;
@@ -1611,6 +1613,39 @@ export function createEditor() {
   restore();
   loop();
   resize();
+
+  // ---- 画面设置面板：环境光/阳光/阴影范围/阴影分辨率/阴影开关，即时生效并持久化 ----
+  // 阴影相机范围、贴图分辨率、开关都是可运行时调整项；范围跟视距（编辑器中与相机距离相关）
+  const sunShadow = {
+    shadowR: (v) => {
+      sun.shadow.camera.left = -v;
+      sun.shadow.camera.right = v;
+      sun.shadow.camera.top = v;
+      sun.shadow.camera.bottom = -v;
+      sun.shadow.camera.updateProjectionMatrix();
+    },
+    shadowSize: (v) => {
+      sun.shadow.mapSize.set(v, v);
+      if (sun.shadow.map) {
+        sun.shadow.map.dispose();
+        sun.shadow.map = null;
+      }
+    },
+    castShadow: (v) => {
+      renderer.shadowMap.enabled = !!v;
+      sun.castShadow = !!v;
+    },
+  };
+  const settingsPanel = createSettingsPanel({
+    ambient: (v) => (ambient.intensity = v),
+    sun: (v) => (sun.intensity = v),
+    shadowR: sunShadow.shadowR,
+    shadowSize: sunShadow.shadowSize,
+    castShadow: sunShadow.castShadow,
+  });
+  const btnSettings = document.getElementById('btnSettings');
+  if (btnSettings) btnSettings.onclick = () => settingsPanel.toggle();
+  state.settingsPanel = settingsPanel;
 
   return { state, setMode };
 }
