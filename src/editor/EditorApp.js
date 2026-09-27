@@ -79,6 +79,9 @@ export function createEditor() {
   // 灯光：默认值跟随画面设置（SettingsPanel），可在「画面」面板里即时调整并持久化
   const ambient = new THREE.AmbientLight(0xffffff, DEFAULT_SETTINGS.ambient);
   scene.add(ambient);
+  // 半球光：按法线给天空/地面色，模拟弹射光，给室内/暗处补明暗层次（关键：让被主阴影盖住的面不再同色）
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x222230, DEFAULT_SETTINGS.hemi);
+  scene.add(hemi);
   // 阴影跟随相机：阳光的阴影相机始终以 sunTarget 为中心，每帧把 sunTarget 挪到相机附近，
   // 这样近处模型和地面都能收到清晰投射，远处自然淡出，性能也更可控。
   const sunTarget = new THREE.Object3D();
@@ -1647,6 +1650,7 @@ export function createEditor() {
   const settingsPanel = createSettingsPanel(
     {
       ambient: (v) => (ambient.intensity = v),
+      hemi: (v) => (hemi.intensity = v),
       sun: (v) => (sun.intensity = v),
       sunElev: (v) => {
         sunElev = v;
@@ -1660,8 +1664,8 @@ export function createEditor() {
       shadowSize: sunShadow.shadowSize,
       castShadow: sunShadow.castShadow,
     },
-    // 编辑器面板：光照设计(强度+角度) + 阴影，不透出视距（视距由游戏客户端可调）
-    { fields: ['ambient', 'sun', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'] }
+    // 编辑器面板：光照设计(环境光/半球光/阳光强度+角度) + 阴影，不透出视距（视距由游戏客户端可调）
+    { fields: ['ambient', 'hemi', 'sun', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'] }
   );
   const btnSettings = document.getElementById('btnSettings');
   if (btnSettings) btnSettings.onclick = () => settingsPanel.toggle();

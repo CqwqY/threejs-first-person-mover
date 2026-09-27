@@ -11,6 +11,11 @@ export function createLights() {
   const ambient = new THREE.AmbientLight(0xffffff, DEFAULT_SETTINGS.ambient);
   group.add(ambient);
 
+  // 半球光：按法线方向给天空色/地面色，模拟间接/弹射光的明暗层次。
+  // 朝上的面（地板/桌面）更亮，朝下的面（天花板/底面）更暗——解决室内被主阴影统一盖暗后失去区别的问题。
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x222230, DEFAULT_SETTINGS.hemi);
+  group.add(hemi);
+
   // 阳光聚焦目标：shadow 相机以它为中心，跟随玩家移动
   const sunTarget = new THREE.Object3D();
   group.add(sunTarget);
@@ -31,5 +36,5 @@ export function createLights() {
   directional.position.copy(sunTarget.position).add(offset);
   group.add(directional);
 
-  return { group, sun: directional, sunTarget, offset, ambient };
+  return { group, sun: directional, sunTarget, offset, ambient, hemi };
 }

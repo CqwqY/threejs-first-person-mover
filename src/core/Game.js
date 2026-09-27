@@ -53,11 +53,13 @@ export class Game {
     this._sunOffset = lights.offset;
     this._sun = lights.sun;
     this._ambient = lights.ambient; // 供画面面板绑定；游戏端不透出强度调整
+    this._hemi = lights.hemi;
 
-    // 应用编辑器保存的「光照设计」：环境光/阳光强度、阳光角度，使客户端与编辑器保持一致；
+    // 应用编辑器保存的「光照设计」：环境光/半球光/阳光强度、阳光角度，使客户端与编辑器保持一致；
     // 若编辑器从未保存过，则自动落到 DEFAULT_SETTINGS 的默认值。
     const design = loadSettings('scene-settings-v1');
     this._ambient.intensity = design.ambient;
+    this._hemi.intensity = design.hemi;
     this._sun.intensity = design.sun;
     const dOff = computeSunOffset(design.sunElev, design.sunAz);
     this._sunOffset.set(dOff.x, dOff.y, dOff.z);

@@ -7,6 +7,7 @@
 
 export const DEFAULT_SETTINGS = {
   ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）—— 编辑器中可调，会保存给客户端
+  hemi: 0.5, // 半球光强度（模拟弹射光，给室内补明暗层次）—— 编辑器中可调，会保存给客户端
   sun: 1.4, // 阳光强度（提亮受光面）—— 编辑器中可调，会保存给客户端
   sunElev: 48, // 阳光高度角（°）—— 编辑器中可调，会保存给客户端
   sunAz: 56, // 阳光方位角（°）—— 编辑器中可调，会保存给客户端
@@ -52,6 +53,7 @@ export function computeSunOffset(elev, az, dist = SUN_DIST) {
 
 const FIELDS = [
   { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01, editorOnly: true },
+  { id: 'hemi', label: '半球光(弹射)强度', kind: 'range', min: 0, max: 1, step: 0.01, editorOnly: true },
   { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05, editorOnly: true },
   { id: 'sunElev', label: '阳光高度角', kind: 'range', min: 0, max: 90, step: 1, editorOnly: true },
   { id: 'sunAz', label: '阳光方位角', kind: 'range', min: 0, max: 360, step: 1, editorOnly: true },
