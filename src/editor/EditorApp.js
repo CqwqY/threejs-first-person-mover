@@ -205,6 +205,7 @@ export function createEditor() {
     pRot: document.getElementById('pRot'),
     pScale: document.getElementById('pScale'),
     outliner: document.getElementById('outliner'),
+    colliderList: document.getElementById('colliderList'),
     sceneryList: document.getElementById('sceneryList'),
     btnSave: document.getElementById('btnSave'),
     status: document.getElementById('status'),
@@ -1050,7 +1051,8 @@ export function createEditor() {
   // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
   function outlinerUpdate() {
     StepUI.outliner.innerHTML = '';
-    state.placed.forEach((rec) => {
+    StepUI.colliderList.innerHTML = '';
+    const addLi = (list, rec, withDelete) => {
       const li = document.createElement('li');
       if (state.selected === rec) li.className = 'sel';
       const nm = document.createElement('span');
@@ -1061,13 +1063,20 @@ export function createEditor() {
       idEl.className = 'oid';
       idEl.textContent = rec.id;
       li.appendChild(idEl);
-      const del = document.createElement('span');
-      del.className = 'del';
-      del.textContent = '✕';
-      del.onclick = (e) => { e.stopPropagation(); removePlaced(rec); };
-      li.appendChild(del);
+      if (withDelete) {
+        const del = document.createElement('span');
+        del.className = 'del';
+        del.textContent = '✕';
+        del.onclick = (e) => { e.stopPropagation(); removePlaced(rec); };
+        li.appendChild(del);
+      }
       li.onclick = () => select(rec);
-      StepUI.outliner.appendChild(li);
+      list.appendChild(li);
+    };
+    state.placed.forEach((rec) => {
+      // 空碰撞体单独一列，避免与摆放模型混在一起太多
+      if (rec.kind === 'empty') addLi(StepUI.colliderList, rec, true);
+      else addLi(StepUI.outliner, rec, true);
     });
 
     if (!StepUI.sceneryList) return;
