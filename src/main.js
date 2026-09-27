@@ -2,7 +2,6 @@
 import { Game } from './core/Game.js';
 import { initDebugYawPanel } from './debug/DebugYawPanel.js';
 import { debugCalibFrame } from './player/PlayerModel.js';
-import { initBuildingTool } from './world/BuildingTool.js';
 import { initMobileControls } from './ui/MobileControls.js';
 
 const game = new Game();
@@ -12,9 +11,6 @@ initMobileControls(game.input);
 
 // 暴露到全局，方便调试（联机验证 / 控制台检查玩家状态）
 window.__game = game;
-
-// 地图建筑放置工具（B 键开关）：导入/选择模型、缩放旋转、拾取位置、持久化放置
-window.__buildingTool = initBuildingTool(game.scene, game.camera, game.renderer.domElement);
 
 // URL 带 ?calib 时打开朝向校准面板（模型朝向 + 骨架走向两个滑块，实时生效）
 if (/\bcalib\b/.test(location.search)) {
