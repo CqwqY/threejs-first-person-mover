@@ -539,50 +539,57 @@ export class Game {
     } catch (e) { return null; }
   }
 
-  // 根据阿花给的效果返回 { label, run }。无匹配效果（装饰品）只提示、不改属性。
+  // 根据阿花写的效果对象 {k,v,s}（或旧的字符串兼容）生成 { label, run }。力度 v、时长 s 都由阿花定。
   _effectForItem(item) {
     const phys = this.localPlayer.physics;
-    const eff = this._loadItemEffect(item);
-    switch (eff) {
-      case 'speed':
+    const raw = this._loadItemEffect(item);
+    const eff = raw && typeof raw === 'object' ? raw : { k: String(raw || '') };
+    const k = eff.k || '';
+    const v = Number.isFinite(Number(eff.v)) ? Number(eff.v) : null;
+    const secs = Number.isFinite(Number(eff.s)) && Number(eff.s) > 0 ? Number(eff.s) : 5;
+    switch (k) {
+      case 'speed': {
+        const m = (v && v > 0) ? v : 1.8;
         return {
           label: '疾风',
           run: () => {
-            const m = 2.2;
             phys.speedMult = m;
-            this._toast('疾风：速度提升至 ' + m + ' 倍，持续 5 秒');
-            setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 5000);
+            this._toast('疾风：速度提升至 ' + m + ' 倍，持续 ' + secs + ' 秒');
+            setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, secs * 1000);
           },
         };
-      case 'jump':
+      }
+      case 'jump': {
+        const m = (v && v > 0) ? v : 1.6;
         return {
           label: '跃升',
           run: () => {
-            const m = 1.8;
             phys.jumpMult = m;
-            this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 5 秒');
-            setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, 5000);
+            this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 ' + secs + ' 秒');
+            setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, secs * 1000);
           },
         };
+      }
       case 'jetpack':
         return {
           label: '喷气',
           run: () => {
             phys.jetpack = true;
-            this._toast('喷气背包：空中按住空格上升，持续 6 秒');
-            setTimeout(() => { phys.jetpack = false; }, 6000);
+            this._toast('喷气背包：空中按住空格上升，持续 ' + secs + ' 秒');
+            setTimeout(() => { phys.jetpack = false; }, secs * 1000);
           },
         };
-      case 'size':
+      case 'size': {
+        const s = (v && v > 0) ? v : 1.6;
         return {
           label: '体型',
           run: () => {
-            const s = 1.6;
             phys.sizeScale = s;
-            this._toast('体型变化：变为 ' + s + ' 倍，持续 6 秒');
-            setTimeout(() => { if (phys.sizeScale === s) phys.sizeScale = 1; }, 6000);
+            this._toast('体型变化：变为 ' + s + ' 倍，持续 ' + secs + ' 秒');
+            setTimeout(() => { if (phys.sizeScale === s) phys.sizeScale = 1; }, secs * 1000);
           },
         };
+      }
       default:
         // 兜底：后端没带 effect 时也保证「有感觉」——给个温和加速，而不是全变装饰品
         return {

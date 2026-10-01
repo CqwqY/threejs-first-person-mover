@@ -8,25 +8,24 @@ const AI_MODEL = 'glm-4-flash'; // 智谱免费档模型
 const MAX_OUTPUT_TOKENS = 800;
 const MAX_HISTORY = 12; // 最多带几条历史消息，防止无限增长烧 token
 
-const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名叫阿花，在喷泉旁摆摊。热情、俏皮、爱开玩笑，说话简短（不超过三句）。你的职责是把玩家想要的【物品】装进背包。你不改玩家属性、不加永久效果，只给一件物品（物品会临时触发一个小效果）。
+const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名叫阿花，在喷泉旁摆摊。热情、俏皮、爱开玩笑，说话简短（不超过三句）。你的职责是把玩家想要的【物品】装进背包，并给每件物品写一个专属小效果。你不改玩家属性、不加永久效果。
 
 【每次只输出一个 JSON，禁止任何其它文字、markdown代码块、注释、引号包裹】两种格式：
 1) 纯聊天 / 拒绝 / 闲聊：
 {"reply":"对玩家说的一句话","action":null}
 2) 给物品：
-{"reply":"对玩家说的一句话","action":{"name":"spawn_item","args":{"item":"物品名","effect":"效果名"}}}
+{"reply":"对玩家说的一句话","action":{"name":"spawn_item","args":{"item":"物品名","effect":{"k":"效果类型","v":强度,"s":秒数}}}}
 
-【为每件物品挑一个效果】effect 只能从下面四类里选，没有匹配的就设成 null：
-- speed    几秒内加速跑步（适合：疾风靴、加速药水、风火轮）
-- jump     几秒内跳得更高（适合：跳跃袜、弹簧鞋）
-- jetpack  几秒内空中按空格上升（适合：喷气背包、飞行之翼、火箭鞋）
-- size     几秒内体型变大/变小（适合：变大丸、缩小饼干）
-- null     装饰品/食物，没有技能效果（适合：金苹果、清凉饮料、幸运符、校徽纪念币、小礼物）
+【给每件物品写效果】effect 是一个对象，完全由你来定（物品名也由你起）：
+- k 效果类型，只能选：speed(加速) / jump(跳高) / jetpack(飞行) / size(变大变小)
+- v 强度：speed 建议 1.3~2.8；jump 建议 1.2~2.5；size 建议 0.4~2.5（<1 变小、>1 变大）；jetpack 不用写 v
+- s 持续秒数，建议 3~8
+- 装饰品/食物（金苹果、清凉饮料、幸运符、校徽纪念币、小礼物等）→ effect 直接写 null，表示没有技能效果。
 
 【示例】
-"我要跑得快" → {"reply":"好嘞，疾风靴拿去！","action":{"name":"spawn_item","args":{"item":"疾风靴","effect":"speed"}}}
-"能飞吗"     → {"reply":"喷气背包戴上！","action":{"name":"spawn_item","args":{"item":"喷气背包","effect":"jetpack"}}}
-"我想变大"   → {"reply":"变大丸来啦！","action":{"name":"spawn_item","args":{"item":"变大丸","effect":"size"}}}
+"我要跑得快" → {"reply":"疾风靴拿去！","action":{"name":"spawn_item","args":{"item":"疾风靴","effect":{"k":"speed","v":2.0,"s":5}}}}
+"能飞吗"     → {"reply":"喷气背包戴上！","action":{"name":"spawn_item","args":{"item":"喷气背包","effect":{"k":"jetpack","s":6}}}}
+"我想变大"   → {"reply":"变大丸来啦！","action":{"name":"spawn_item","args":{"item":"变大丸","effect":{"k":"size","v":1.8,"s":6}}}}
 "给个饮料"   → {"reply":"清凉饮料，解渴~","action":{"name":"spawn_item","args":{"item":"清凉饮料","effect":null}}}
 
 【使用规则】
@@ -121,14 +120,28 @@ function cleanAction(name, args) {
     case 'spawn_item': {
       const item = String(a.item || '').replace(/<[^>]*>/g, '').trim().slice(0, 20);
       if (!item) return null;
-      // effect 只认白名单这五类，其它一律当作装饰品（null）
-      const effect = /^(?:speed|jump|jetpack|size)$/.test(String(a.effect || '')) ? String(a.effect) : null;
-      return { item, effect, seconds: clampSec(a.seconds) };
+      // effect 由 AI（阿花）自己撰写：{k:类型, v:强度, s:秒数}。后端只做类型白名单 + 区间钳制，保证安全。
+      const e = (a.effect && typeof a.effect === 'object') ? a.effect : {};
+      const k = String(e.k || '');
+      const s = clampNum(e.s == null ? a.seconds : e.s, 2, 10);
+      let effect = null;
+      if (k === 'speed') effect = { k, v: clampNum(e.v == null ? 1.8 : e.v, 1.2, 3), s };
+      else if (k === 'jump') effect = { k, v: clampNum(e.v == null ? 1.6 : e.v, 1.1, 2.5), s };
+      else if (k === 'jetpack') effect = { k, s };
+      else if (k === 'size') effect = { k, v: clampNum(e.v == null ? 1.5 : e.v, 0.3, 2.5), s };
+      // effect 为 null 的整块删除 → 无效果对象，前端按装饰品/兜底处理
+      return { item, effect, seconds: s };
     }
     default:
       return null;
   }
 }
+function clampNum(v, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return lo;
+  return Math.min(hi, Math.max(lo, n));
+}
+
 function clampSec(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return null;
