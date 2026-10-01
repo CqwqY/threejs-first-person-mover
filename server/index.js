@@ -250,6 +250,21 @@ function clampHold(v) {
   return String(v || '').replace(/<[^>]*>/g, '').trim().slice(0, 8);
 }
 
+// 范围效果白名单钳制（投掷物附带增益）：只允许治疗/加速/跳高/飞行/体型，参数一律夹到安全区间
+function cleanFx(v) {
+  if (!v || typeof v !== 'object') return null;
+  const k = String(v.k || '');
+  const s = Number(v.s);
+  const secs = Number.isFinite(s) && s > 0 ? Math.min(20, Math.max(2, Math.round(s))) : 5;
+  const num = (d, lo, hi) => { const n = Number(v.v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+  if (k === 'speed') return { k, v: num(1.8, 1.2, 3), s: secs };
+  if (k === 'jump') return { k, v: num(1.6, 1.1, 2.5), s: secs };
+  if (k === 'jetpack') return { k, s: secs };
+  if (k === 'size') return { k, v: num(1.5, 0.3, 2.5), s: secs };
+  if (k === 'heal') return { k, v: num(100, 1, 500) };
+  return null;
+}
+
 // 收集所有（id, 已上报状态）列表，用于 welcome / snapshot
 function worldPlayers() {
   return [...states.entries()].map(([pid, st]) => ({
@@ -315,6 +330,20 @@ wss.on('connection', (ws) => {
       for (const client of wss.clients) {
         if (client.__id === target && client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({ t: 'hit', from: id, damage: dmg }));
+          break;
+        }
+      }
+      return;
+    }
+
+    // 范围效果广播：投掷物附带的增益，钳制后转发给被覆盖的玩家
+    if (msg.t === 'fx') {
+      const eff = cleanFx(msg.effect);
+      const target = String(msg.target || '');
+      if (!eff || !target || target === id) return;
+      for (const client of wss.clients) {
+        if (client.__id === target && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ t: 'fx', from: id, effect: eff }));
           break;
         }
       }

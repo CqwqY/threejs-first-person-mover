@@ -7,7 +7,7 @@ const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 const AI_MODEL = 'glm-4-flash'; // 智谱免费档模型
 const MAX_OUTPUT_TOKENS = 800;
 // 提示词/接口版本号：随响应一起返回，前端控制台可据此判断线上后端是不是最新版
-const PROMPT_VERSION = 'v15-force-action';
+const PROMPT_VERSION = 'v16-onhit';
 const MAX_HISTORY = 12; // 最多带几条历史消息，防止无限增长烧 token
 
 const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名叫阿花，在喷泉旁摆摊。热情、俏皮、爱开玩笑，说话简短（不超过两句）。
@@ -43,9 +43,11 @@ const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名�
 【动作清单（参数必须写在 args 对象里）】
 
 1. spawn_item —— 给物品（最常用）
-   args: {"item":"物品名","effect":{"k":"speed/jump/jetpack/size/throw","v":强度,"r":半径(仅throw),"s":秒数}}
+   args: {"item":"物品名","effect":{"k":"speed/jump/jetpack/size/throw","v":强度,"r":半径(仅throw),"s":秒数,"onHit":可选}}   （heal 只用于 onHit）
    - effect 必须是对象，绝不能写成字符串！错误：{"effect":"speed"}；正确：{"effect":{"k":"speed","v":2,"s":5}}
-   - k=speed 加速(v 1.2~3)；k=jump 跳高(v 1.1~2.5)；k=size 变大变小(v 0.3~2.5，小于1变小)；k=jetpack 飞行(不写 v)；k=throw 投掷物(v=伤害1~120, r=爆炸半径1~20)；s 秒数 2~10
+   - k=speed 加速(v 1.2~3)；k=jump 跳高(v 1.1~2.5)；k=size 变大变小(v 0.3~2.5，小于1变小)；k=jetpack 飞行(不写 v)；s 秒数 2~10
+   - k=throw 投掷物：v=伤害(1~120)，r=爆炸半径(1~20)，还可加 onHit=附带范围效果（见下）
+   - onHit 是"炸到的人也吃到的效果"，格式和上面一样，可选：{"k":"heal","v":120} 治疗、{"k":"speed","v":2,"s":5} 加速、{"k":"jump","v":1.6,"s":5} 跳高、{"k":"jetpack","s":5} 飞行、{"k":"size","v":1.5,"s":5} 变大
    - 装饰品/食物没有效果，effect 直接写 null，例如 {"item":"矿泉水","effect":null}
 
 2. set_player_speed —— 改移动速度
@@ -86,10 +88,13 @@ const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名�
    args: {"text":"文字"}；传空串 {"text":""} 表示放下。
 
 13. spawn_projectile —— 直接投掷一个范围投掷物
-   args: {"damage":伤害(1~120),"radius":爆炸半径米(1~20),"speed":出手速度(4~40)}
-   命中地面或玩家后爆开，半径内所有玩家（含你自己）受伤。伤害请克制，别动辄上百。
+   args: {"damage":伤害(1~120),"radius":爆炸半径米(1~20),"speed":出手速度(4~40),"onHit":可选附带效果}
+   命中地面、建筑或玩家后爆开，半径内所有玩家（含你自己）受伤；onHit 会同时给半径内的人上效果。
+   例：治疗弹 {"damage":20,"radius":5,"onHit":{"k":"heal","v":120}}
+   例：加速雷 {"damage":30,"radius":4,"onHit":{"k":"speed","v":2.2,"s":5}}
+   伤害请克制，别动辄上百。
 
-【数值平衡】伤害建议 15~60；范围 2~6 米；血量别一次扣光，留点余地。
+【数值平衡】伤害建议 15~60；范围 2~6 米；onHit 治疗建议 80~200；血量别一次扣光，留点余地。
 
 【seconds 说明】写了 seconds 就持续那么久后自动恢复；不写则长期有效。
 
@@ -97,7 +102,9 @@ const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名�
 
 【关于手雷/炸弹/投掷物】这是本游戏的正经玩法，必须支持，不要拒绝：玩家要"手雷/炸弹/爆炸物/扔出去的东西"，就给一件物品，
 effect 写成 {"k":"throw","v":伤害40左右,"r":爆炸半径4左右,"s":3}，千万不要把 effect 写成 null。
+如果玩家还要"顺便回血/加速/跳高/飞行"，就在 throw 里加 onHit。
 示例：{"reply":"接好，别炸到自己！","action":{"name":"spawn_item","args":{"item":"手雷","effect":{"k":"throw","v":45,"r":4,"s":3}}}}
+示例：{"reply":"治疗弹来了，炸到就回血！","action":{"name":"spawn_item","args":{"item":"治疗弹","effect":{"k":"throw","v":20,"r":5,"s":3,"onHit":{"k":"heal","v":120}}}}}
 
 【使用规则】
 - 玩家想要东西 → 用 spawn_item。
@@ -234,6 +241,7 @@ function cleanAction(name, args) {
         damage: Number.isFinite(dmg) && dmg > 0 ? clampNum(dmg, 1, 120) : 0,
         radius: clampNum(Number.isFinite(rad) ? rad : 2, 1, 20),
         speed: clampNum(Number.isFinite(spd) ? spd : 18, 4, 40),
+        onHit: cleanEffect(a.onHit || a.effect),
       };
     }
     case 'spawn_item': {
@@ -256,7 +264,9 @@ function cleanAction(name, args) {
       else if (k === 'throw') {
         const dmg = v != null ? v : (pick('damage') != null ? pick('damage') : 40);
         const rad = pick('r') != null ? pick('r') : (pick('radius') != null ? pick('radius') : 3);
-        effect = { k, v: clampNum(dmg, 1, 120), r: clampNum(rad, 1, 20), s };
+        // 可选附带范围效果：onHit（兼容 sub / 顶层写法）
+        const onHit = cleanEffect(pick('onHit') || pick('sub') || a.onHit || a.sub);
+        effect = { k, v: clampNum(dmg, 1, 120), r: clampNum(rad, 1, 20), s, onHit };
       }
       // 回显 AI 原本写的效果，便于前端排查（null=她确实写了 null/装饰品）
       const echo = raw === undefined ? null : String(typeof raw === 'string' ? raw : JSON.stringify(raw)).slice(0, 80);
@@ -280,10 +290,25 @@ const KIND_ALIAS = {
   飞: 'jetpack', 飞行: 'jetpack', 喷气: 'jetpack', 喷气背包: 'jetpack', 翅膀: 'jetpack',
   体型: 'size', 变大: 'size', 变小: 'size', 缩小: 'size', 巨人: 'size',
   投掷: 'throw', 投掷物: 'throw', 爆炸: 'throw', 手雷: 'throw', 炸弹: 'throw', 爆裂: 'throw', 投: 'throw',
+  治疗: 'heal', 回血: 'heal', 加血: 'heal', 补血: 'heal', 回蓝: 'heal', heal: 'heal',
 };
 function kindOf(raw) {
   const s = String(raw == null ? '' : raw).trim();
   return KIND_ALIAS[s] || KIND_ALIAS[s.toLowerCase()] || '';
+}
+
+// 单个「效果」清洗：只允许 speed/jump/jetpack/size/heal，参数一律夹到安全区间。
+// 用于投掷物的附带范围效果（onHit），与物品主效果口径一致。
+function cleanEffect(o) {
+  if (!o || typeof o !== 'object') return null;
+  const k = kindOf(o.k);
+  const s = clampNum(o.s, 2, 10);
+  if (k === 'speed') return { k, v: clampNum(o.v == null ? 1.8 : o.v, 1.2, 3), s };
+  if (k === 'jump') return { k, v: clampNum(o.v == null ? 1.6 : o.v, 1.1, 2.5), s };
+  if (k === 'jetpack') return { k, s };
+  if (k === 'size') return { k, v: clampNum(o.v == null ? 1.5 : o.v, 0.3, 2.5), s };
+  if (k === 'heal') return { k, v: clampNum(o.v == null ? 100 : o.v, 1, 500) };
+  return null;
 }
 
 function clampInt(v, lo, hi) {

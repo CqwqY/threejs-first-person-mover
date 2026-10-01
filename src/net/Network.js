@@ -80,6 +80,12 @@ export class Network {
     this.send({ t: 'hit', target, damage });
   }
 
+  // 范围效果上报：把投掷物附带的范围增益发给服务器，转发给被覆盖的玩家
+  sendFx(target, effect) {
+    if (!target || !effect) return;
+    this.send({ t: 'fx', target, effect });
+  }
+
   // 节流上报状态：在 20Hz 周期内只发送最新的一次 {t:"state", ...state}
   sendState(state) {
     this._pendingState = state;

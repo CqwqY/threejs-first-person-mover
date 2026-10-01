@@ -344,6 +344,12 @@ export class Game {
         }
         break;
       }
+      case 'fx': {
+        // 被别人投掷物的范围效果覆盖：在本机直接生效
+        this._applyEffect(msg.effect);
+        this._toast('受到范围效果：' + this._describeEffect(msg.effect));
+        break;
+      }
       default:
         break;
     }
@@ -667,15 +673,18 @@ export class Game {
         break;
       }
       case 'spawn_projectile': {
-        // 直接投掷：伤害/范围由阿花指定，后端已钳制
+        // 直接投掷：伤害/范围/范围效果由阿花指定，后端已钳制
         const dmg = Number(a.damage) || 0;
+        const onHit = (a.onHit && typeof a.onHit === 'object') ? a.onHit : null;
         this._throwProjectile({
           damage: dmg,
           radius: Number(a.radius) || 2,
           speed: Number(a.speed) || Config.PROJECTILE_SPEED,
           color: dmg > 0 ? 0xff6a3c : 0x4cd97b,
+          onHit,
         });
-        this._toast(dmg > 0 ? '投掷物已出手（伤害 ' + dmg + '）' : '投掷物已出手');
+        this._toast((dmg > 0 ? '投掷物已出手（伤害 ' + dmg + '）' : '投掷物已出手')
+          + (onHit ? '，并给予 ' + this._describeEffect(onHit) : ''));
         break;
       }
       case 'spawn_item': {
@@ -714,10 +723,59 @@ export class Game {
       life: 4,
       damage: spec.damage || 0,
       radius: spec.radius || 2,
+      onHit: spec.onHit || null,
     });
   }
 
-  // 每帧推进所有投掷物：受重力、撞地/命中玩家即爆开
+  // 投掷物（球）与场景碰撞体的相交检测。
+  // 盒碰撞体（可带 rotY）按「点转到盒局部再做 AABB」；凸包 / trimesh 用其顶点算出的包围盒近似（结果缓存）。
+  _projectileHitsWorld(x, y, z, r) {
+    const cols = this.colliders;
+    if (!cols || !cols.length) return false;
+    for (const b of cols) {
+      if (!b) continue;
+      if (b.type === 'convex' || b.type === 'trimesh') {
+        let box = b.__aabb;
+        if (box === undefined) {
+          const src = b.vertices || b.positions;
+          if (!src || src.length < 3) { b.__aabb = null; box = null; }
+          else {
+            let minX = Infinity, minY = Infinity, minZ = Infinity;
+            let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+            for (let i = 0; i < src.length; i += 3) {
+              const px = src[i], py = src[i + 1], pz = src[i + 2];
+              if (px < minX) minX = px; if (px > maxX) maxX = px;
+              if (py < minY) minY = py; if (py > maxY) maxY = py;
+              if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
+            }
+            box = { minX, minY, minZ, maxX, maxY, maxZ };
+            b.__aabb = box;
+          }
+        }
+        if (box
+          && x > box.minX - r && x < box.maxX + r
+          && y > box.minY - r && y < box.maxY + r
+          && z > box.minZ - r && z < box.maxZ + r) return true;
+        continue;
+      }
+      // 盒：把点转到盒局部坐标（绕 Y 反向旋转 rotY）再做膨胀 AABB 判定
+      let lx = x - b.cx;
+      const ly = y - b.cy;
+      let lz = z - b.cz;
+      if (b.rotY) {
+        const c = Math.cos(b.rotY);
+        const s = Math.sin(b.rotY);
+        const nx = lx * c - lz * s;
+        const nz = lx * s + lz * c;
+        lx = nx;
+        lz = nz;
+      }
+      if (Math.abs(lx) < b.hx + r && Math.abs(ly) < b.hy + r && Math.abs(lz) < b.hz + r) return true;
+    }
+    return false;
+  }
+
+  // 每帧推进所有投掷物：受重力、撞地/撞建筑/命中玩家即爆开
   _updateProjectiles(dt) {
     if (!this._projectiles.length) return;
     for (let i = this._projectiles.length - 1; i >= 0; i--) {
@@ -727,6 +785,8 @@ export class Game {
       p.life -= dt;
       const pos = p.mesh.position;
       let hit = p.life <= 0 || pos.y <= 0.12;
+      // 撞到场景碰撞体（建筑/墙）也爆开：盒按可旋转盒、凸包/网格按其包围盒近似
+      if (!hit && this._projectileHitsWorld(pos.x, pos.y, pos.z, 0.16)) hit = true;
       if (!hit) {
         // 竖直圆柱近似：水平 0.8 米内、高度区间内视为命中其他玩家
         for (const [id, rp] of this.playerManager.players) {
@@ -792,15 +852,70 @@ export class Game {
 
     this._fx.push({ group, ball, ring, shards, t: 0, life: 0.6 });
 
-    if (!p.damage) return;
-    if (Math.hypot(this.localState.x - c.x, this.localState.z - c.z) <= radius) {
-      this._changeHealth(-p.damage);
+    const dSelf = Math.hypot(this.localState.x - c.x, this.localState.z - c.z);
+    const inSelf = dSelf <= radius;
+
+    // 1) 伤害：半径内的自己直接扣血，远端玩家交给服务器转发
+    if (p.damage && inSelf) this._changeHealth(-p.damage);
+    if (p.damage) {
+      for (const [id, rp] of this.playerManager.players) {
+        if (id === this.localState.id) continue;
+        const st = rp.state;
+        if (Math.hypot(st.x - c.x, st.z - c.z) <= radius) this.network.sendHit(id, p.damage);
+      }
     }
-    // 其他玩家：伤害交给服务器转发（服务端会再钳制一次）
-    for (const [id, rp] of this.playerManager.players) {
-      if (id === this.localState.id) continue;
-      const st = rp.state;
-      if (Math.hypot(st.x - c.x, st.z - c.z) <= radius) this.network.sendHit(id, p.damage);
+
+    // 2) 范围效果：半径内的玩家获得 onHit 指定的增益（治疗/加速/跳高/飞行/体型）
+    const onHit = p.onHit;
+    if (onHit) {
+      if (inSelf) {
+        this._applyEffect(onHit);
+        this._toast('受到范围效果：' + this._describeEffect(onHit));
+      }
+      for (const [id, rp] of this.playerManager.players) {
+        if (id === this.localState.id) continue;
+        const st = rp.state;
+        if (Math.hypot(st.x - c.x, st.z - c.z) <= radius) this.network.sendFx(id, onHit);
+      }
+    }
+  }
+
+  // 把一个效果对象（{k,v,s}）作用到本地玩家身上：范围内增益、技能槽触发都走这里，保证口径一致
+  _applyEffect(e) {
+    if (!e || typeof e !== 'object') return;
+    const phys = this.localPlayer.physics;
+    const v = Number(e.v);
+    const secs = Number(e.s) > 0 ? Number(e.s) : 5;
+    switch (e.k) {
+      case 'speed': {
+        const m = (v > 0) ? v : 1.8;
+        phys.speedMult = m;
+        setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, secs * 1000);
+        break;
+      }
+      case 'jump': {
+        const m = (v > 0) ? v : 1.6;
+        phys.jumpMult = m;
+        setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, secs * 1000);
+        break;
+      }
+      case 'jetpack':
+        phys.jetpack = true;
+        setTimeout(() => { phys.jetpack = false; }, secs * 1000);
+        break;
+      case 'size': {
+        const s = (v > 0) ? v : 1.6;
+        phys.sizeTarget = s;
+        setTimeout(() => { if (phys.sizeTarget === s) phys.sizeTarget = 1; }, secs * 1000);
+        break;
+      }
+      case 'heal': {
+        const amount = (v > 0) ? v : 100;
+        this._changeHealth(amount);
+        break;
+      }
+      default:
+        break;
     }
   }
 
@@ -903,14 +1018,16 @@ export class Game {
         };
       }
       case 'throw': {
-        // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）
+        // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
         const dmg = (v && v > 0) ? v : 40;
         const rad = Number.isFinite(Number(eff.r)) && Number(eff.r) > 0 ? Number(eff.r) : 3;
+        const onHit = (eff.onHit && typeof eff.onHit === 'object') ? eff.onHit : null;
         return {
           label: '投掷',
           run: () => {
-            this._throwProjectile({ damage: dmg, radius: rad, color: 0xff6a3c });
-            this._toast('投掷：' + rad + ' 米内造成 ' + dmg + ' 点伤害');
+            this._throwProjectile({ damage: dmg, radius: rad, color: 0xff6a3c, onHit });
+            this._toast('投掷：' + rad + ' 米内造成 ' + dmg + ' 点伤害'
+              + (onHit ? '，并给予 ' + this._describeEffect(onHit) : ''));
           },
         };
       }
@@ -936,6 +1053,7 @@ export class Game {
     const k = e.k || '';
     if (k === 'throw') return '投掷 伤害' + (e.v == null ? '?' : e.v) + ' 半径' + (e.r == null ? '?' : e.r);
     if (k === 'jetpack') return '飞行 ' + (e.s == null ? '?' : e.s) + ' 秒';
+    if (k === 'heal') return '治疗 ' + (e.v == null ? '?' : e.v);
     const names = { speed: '加速', jump: '跳高', size: '体型' };
     if (names[k]) return names[k] + ' ×' + (e.v == null ? '?' : e.v) + ' 持续 ' + (e.s == null ? '?' : e.s) + ' 秒';
     return '未知类型(' + k + ')';
