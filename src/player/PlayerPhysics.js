@@ -12,6 +12,10 @@ export class PlayerPhysics {
     // complex（trimesh）与 simple（盒/凸包）两类碰撞体的每帧拆分缓冲（复用，避免每帧分配）
     this._trimeshes = [];
     this._simples = [];
+    // 运行时状态（由 AI 商人 NPC / 外部注入，不必改 Config 全局）
+    this.speedMult = 1;   // 移动速度倍率（默认 1 = 正常）
+    this.sizeScale = 1;   // 体型倍率（身高/碰撞半径/边界按此缩放，默认 1 = 正常）
+    this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
   }
 
   // 更新一帧物理。
@@ -44,14 +48,20 @@ export class PlayerPhysics {
     const sprint =
       input.sprinting() ||
       (input.joyMagnitude && input.joyMagnitude() >= 0.85);
-    const speed = Config.MOVE_SPEED * (sprint ? Config.SPRINT_MULTIPLIER : 1);
+    const speed = Config.MOVE_SPEED * this.speedMult * (sprint ? Config.SPRINT_MULTIPLIER : 1);
 
     // ---- 2. 水平速度 ----
     this.velocity.x = move.x * speed;
     this.velocity.z = move.z * speed;
 
-    // ---- 3. 重力：竖直方向速度持续向下累加（GRAVITY 为负值） ----
+    // ---- 3. 重力：竖直方向速度持续向下累加（GRAVITY 为负值）----
     this.velocity.y += Config.GRAVITY * dt;
+
+    // ---- 3.5 喷气背包：开启且按住空格、又在空中时，把竖直速度托住为上升/悬停 ----
+    // 地面起跳仍走正常 jump；只要在空中按住空格就一直往上升，松开自然下落。
+    if (this.jetpack && input.isDown && input.isDown('Space') && !state.onGround) {
+      this.velocity.y = Math.max(this.velocity.y + (Config.JETPACK_LIFT - this.velocity.y) * Math.min(1, dt * 8), Config.JETPACK_LIFT);
+    }
 
     // ---- 4. 跳跃：只有站在地面才允许跳 ----
     // 采用一次性探测（consumeJump），防止按住空格时连续起跳
@@ -90,15 +100,17 @@ export class PlayerPhysics {
     this._snapToGround(state, simples);
 
     // ---- 6. 地面碰撞：防止下穿地面，落到 PLAYER_HEIGHT 处即认为着地 ----
-    if (state.y <= Config.PLAYER_HEIGHT) {
-      state.y = Config.PLAYER_HEIGHT;
+    const groundY = Config.PLAYER_HEIGHT * this.sizeScale;
+    if (state.y <= groundY) {
+      state.y = groundY;
       this.velocity.y = 0;
       state.onGround = true;
     }
 
     // ---- 7. 边界限制：把玩家挡在矩形地面内（宽 x / 长 z） ----
-    const limitX = Config.GROUND_WIDTH / 2 - Config.PLAYER_RADIUS;
-    const limitZ = Config.GROUND_DEPTH / 2 - Config.PLAYER_RADIUS;
+    const rScale = Config.PLAYER_RADIUS * this.sizeScale;
+    const limitX = Config.GROUND_WIDTH / 2 - rScale;
+    const limitZ = Config.GROUND_DEPTH / 2 - rScale;
     state.x = THREE.MathUtils.clamp(state.x, -limitX, limitX);
     state.z = THREE.MathUtils.clamp(state.z, -limitZ, limitZ);
   }
@@ -110,8 +122,8 @@ export class PlayerPhysics {
   // 沿最小穿透轴解析，从而既能挡侧面、也能从顶部顶面着陆（不能从上方穿入）。
   _resolveWorldCollisions(state, colliders) {
     if (!colliders || colliders.length === 0) return;
-    const pr = Config.PLAYER_RADIUS;
-    const hh = Config.PLAYER_HEIGHT / 2;
+    const pr = Config.PLAYER_RADIUS * this.sizeScale;
+    const hh = (Config.PLAYER_HEIGHT / 2) * this.sizeScale;
 
     for (const b of colliders) {
       const px = state.x;
@@ -136,7 +148,7 @@ export class PlayerPhysics {
         // 选最小穿透轴解析（竖直优先，其次 X 再 Z，保证顶面着陆稳定）
         if (oy <= ox && oy <= oz) {
           if (py > b.cy) {
-            state.y = b.cy + b.hy + Config.PLAYER_HEIGHT;
+            state.y = b.cy + b.hy + Config.PLAYER_HEIGHT * this.sizeScale;
             if (this.velocity.y < 0) this.velocity.y = 0;
             state.onGround = true;
           } else {
@@ -182,7 +194,7 @@ export class PlayerPhysics {
       // 竖直穿透最小 → 顶面/底面解析（保持在转动的盒顶站稳）
       if (oy <= minPen) {
         if (py > b.cy) {
-          state.y = b.cy + b.hy + Config.PLAYER_HEIGHT;
+          state.y = b.cy + b.hy + Config.PLAYER_HEIGHT * this.sizeScale;
           if (this.velocity.y < 0) this.velocity.y = 0;
           state.onGround = true;
         } else {
@@ -252,7 +264,7 @@ export class PlayerPhysics {
     const isY = Math.abs(minAxis.y) > 0.999;
     if (isY) {
       if (py > b.maxY) {
-        state.y = b.maxY + Config.PLAYER_HEIGHT;
+        state.y = b.maxY + Config.PLAYER_HEIGHT * this.sizeScale;
         if (this.velocity.y < 0) this.velocity.y = 0;
         state.onGround = true;
       } else if (py < b.minY) {
@@ -324,8 +336,8 @@ export class PlayerPhysics {
     // 此时若吸附会把玩家在离地仍有一段距离时就拉到地面并清零竖直速度，表现为「坠落震一下」。
     if (this.velocity.y < -Config.GROUND_SNAP_MAX_FALL_SPEED) return;
 
-    const pr = Config.PLAYER_RADIUS;
-    const feet = state.y - Config.PLAYER_HEIGHT; // 脚底高度
+    const pr = Config.PLAYER_RADIUS * this.sizeScale;
+    const feet = state.y - Config.PLAYER_HEIGHT * this.sizeScale; // 脚底高度
     const snap = Config.GROUND_SNAP_DISTANCE;
 
     // 候选地面高度：取脚底及其以下（含极小容差）中最高的一个
@@ -347,7 +359,7 @@ export class PlayerPhysics {
     if (best === -Infinity) return;
     if (feet - best > Math.min(snap, Config.GROUND_SNAP_MAX_GAP)) return; // 落差过大 = 正在下落，交给碰撞解析正常着陆
 
-    state.y = best + Config.PLAYER_HEIGHT;
+    state.y = best + Config.PLAYER_HEIGHT * this.sizeScale;
     if (this.velocity.y < 0) this.velocity.y = 0;
     state.onGround = true;
   }

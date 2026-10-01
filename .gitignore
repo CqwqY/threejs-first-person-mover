@@ -7,6 +7,12 @@ dist/
 *.db-wal
 *.db-shm
 
+# AI 第三方 API Key（智谱 GLM），只存在服务器，绝不能进公开仓库
+server/ai.key.js
+server-remote/ai.key.js
+server/*.key.js
+server-remote/*.key.js
+
 # 包管理器锁文件（可选，若希望锁定版本可保留 package-lock.json）
 npm-debug.log*
 

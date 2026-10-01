@@ -8,6 +8,8 @@ export const Config = {
   SPRINT_MULTIPLIER: 1.6,
   // 跳跃初速度（向上，正值；米/秒）
   JUMP_VELOCITY: 6,
+  // 喷气背包悬停/上升速度（米/秒）：NPC 给玩家喷气背包后，空中按住空格以此速度持续上升
+  JETPACK_LIFT: 5,
   // 重力加速度（向下，负值；米/秒^2）。负号表示方向朝 y 轴负方向。
   GRAVITY: -20,
   // ---- 斜面抓地（走上/停在斜坡上不再像踩冰一样下滑）----
@@ -83,6 +85,14 @@ export const Config = {
   // 多人在线中继地址（后端已迁到远程，支持 HTTPS/wss，wss 走 443）。
   // 纯本地调试可改回 'ws://localhost:9000'。
   RELAY_URL: 'wss://game666.lshserver.dpdns.org',
+
+  // ---- AI 商人 NPC ----
+  // NPC 世界坐标（米）：出生点约 (2,144)，放在旁边的校园喷泉(-2,143)
+  NPC_POS: { x: -2, z: 143 },
+  // 玩家离 NPC 多远内算「可对话」（水平距离，米）
+  NPC_PROXIMITY: 3.2,
+  // 触发对话的键（e.code）
+  NPC_KEY: 'KeyE',
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。

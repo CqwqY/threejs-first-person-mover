@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { initAuth } from './auth.js';
+import { handleAIRoute } from './ai.js';
 
 const PORT = 9000; // 服务监听端口
 const SNAPSHOT_INTERVAL = 50; // 快照广播间隔（毫秒），对应 20Hz
@@ -55,6 +56,12 @@ const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // AI 商人 NPC：对话 + 工具调用（改速度/体积/传送/喷气背包/生成物品）
+  if (req.method === 'POST' && url.pathname === '/api/ai') {
+    await handleAIRoute(req, res, url);
+    return;
+  }
 
   // 账号相关接口（注册/登录/资料/登出）：已处理则返回
   if (await auth.handleRequest(req, res, url)) return;

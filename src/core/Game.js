@@ -1,11 +1,13 @@
 // 职责：游戏主类，负责装配三大件（渲染器/场景/相机）、输入、玩家，并驱动主循环。
 import * as THREE from 'three';
-import { Config } from '../config.js';
+import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, createSettingsButton, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
+import { createNpcChat } from '../ui/NpcChat.js';
+import { createAiNpc } from '../world/AiNpc.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
@@ -162,6 +164,19 @@ export class Game {
 
     // 顶部校卡：显示当前账号名字，点击展开查看详情，并可在卡内退出登录
     this.playerHUD = createPlayerHUD(this._profile, !!this._token);
+
+    // ---- AI 商人 NPC：放在出生点旁的喷泉处，靠近按 E 打开对话面板 ----
+    this.aiChat = createNpcChat();
+    this.aiChat.setOnSend((text) => this._npcSend(text));
+    this.aiNpc = createAiNpc();
+    this.aiNpc.setInteract(() => {
+      if (this.aiChat.isOpen()) return; // 已打开就不重复弹欢迎语
+      document.exitPointerLock && document.exitPointerLock();
+      this.aiChat.open();
+    });
+    this.scene.add(this.aiNpc.group);
+    // 本地可拾取的「生成物品」发光道具
+    this._pickups = [];
   }
 
   // 窗口尺寸变化时更新相机纵横比和渲染器尺寸
@@ -261,6 +276,155 @@ export class Game {
     }
   }
 
+  // 把玩家一句话发给后端 GLM 代理，拿到 {reply, action} 后：展示回复并执行工具动作。
+  async _npcSend(text) {
+    const aichat = this.aiChat;
+    aichat.addMsg('busy', '阿花正在想…');
+    const msgs = this._npcHistory || [];
+    msgs.push({ role: 'user', content: text });
+    try {
+      const res = await fetch(API_BASE + '/api/ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: msgs }),
+      });
+      const data = await res.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || ('http ' + res.status));
+      const reply = data.reply || '…';
+      msgs.push({ role: 'assistant', content: reply });
+      // 只保留最近若干条，避免历史无限膨胀
+      this._npcHistory = msgs.slice(-12);
+      aichat.addMsg('npc', reply);
+      if (data.action) this._executeNpcAction(data.action);
+    } catch (e) {
+      aichat.addMsg('npc', '阿花好像卡住了，请稍后再试。');
+    }
+  }
+
+  // 执行 GLM 点名的工具动作。所有参数已经过后端清洗，这里只做贴上玩家。
+  _executeNpcAction(action) {
+    const state = this.localState;
+    const phys = this.localPlayer.physics;
+    switch (action.name) {
+      case 'set_player_speed': {
+        phys.speedMult = action.args.multiplier;
+        this._toast('速度已变为 ' + action.args.multiplier + ' 倍');
+        if (action.args.seconds && action.args.seconds > 0) {
+          const t = action.args.seconds;
+          setTimeout(() => { if (phys.speedMult === action.args.multiplier) phys.speedMult = 1; }, t * 1000);
+        }
+        break;
+      }
+      case 'set_player_size': {
+        phys.sizeScale = action.args.scale;
+        this._toast('体型已变为 ' + action.args.scale + ' 倍');
+        if (action.args.seconds && action.args.seconds > 0) {
+          const t = action.args.seconds;
+          setTimeout(() => { if (phys.sizeScale === action.args.scale) phys.sizeScale = 1; }, t * 1000);
+        }
+        break;
+      }
+      case 'teleport_player': {
+        const x = THREE.MathUtils.clamp(action.args.x, -Config.GROUND_WIDTH / 2, Config.GROUND_WIDTH / 2);
+        const z = THREE.MathUtils.clamp(action.args.z, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
+        state.x = x;
+        state.z = z;
+        state.y = Config.PLAYER_HEIGHT * phys.sizeScale;
+        this._toast('已传送');
+        break;
+      }
+      case 'grant_jetpack': {
+        phys.jetpack = !!action.args.on;
+        this._toast(phys.jetpack ? '喷气背包已开启，空中按住空格上升' : '喷气背包已关闭');
+        if (action.args.seconds && action.args.seconds > 0) {
+          const t = action.args.seconds;
+          setTimeout(() => { phys.jetpack = false; }, t * 1000);
+        }
+        break;
+      }
+      case 'spawn_item': {
+        this._spawnPickup(action.args.item, action.args.seconds || 60);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  // spawn_item：在玩家正前方生成一个发光可拾取道具，走过去触碰即可拾取。
+  _spawnPickup(name, ttl) {
+    const state = this.localState;
+    const rad = 1.6;
+    const px = state.x + -Math.sin(state.yaw) * rad;
+    const pz = state.z + -Math.cos(state.yaw) * rad;
+    const geo = new THREE.OctahedronGeometry(0.28);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffd24a, emissive: 0xffa726, emissiveIntensity: 1.4,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(px, 1.0, pz);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+
+    const life = Math.max(5, Math.min(ttl || 60, 300));
+    const p = { mesh, x: px, z: pz, ttl: life, buff: (Math.random() * 0.5 + 0.75) };
+    this._pickups.push(p);
+    mesh.userData.pickup = p;
+
+    this._toast('阿花送了你一个：' + name + '，走过去碰到它就有小惊喜');
+  }
+
+  // 顶部消息气泡提醒（不带 emoji）
+  _toast(text) {
+    let el = this._toastEl;
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'npc-toast';
+      el.style.cssText =
+        'position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:9800;' +
+        'background:rgba(30,40,60,.88);color:#fff;padding:8px 16px;border-radius:18px;' +
+        'font:14px/1.4 system-ui,"Microsoft YaHei",sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.3);pointer-events:none;' +
+        'opacity:0;transition:opacity .25s;';
+      document.body.appendChild(el);
+      this._toastEl = el;
+    }
+    el.textContent = text;
+    el.style.opacity = '1';
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => { el.style.opacity = '0'; }, 3200);
+  }
+
+  // 每帧推进拾取道具：旋转跳动、倒计时消失、靠近自动拾取并给个随机小 buff
+  _updatePickups(dt) {
+    if (!this._pickups.length) return;
+    const state = this.localState;
+    const phys = this.localPlayer.physics;
+    const myX = state.x, myZ = state.z;
+
+    for (let i = this._pickups.length - 1; i >= 0; i--) {
+      const p = this._pickups[i];
+      p.ttl -= dt;
+      p.mesh.rotation.y += dt * 2.5;
+      p.mesh.position.y = 1.0 + Math.abs(Math.sin(performance.now() / 350)) * 0.25;
+
+      const d = Math.hypot(myX - p.x, myZ - p.z);
+      if (d < 1.0) {
+        // 拾取：随机加速一点点，算作「小惊喜」
+        phys.speedMult = Math.min(phys.speedMult * (1 + p.buff * 0.15), 5);
+        this._toast('你捡到了宝贝，速度 +' + Math.round(p.buff * 15) + '%');
+        this.scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.dispose();
+        this._pickups.splice(i, 1);
+      } else if (p.ttl <= 0) {
+        this.scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.dispose();
+        this._pickups.splice(i, 1);
+      }
+    }
+  }
+
   // 第三人称：本地模型跟随自身位置朝向并播放行走动画，相机位于玩家后上方看向角色
   _thirdPerson(dt) {
     const local = this.playerManager.getLocalPlayer();
@@ -315,6 +479,10 @@ export class Game {
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     this.localPlayer.update(dt);
     this.playerManager.update(dt);
+
+    // AI 商人 NPC：靠近提示 + 可拾取道具的推进
+    this.aiNpc.update(dt, this.localState.x, this.localState.z);
+    this._updatePickups(dt);
 
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
