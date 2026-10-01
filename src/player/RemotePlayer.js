@@ -4,8 +4,8 @@ import { PlayerState } from './PlayerState.js';
 import { createPlayerModel } from './PlayerModel.js';
 
 export class RemotePlayer {
-  // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖
-  constructor(id, stateData, name) {
+  // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色
+  constructor(id, stateData, name, color) {
     this.id = id;
 
     // target：最新网络目标状态；state：用于渲染的插值状态（不断向 target 逼近）
@@ -21,7 +21,7 @@ export class RemotePlayer {
     const gender = num % 2 === 0 ? 'girl' : 'boy';
 
     // 外观模型（人物 GLB + 头顶名牌）
-    this.model = createPlayerModel(label, gender);
+    this.model = createPlayerModel(label, gender, color || '#ffffff');
     this.model.visible = true;
 
     // 初始对齐，避免首帧瞬移

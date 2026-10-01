@@ -2,8 +2,9 @@
 import { Config } from '../config.js';
 
 export class Network {
-  constructor(url) {
+  constructor(url, token) {
     this.url = url;
+    this.token = token || ''; // 登录会话 token；空串表示游客
     this.ws = null;
 
     // 消息回调列表
@@ -26,6 +27,10 @@ export class Network {
     this.ws.onopen = () => {
       // 连接成功：重置重试计数
       this._reconnectAttempts = 0;
+      // 连接握手：携带 token 登录；游客 token 为空不发送，服务端按未登录处理
+      if (this.token) {
+        this.send({ t: 'auth', token: this.token });
+      }
     };
 
     this.ws.onmessage = (event) => {

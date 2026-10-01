@@ -103,8 +103,8 @@ export function debugCalibFrame() {
   }
 }
 
-// 创建玩家模型；label 为头顶名牌文字（如"玩家1"），gender 决定使用 girl/boy 素材，为空则不挂名牌
-export function createPlayerModel(label = '', gender = 'boy') {
+// 创建玩家模型；label 为头顶名牌文字（如"玩家1"），gender 决定使用 girl/boy 素材，color 为名牌文字颜色
+export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff') {
   const group = new THREE.Group();
 
   // ---- 占位身体：GLB 加载前的简单人形，避免一开始就“隐形” ----
@@ -121,7 +121,7 @@ export function createPlayerModel(label = '', gender = 'boy') {
   group.userData.headAnchor = headAnchor;
 
   if (label) {
-    headAnchor.add(createNameTag(label));
+    headAnchor.add(createNameTag(label, color));
   }
 
   // 注册本次模型条目，并立即构建身体
@@ -148,8 +148,8 @@ function _createFallbackBody() {
   return holder;
 }
 
-// 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）
-export function createNameTag(text) {
+// 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）；color 控制昵称文字颜色（默认白）
+export function createNameTag(text, color = '#ffffff') {
   const canvas = document.createElement('canvas');
   const w = 256;
   const h = 72;
@@ -162,8 +162,8 @@ export function createNameTag(text) {
   ctx.beginPath();
   ctx.roundRect(8, 8, w - 16, h - 16, 16);
   ctx.fill();
-  // 白色文字
-  ctx.fillStyle = '#ffffff';
+  // 昵称颜色（默认白）
+  ctx.fillStyle = color;
   ctx.font = 'bold 44px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';

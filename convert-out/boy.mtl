@@ -1,0 +1,9 @@
+newmtl tripo_mat_43eae947-f463-4c96-b4fe-24569fef2e6e
+Ka 0 0 0
+Kd 1 1 1
+Ks 0 0 0
+Ns 1
+d 1
+illum 2
+map_Kd tripo_image_43eae947-f463-4c96-b4fe-24569fef2e6e_0_0.jpg
+

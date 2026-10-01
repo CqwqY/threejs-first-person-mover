@@ -14,14 +14,14 @@ export class PlayerManager {
   }
 
   // 新增/获取一个玩家：创建 RemotePlayer 并把模型加入场景
-  // name 用于头顶名牌文字；缺省时由 RemotePlayer 按状态里的 num 推导
-  addPlayer(id, stateData, name) {
+  // name 用于头顶名牌文字；color 为名牌文字颜色；缺省时由 RemotePlayer 按状态里的 num 推导
+  addPlayer(id, stateData, name, color) {
     // 已存在则直接返回
     if (this.players.has(id)) {
       return this.players.get(id);
     }
 
-    const remote = new RemotePlayer(id, stateData, name);
+    const remote = new RemotePlayer(id, stateData, name, color);
     this.scene.add(remote.model);
 
     // 本地玩家第一人称看不到自己，模型设为不可见
@@ -97,8 +97,8 @@ export class PlayerManager {
         // 已有玩家：仅更新目标状态，由 RemotePlayer 插值逼近
         remote.applyState(data);
       } else {
-        // 新玩家：第一次出现时创建模型并注册
-        this.addPlayer(data.id, data);
+        // 新玩家：第一次出现时创建模型并注册（名牌用服务端下发的昵称/颜色）
+        this.addPlayer(data.id, data, data.nick, data.color);
       }
     }
 

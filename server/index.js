@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { initAuth } from './auth.js';
 
 const PORT = 9000; // 服务监听端口
 const SNAPSHOT_INTERVAL = 50; // 快照广播间隔（毫秒），对应 20Hz
@@ -41,14 +42,17 @@ function mimeFor(ext) {
 }
 
 // HTTP 服务：承载「保存地图 / 素材清单 / 上传 / 静态资源」接口，并用 upgrade 事件转交给 WebSocket 中继
-const httpServer = http.createServer((req, res) => {
+const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-filename');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-filename, Authorization');
 
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // 账号相关接口（注册/登录/资料/登出）：已处理则返回
+  if (await auth.handleRequest(req, res, url)) return;
 
   // 静态资源：/assets/<file> 从 data/assets 返回（含上传的 GLB 模型）
   if (req.method === 'GET' && url.pathname.startsWith('/assets/')) {
@@ -204,6 +208,10 @@ function broadcast(msg) {
   }
 }
 
+const AUTH_DB = path.join(DATA_DIR, 'accounts.db');
+// 账号系统（SQLite，schema 由 auth.js 启动时自建），不碰地图/素材文件
+const auth = initAuth(AUTH_DB);
+
 // 收集所有（id, 已上报状态）列表，用于 welcome / snapshot
 function worldPlayers() {
   return [...states.entries()].map(([pid, st]) => ({
@@ -213,6 +221,8 @@ function worldPlayers() {
     y: st.y,
     z: st.z,
     yaw: st.yaw,
+    nick: st.nick || ('玩家' + st.num),
+    color: st.color || '#ffffff',
   }));
 }
 
@@ -233,10 +243,32 @@ wss.on('connection', (ws) => {
     } catch {
       return; // 非 JSON 忽略
     }
-    if (!msg || msg.t !== 'state') return;
+    if (!msg) return;
+
+    // 登录：客户端连上后携带 token 鉴权，成功则把昵称/颜色挂到本连接，供名牌展示
+    if (msg.t === 'auth') {
+      const pub = auth.getPublicByToken(msg.token);
+      ws.__profile = pub;
+      ws.send(JSON.stringify({ t: 'auth', ok: !!pub, profile: pub }));
+      // 若此前已上报过自身状态，立即用登录资料刷新并广播给他人
+      if (pub && states.has(id)) {
+        const cur = states.get(id);
+        states.set(id, { ...cur, nick: pub.nickname || ('玩家' + cur.num), color: pub.nicknameColor || '#ffffff' });
+        broadcast({ t: 'join', id, state: states.get(id) });
+      }
+      return;
+    }
+
+    if (msg.t !== 'state') return;
 
     const isFresh = !states.has(id); // 是否第一次上报（用于 join 广播）
-    states.set(id, { num, x: msg.x, y: msg.y, z: msg.z, yaw: msg.yaw });
+    const pub = ws.__profile;
+    states.set(id, {
+      num,
+      x: msg.x, y: msg.y, z: msg.z, yaw: msg.yaw,
+      nick: pub ? (pub.nickname || ('玩家' + num)) : ('玩家' + num),
+      color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
+    });
 
     if (isFresh) {
       // 新玩家首次上报：把 join（含序号与状态）广播给其他人

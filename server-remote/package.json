@@ -8,6 +8,7 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "ws": "^8.18.0"
   }
 }

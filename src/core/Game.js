@@ -28,7 +28,11 @@ async function _fetchRemoteScene(scene, roots, target) {
 }
 
 export class Game {
-  constructor() {
+  // token：登录会话 token（游客为空串）；profile：登录成功返回的用户资料（点名牌用）
+  constructor(token = '', profile = null) {
+    this._token = token;
+    this._profile = profile;
+
     // ---- 渲染器 ----
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
@@ -89,7 +93,7 @@ export class Game {
     this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState, this.colliders);
 
     // ---- 网络连接 ----
-    this.network = new Network(Config.RELAY_URL);
+    this.network = new Network(Config.RELAY_URL, this._token);
     this.network.onMessage((msg) => this._onNetworkMessage(msg));
     this.network.connect();
 
@@ -162,6 +166,12 @@ export class Game {
   // 处理服务器发来的消息（中继协议）
   _onNetworkMessage(msg) {
     switch (msg.t) {
+      case 'auth': {
+        // 服务端确认登录结果：刷新本地资料（昵称/颜色用于自己的名牌）
+        if (msg.ok && msg.profile) this._profile = msg.profile;
+        else if (!msg.ok) console.warn('[Game] 登录令牌失效，将以游客身份显示');
+        break;
+      }
       case 'welcome': {
         // 确定本地 id，注册自己（模型隐藏），并加入服务器已存在的玩家
         this.localState.id = msg.id;
@@ -171,17 +181,20 @@ export class Game {
         this.localState.yaw = msg.spawn.yaw;
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         this.playerManager.setLocal(msg.id);
-        this.playerManager.addPlayer(msg.id, this.localState, `玩家${msg.num}`);
+        // 本地名牌：登录了用昵称，否则游客样式
+        const myNick = this._profile ? (this._profile.nickname || `玩家${msg.num}`) : `玩家${msg.num}`;
+        const myColor = this._profile ? (this._profile.nicknameColor || '#ffffff') : '#ffffff';
+        this.playerManager.addPlayer(msg.id, this.localState, myNick, myColor);
         for (const p of msg.players) {
-          this.playerManager.addPlayer(p.id, p, `玩家${p.num}`);
+          this.playerManager.addPlayer(p.id, p, p.nick || `玩家${p.num}`, p.color || '#ffffff');
         }
         // 服务器为准：移除不在当前在线列表中的远程模型/名牌（清除未加入或已断开连接的残留）
         this.playerManager.pruneTo(msg.players.map((p) => p.id));
         break;
       }
       case 'join': {
-        // 有新玩家加入：注册并显示模型（名牌按加入序号）
-        this.playerManager.addPlayer(msg.id, msg.state, `玩家${msg.state.num}`);
+        // 有新玩家加入：注册并显示模型（名牌用服务端下发的昵称/颜色）
+        this.playerManager.addPlayer(msg.id, msg.state, msg.state.nick || `玩家${msg.state.num}`, msg.state.color || '#ffffff');
         break;
       }
       case 'leave': {
