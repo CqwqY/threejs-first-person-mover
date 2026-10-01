@@ -11,7 +11,26 @@ const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
 const HAND_POS = { x: 0.34, y: 1.05, z: 0.16 }; // 手部锚点（模型局部坐标，原点在脚底）
 const HP_W = 0.9;   // 血量条宽度（世界单位）
 const HP_H = 0.085; // 血量条高度
+const HP_CANVAS_W = 128; // 血量条画布尺寸（横向分辨率足够看清比例即可）
+const HP_CANVAS_H = 16;
 const DEG = Math.PI / 180;
+
+// 把血量比例画到画布上：底槽 + 左对齐的彩色填充（同一张图，不存在层序问题）
+function drawHpBar(ctx, ratio) {
+  const r = Math.max(0, Math.min(1, ratio));
+  ctx.clearRect(0, 0, HP_CANVAS_W, HP_CANVAS_H);
+  ctx.fillStyle = 'rgba(20,26,38,0.85)';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, HP_CANVAS_W, HP_CANVAS_H, 4);
+  ctx.fill();
+  const w = r * (HP_CANVAS_W - 2);
+  if (w > 1) {
+    ctx.fillStyle = r > 0.5 ? '#2ecc71' : (r > 0.2 ? '#f1c40f' : '#e74c3c');
+    ctx.beginPath();
+    ctx.roundRect(1, 1, w, HP_CANVAS_H - 2, 3);
+    ctx.fill();
+  }
+}
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
 // modelDeg：模型整体视觉朝向，直接绕 Y 旋转最终模型（安全、不动骨架）。
@@ -147,18 +166,25 @@ export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff')
     headAnchor.add(createNameTag(label, color));
   }
 
-  // ---- 血量条：名牌下方一条，Sprite 始终面向相机（depthTest:false 保证被人挡住也可见）----
-  const hpBg = new THREE.Sprite(new THREE.SpriteMaterial({
-    color: 0x141a26, transparent: true, opacity: 0.85, depthTest: false,
+  // ---- 血量条：名牌下方一条 ----
+  // 用「一张画布同时画底槽 + 填充」的单 Sprite，而不是底/填充两个 Sprite：
+  // 两个 depthTest:false 的透明 Sprite 只能按距离排序，必然互相穿插闪烁。
+  // 层级用 renderOrder 固定（名牌 10 → 血条 11 → 手持物 13），并关掉 depthWrite。
+  const hpCanvas = document.createElement('canvas');
+  hpCanvas.width = HP_CANVAS_W;
+  hpCanvas.height = HP_CANVAS_H;
+  const hpTex = new THREE.CanvasTexture(hpCanvas);
+  hpTex.minFilter = THREE.LinearFilter;
+  const hpSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: hpTex, transparent: true, depthTest: false, depthWrite: false,
   }));
-  hpBg.scale.set(HP_W, HP_H, 1);
-  hpBg.position.y = -0.26;
-  const hpFill = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x2ecc71, depthTest: false }));
-  hpFill.scale.set(HP_W, HP_H, 1);
-  hpFill.position.set(0, -0.26, 0.001); // 略前置，避免与底色同深度闪烁
-  headAnchor.add(hpBg);
-  headAnchor.add(hpFill);
-  group.userData.hpBar = { fill: hpFill };
+  hpSprite.scale.set(HP_W, HP_H, 1);
+  hpSprite.position.y = -0.26;
+  hpSprite.renderOrder = 11;
+  headAnchor.add(hpSprite);
+  const hpBar = { sprite: hpSprite, tex: hpTex, ctx: hpCanvas.getContext('2d'), shown: -1 };
+  group.userData.hpBar = hpBar;
+  drawHpBar(hpBar.ctx, 1); // 初始满血
 
   // 注册本次模型条目，并立即构建身体
   const entry = { group, gender, faceHolder: null, root: null, pivots: [], skinnedMesh: null };
@@ -195,14 +221,16 @@ export function setModelScale(group, s) {
   if (hand) hand.position.set(HAND_POS.x * scale, HAND_POS.y * scale, HAND_POS.z * scale);
 }
 
-// 刷新玩家头顶血量条：按比例缩放绿色条（左端固定），过半绿、居中黄、偏低红
+// 刷新玩家头顶血量条：比例没变就不重绘（血量只在受伤/回血时变，开销可忽略）
 export function setHealthBar(group, hp, max) {
   const bar = group.userData.hpBar;
   if (!bar) return;
   const ratio = max > 0 ? Math.max(0, Math.min(1, hp / max)) : 0;
-  bar.fill.scale.x = Math.max(1e-4, HP_W * ratio);
-  bar.fill.position.x = -HP_W * (1 - ratio) / 2;
-  bar.fill.material.color.setHex(ratio > 0.5 ? 0x2ecc71 : (ratio > 0.2 ? 0xf1c40f : 0xe74c3c));
+  const q = Math.round(ratio * 100);
+  if (bar.shown === q) return;
+  bar.shown = q;
+  drawHpBar(bar.ctx, ratio);
+  bar.tex.needsUpdate = true;
 }
 
 // 设置手持物：一段显示在手上的 3D 文字（别人与第三人称可见）；text 为空则清空手持
@@ -229,8 +257,11 @@ export function setHeldText(group, text) {
   ctx.fillText(text, 64, 33);
   const tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearFilter;
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false, depthWrite: false,
+  }));
   sp.scale.set(0.6, 0.3, 1);
+  sp.renderOrder = 13; // 手持物压在最上层，不与名牌/血条互相穿插
   hand.add(sp);
 }
 
@@ -262,10 +293,12 @@ export function createNameTag(text, color = '#ffffff') {
     map: texture,
     transparent: true,
     depthTest: false, // 名牌始终可见，不被遮挡
+    depthWrite: false, // 不写深度，避免与血量条等其它 Sprite 互相穿插
   });
 
   const sprite = new THREE.Sprite(material);
   sprite.scale.set(1.6, 0.45, 1);
+  sprite.renderOrder = 10; // 名牌在最底层，血量条压在其上
   return sprite;
 }
 
