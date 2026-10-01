@@ -153,9 +153,14 @@ export class Game {
         storeKey: 'scene-settings-game-v1',
       }
     );
-    createSettingsButton({ text: '画面', panel: this.settingsPanel });
+    // 设置入口：停靠在屏幕右侧中部，齿轮图标
+    createSettingsButton({
+      panel: this.settingsPanel,
+      icon: true,
+      position: { right: 18, top: '50%', centerY: true },
+    });
 
-    // 左上角玩家信息 HUD：显示当前账号名字，并提供退出登录
+    // 顶部校卡：显示当前账号名字，点击展开查看详情，并可在卡内退出登录
     this.playerHUD = createPlayerHUD(this._profile, !!this._token);
   }
 

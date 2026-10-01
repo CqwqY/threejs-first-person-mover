@@ -102,6 +102,15 @@ function injectStyle() {
       font: 12px/1 system-ui, sans-serif; box-shadow: 0 4px 14px rgba(0,0,0,.4);
     }
     .gx-fab:hover { background: #2a2d36; }
+    /* 图标形态的设置按钮：圆形玻璃质感，配合右侧中部停靠 */
+    .gx-fab-icon {
+      width: 44px; height: 44px; padding: 0; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,.74); color: #3a4250;
+      border: 1px solid rgba(255,255,255,.68); backdrop-filter: blur(12px);
+      box-shadow: 0 6px 20px rgba(0,0,0,.16);
+    }
+    .gx-fab-icon:hover { background: #fff; color: #1f2430; }
   `;
   const style = document.createElement('style');
   style.textContent = css;
@@ -243,15 +252,30 @@ export function createSettingsPanel(binds, opts = {}) {
   };
 }
 
-// createSettingsButton({ text, panel, position })：生成一个右下角悬浮按钮，点击切换面板显隐。
-export function createSettingsButton({ text = '画面', panel, position = { left: 16, bottom: 16 } }) {
+// 齿轮图标（描边 SVG，不用 emoji）
+const GEAR_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <circle cx="12" cy="12" r="3"/>
+  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+</svg>`;
+
+// createSettingsButton({ text, panel, position, icon })：生成悬浮按钮，点击切换面板显隐。
+//   position：{ left?, right?, top?, bottom?, centerY? }，给 centerY 时以 top 为中线垂直居中。
+//   icon：true 时渲染齿轮图标（圆形按钮），false 时渲染文字。
+export function createSettingsButton({ text = '画面', panel, position = { left: 16, bottom: 16 }, icon = false }) {
   injectStyle();
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'gx-fab';
-  btn.textContent = text;
-  btn.style.left = `${position.left}px`;
-  btn.style.bottom = `${position.bottom}px`;
+  btn.className = icon ? 'gx-fab gx-fab-icon' : 'gx-fab';
+  if (icon) btn.innerHTML = GEAR_SVG;
+  else btn.textContent = text;
+  btn.title = '画面设置';
+  for (const side of ['left', 'right', 'top', 'bottom']) {
+    const v = position[side];
+    if (typeof v === 'number') btn.style[side] = `${v}px`;
+    else if (typeof v === 'string') btn.style[side] = v; // 允许 "50%" 这类百分比定位
+  }
+  if (position.centerY) btn.style.transform = 'translateY(-50%)';
   btn.addEventListener('click', () => panel.toggle());
   document.body.appendChild(btn);
   return btn;
