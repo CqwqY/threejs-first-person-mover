@@ -335,7 +335,8 @@ export async function askNpc(messages) {
     reply = '嗯嗯，我在呢。';
   }
   reply = reply.slice(0, 1500);
-  return { reply, action, pv: PROMPT_VERSION };
+  // action 为 null 时把模型原始输出回显（截断），便于排查「她为什么不给东西」
+  return { reply, action, pv: PROMPT_VERSION, raw: action ? null : String(content || '').slice(0, 300) };
 }
 
 // 动作名 → reply 缺失时的兜底台词（让玩家只看到自然的话，不暴露底层参数）

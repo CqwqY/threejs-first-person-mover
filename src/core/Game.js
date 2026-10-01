@@ -545,8 +545,8 @@ export class Game {
       const data = await res.json();
       if (!data || !data.ok) throw new Error((data && data.error) || ('http ' + res.status));
       const reply = data.reply || '…';
-      // 诊断：pv 是后端提示词版本号，用于确认线上后端是否已更新
-      console.log('[阿花] pv=' + (data.pv || '未知(旧后端)'), 'action=' + JSON.stringify(data.action));
+      // 诊断：pv 是后端提示词版本号，raw 是 action 为空时模型的原始输出
+      console.log('[阿花] pv=' + (data.pv || '未知(旧后端)'), 'action=' + JSON.stringify(data.action), 'raw=' + (data.raw || ''));
       msgs.push({ role: 'assistant', content: reply });
       // 只保留最近若干条，避免历史无限膨胀
       this._npcHistory = msgs.slice(-12);
