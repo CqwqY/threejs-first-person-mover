@@ -195,6 +195,7 @@ export class Game {
     this._dead = false;
     this._createHealthBar();
     this._projectiles = []; // 在飞的投掷物
+    this._fx = [];          // 在播的爆炸特效
   }
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
@@ -744,30 +745,86 @@ export class Game {
     }
   }
 
-  // 爆开：范围内玩家受伤（自己也在范围内就一起结算），并画一圈扩散光环
+  // 爆开：范围内玩家受伤（自己也在范围内就一起结算），并播放爆炸特效
   _explode(p) {
-    const c = p.mesh.position;
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(Math.max(0.2, p.radius * 0.45), p.radius, 32),
+    const c = p.mesh.position.clone();
+    const radius = p.radius;
+    const color = p.damage > 0 ? 0xff7a3c : 0x4cd97b;
+
+    const group = new THREE.Group();
+    group.position.copy(c);
+    this.scene.add(group);
+
+    // 中心闪光球（叠加混合，看起来更亮）
+    const ball = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(0.45, radius * 0.45), 16, 12),
       new THREE.MeshBasicMaterial({
-        color: p.damage > 0 ? 0xff5a3c : 0x4cd97b,
-        transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+        color: 0xffd27a, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    group.add(ball);
+
+    // 贴地扩散光环
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(Math.max(0.25, radius * 0.55), radius, 40),
+      new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.85,
+        side: THREE.DoubleSide, depthWrite: false,
       })
     );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(c.x, 0.06, c.z);
-    this.scene.add(ring);
-    setTimeout(() => { this.scene.remove(ring); ring.geometry.dispose(); ring.material.dispose(); }, 450);
+    ring.position.y = 0.05 - c.y; // 组内偏移，使世界坐标落在地面附近
+    group.add(ring);
+
+    // 飞散的碎块
+    const shards = [];
+    for (let i = 0; i < 14; i++) {
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(0.12, 0.12, 0.12),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false })
+      );
+      const a = (i / 14) * Math.PI * 2;
+      const sp = 4 + Math.random() * 5;
+      shards.push({ m, v: new THREE.Vector3(Math.cos(a) * sp, 2.5 + Math.random() * 3, Math.sin(a) * sp) });
+      group.add(m);
+    }
+
+    this._fx.push({ group, ball, ring, shards, t: 0, life: 0.6 });
 
     if (!p.damage) return;
-    if (Math.hypot(this.localState.x - c.x, this.localState.z - c.z) <= p.radius) {
+    if (Math.hypot(this.localState.x - c.x, this.localState.z - c.z) <= radius) {
       this._changeHealth(-p.damage);
     }
     // 其他玩家：伤害交给服务器转发（服务端会再钳制一次）
     for (const [id, rp] of this.playerManager.players) {
       if (id === this.localState.id) continue;
       const st = rp.state;
-      if (Math.hypot(st.x - c.x, st.z - c.z) <= p.radius) this.network.sendHit(id, p.damage);
+      if (Math.hypot(st.x - c.x, st.z - c.z) <= radius) this.network.sendHit(id, p.damage);
+    }
+  }
+
+  // 推进爆炸特效：闪光球胀大淡出、地环扩散、碎块抛体下落，0.6 秒后自动清理
+  _updateFX(dt) {
+    for (let i = this._fx.length - 1; i >= 0; i--) {
+      const f = this._fx[i];
+      f.t += dt;
+      const k = f.t / f.life;
+      if (k >= 1) {
+        this.scene.remove(f.group);
+        f.group.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+        this._fx.splice(i, 1);
+        continue;
+      }
+      f.ball.scale.setScalar(1 + k * 1.6);
+      f.ball.material.opacity = 0.85 * (1 - k) * (1 - k);
+      f.ring.scale.setScalar(0.6 + k * 1.4);
+      f.ring.material.opacity = 0.85 * (1 - k);
+      for (const s of f.shards) {
+        s.v.y -= 14 * dt;
+        s.m.position.addScaledVector(s.v, dt);
+        s.m.material.opacity = 0.9 * (1 - k);
+      }
     }
   }
 
@@ -1094,6 +1151,8 @@ export class Game {
 
     // 投掷物：推进飞行、命中/落地后结算范围伤害
     this._updateProjectiles(dt);
+    // 爆炸特效：推进动画
+    this._updateFX(dt);
 
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
