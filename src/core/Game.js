@@ -166,16 +166,16 @@ export class Game {
     // 顶部校卡：显示当前账号名字，点击展开查看详情，并可在卡内退出登录
     this.playerHUD = createPlayerHUD(this._profile, !!this._token);
 
-    // ---- AI 商人 NPC：放在出生点旁的喷泉处，靠近按 E 打开对话面板 ----
+    // ---- AI 商人 NPC：出生点旁喷泉处的阿花，靠近按 F 或点右侧选项卡打开对话栏 ----
     this.aiChat = createNpcChat();
     this.aiChat.setOnSend((text) => this._npcSend(text));
+    this.aiChat.setOnOpen(() => { this._setChatLock(true); });
+    this.aiChat.setOnClose(() => { this._setChatLock(false); });
     this.aiNpc = createAiNpc();
-    this.aiNpc.setInteract(() => {
-      if (this.aiChat.isOpen()) return; // 已打开就不重复弹欢迎语
-      document.exitPointerLock && document.exitPointerLock();
-      this.aiChat.open();
-    });
+    this.aiNpc.setInteract(() => this._openChat());
     this.scene.add(this.aiNpc.group);
+    // 屏幕中心右侧的「与阿花对话」选项卡：点击开/关对话栏
+    this._createChatTab();
     // 本地可拾取的「生成物品」发光道具
     this._pickups = [];
   }
@@ -275,6 +275,30 @@ export class Game {
     } else {
       local.setLabel(`玩家${this.localState.num}`);
     }
+  }
+
+  // 打开对话栏：退出指针锁定并锁定操控（对话期间移动键不响应）
+  _openChat() {
+    if (this.aiChat.isOpen()) return;
+    document.exitPointerLock && document.exitPointerLock();
+    this.aiChat.open();
+  }
+  _setChatLock(locked) {
+    if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.controlLock = !!locked;
+  }
+
+  // 屏幕中心右侧的「与阿花对话」选项卡：点击开/关底部对话栏
+  _createChatTab() {
+    const el = document.createElement('div');
+    el.textContent = '与阿花对话';
+    el.style.cssText =
+      'position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;' +
+      'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:12px 14px;border-radius:14px;' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.3);user-select:none;' +
+      'font:13px/1.4 system-ui,"Microsoft YaHei",sans-serif;text-align:center;';
+    el.addEventListener('click', () => { this.aiChat.toggle(); });
+    document.body.appendChild(el);
+    this._chatTab = el;
   }
 
   // 把玩家一句话发给后端 GLM 代理，拿到 {reply, action} 后：展示回复并执行工具动作。

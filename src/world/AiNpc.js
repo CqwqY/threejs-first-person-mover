@@ -85,7 +85,7 @@ export function createAiNpc() {
 
   const hint = document.createElement('div');
   hint.className = 'npc-hint hidden';
-  hint.innerHTML = '靠近 <b>阿花</b> · 按 <b>E</b> 与她对话';
+  hint.innerHTML = '靠近 <b>阿花</b> · 按 <b>F</b> 与她对话';
   document.body.appendChild(hint);
 
   let inRange = false;

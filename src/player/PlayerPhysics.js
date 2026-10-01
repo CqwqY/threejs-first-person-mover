@@ -18,6 +18,7 @@ export class PlayerPhysics {
     this.jumpMult = 1;    // 起跳倍率（跳跃初速度乘它，默认 1 = 正常）
     this.gravityMult = 1; // 重力倍率（重力加速度乘它，默认 1 = 正常）
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
+    this.controlLock = false; // 锁定操控：对话栏打开等 UI 占用时，移动/跳/喷气不响应
   }
 
   // 更新一帧物理。
@@ -45,6 +46,8 @@ export class PlayerPhysics {
     if (move.lengthSq() > 0) {
       move.normalize();
     }
+    // 对话栏等 UI 占用输入时锁定水平移动（重力/碰撞仍生效，人不会飘走）
+    if (this.controlLock) move.set(0, 0, 0);
 
     // 速度倍率：默认速度 ×（冲刺时乘冲刺倍率）。手机摇杆推满也算冲刺
     const sprint =
@@ -61,13 +64,13 @@ export class PlayerPhysics {
 
     // ---- 3.5 喷气背包：开启且按住空格、又在空中时，把竖直速度托住为上升/悬停 ----
     // 地面起跳仍走正常 jump；只要在空中按住空格就一直往上升，松开自然下落。
-    if (this.jetpack && input.isDown && input.isDown('Space') && !state.onGround) {
+    if (this.jetpack && !this.controlLock && input.isDown && input.isDown('Space') && !state.onGround) {
       this.velocity.y = Math.max(this.velocity.y + (Config.JETPACK_LIFT - this.velocity.y) * Math.min(1, dt * 8), Config.JETPACK_LIFT);
     }
 
     // ---- 4. 跳跃：只有站在地面才允许跳 ----
     // 采用一次性探测（consumeJump），防止按住空格时连续起跳
-    if (state.onGround && input.consumeJump()) {
+    if (state.onGround && input.consumeJump() && !this.controlLock) {
       this.velocity.y = Config.JUMP_VELOCITY * this.jumpMult; // 设置竖直初速度（受起跳倍率影响）
       state.onGround = false;
     }

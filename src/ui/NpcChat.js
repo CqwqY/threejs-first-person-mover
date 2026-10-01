@@ -7,20 +7,20 @@ function injectStyle() {
   const st = document.createElement('style');
   st.textContent = `
     .npc-chat {
-      position: fixed; right: 18px; bottom: 18px; z-index: 9500; width: 316px;
-      background: #ffffff; border: 1px solid #dde3ec; border-radius: 14px;
-      box-shadow: 0 12px 40px rgba(0,0,0,.25); display: flex; flex-direction: column;
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 9500; width: 100%;
+      background: #ffffff; border-top: 1px solid #dde3ec;
+      box-shadow: 0 -8px 40px rgba(0,0,0,.2); display: flex; flex-direction: column;
       font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; overflow: hidden;
     }
     .npc-chat.hidden { display: none; }
     .npc-chat-head {
-      display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+      display: flex; align-items: center; gap: 8px; padding: 8px 16px;
       background: linear-gradient(150deg,#3b7ddd,#1e55a8); color: #fff; font-weight: 700;
     }
     .npc-chat-head .dot { width: 8px; height: 8px; border-radius: 50%; background: #9be15d; }
-    .npc-chat-head .close { margin-left: auto; cursor: pointer; font-weight: 400; font-size: 15px; opacity:.9; }
+    .npc-chat-head .close { margin-left: auto; cursor: pointer; font-weight: 400; font-size: 15px; opacity:.9; padding: 0 6px; }
     .npc-chat-head .close:hover { opacity: 1; }
-    .npc-chat-body { height: 240px; overflow-y: auto; padding: 10px 12px; background: #f5f7fa; }
+    .npc-chat-body { max-height: 150px; height: 150px; overflow-y: auto; padding: 10px 16px; background: #f5f7fa; }
     .npc-msg { margin-bottom: 8px; max-width: 88%; padding: 6px 10px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
     .npc-msg.npc { background: #e7eefb; color: #1f2430; border-top-left-radius: 3px; }
     .npc-msg.me { margin-left: auto; background: #3b7ddd; color: #fff; border-top-right-radius: 3px; }
@@ -129,16 +129,20 @@ export function createNpcChat() {
     onSend(text);
   }
 
+  let onOpen = null;
+  let onClose = null;
   function open() {
     root.classList.remove('hidden');
     input.focus();
     if (!body.querySelector('.npc-msg')) {
       addMsg('npc', '来啦来啦～我是物品商人阿花。想要什么宝贝，直接跟我说，东西放进你背包里。');
     }
+    if (onOpen) onOpen();
   }
   function close() {
     if (_stopType) { _stopType(); _stopType = null; }
     root.classList.add('hidden');
+    if (onClose) onClose();
   }
   function toggle() { root.classList.contains('hidden') ? open() : close(); }
 
@@ -159,5 +163,7 @@ export function createNpcChat() {
     addMsg,
     focusInput,
     setOnSend(fn) { onSend = fn; },
+    setOnOpen(fn) { onOpen = fn; },
+    setOnClose(fn) { onClose = fn; },
   };
 }

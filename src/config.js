@@ -92,7 +92,7 @@ export const Config = {
   // 玩家离 NPC 多远内算「可对话」（水平距离，米）
   NPC_PROXIMITY: 3.2,
   // 触发对话的键（e.code）
-  NPC_KEY: 'KeyE',
+  NPC_KEY: 'KeyF',
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
