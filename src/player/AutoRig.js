@@ -172,3 +172,84 @@ function applyPose(bone, t, speed) {
   bone.spine.rotation.z = Math.sin(t * 1.6) * 0.02;
   bone.spine.position.y = 0.40 + Math.sin(t * 1.6) * 0.008;
 }
+
+// ---------------------------------------------------------------------------
+// 原生骨骼驱动：当 GLB 自带真实骨骼（SkinnedMesh + skeleton）时，优先驱动这套
+// 骨骼来做走/待机动画，而不是用 autoRig 重建的启发式骨架。这样动作贴合模型
+// 自带的绑骨，四肢/躯干的朝向和粗细都正确。
+// 返回与 autoRig 同构的 { group, bones, update }，交给 PlayerModel 复用同一套接线。
+// 若模型没有可用骨骼则返回 null，调用方再回退到 autoRig。
+// ---------------------------------------------------------------------------
+export function useNativeSkeleton(scene, height) {
+  try {
+    let skinned = null;
+    scene.traverse((o) => { if (o.isSkinnedMesh) skinned = o; });
+    if (!skinned || !skinned.skeleton || !skinned.skeleton.bones || skinned.skeleton.bones.length === 0) return null;
+
+    // 归一化身高（脚底 y=0，身高=height）。因为改的是整个场景根节点（骨骼 + 蒙皮一起缩放），
+    // 用 calculateInverses + bind 重算绑定，避免「骨骼与网格各缩放一次」造成的双重放大。
+    const box = new THREE.Box3().setFromObject(scene);
+    const sizeY = box.max.y - box.min.y;
+    const s = sizeY > 1e-4 ? height / sizeY : height;
+    scene.scale.set(s, s, s);
+    scene.position.y = -box.min.y * s;
+    scene.updateMatrixWorld(true);
+    skinned.skeleton.calculateInverses();
+    skinned.bind(skinned.skeleton);
+
+    // 按名取真实骨骼（少数模型用别名，找不到对应骨则退回启发式 AutoRig）
+    const B = (n) => skinned.skeleton.getBoneByName(n);
+    const ulL = B('upperleg.L'), ulR = B('upperleg.R');
+    if (!ulL || !ulR) return null; // 无腿骨不硬撑，交给 autoRig
+    const root = B('root') || skinned.skeleton.bones[0];
+    const spine = B('spine') || root;
+    const bones = {
+      root,
+      spine,
+      head: B('head'),
+      ulL, llL: B('lowerleg.L'), ulR, llR: B('lowerleg.R'),
+      uaL: B('upperarm.L'), laL: B('lowerarm.L'),
+      uaR: B('upperarm.R'), laR: B('lowerarm.R'),
+      _rootY0: root.position.y,
+    };
+
+    return {
+      group: scene,
+      skeleton: skinned.skeleton,
+      native: true,
+      bones,
+      update(time, speed) {
+        applyNativePose(bones, time, speed);
+        scene.updateMatrixWorld(true);
+        skinned.skeleton.update();
+      },
+    };
+  } catch (e) {
+    console.warn('[NativeRig] 失败，回退启发式:', e);
+    return null;
+  }
+}
+
+// 程序化走/待机姿态，作用在模型真实骨骼上（命名：upperlimb/lowerlimb + .L/.R）
+function applyNativePose(b, t, speed) {
+  const walking = speed > 0.2;
+  const amp = walking ? Math.min(0.65, 0.18 + speed * 0.28) : 0.0;
+  const ph = t * (walking ? 6.0 : 1.4);
+
+  // 腿：与 autoRig 相同的交替摆动 + 膝盖弯曲
+  const swing = amp * Math.sin(ph);
+  b.ulL.rotation.x = swing;
+  b.ulR.rotation.x = -swing;
+  if (b.llL) b.llL.rotation.x = Math.max(0, -swing * 0.5);
+  if (b.llR) b.llR.rotation.x = Math.max(0, swing * 0.5);
+
+  // 手臂：上臂反向摆动，小臂微曲
+  if (b.uaL) b.uaL.rotation.x = -swing * 0.7;
+  if (b.uaR) b.uaR.rotation.x = swing * 0.7;
+  if (b.laL) b.laL.rotation.x = Math.max(0, swing * 0.3);
+  if (b.laR) b.laR.rotation.x = Math.max(0, -swing * 0.3);
+
+  // 躯干：root 起伏（记录初始 y 为基准）+ 脊柱轻微左右摆
+  b.root.position.y = b._rootY0 + Math.abs(Math.cos(ph)) * amp * 0.12;
+  b.spine.rotation.z = Math.sin(t * 1.6) * 0.02;
+}

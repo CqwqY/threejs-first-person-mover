@@ -4,7 +4,7 @@
 // 按包围盒等比缩放到 1.8 并让脚底落在 y=0；静态模型，不做骨骼动画，朝向由 applyCfg/modelDeg 控制。
 import * as THREE from 'three';
 import { instantiate } from '../world/AssetLoader.js';
-import { autoRig } from './AutoRig.js';
+import { autoRig, useNativeSkeleton } from './AutoRig.js';
 // import { Config } from '../config.js'; // （移动时疯狂旋转功能临时注释，重开时取消这行）
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
@@ -52,8 +52,8 @@ function buildBody(entry) {
       const bodyHolder = entry.group.userData.bodyHolder;
       bodyHolder.clear();
 
-      // 尝试绑定骨骼：AutoRig 会把最大网格烘焙到脚底 y=0、身高 MODEL_HEIGHT，并生成蒙皮网格
-      const rig = autoRig(model, MODEL_HEIGHT);
+      // 优先驱动 GLB 自带的真实骨骼（动作贴合模型绑骨）；没有自带骨骼再退回启发式 AutoRig。
+      const rig = useNativeSkeleton(model, MODEL_HEIGHT) || autoRig(model, MODEL_HEIGHT);
       if (rig) {
         rig.group.receiveShadow = true;
         bodyHolder.add(rig.group);
