@@ -15,6 +15,20 @@ export const SHOP_ITEMS = [
     desc: '挥动横扫，被扫到的玩家会被撞飞出去。',
     effect: { k: 'club' },
   },
+  {
+    id: 'blackhole',
+    name: '黑洞',
+    price: 150,
+    desc: '扔出去后会不断变大，10 秒后把范围内的人吸过去。',
+    effect: { k: 'blackhole' },
+  },
+  {
+    id: 'hide',
+    name: '捉迷藏玩具',
+    price: 80,
+    desc: '变成任意颜色的方块。开始前先选和谁玩、谁抓；每 30 秒向抓的人报告自己的模糊方向。',
+    effect: { k: 'hide' },
+  },
 ];
 
 function walletKey(profile) {

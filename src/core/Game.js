@@ -300,6 +300,17 @@ export class Game {
     this._clubAt = 0;
     this._clubSwing = null;     // { t, hit }
 
+    // ---- 黑洞：扔出去不断变大，10 秒后把范围内的人吸过去 ----
+    this._holes = [];
+
+    // ---- 捉迷藏玩具：变成任意颜色的方块，每 30 秒给抓的人报一次模糊方向 ----
+    this._morphs = new Map();   // 玩家 id -> { mesh }（变成方块的那位）
+    this._hide = null;          // { hider, seeker, color }
+    this._hideHintDeg = null;   // 最近一次收到的方向（世界方位角）
+    this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
+    this._hidePanel = this._createHidePanel();
+    this._hideArrow = this._createHideArrow();
+
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.BOSS_SHIELD_KEY) return;
@@ -542,6 +553,16 @@ export class Game {
       case 'knock': {
         // 被别人的棍子扫到：由本机给自己施加击飞（冲量来自挥棍的人）
         this._applyKnock(msg);
+        break;
+      }
+      case 'bh': {
+        // 别人扔的黑洞：投掷者已经算完飞行，这里直接在落点摆一个同样的黑洞
+        this._spawnRemoteBlackHole(msg);
+        break;
+      }
+      case 'hide': {
+        // 别人的捉迷藏事件：开始 / 方向提示 / 结束
+        this._onHideNet(msg);
         break;
       }
       case 'proj': {
@@ -1297,6 +1318,368 @@ export class Game {
     this._updateMerchantHint();
   }
 
+  // ---------- 黑洞 ----------
+
+  // 一个会不断变大的黑色球体 + 一圈紫色光环
+  _createHoleMesh() {
+    const group = new THREE.Group();
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 20, 14),
+      new THREE.MeshBasicMaterial({ color: 0x08000f })
+    );
+    group.add(core);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(1.1, 1.45, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x9a4cff, transparent: true, opacity: 0.5,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    group.add(ring);
+    return { group, ring };
+  }
+
+  _throwBlackHole() {
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP);
+    const { group, ring } = this._createHoleMesh();
+    group.position.set(s.x, s.y, s.z).addScaledVector(dir, 1.0);
+    group.scale.setScalar(Config.BLACKHOLE_RADIUS_MIN);
+    this.scene.add(group);
+    this._holes.push({
+      group,
+      ring,
+      vel: dir.clone().multiplyScalar(Config.BLACKHOLE_SPEED),
+      settled: false,
+      net: false,
+      t: 0,
+    });
+    this._toast('黑洞出手，' + Config.BLACKHOLE_GROW + ' 秒后开始吸人');
+  }
+
+  // 别人扔的黑洞：投掷者已经把飞行算完了，这里直接在落点生成
+  _spawnRemoteBlackHole(msg) {
+    const x = Number(msg.x);
+    const z = Number(msg.z);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+    const { group, ring } = this._createHoleMesh();
+    group.position.set(x, 0.9, z);
+    group.scale.setScalar(Config.BLACKHOLE_RADIUS_MIN);
+    this.scene.add(group);
+    this._holes.push({ group, ring, vel: null, settled: true, net: true, t: 0 });
+  }
+
+  // 推进所有黑洞：飞行 -> 不断长大 -> 长满后吸附近的人 -> 消散
+  _updateHoles(dt) {
+    if (!this._holes.length) return;
+    const s = this.localState;
+    const phys = this.localPlayer.physics;
+    for (let i = this._holes.length - 1; i >= 0; i--) {
+      const h = this._holes[i];
+
+      if (!h.settled) {
+        h.vel.y += Config.GRAVITY * Config.BLACKHOLE_GRAVITY * dt;
+        h.group.position.addScaledVector(h.vel, dt);
+        if (h.group.position.y <= 0.9) {
+          h.group.position.y = 0.9;
+          h.vel = null;
+          h.settled = true;
+          // 飞行只有投掷者自己模拟；落地那一刻把落点广播出去，其他人照着摆
+          if (!h.net) this.network.sendBlackHole(h.group.position.x, h.group.position.z);
+        }
+        continue;
+      }
+
+      h.t += dt;
+      const k = Math.min(1, h.t / Config.BLACKHOLE_GROW);
+      h.group.scale.setScalar(Config.BLACKHOLE_RADIUS_MIN
+        + (Config.BLACKHOLE_RADIUS_MAX - Config.BLACKHOLE_RADIUS_MIN) * k);
+      h.ring.rotation.z += dt * 1.6;
+      h.ring.material.opacity = 0.35 + 0.3 * Math.sin(h.t * 4);
+
+      // 长满后的一段时间里持续吸人：各自判自己，只把冲量喂给自己的物理
+      if (h.t >= Config.BLACKHOLE_GROW && h.t <= Config.BLACKHOLE_GROW + Config.BLACKHOLE_PULL_TIME) {
+        const dx = h.group.position.x - s.x;
+        const dz = h.group.position.z - s.z;
+        const d = Math.hypot(dx, dz);
+        if (d < Config.BLACKHOLE_PULL_RADIUS && d > 0.7) {
+          const speed = Math.min(Config.BLACKHOLE_PULL_SPEED, d * 3);
+          // y 传 null：竖直方向仍交给重力，不然会被吸得悬停在空中
+          phys.velocityHold = { x: (dx / d) * speed, y: null, z: (dz / d) * speed, t: 0.15 };
+        }
+      }
+
+      if (h.t >= Config.BLACKHOLE_LIFE) {
+        this.scene.remove(h.group);
+        h.group.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+        this._holes.splice(i, 1);
+      }
+    }
+  }
+
+  // ---------- 捉迷藏玩具 ----------
+
+  // 选人 / 选谁抓 / 选颜色的弹窗
+  _createHidePanel() {
+    const ov = document.createElement('div');
+    ov.style.cssText =
+      'position:fixed;inset:0;z-index:9750;display:none;background:rgba(15,20,30,.45);' +
+      'align-items:center;justify-content:center;font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;';
+    const card = document.createElement('div');
+    card.style.cssText =
+      'background:#fff;color:#1f2933;border-radius:16px;padding:22px 22px 18px;width:min(380px,88vw);' +
+      'box-shadow:0 18px 50px rgba(0,0,0,.3);box-sizing:border-box;';
+    card.innerHTML =
+      '<h3 style="margin:0 0 14px;font-size:16px;">捉迷藏玩具</h3>' +
+      '<label style="display:block;margin-bottom:10px;">一起玩的人' +
+      '<select class="hd-partner" style="margin-left:8px;max-width:190px;"></select></label>' +
+      '<label style="display:block;margin-bottom:12px;">谁抓' +
+      '<select class="hd-role" style="margin-left:8px;max-width:230px;">' +
+      '<option value="partner">对方抓（我变成方块躲起来）</option>' +
+      '<option value="me">我抓（对方变成方块）</option></select></label>' +
+      '<div style="margin-bottom:16px;">方块颜色<div class="hd-colors" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;"></div></div>' +
+      '<div style="display:flex;gap:10px;justify-content:flex-end;">' +
+      '<button class="hd-cancel" type="button" style="border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:7px 16px;cursor:pointer;">取消</button>' +
+      '<button class="hd-go" type="button" style="border:0;background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;border-radius:8px;' +
+      'padding:7px 18px;cursor:pointer;font-weight:600;">开始</button></div>';
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+
+    const partnerSel = card.querySelector('.hd-partner');
+    const roleSel = card.querySelector('.hd-role');
+    const colorBox = card.querySelector('.hd-colors');
+
+    const COLORS = ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#16a085', '#3498db', '#9b59b6', '#2c3e50'];
+    let color = COLORS[3];
+    const swatches = COLORS.map((c) => {
+      const d = document.createElement('div');
+      d.style.cssText = 'width:30px;height:30px;border-radius:8px;cursor:pointer;background:' + c + ';box-sizing:border-box;';
+      d.addEventListener('click', () => { color = c; paint(); });
+      colorBox.appendChild(d);
+      return { c, d };
+    });
+    function paint() {
+      for (const s of swatches) {
+        s.d.style.border = s.c === color ? '3px solid #1f2933' : '3px solid transparent';
+      }
+    }
+    paint();
+
+    card.querySelector('.hd-cancel').addEventListener('click', () => { ov.style.display = 'none'; });
+    card.querySelector('.hd-go').addEventListener('click', () => {
+      this._startHide(partnerSel.value, roleSel.value === 'me', color);
+    });
+
+    return {
+      ov,
+      // 打开前刷新在线玩家列表；没有别人可玩就返回 false
+      // 注意用箭头函数：这里需要的是 Game 实例的 this，不是这个返回对象的
+      open: () => {
+        const me = this.localState.id;
+        const opts = [];
+        for (const [id] of this.playerManager.players) {
+          if (id === me) continue;
+          opts.push(id);
+        }
+        if (!opts.length) return false;
+        partnerSel.innerHTML = '';
+        for (const id of opts) {
+          const o = document.createElement('option');
+          o.value = id;
+          o.textContent = '玩家 ' + id.slice(-4);
+          partnerSel.appendChild(o);
+        }
+        ov.style.display = 'flex';
+        return true;
+      },
+      close: () => { ov.style.display = 'none'; },
+      isOpen: () => ov.style.display !== 'none',
+    };
+  }
+
+  // 抓的人屏幕顶部的方向指示：一个指向目标方位的箭头
+  _createHideArrow() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:59;display:none;pointer-events:none;' +
+      'top:calc(env(safe-area-inset-top, 0px) + clamp(96px,17vmin,132px));text-align:center;' +
+      'font:clamp(11px,2.8vmin,13px)/1.4 system-ui,"Microsoft YaHei",sans-serif;color:#fff;';
+    el.innerHTML =
+      '<div class="hd-arrow" style="font-size:26px;line-height:1;text-shadow:0 2px 6px rgba(0,0,0,.7);">' +
+      '<span style="display:inline-block;">▲</span></div>' +
+      '<div class="hd-text" style="margin-top:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);"></div>';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 使用捉迷藏玩具：已经在玩就结束，否则打开选人弹窗
+  _useHideToy() {
+    const me = this.localState.id;
+    if (this._hide && (this._hide.hider === me || this._hide.seeker === me)) {
+      this._endHide(true);
+      return;
+    }
+    if (!this._hidePanel.open()) this._toast('没有其他玩家在线，捉迷藏要两个人');
+  }
+
+  _startHide(partnerId, iSeek, color) {
+    const me = this.localState.id;
+    if (!me || !partnerId) { this._toast('先选一个一起玩的人'); return; }
+    const hider = iSeek ? partnerId : me;
+    const seeker = iSeek ? me : partnerId;
+    this._hidePanel.close();
+    // 自己发的消息服务器不会再回给自己，所以本地先立即生效一次
+    this.network.sendHide({ ev: 'start', hider, seeker, color });
+    this._applyHideStart(hider, seeker, color);
+  }
+
+  _applyHideStart(hider, seeker, color) {
+    const me = this.localState.id;
+    this._hide = { hider, seeker, color };
+    this._setMorph(hider, color || '#cccccc');
+    this._hideHintDeg = null;
+    this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
+    if (hider === me) this._toast('你变成了方块，躲好（每 ' + Config.HIDE_REPORT_INTERVAL + ' 秒会报一次方向）');
+    else if (seeker === me) this._toast('开始抓人，每 ' + Config.HIDE_REPORT_INTERVAL + ' 秒会收到一次方向提示');
+    this._updateHideArrow();
+  }
+
+  _endHide(broadcast) {
+    const h = this._hide;
+    this._hide = null;
+    this._hideHintDeg = null;
+    if (this._hideArrow) this._hideArrow.style.display = 'none';
+    if (h) this._setMorph(h.hider, null);
+    if (broadcast && h) this.network.sendHide({ ev: 'end', hider: h.hider, seeker: h.seeker, color: h.color });
+  }
+
+  // 把一个玩家变成方块（color 为 null 表示还原）
+  _setMorph(id, color) {
+    if (!id) return;
+    const prev = this._morphs.get(id);
+    if (prev) {
+      this.scene.remove(prev.mesh);
+      prev.mesh.geometry.dispose();
+      prev.mesh.material.dispose();
+      this._morphs.delete(id);
+    }
+    const rp = this.playerManager.players.get(id);
+    if (!color) {
+      if (rp && id !== this.localState.id) rp.model.visible = true;
+      return;
+    }
+    const size = Config.HIDE_BLOCK_SIZE;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(size, size, size),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.75 })
+    );
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this._morphs.set(id, { mesh });
+    // 别人的方块要盖住原来的人形模型；自己的模型本来就看不见
+    if (rp && id !== this.localState.id) rp.model.visible = false;
+  }
+
+  // 方块跟着人走（第一人称看不到自己的方块，第三人称才显示）
+  _updateMorphs() {
+    if (!this._morphs.size) return;
+    const s = this.localState;
+    for (const [id, m] of this._morphs) {
+      if (id === s.id) {
+        m.mesh.position.set(s.x, s.y - Config.PLAYER_HEIGHT * 0.5, s.z);
+        m.mesh.visible = this.thirdPerson;
+        continue;
+      }
+      const rp = this.playerManager.players.get(id);
+      if (!rp) continue;
+      const st = rp.state;
+      m.mesh.position.set(st.x, st.y - Config.PLAYER_HEIGHT * 0.5, st.z);
+    }
+  }
+
+  // 每帧：抓的人靠近就算抓到；躲的人每隔一段时间报一次模糊方向
+  _updateHideReport(dt) {
+    const h = this._hide;
+    if (!h) return;
+    const me = this.localState.id;
+
+    if (me === h.seeker) {
+      const target = this.playerManager.players.get(h.hider);
+      if (target) {
+        const d = Math.hypot(target.state.x - this.localState.x, target.state.z - this.localState.z);
+        if (d <= Config.HIDE_CATCH_RANGE) {
+          this._toast('抓到啦');
+          this._endHide(true);
+          return;
+        }
+      }
+      this._updateHideArrow();
+    }
+
+    if (me !== h.hider) return;
+    this._hideReportTimer -= dt;
+    if (this._hideReportTimer > 0) return;
+    this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
+    const seeker = this.playerManager.players.get(h.seeker);
+    if (!seeker) return;
+    const dx = this.localState.x - seeker.state.x;
+    const dz = this.localState.z - seeker.state.z;
+    if (Math.hypot(dx, dz) < 1e-3) return;
+    // 报的是「从抓的人看向我」的方位角，再叠加一个随机偏移做到「模糊」
+    const fuzz = (Math.random() * 2 - 1) * (Config.HIDE_FUZZ_DEG * Math.PI) / 180;
+    this.network.sendHide({ ev: 'hint', hider: me, deg: Math.atan2(dx, dz) + fuzz });
+  }
+
+  // 把世界方位角换算成「相对玩家朝向」的屏幕角度，转成顶部箭头
+  _updateHideArrow() {
+    const el = this._hideArrow;
+    if (!el) return;
+    const h = this._hide;
+    if (!h || this.localState.id !== h.seeker || this._hideHintDeg == null) {
+      el.style.display = 'none';
+      return;
+    }
+    const yaw = this.localState.yaw;
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
+    const rx = -fz; // 玩家右手方向
+    const rz = fx;
+    const tx = Math.sin(this._hideHintDeg);
+    const tz = Math.cos(this._hideHintDeg);
+    const fwd = tx * fx + tz * fz;
+    const right = tx * rx + tz * rz;
+    const deg = (Math.atan2(right, fwd) * 180) / Math.PI;
+    el.style.display = '';
+    el.querySelector('.hd-arrow span').style.transform = 'rotate(' + deg.toFixed(1) + 'deg)';
+    el.querySelector('.hd-text').textContent = '捉迷藏：目标在这个方向（模糊 ±' + Config.HIDE_FUZZ_DEG + '°）';
+  }
+
+  // 别人发起的捉迷藏事件
+  _onHideNet(msg) {
+    const me = this.localState.id;
+    if (msg.ev === 'start') {
+      if (!msg.hider || !msg.seeker) return;
+      this._applyHideStart(msg.hider, msg.seeker, msg.color);
+      if (msg.seeker === me) this._toast('有人邀请你抓人');
+    } else if (msg.ev === 'hint') {
+      if (this._hide && this._hide.hider === msg.hider) {
+        this._hideHintDeg = Number(msg.deg) || 0;
+        this._updateHideArrow();
+      }
+    } else if (msg.ev === 'end') {
+      this._setMorph(msg.hider, null);
+      if (this._hide && this._hide.hider === msg.hider) {
+        this._hide = null;
+        this._hideHintDeg = null;
+        if (this._hideArrow) this._hideArrow.style.display = 'none';
+      }
+      if (msg.seeker === me || msg.hider === me) this._toast('捉迷藏结束');
+    }
+  }
+
   // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
   _createChatTab() {
     const el = document.createElement('div');
@@ -1943,6 +2326,16 @@ export class Game {
           label: '棍子',
           run: () => this._swingClub(),
         };
+      case 'blackhole':
+        return {
+          label: '黑洞',
+          run: () => this._throwBlackHole(),
+        };
+      case 'hide':
+        return {
+          label: '捉迷藏',
+          run: () => this._useHideToy(),
+        };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
         const dmg = (v && v > 0) ? v : 40;
@@ -2203,6 +2596,11 @@ export class Game {
     this._updateMerchant(dt);
     // 棍子挥动动画与命中结算
     this._updateClub(dt);
+    // 黑洞：长大与吸人
+    this._updateHoles(dt);
+    // 捉迷藏：方块跟人走、方向提示、抓到判定
+    this._updateMorphs();
+    this._updateHideReport(dt);
 
     // 传送门 / 老师 Boss：倒计时、追击、弹幕与 UI
     this._updateBoss(dt);
@@ -2219,7 +2617,8 @@ export class Game {
 
     // 第三人称：第一人称时保证本地隐藏；第三人称时显示自己并让相机跟随
     if (this.thirdPerson) {
-      this.playerManager.setLocalVisible(true);
+      // 捉迷藏变成方块时，第三人称下显示方块而不是人形
+      this.playerManager.setLocalVisible(!this._morphs.has(this.localState.id));
       this.localPlayer.bobEnabled = false; // 第三人称不做头部晃动
       this._thirdPerson(dt);
     } else {

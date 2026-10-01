@@ -435,6 +435,38 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 黑洞：投掷者已把飞行模拟完，这里只把落点转发给其他人
+    if (msg.t === 'bh') {
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.min(1000, Math.max(-1000, n)) : 0; };
+      const raw = JSON.stringify({ t: 'bh', x: num(msg.x), z: num(msg.z) });
+      for (const client of wss.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
+      }
+      return;
+    }
+
+    // 捉迷藏：开始 / 方向提示 / 结束，广播给所有人（只有相关的人会响应）
+    if (msg.t === 'hide') {
+      const ev = String(msg.ev || '');
+      if (ev !== 'start' && ev !== 'hint' && ev !== 'end') return;
+      const out = { t: 'hide', ev };
+      out.hider = String(msg.hider || '').slice(0, 24);
+      if (ev === 'hint') {
+        const n = Number(msg.deg);
+        out.deg = Number.isFinite(n) ? n : 0;
+      } else {
+        out.seeker = String(msg.seeker || '').slice(0, 24);
+        // 颜色只留合法的十六进制位，长度固定 7
+        const c = String(msg.color || '').replace(/[^#0-9a-fA-F]/g, '').slice(0, 7);
+        out.color = /^#[0-9a-fA-F]{6}$/.test(c) ? c : '#cccccc';
+      }
+      const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
+      }
+      return;
+    }
+
     if (msg.t !== 'state') return;
 
     const isFresh = !states.has(id); // 是否第一次上报（用于 join 广播）

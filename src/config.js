@@ -211,6 +211,23 @@ export const Config = {
   CLUB_SWING_TIME: 0.32,     // 挥棍动画时长（秒）
   CLUB_HIT_AT: 0.12,         // 动画进行到这个时间点时结算命中（秒）
   CLUB_COOLDOWN: 0.9,        // 两次挥棍的最小间隔（秒）
+
+  // ---- 黑洞（投掷）----
+  BLACKHOLE_SPEED: 14,        // 抛出初速度（米/秒）
+  BLACKHOLE_GRAVITY: 0.35,    // 飞行时的重力系数（越小飞得越直）
+  BLACKHOLE_GROW: 10,         // 长大耗时（秒），长满后开始吸人
+  BLACKHOLE_RADIUS_MIN: 0.35, // 出手时的半径（米）
+  BLACKHOLE_RADIUS_MAX: 3.0,  // 长满后的球体半径（米）
+  BLACKHOLE_PULL_RADIUS: 10,  // 吸人判定半径（米）
+  BLACKHOLE_PULL_SPEED: 14,   // 吸力最大速度（米/秒）
+  BLACKHOLE_PULL_TIME: 1.6,   // 吸人持续时长（秒）
+  BLACKHOLE_LIFE: 12.5,       // 总存活时间（吸完就消散）
+
+  // ---- 捉迷藏玩具 ----
+  HIDE_REPORT_INTERVAL: 30,   // 每隔多久向抓的人报告一次模糊方向（秒）
+  HIDE_FUZZ_DEG: 40,          // 方向模糊量（±度）
+  HIDE_BLOCK_SIZE: 1.0,       // 变成的方块边长（米）
+  HIDE_CATCH_RANGE: 1.6,      // 抓的人离多近算抓到（米）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。

@@ -86,6 +86,17 @@ export class Network {
     this.send({ t: 'fx', target, effect });
   }
 
+  // 黑洞：投掷者先把飞行模拟完，落地后再广播落点，其他人在同一位置生成同一个黑洞
+  sendBlackHole(x, z) {
+    this.send({ t: 'bh', x, z });
+  }
+
+  // 捉迷藏：开始 / 方向提示 / 结束，广播给所有人（只有相关的人会响应）
+  sendHide(info) {
+    if (!info || !info.ev) return;
+    this.send({ t: 'hide', ...info });
+  }
+
   // 击飞上报：被棍子扫到的玩家由服务器转发一条击飞冲量，由他自己客户端施加
   sendKnock(target, kx, ky, kz) {
     if (!target) return;
