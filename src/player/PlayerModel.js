@@ -4,6 +4,7 @@
 // 按包围盒等比缩放到 1.8 并让脚底落在 y=0；静态模型，不做骨骼动画，朝向由 applyCfg/modelDeg 控制。
 import * as THREE from 'three';
 import { instantiate } from '../world/AssetLoader.js';
+import { Config } from '../config.js';
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
@@ -72,6 +73,19 @@ function buildBody(entry) {
     .catch(() => {
       // 加载失败：保留占位身体即可
     });
+}
+
+// 移动时让模型疯狂旋转：按移动速度推进自转角（弧度），站着不动就冻结在当前角度。
+// 转过的角度只作为「朝向的临时偏移」叠加，不写回任何状态，所以停下时朝向不会被带偏。
+// group：玩家模型根节点；speed：本帧实际移动速度（米/秒）；dt：帧间隔（秒）。
+export function advanceSpin(group, speed, dt) {
+  const u = group.userData;
+  if (speed > Config.MODEL_SPIN_MIN_SPEED) {
+    // 跑得越快转得越快：以 MOVE_SPEED 为基准，冲刺（1.6 倍速）时约 1.6 倍转速
+    const k = Math.min(speed / Config.MOVE_SPEED, 2);
+    u.spin = (u.spin || 0) + Config.MODEL_SPIN_SPEED * k * dt;
+  }
+  return u.spin || 0;
 }
 
 // 供 ?calib 校准面板调用：实时调整所有玩家模型的朝向与骨架走向（后加载模型同样生效）

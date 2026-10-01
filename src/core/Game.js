@@ -9,6 +9,7 @@ import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
+import { advanceSpin } from '../player/PlayerModel.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { Network } from '../net/Network.js';
@@ -270,18 +271,21 @@ export class Game {
     // 否则会一直停在出生点，切第三人称也看不到自己。
     const s = this.localState;
     local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT, s.z);
-    local.model.rotation.set(0, s.yaw, 0);
+
+    // 本帧实际移动速度：驱动「移动时疯狂旋转」，也让骨头动画知道走得多快
+    const dx = s.x - this._tpPrevX;
+    const dz = s.z - this._tpPrevZ;
+    const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
+    this._tpPrevX = s.x;
+    this._tpPrevZ = s.z;
+
+    local.model.rotation.set(0, s.yaw + advanceSpin(local.model, speed, dt), 0);
 
     const rig = local.model.userData.rig;
     if (rig) {
-      const dx = s.x - this._tpPrevX;
-      const dz = s.z - this._tpPrevZ;
-      const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
       this._tpTime += dt;
       rig.update(this._tpTime, speed);
     }
-    this._tpPrevX = s.x;
-    this._tpPrevZ = s.z;
 
     // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
     // 俯仰（pitch）必须参与：否则鼠标上下拖动在第三人称下毫无反应。
