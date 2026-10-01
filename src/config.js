@@ -118,6 +118,11 @@ export const Config = {
 
   // ---- 昼夜循环 ----
   DAY_START: 0.35,   // 起始时刻（0 = 午夜，0.5 = 正午）
+  // 夜空照片在天空球面上的平铺份数。横向 2.5 份时每份约 144° 宽，
+  // 尺寸接近原图（像素约 1:1），星星清晰；纵向必须取横向的 0.77 倍（= 原图宽/高/2）
+  // 才不会把星星拉成椭圆。调大更清晰但重复次数更多，调小重复更少但会变糊。
+  NIGHT_SKY_TILE_X: 2.5,
+  NIGHT_SKY_TILE_Y: 1.93,
 
   // ---- 传送门与「老师」Boss ----
   PORTAL_POS: { x: 11, z: 142 },  // 传送门所在坐标
@@ -127,23 +132,42 @@ export const Config = {
   BOSS_HEIGHT: 2.0,               // 归一化后的模型身高（米），按包围盒等比缩放
   BOSS_YAW_OFFSET: Math.PI,       // 模型自带朝向与「面朝 +Z」之间的补偿角（弧度），必要时调这个
   BOSS_RADIUS: 0.45,              // 命中判定圆柱半径（米）
-  BOSS_HP: 1000,                  // Boss 血量上限（玩家 500 是玩家上限，Boss 单独放宽）
+  BOSS_HP: 1000,                  // 每个阶段的 Boss 血量（打空进入下一阶段）
   BOSS_SPAWN_DELAY: 10,           // 点击召唤后的出现倒计时（秒）
-  BOSS_CHASE_SPEED: 3.2,          // 追击移动速度（米/秒）
-  BOSS_CHASE_STOP: 6,             // 追到离目标这么近就停下（米）
-  BOSS_CHASE_RANGE: 45,           // 超过该距离不再追击（米）
-  BOSS_VOLLEY_INTERVAL: 2.6,      // 弹幕间隔（秒）
+  BOSS_CHASE_SPEED: 4.4,          // 追击移动速度（米/秒）：要追得上玩家才能碰到人
+  BOSS_CHASE_STOP: 0,             // 追到离目标这么近就停下（0 = 一路贴上去，靠接触判定秒杀）
+  BOSS_CHASE_RANGE: 60,           // 超过该距离不再追击（米）
+  BOSS_CONTACT_PAD: 0.15,         // 接触判定的额外余量（米）：碰到即秒杀
+  // 阶段切换：血量打空后先「发白光 + 世界变红」，停顿这么多久再进入下一阶段
+  BOSS_PHASE_SHIFT: 2.5,
+  BOSS_VOLLEY_INTERVAL: 2.6,      // 一阶段弹幕间隔（秒）
   BOSS_VOLLEY_COUNT: 24,          // 每圈弹幕数量（向四周均分）
   BOSS_BULLET_SPEED: 9,           // 弹幕飞行速度（米/秒）
   BOSS_BULLET_LIFE: 4.5,          // 弹幕存活时间（秒）
   BOSS_BULLET_DAMAGE: 12,         // 单发弹幕命中玩家的伤害
   BOSS_BULLET_HIT_RADIUS: 0.55,   // 弹幕判定命中玩家的水平半径（米）
+  // 二/三阶段：绕老师旋转的红色激光
+  BOSS_LASER_COUNT: 3,            // 同时存在的激光数量
+  BOSS_LASER_LEN: 26,             // 激光长度（米）
+  BOSS_LASER_THICK: 0.35,         // 激光厚度（米）
+  BOSS_LASER_DAMAGE: 120,         // 被激光扫到的伤害
+  BOSS_LASER_HIT_COOLDOWN: 1.2,   // 同一玩家被激光命中的最小间隔（秒）
+  BOSS_LASER_SPIN_2: 1.05,        // 二阶段旋转角速度（弧度/秒）
+  BOSS_LASER_SPIN_3: 1.35,        // 三阶段旋转角速度（弧度/秒）
+  BOSS_LASER_LOW: 0.05,           // 激光下沿高度（米）
+  BOSS_LASER_HIGH_2: 0.6,         // 二阶段激光上沿高度（米）：跳起来（最高约 0.9m）就能躲开
+  BOSS_LASER_HIGH_3: 5.0,         // 三阶段激光上沿高度（米）：跳不过去，必须用护盾
+  // 三阶段：手动开启的间歇性护盾
+  BOSS_SHIELD_KEY: 'KeyQ',        // 开启护盾的键
+  BOSS_SHIELD_DURATION: 1.5,      // 护盾持续时间（秒）
+  BOSS_SHIELD_COOLDOWN: 2.8,      // 护盾冷却（秒，从开启时算）
+  BOSS_SHIELD_DAMAGE: 100,        // 护盾成功挡下激光时老师掉的血
   BOSS_NET_HZ: 10,                // 联机时 Boss 位姿/血量的广播频率
   // Boss 战期间玩家的基础攻击（鼠标左键 / 手机「攻击」按钮）投出的粉笔头
-  CHALK_DAMAGE: 25,
+  CHALK_DAMAGE: 50,
   CHALK_SPEED: 24,
   CHALK_RADIUS: 1.6,              // 粉笔头落点爆炸半径（只对 Boss 结算，不误伤玩家）
-  CHALK_COOLDOWN: 0.35,           // 两次投掷的最小间隔（秒）
+  CHALK_COOLDOWN: 0.28,           // 两次投掷的最小间隔（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。

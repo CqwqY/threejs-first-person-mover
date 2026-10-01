@@ -2,15 +2,10 @@
 // 离线/加载失败时回退到 Three.js 程序化 Sky（无需外部贴图）。两套天空都无缝。
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
+import { Config } from '../config.js';
 
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
-
-// 已加载的天空贴图引用：供 Game 在「白天/夜晚」之间直接切换 scene.background 用
-const skyTextures = { day: null, night: null };
-export function getSkyTextures() {
-  return skyTextures;
-}
 
 // asyncLoadSky(scene, fin)：异步加载并应用贴图天空，成功时移除程序化 Sky 兜底并设背景。
 // 返回一个 Promise（供需要按时序处理的调用方等待；失败自动静默回退）。
@@ -23,7 +18,6 @@ export function loadSkyTexture(scene) {
         texture.mapping = THREE.EquirectangularReflectionMapping;
         texture.colorSpace = THREE.SRGBColorSpace;
         scene.background = texture;
-        skyTextures.day = texture;
         resolve(true);
       },
       undefined,
@@ -70,28 +64,54 @@ export function attachSky(scene, opts = {}) {
   return sky;
 }
 
-// 夜空贴图（星空）——夜晚时整屏铺在 scene.background 上。
-// 这张图是一张普通照片（不是 360° 全景等距圆柱图），所以不能贴到球壳上：
-// 球壳会把整张图绕满 360°，而一个视锥只有 70° 左右，等于只看到图片的一小块，
-// 星空会被放大成一片模糊光斑、星系本体完全看不到。直接当整屏背景才是正常显示。
+// 夜空贴图（星空）。
+// 用球壳而不是 scene.background：整屏背景是「贴」在屏幕上的（转视角时星空不动、只有场景在转，
+// 看着很晕），而球壳是真正钉在世界里的天空，转视角时星空按相反方向移动。
+// 又因为这张图是普通照片（不是 360° 全景等距圆柱图），直接铺满整个球面会被放大约 3 倍、
+// 星星糊成一团，所以用 RepeatWrapping 平铺成若干份，让单个副本只占约 144°×93°，
+// 尺寸接近原图（像素基本 1:1），既清楚又不会像贴纸一样粘在屏幕上。
 const NIGHT_SKY_URL = 'sky/night_sky.png';
 
-// loadNightSkyTexture()：预加载夜空贴图，成功后缓存到 skyTextures.night 供 Game 切背景用。
-export function loadNightSkyTexture() {
-  return new Promise((resolve) => {
-    new THREE.TextureLoader().load(
-      NIGHT_SKY_URL,
-      (texture) => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        skyTextures.night = texture;
-        resolve(true);
-      },
-      undefined,
-      () => {
-        // 加载失败：夜里退回纯深色天空，并打一条日志便于定位路径问题
-        console.warn('[sky] 夜空贴图加载失败，夜里将退回纯深色天空:', NIGHT_SKY_URL);
-        resolve(false);
-      }
-    );
+// createNightSky(scene)：生成包住场景的夜空球壳，透明度由调用方按「夜的浓度」驱动。
+// 球壳半径在 update 里按相机 far 动态缩放，否则把「视距」调小后整个球会被裁掉、夜空消失。
+export function createNightSky(scene) {
+  const mat = new THREE.MeshBasicMaterial({
+    map: null,
+    color: 0x05070f, // 贴图没加载成功时，至少天空会变暗而不是原样
+    side: THREE.BackSide,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    fog: false,
   });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), mat);
+  mesh.renderOrder = -1; // 与天空同层：先于地面/建筑绘制
+  mesh.visible = false;  // 白天完全不参与绘制，零开销
+  scene.add(mesh);
+
+  new THREE.TextureLoader().load(
+    NIGHT_SKY_URL,
+    (texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.repeat.set(Config.NIGHT_SKY_TILE_X, Config.NIGHT_SKY_TILE_Y);
+      mat.map = texture;
+      mat.color.setHex(0xffffff); // 有贴图时按原色显示星空
+      mat.needsUpdate = true;
+    },
+    undefined,
+    () => {
+      // 加载失败：保留深色兜底，并打一条日志便于定位路径问题
+      console.warn('[sky] 夜空贴图加载失败，改用纯深色天空:', NIGHT_SKY_URL);
+    }
+  );
+
+  return mesh;
+}
+
+// 让夜空球壳刚好套在相机可视范围内（跟随 far，避免被裁剪）
+export function fitNightSky(mesh, camera) {
+  if (!mesh || !camera) return;
+  mesh.scale.setScalar(camera.far * 0.92);
 }

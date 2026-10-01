@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { attachSky, loadNightSkyTexture, getSkyTextures } from '../world/SkyBox.js';
+import { attachSky, createNightSky, fitNightSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
@@ -37,6 +37,9 @@ async function _fetchRemoteScene(scene, roots, target) {
   }
 }
 
+// 老师 Boss 的阶段名（1 起，索引 0 占位）
+const BOSS_PHASE_NAMES = ['', '一阶段', '二阶段', '三阶段'];
+
 export class Game {
   // 与服务器一致的昼夜周期（秒）：联机时以服务器权威时间为准，这里用于两次快照之间的外推
   static SYNC_DAY_SECONDS = 240;
@@ -60,9 +63,9 @@ export class Game {
     // ---- 场景与相机 ----
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，贴图/天空盒覆盖其上）
-    this._dayBg = this.scene.background; // 记下兜底背景，夜里切星空后回白天时用它还原
     attachSky(this.scene); // 城市天空贴图（优先）→ 程序化天空兜底
-    loadNightSkyTexture(); // 预加载星空图，夜里由 _updateDayNight 换到 scene.background
+    // 夜空球壳：夜晚时淡入（白天 visible=false，完全不绘制）
+    this._nightSky = createNightSky(this.scene);
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
@@ -103,7 +106,6 @@ export class Game {
     this._hudTimeText = '';
     // 本地时刻偏移（小时→一天比例）：只用于本地预览（想马上看夜晚就拖它），不参与联机同步
     this._dayOffset = (Number(gset.dayOffset) || 0) / 24;
-    this._skyNight = false; // 当前背景是否已切到星空贴图
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
@@ -235,17 +237,47 @@ export class Game {
     this._restoreSkills();
 
     // ---- 传送门与「老师」Boss：位于 (11,142)，靠近点「召唤老师」10 秒后出现 ----
+    // 三阶段：一阶段弹幕 → 白光+世界变红 → 二阶段旋转激光（跳着躲）→ 三阶段高激光（手动开护盾挡）
     this.boss = createTeacherBoss(this.scene);
     this.boss.setOnEvent((msg) => this.network.sendBoss(msg));
-    this.boss.setOnBulletHit((id, isLocal, dmg) => {
-      if (isLocal) this._changeHealth(-dmg);        // 自己被打中：本地扣血
-      else this.network.sendHit(id, dmg);           // 别人被打中：走 hit 中继让他的客户端扣血
-    });
+    this.boss.setOnLocalDamage((dmg) => this._changeHealth(-dmg));
+    this.boss.setOnLocalKill(() => { if (!this._dead) this._changeHealth(-Config.HEALTH_MAX * 2); });
+    this.boss.setOnPhase((kind, ph) => this._onBossPhase(kind, ph));
     this.boss.setOnStatus(() => this._updateBossUI());
     this._portalHint = this._createPortalHint();
     this._attackBtn = this._createAttackButton();
+    this._shieldBtn = this._createShieldButton();
     this._bossBar = this._createBossBar();
+    this._redOverlay = this._createRedOverlay();
+    this._flashEl = this._createFlashOverlay();
     this._chalkAt = 0;
+    this._shieldUntil = 0;      // 护盾生效截止时间（performance.now）
+    this._shieldReadyAt = 0;    // 护盾冷却结束时间
+    this._redWorld = false;     // 当前是否处于「世界变红」的阶段
+    this._lightColors = {       // 记下原始灯光颜色，狂暴结束后还原
+      sun: this._sun.color.clone(),
+      ambient: this._ambient.color.clone(),
+      hemi: this._hemi.color.clone(),
+    };
+    // 玩家身上的护盾罩子（只在三阶段开盾时显示）
+    this._shieldMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(1.15, 20, 14),
+      new THREE.MeshBasicMaterial({
+        color: 0x7fe3ff, transparent: true, opacity: 0.3,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    this._shieldMesh.visible = false;
+    this.scene.add(this._shieldMesh);
+
+    // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.BOSS_SHIELD_KEY) return;
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (this.aiChat && this.aiChat.isOpen()) return;
+      this._activateShield();
+    });
+
     // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）
     this.renderer.domElement.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
@@ -361,19 +393,19 @@ export class Game {
     this._sun.intensity = this._dayBaseSun * sunUp;
     this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
     this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
-    // 天空贴图整体压暗：日落时让白天贴图自然变黑（强度掉到 0），
-    // 这样等太阳完全落下再切星空图时，切换点前后都是全黑，不会出现跳变。
-    const tex = getSkyTextures();
-    const wantNight = !!tex.night && sunUp <= 0.001; // 太阳落到地平线以下之后
-    if (wantNight !== this._skyNight) {
-      this._skyNight = wantNight;
-      // 回到白天时优先用城市贴图；没有就退回最初的颜色兜底
-      this.scene.background = wantNight ? tex.night : (tex.day || this._dayBg);
-    }
+    // 天空贴图整体压暗 + 夜空淡入：日落时白天贴图自然变黑，
+    // 同时星空球壳按「夜的浓度」淡入（sunUp 到 0 就是全黑的世界）。
+    const night = Math.min(1, Math.max(0, 1 - sunUp / 0.35));
 
     if ('backgroundIntensity' in this.scene) {
-      // 星空图不再压暗（本来就很暗）；白天按时段明暗，日落到 0 变全黑
-      this.scene.backgroundIntensity = this._skyNight ? 1 : sunUp;
+      this.scene.backgroundIntensity = sunUp; // 白天贴图日落后压到 0（全黑）
+    }
+
+    if (this._nightSky) {
+      fitNightSky(this._nightSky, this.camera); // 跟着相机 far 缩放，防止调小视距后球壳被裁掉
+      this._nightSky.visible = night > 0.01;
+      this._nightSky.material.opacity = night;
+      this._nightSky.position.copy(this.camera.position); // 天空不该有视差，跟着相机走
     }
 
     // 校卡上的时间（0 = 00:00，0.5 = 12:00）：只在整分钟变化时写 DOM
@@ -740,6 +772,104 @@ export class Game {
     return el;
   }
 
+  // 三阶段的「护盾」按钮（手机没有 Q 键）
+  _createShieldButton() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 37%);' +
+      'min-width:clamp(70px,20vmin,112px);box-sizing:border-box;text-align:center;' +
+      'background:linear-gradient(150deg,#4bb8f0,#1f6fb8);color:#fff;' +
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
+      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+    el.textContent = '护盾';
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._activateShield();
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 世界变红的全屏滤镜（pointer-events:none，只做视觉）
+  _createRedOverlay() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;inset:0;z-index:56;pointer-events:none;opacity:0;' +
+      'transition:opacity .8s ease;' +
+      'background:radial-gradient(circle at 50% 45%, rgba(255,60,60,.22) 0%, rgba(120,0,0,.62) 100%);';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 白光一闪用的全屏白幕
+  _createFlashOverlay() {
+    const el = document.createElement('div');
+    el.style.cssText = 'position:fixed;inset:0;z-index:57;pointer-events:none;opacity:0;background:#fff;';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 全屏闪一下（老师阶段切换 / 被击败时的白光）
+  _flash(color, ms) {
+    const el = this._flashEl;
+    if (!el) return;
+    el.style.transition = 'none';
+    el.style.background = color;
+    el.style.opacity = '0.95';
+    void el.offsetWidth; // 强制重排，保证紧接着改 opacity 能触发过渡动画
+    el.style.transition = 'opacity ' + ms + 'ms ease-out';
+    el.style.opacity = '0';
+  }
+
+  // 世界变红 / 还原：全屏红色滤镜 + 把阳光、环境光、半球光染红
+  _setWorldRed(on) {
+    if (this._redWorld === on) return;
+    this._redWorld = on;
+    if (this._redOverlay) this._redOverlay.style.opacity = on ? '1' : '0';
+    const c = this._lightColors;
+    if (!c) return;
+    if (on) {
+      this._sun.color.setHex(0xff4a3a);
+      this._ambient.color.setHex(0xff6a5a);
+      this._hemi.color.setHex(0xff3b2f);
+    } else {
+      this._sun.color.copy(c.sun);
+      this._ambient.color.copy(c.ambient);
+      this._hemi.color.copy(c.hemi);
+    }
+  }
+
+  // 老师阶段变化：切换白光、世界变红、提示当前阶段的应对方式
+  _onBossPhase(kind, ph) {
+    if (kind === 'shift') {
+      this._flash('#ffffff', 700); // 一阶段被打死：先发白光
+      this._setWorldRed(true);     // 然后世界变红
+      this._toast('老师狂暴了');
+    } else if (kind === 'enter') {
+      const tips = ['', '', '跳起来躲开旋转激光！', '按 ' + Config.BOSS_SHIELD_KEY.slice(-1) + ' 开护盾挡下激光'];
+      this._toast('老师进入' + BOSS_PHASE_NAMES[ph] + '：' + tips[ph]);
+    } else if (kind === 'dead') {
+      this._setWorldRed(false);
+      this._flash('#ffffff', 600);
+      this._toast('老师已被击败');
+    }
+    this._updateBossUI();
+  }
+
+  // 手动开护盾：只在三阶段可用，有冷却
+  _activateShield() {
+    if (!this.boss || this._dead) return;
+    if (this.boss.mode !== 'alive' || this.boss.phase < 3) return;
+    const now = performance.now();
+    if (now < this._shieldReadyAt) return;
+    this._shieldUntil = now + Config.BOSS_SHIELD_DURATION * 1000;
+    this._shieldReadyAt = now + Config.BOSS_SHIELD_COOLDOWN * 1000;
+    this._updateBossUI();
+  }
+
   // 顶部的 Boss 血条：倒计时显示剩余秒数，出现后显示血量
   _createBossBar() {
     const box = document.createElement('div');
@@ -765,36 +895,50 @@ export class Game {
     box.appendChild(row);
     box.appendChild(track);
     document.body.appendChild(box);
-    return { box, num, fill };
+    return { box, name, num, fill };
   }
 
-  // 每帧刷新 Boss 相关 UI：传送门按钮、攻击按钮、顶部血条。
+  // 每帧刷新 Boss 相关 UI：传送门按钮、攻击/护盾按钮、顶部血条。
   // 用一个状态串做去重，避免每帧重复写 DOM。
   _updateBossUI() {
     const mode = this.boss.mode;
+    const phase = this.boss.phase;
     const P = Config.PORTAL_POS;
     const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
     const showPortal = mode === 'idle' && near;
     const showAtk = mode === 'alive' && !this._dead;
+    const showShield = mode === 'alive' && phase >= 3 && !this._dead;
+    const shieldReady = performance.now() >= this._shieldReadyAt;
     const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
     const hp = mode === 'alive' ? Math.max(0, Math.round(this.boss.hp)) : 0;
-    const key = [showPortal, showAtk, mode, seconds, hp].join('|');
+    const key = [showPortal, showAtk, showShield, shieldReady, mode, phase, seconds, hp].join('|');
     if (key === this._bossUiKey) return;
     this._bossUiKey = key;
 
     if (this._portalHint) this._portalHint.style.display = showPortal ? '' : 'none';
     if (this._attackBtn) this._attackBtn.style.display = showAtk ? '' : 'none';
+    if (this._shieldBtn) {
+      this._shieldBtn.style.display = showShield ? '' : 'none';
+      this._shieldBtn.style.opacity = shieldReady ? '1' : '0.4'; // 冷却中变淡
+    }
 
     const bar = this._bossBar;
     if (!bar) return;
     if (mode === 'countdown') {
       bar.box.style.display = '';
+      bar.name.textContent = '老师';
       bar.num.textContent = '来袭倒计时 ' + seconds + 's';
       bar.fill.style.width = '100%';
     } else if (mode === 'alive') {
       bar.box.style.display = '';
+      bar.name.textContent = '老师 · ' + (BOSS_PHASE_NAMES[phase] || '');
       bar.num.textContent = hp + ' / ' + this.boss.maxHp;
       bar.fill.style.width = ((hp / this.boss.maxHp) * 100).toFixed(1) + '%';
+    } else if (mode === 'shift') {
+      bar.box.style.display = '';
+      bar.name.textContent = '老师 · 狂暴';
+      bar.num.textContent = '—';
+      bar.fill.style.width = '100%';
     } else {
       bar.box.style.display = 'none';
     }
@@ -804,11 +948,11 @@ export class Game {
   _updateBoss(dt) {
     const me = this.localState;
     const bpos = this.boss.pos;
-    const players = [{ id: me.id || '__local', x: me.x, y: me.y, z: me.z, isLocal: true }];
+    const players = [{ id: me.id || '__local', x: me.x, y: me.y, z: me.z }];
     for (const [id, rp] of this.playerManager.players) {
       if (id === me.id) continue;
       const st = rp.state;
-      players.push({ id, x: st.x, y: st.y, z: st.z, isLocal: false });
+      players.push({ id, x: st.x, y: st.y, z: st.z });
     }
     let target = null;
     let best = Config.BOSS_CHASE_RANGE;
@@ -816,7 +960,24 @@ export class Game {
       const d = Math.hypot(p.x - bpos.x, p.z - bpos.z);
       if (d < best) { best = d; target = p; }
     }
-    this.boss.update(dt, { target, players, colliders: this.colliders });
+
+    // 护盾：本帧是否生效 + 罩子跟随玩家
+    const now = performance.now();
+    const shield = now < this._shieldUntil;
+    if (this._shieldMesh) {
+      const size = this.localPlayer.physics.sizeScale;
+      this._shieldMesh.visible = shield;
+      if (shield) {
+        this._shieldMesh.position.set(me.x, me.y - Config.PLAYER_HEIGHT * size * 0.5, me.z);
+        this._shieldMesh.scale.setScalar(size);
+      }
+    }
+
+    this.boss.update(dt, {
+      target,
+      local: { x: me.x, y: me.y, z: me.z, shield },
+      colliders: this.colliders,
+    });
     this._updateBossUI();
   }
 

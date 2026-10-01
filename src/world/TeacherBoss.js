@@ -1,18 +1,25 @@
-// 职责：位于 (11,142) 的传送门，以及由它召唤出来的「老师」Boss。
-// 玩法：靠近传送门点「召唤老师」→ 10 秒倒计时 → 老师出现（1000 血），
-//       追着最近的玩家跑，并每隔几秒朝四周环形打出一圈弹幕。
-// 联机：召唤者是 owner，负责模拟老师的移动 / 开火 / 命中判定，事件经服务器中继给其他人；
-//       非 owner 的老师只按收到的位姿做插值。血量由所有人各自扣同一份增量
-//       （每个客户端只上报自己造成的伤害，服务器不回发给发送者，因此不会重复扣）。
+// 职责：位于 (11,142) 的传送门，以及由它召唤出来的「老师」三阶段 Boss。
+//
+// 一阶段：追着最近的玩家跑（碰到谁谁就挂），每 2.6 秒朝四周打一圈弹幕；打空 1000 血进入二阶段。
+// 切换演出：老师发白光一闪 → 世界变红。
+// 二阶段：开始绕自身旋转的红色激光，激光很矮，跳起来就能躲开；打空 1000 血进入三阶段。
+// 三阶段：激光变成跳不过去的高墙，玩家可以按 Q（手机点「护盾」按钮）手动开护盾，
+//         护盾挡下激光时老师掉 100 血，打空 1000 血即获胜。
+//
+// 联机：召唤者是 owner，负责模拟老师的移动 / 开火 / 激光角度 / 阶段推进，事件经服务器中继；
+//       非 owner 的老师只按收到的位姿与角度插值。伤害结算全部「各人判自己」：
+//       每个客户端只检测自己有没有被弹幕/激光扫到、有没有被碰到，因此不需要服务器判定。
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate, createFallback } from './AssetLoader.js';
 import { projectileHitsWorld } from './collision/projectileHit.js';
 
-// 老师的三种状态：idle（传送门待机）/ countdown（倒计时中）/ alive（已出现）/ dead（刚被击败，稍后重置）
+// 老师的状态：idle（传送门待机）/ countdown（倒计时中）/ alive（战斗中）/
+// shift（刚被打空血，白光+世界变红的过场中）/ dead（已击败，稍后重置）
 const IDLE = 'idle';
 const COUNTDOWN = 'countdown';
 const ALIVE = 'alive';
+const SHIFT = 'shift';
 const DEAD = 'dead';
 
 export function createTeacherBoss(scene) {
@@ -92,7 +99,7 @@ export function createTeacherBoss(scene) {
       bossGroup.add(createFallback({ color: 0xb03a55, width: 0.8, height: Config.BOSS_HEIGHT, depth: 0.5 }));
     });
 
-  // ---------- 弹幕 ----------
+  // ---------- 一阶段：环形弹幕 ----------
   const bulletGeo = new THREE.SphereGeometry(0.16, 10, 8);
   const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffd75e });
   const bullets = [];
@@ -123,24 +130,67 @@ export function createTeacherBoss(scene) {
     }
   }
 
+  // ---------- 二/三阶段：绕老师旋转的红色激光 ----------
+  const laserGroup = new THREE.Group();
+  laserGroup.visible = false;
+  scene.add(laserGroup);
+
+  const laserMat = new THREE.MeshBasicMaterial({
+    color: 0xff2a2a, transparent: true, opacity: 0.6,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const laserBoxGeo = new THREE.BoxGeometry(1, 1, 1);
+
+  // 每根激光放在一个只绕 Y 旋转的支点上，支点角度固定（一圈均分），
+  // 整体再靠 laserGroup.rotation.y 统一旋转，因此世界角度 = laserAngle + i * 2π/N。
+  const laserBlades = [];
+  for (let i = 0; i < Config.BOSS_LASER_COUNT; i++) {
+    const pivot = new THREE.Group();
+    pivot.rotation.y = (i / Config.BOSS_LASER_COUNT) * Math.PI * 2;
+    laserGroup.add(pivot);
+    const mesh = new THREE.Mesh(laserBoxGeo, laserMat);
+    pivot.add(mesh);
+    laserBlades.push({ mesh });
+  }
+
+  // 按当前阶段设置激光的高度：二阶段很矮（跳得过去），三阶段是一堵高墙（跳不过去）
+  function updateLaserGeometry() {
+    const low = Config.BOSS_LASER_LOW;
+    const high = phase >= 3 ? Config.BOSS_LASER_HIGH_3 : Config.BOSS_LASER_HIGH_2;
+    const h = Math.max(0.05, high - low);
+    for (const b of laserBlades) {
+      b.mesh.scale.set(Config.BOSS_LASER_THICK, h, Config.BOSS_LASER_LEN);
+      b.mesh.position.set(0, low + h / 2, -Config.BOSS_LASER_LEN / 2);
+    }
+  }
+
   // ---------- 状态 ----------
   let mode = IDLE;
+  let phase = 1;                   // 1 / 2 / 3
+  let nextPhase = 2;
   let countdown = 0;
   let hp = 0;
-  let owner = false;               // 是否由本机负责模拟老师的移动 / 开火 / 命中
+  let owner = false;               // 是否由本机负责模拟老师的移动 / 开火 / 阶段推进
   let px = P.x;                    // 当前坐标（地面）
   let pz = P.z;
   let byaw = 0;                    // 当前朝向
+  let laserAngle = 0;              // 激光当前旋转角
   let volleyTimer = 0;
-  let resetTimer = 0;
+  let shiftTimer = 0;              // 阶段切换过场的剩余时间
+  let resetTimer = 0;              // 被击败后传送门恢复的剩余时间
+  let laserHitCd = 0;              // 本地玩家被激光命中的冷却
+  let shieldBlockCd = 0;           // 护盾挡下激光的冷却（防止一次开盾刷多次伤害）
   let netPoseTimer = 0;
   let netX = P.x;                  // 非 owner：收到的目标位姿，做插值
   let netZ = P.z;
   let netYaw = 0;
+  let netLaser = 0;
   let animT = 0;
 
   let onEvent = null;              // (msg) => void，广播给其他玩家
-  let onBulletHit = null;          // (playerId, isLocal, damage) => void
+  let onLocalDamage = null;        // (damage) => void，本机玩家受伤
+  let onLocalKill = null;          // () => void，本机玩家被老师碰到（秒杀）
+  let onPhase = null;              // (kind, phase) => void，kind: 'shift' | 'enter' | 'dead'
   let onStatus = null;             // () => void，状态变化时刷新 UI
 
   function emit(msg) {
@@ -149,6 +199,93 @@ export function createTeacherBoss(scene) {
 
   function setStatus() {
     if (onStatus) onStatus();
+  }
+
+  function laserHeight() {
+    return phase >= 3 ? Config.BOSS_LASER_HIGH_3 : Config.BOSS_LASER_HIGH_2;
+  }
+
+  // ---------- 阶段流程 ----------
+
+  function startCountdown() {
+    mode = COUNTDOWN;
+    phase = 1;
+    countdown = Config.BOSS_SPAWN_DELAY;
+    hp = Config.BOSS_HP;
+    px = P.x;
+    pz = P.z;
+    byaw = 0;
+    laserAngle = 0;
+    netX = px;
+    netZ = pz;
+    netLaser = 0;
+    laserGroup.visible = false;
+    clearBullets();
+    setStatus();
+  }
+
+  function spawnNow() {
+    mode = ALIVE;
+    phase = 1;
+    hp = Config.BOSS_HP;
+    volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.5; // 出现后先缓一下再开火
+    bossGroup.visible = true;
+    laserGroup.visible = false;
+    setStatus();
+  }
+
+  // 进入某个阶段：血量重置、切到该阶段的攻击方式
+  function enterPhase(n) {
+    phase = n;
+    hp = Config.BOSS_HP;
+    mode = ALIVE;
+    volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.6;
+    laserAngle = 0;
+    clearBullets();
+    updateLaserGeometry();
+    laserGroup.visible = n >= 2;
+    if (onPhase) onPhase('enter', n);
+    setStatus();
+  }
+
+  // 血量打空：先播「白光 + 世界变红」的过场，再进入下一阶段（只有 owner 推进流程）
+  function startShift(next) {
+    mode = SHIFT;
+    nextPhase = next;
+    shiftTimer = Config.BOSS_PHASE_SHIFT;
+    hp = 0;
+    clearBullets();
+    laserGroup.visible = false;
+    emit({ ev: 'shift', ph: next });
+    if (onPhase) onPhase('shift', next);
+    setStatus();
+  }
+
+  function endFight() {
+    mode = DEAD;
+    hp = 0;
+    resetTimer = Config.PORTAL_RESET_DELAY;
+    bossGroup.visible = false;
+    laserGroup.visible = false;
+    clearBullets();
+    emit({ ev: 'dead' });
+    if (onPhase) onPhase('dead', phase);
+    setStatus();
+  }
+
+  // 老师掉血：先本地扣，再广播给别人各扣同一份增量
+  function hurtBy(dmg) {
+    if (mode !== ALIVE || !(dmg > 0)) return;
+    hp = Math.max(0, hp - dmg);
+    emit({ ev: 'damage', dmg });
+    afterHpChange();
+  }
+
+  // 血量变化后的收尾：打空则由 owner 推进阶段，其他人等 owner 的 shift 事件
+  function afterHpChange() {
+    if (hp > 0 || !owner) { setStatus(); return; }
+    if (phase < 3) startShift(phase + 1);
+    else endFight();
   }
 
   // ---------- 对外操作 ----------
@@ -161,37 +298,6 @@ export function createTeacherBoss(scene) {
     emit({ ev: 'start' });
   }
 
-  function startCountdown() {
-    mode = COUNTDOWN;
-    countdown = Config.BOSS_SPAWN_DELAY;
-    hp = Config.BOSS_HP;
-    px = P.x;
-    pz = P.z;
-    byaw = 0;
-    netX = px;
-    netZ = pz;
-    clearBullets();
-    setStatus();
-  }
-
-  function spawnNow() {
-    mode = ALIVE;
-    hp = Config.BOSS_HP;
-    volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.5; // 出现后先缓一下再开火
-    bossGroup.visible = true;
-    setStatus();
-  }
-
-  function die() {
-    if (mode === IDLE || mode === DEAD) return;
-    mode = DEAD;
-    hp = 0;
-    resetTimer = Config.PORTAL_RESET_DELAY;
-    bossGroup.visible = false;
-    clearBullets();
-    setStatus();
-  }
-
   // 本地收到的网络事件（别人的老师动作）
   function netEvent(msg) {
     if (!msg || !msg.ev) return;
@@ -201,26 +307,47 @@ export function createTeacherBoss(scene) {
         break;
       case 'pose':
         if (mode === IDLE) { mode = ALIVE; bossGroup.visible = true; } // 中途加入：直接按当前状态补齐
-        if (mode === ALIVE || mode === COUNTDOWN) {
-          if (mode === COUNTDOWN) { mode = ALIVE; bossGroup.visible = true; }
+        if (mode === COUNTDOWN) { mode = ALIVE; bossGroup.visible = true; }
+        if (mode === ALIVE) {
           netX = Number(msg.x) || 0;
           netZ = Number(msg.z) || 0;
           netYaw = Number(msg.yaw) || 0;
+          netLaser = Number(msg.la) || 0;
+          if (Number.isFinite(Number(msg.ph))) phase = Number(msg.ph);
           if (Number.isFinite(Number(msg.hp))) hp = Number(msg.hp);
+          updateLaserGeometry();
+          if (phase >= 2) laserGroup.visible = true;
           setStatus();
         }
         break;
       case 'volley':
-        if (mode === ALIVE) {
+        if (mode === ALIVE && phase === 1) {
           fireVolley(Number(msg.x) || px, Number(msg.y) || (Config.BOSS_HEIGHT * 0.6), Number(msg.z) || pz);
         }
         break;
+      case 'shift':
+        if (mode === ALIVE || mode === SHIFT) {
+          mode = SHIFT;
+          nextPhase = Number(msg.ph) || (phase + 1);
+          shiftTimer = Config.BOSS_PHASE_SHIFT;
+          hp = 0;
+          clearBullets();
+          laserGroup.visible = false;
+          if (onPhase) onPhase('shift', nextPhase);
+          setStatus();
+        }
+        break;
+      case 'phase':
+        enterPhase(Number(msg.ph) || 2);
+        break;
       case 'damage':
-        hp = Math.max(0, hp - Math.max(0, Number(msg.dmg) || 0));
-        if (hp <= 0) die(); else setStatus();
+        if (mode === ALIVE) {
+          hp = Math.max(0, hp - Math.max(0, Number(msg.dmg) || 0));
+          afterHpChange();
+        }
         break;
       case 'dead':
-        die();
+        if (mode !== IDLE) endFight();
         break;
       default:
         break;
@@ -231,10 +358,11 @@ export function createTeacherBoss(scene) {
   function broadcastNow() {
     if (!owner || mode === IDLE) return;
     if (mode === COUNTDOWN) { emit({ ev: 'start' }); return; }
-    if (mode === ALIVE) emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp });
+    if (mode === ALIVE) emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: phase, la: laserAngle });
+    else if (mode === SHIFT) emit({ ev: 'shift', ph: nextPhase });
   }
 
-  // 玩家投掷物 / 爆炸是否落在老师身上
+  // 玩家投掷物 / 爆炸是否落在老师身上（过场中无敌）
   function hitsAt(x, y, z, r) {
     if (mode !== ALIVE) return false;
     const dx = x - px;
@@ -242,14 +370,6 @@ export function createTeacherBoss(scene) {
     const rad = Config.BOSS_RADIUS + r;
     if (dx * dx + dz * dz > rad * rad) return false;
     return y > -r && y < Config.BOSS_HEIGHT + r;
-  }
-
-  // 本机对老师造成伤害：本地扣血 + 广播（其他客户端各自扣同一份增量）
-  function hurtBy(dmg) {
-    if (mode !== ALIVE || !(dmg > 0)) return;
-    hp = Math.max(0, hp - dmg);
-    emit({ ev: 'damage', dmg });
-    if (hp <= 0) { die(); emit({ ev: 'dead' }); } else setStatus();
   }
 
   // ---------- 追击时的移动判定：直接朝目标走，撞到建筑就沿墙滑动 ----------
@@ -266,7 +386,7 @@ export function createTeacherBoss(scene) {
     if (dist < 1e-4) return;
     byaw = Math.atan2(dx, dz);
     if (dist <= Config.BOSS_CHASE_STOP || dist > Config.BOSS_CHASE_RANGE) return;
-    const step = Config.BOSS_CHASE_SPEED * dt;
+    const step = Math.min(Config.BOSS_CHASE_SPEED * dt, dist);
     const nx = px + (dx / dist) * step;
     const nz = pz + (dz / dist) * step;
     if (!blocked(px, pz, nx, nz, colliders)) { px = nx; pz = nz; return; }
@@ -275,8 +395,58 @@ export function createTeacherBoss(scene) {
     if (!blocked(px, pz, px, nz, colliders)) { pz = nz; }
   }
 
+  // ---------- 打本地玩家：碰到秒杀 ----------
+  function checkContact(local) {
+    if (!local) return;
+    const reach = Config.BOSS_RADIUS + Config.PLAYER_RADIUS + Config.BOSS_CONTACT_PAD;
+    if (Math.hypot(local.x - px, local.z - pz) > reach) return;
+    // 竖直方向也要有重叠（站在楼顶/高空时碰不到）：老师占 [0, BOSS_HEIGHT]，玩家占 [y-身高, y]
+    const feet = local.y - Config.PLAYER_HEIGHT;
+    if (feet >= Config.BOSS_HEIGHT || local.y <= 0) return;
+    if (onLocalKill) onLocalKill();
+  }
+
+  // ---------- 激光命中判定：都只判「本地玩家自己」，所以不需要 owner 代判 ----------
+  function checkLasers(local, dt) {
+    laserHitCd = Math.max(0, laserHitCd - dt);
+    shieldBlockCd = Math.max(0, shieldBlockCd - dt);
+    if (!local || laserHitCd > 0) return;
+
+    const low = Config.BOSS_LASER_LOW;
+    const high = laserHeight();
+    // 玩家躯干（脚底 y-PLAYER_HEIGHT ~ 头顶 y）与激光高度区间没有交集就安全（跳起来躲开）
+    const feet = local.y - Config.PLAYER_HEIGHT;
+    if (feet >= high || local.y <= low) return;
+
+    const dx = local.x - px;
+    const dz = local.z - pz;
+    const reach = Config.BOSS_LASER_THICK / 2 + Config.PLAYER_RADIUS;
+
+    for (let i = 0; i < laserBlades.length; i++) {
+      const a = laserAngle + (i / laserBlades.length) * Math.PI * 2;
+      const sx = -Math.sin(a);
+      const sz = -Math.cos(a);
+      const along = dx * sx + dz * sz;
+      if (along < 0 || along > Config.BOSS_LASER_LEN) continue;
+      const perp = Math.abs(dz * sx - dx * sz);
+      if (perp > reach) continue;
+
+      laserHitCd = Config.BOSS_LASER_HIT_COOLDOWN;
+      if (local.shield) {
+        // 护盾成功挡下：老师掉血（同一面盾只结算一次）
+        if (shieldBlockCd <= 0) {
+          shieldBlockCd = Config.BOSS_SHIELD_DURATION;
+          hurtBy(Config.BOSS_SHIELD_DAMAGE);
+        }
+      } else if (onLocalDamage) {
+        onLocalDamage(Config.BOSS_LASER_DAMAGE);
+      }
+      return;
+    }
+  }
+
   // ---------- 每帧推进 ----------
-  // ctx: { dt 已由外部应用；target: 最近玩家 {x,z} | null；players: [{id,x,y,z,isLocal}]; colliders }
+  // ctx: { target: 最近玩家 {x,z} | null; local: {x,y,z,shield} 本地玩家; colliders }
   function update(dt, ctx) {
     animT += dt;
 
@@ -285,12 +455,11 @@ export function createTeacherBoss(scene) {
     halo.position.y = 1.7 + Math.sin(animT * 1.6) * 0.12;
     disc.material.opacity = 0.26 + 0.14 * (0.5 + 0.5 * Math.sin(animT * 2.4));
     beam.material.opacity = 0.12 + 0.08 * (0.5 + 0.5 * Math.sin(animT * 1.1 + 1));
-    const portalHot = mode === IDLE; // 可召唤时传送门更亮
-    ringOuter.material.opacity = portalHot ? 0.65 : 0.3;
+    ringOuter.material.opacity = mode === IDLE ? 0.65 : 0.3;
 
     if (mode === DEAD) {
       resetTimer -= dt;
-      if (resetTimer <= 0) { mode = IDLE; hp = 0; setStatus(); }
+      if (resetTimer <= 0) { mode = IDLE; phase = 1; hp = 0; setStatus(); }
       return;
     }
     if (mode === COUNTDOWN) {
@@ -298,28 +467,42 @@ export function createTeacherBoss(scene) {
       if (countdown <= 0) {
         countdown = 0;
         spawnNow();
-        if (owner) emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp });
+        if (owner) emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: 1, la: laserAngle });
+      }
+      return;
+    }
+    if (mode === SHIFT) {
+      // 只有 owner 计时，其他人等 owner 的 phase 事件，避免两端各进一次阶段
+      if (!owner) return;
+      shiftTimer -= dt;
+      if (shiftTimer <= 0) {
+        enterPhase(nextPhase);
+        emit({ ev: 'phase', ph: nextPhase });
       }
       return;
     }
     if (mode !== ALIVE) return;
 
-    // ---- 移动与开火：只有 owner 模拟，其他人按收到的位姿插值 ----
+    // ---- 移动 / 攻击：只有 owner 模拟，其他人按收到的位姿插值 ----
     if (owner) {
       if (ctx.target) chase(dt, ctx.target, ctx.colliders);
 
-      volleyTimer -= dt;
-      if (volleyTimer <= 0) {
-        volleyTimer = Config.BOSS_VOLLEY_INTERVAL;
-        const by = Config.BOSS_HEIGHT * 0.6;
-        fireVolley(px, by, pz);
-        emit({ ev: 'volley', x: px, y: by, z: pz });
+      if (phase === 1) {
+        volleyTimer -= dt;
+        if (volleyTimer <= 0) {
+          volleyTimer = Config.BOSS_VOLLEY_INTERVAL;
+          const by = Config.BOSS_HEIGHT * 0.6;
+          fireVolley(px, by, pz);
+          emit({ ev: 'volley', x: px, y: by, z: pz });
+        }
+      } else {
+        laserAngle += (phase >= 3 ? Config.BOSS_LASER_SPIN_3 : Config.BOSS_LASER_SPIN_2) * dt;
       }
 
       netPoseTimer -= dt;
       if (netPoseTimer <= 0) {
         netPoseTimer = 1 / Config.BOSS_NET_HZ;
-        emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp });
+        emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: phase, la: laserAngle });
       }
     } else {
       // 位姿插值：按 10Hz 收到的目标平滑靠近，避免瞬移
@@ -327,42 +510,45 @@ export function createTeacherBoss(scene) {
       px += (netX - px) * k;
       pz += (netZ - pz) * k;
       byaw += Math.atan2(Math.sin(netYaw - byaw), Math.cos(netYaw - byaw)) * k;
+      laserAngle += Math.atan2(Math.sin(netLaser - laserAngle), Math.cos(netLaser - laserAngle)) * k;
     }
 
-    // ---- 弹幕推进 ----
-    if (bullets.length) {
-      const players = ctx.players || [];
-      for (let i = bullets.length - 1; i >= 0; i--) {
-        const b = bullets[i];
-        b.mesh.position.x += b.vx * dt;
-        b.mesh.position.z += b.vz * dt;
-        b.life -= dt;
-        b.mesh.rotation.y += dt * 4;
+    // ---- 场地效果：接触秒杀 + 激光 / 弹幕命中（都只判本地玩家） ----
+    const local = ctx.local;
+    if (local) {
+      checkContact(local);
+      if (phase >= 2) checkLasers(local, dt);
 
-        let dead = b.life <= 0;
-        // 只有 owner 做命中判定，避免所有客户端重复扣血；伤害经 hit 中继下发给被命中的玩家
-        if (!dead && owner) {
-          for (const p of players) {
-            const d = Math.hypot(b.mesh.position.x - p.x, b.mesh.position.z - p.z);
-            if (d > Config.BOSS_BULLET_HIT_RADIUS) continue;
-            const cy = p.y - Config.PLAYER_HEIGHT / 2; // 玩家躯干中心高度
-            if (Math.abs(b.mesh.position.y - cy) > 1.1) continue;
-            dead = true;
-            if (onBulletHit) onBulletHit(p.id, p.isLocal, Config.BOSS_BULLET_DAMAGE);
-            break;
+      if (bullets.length) {
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          b.mesh.position.x += b.vx * dt;
+          b.mesh.position.z += b.vz * dt;
+          b.life -= dt;
+          b.mesh.rotation.y += dt * 4;
+
+          let dead = b.life <= 0;
+          if (!dead) {
+            const d = Math.hypot(b.mesh.position.x - local.x, b.mesh.position.z - local.z);
+            const cy = local.y - Config.PLAYER_HEIGHT / 2; // 玩家躯干中心高度
+            if (d <= Config.BOSS_BULLET_HIT_RADIUS && Math.abs(b.mesh.position.y - cy) <= 1.1) {
+              dead = true;
+              if (onLocalDamage) onLocalDamage(Config.BOSS_BULLET_DAMAGE);
+            }
           }
-        }
-        // 飞出场地边界也回收
-        if (!dead && (Math.abs(b.mesh.position.x) > 400 || Math.abs(b.mesh.position.z) > 400)) dead = true;
-        if (dead) {
-          scene.remove(b.mesh);
-          bullets.splice(i, 1);
+          if (!dead && (Math.abs(b.mesh.position.x) > 400 || Math.abs(b.mesh.position.z) > 400)) dead = true;
+          if (dead) {
+            scene.remove(b.mesh);
+            bullets.splice(i, 1);
+          }
         }
       }
     }
 
     bossGroup.position.set(px, 0, pz);
     bossGroup.rotation.y = byaw + Config.BOSS_YAW_OFFSET;
+    laserGroup.position.set(px, 0, pz);
+    laserGroup.rotation.y = laserAngle;
   }
 
   return {
@@ -373,10 +559,13 @@ export function createTeacherBoss(scene) {
     hitsAt,
     hurtBy,
     setOnEvent: (fn) => { onEvent = fn; },
-    setOnBulletHit: (fn) => { onBulletHit = fn; },
+    setOnLocalDamage: (fn) => { onLocalDamage = fn; },
+    setOnLocalKill: (fn) => { onLocalKill = fn; },
+    setOnPhase: (fn) => { onPhase = fn; },
     setOnStatus: (fn) => { onStatus = fn; },
     // 供 UI / 其他模块读取
     get mode() { return mode; },
+    get phase() { return phase; },
     get hp() { return hp; },
     get maxHp() { return Config.BOSS_HP; },
     get countdown() { return countdown; },
