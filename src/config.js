@@ -193,6 +193,24 @@ export const Config = {
   SUPER_MISSILE_DAMAGE: 300,      // 追踪导弹命中老师的伤害
   SUPER_MISSILE_SPEED: 26,        // 追踪导弹飞行速度（米/秒）
   SUPER_MISSILE_LIFE: 8,          // 追踪导弹最长飞行时间（秒）
+
+  // ---- 商人「小满」与商店 ----
+  MERCHANT_POS: { x: -12, z: 144 },  // 商人所在坐标
+  MERCHANT_PROXIMITY: 3.6,           // 离多近内出现「找小满买东西」按钮（米）
+  MERCHANT_MODEL: '/assets/girl.glb', // 女生模型
+  MERCHANT_HEIGHT: 1.75,             // 归一化后的身高（米）
+  MERCHANT_YAW: Math.PI * 0.25,      // 站姿朝向（弧度），让她面朝出生点方向
+  BOSS_COIN_REWARD: 50,              // 击败老师奖励的学币
+
+  // ---- 棍子（横扫击飞）----
+  CLUB_RANGE: 3.6,           // 横扫半径（米）
+  CLUB_ARC_DEG: 160,         // 横扫张角（度），以玩家正前方为中心左右各一半
+  CLUB_KNOCK: 15,            // 被扫到后的水平击飞速度（米/秒）
+  CLUB_KNOCK_UP: 7,          // 击飞的向上分量（米/秒）
+  CLUB_KNOCK_HOLD: 0.35,     // 被击飞后持续被推着飞的时长（秒）
+  CLUB_SWING_TIME: 0.32,     // 挥棍动画时长（秒）
+  CLUB_HIT_AT: 0.12,         // 动画进行到这个时间点时结算命中（秒）
+  CLUB_COOLDOWN: 0.9,        // 两次挥棍的最小间隔（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。

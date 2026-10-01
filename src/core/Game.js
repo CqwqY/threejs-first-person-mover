@@ -10,6 +10,9 @@ import { createNpcChat } from '../ui/NpcChat.js';
 import { createAiNpc } from '../world/AiNpc.js';
 import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
+import { createMerchant } from '../world/Merchant.js';
+import { createShopPanel } from '../ui/ShopPanel.js';
+import { loadWallet, buyItem, rewardBossKill } from '../player/Shop.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
@@ -280,6 +283,23 @@ export class Game {
     this._superLabel = '';      // 0 号槽当前文案（用于去重）
     this._missiles = [];        // 在飞的追踪导弹
 
+    // ---- 商人与商店：(-12,144) 的小满，靠近点按钮开店 ----
+    this.merchant = createMerchant();
+    this.scene.add(this.merchant.group);
+    this._merchantHint = this._createMerchantHint();
+    this.merchant.onRange((r) => { this._merchantNear = !!r; });
+    this.shop = createShopPanel({ onBuy: (id) => this._buyShopItem(id) });
+    this.shop.setState(() => loadWallet(this._profile));
+    this._coinBadge = this._createCoinBadge();
+    this._refreshCoins();
+
+    // ---- 棍子：挂在相机下的挥动模型（只有挥的那一下才显示）----
+    // 相机要进场景图，否则挂在它下面的模型不会被渲染
+    this.scene.add(this.camera);
+    this._clubRig = this._createClubRig();
+    this._clubAt = 0;
+    this._clubSwing = null;     // { t, hit }
+
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.BOSS_SHIELD_KEY) return;
@@ -517,6 +537,11 @@ export class Game {
         // 被别人投掷物的范围效果覆盖：在本机直接生效
         this._applyEffect(msg.effect);
         this._toast('受到范围效果：' + this._describeEffect(msg.effect));
+        break;
+      }
+      case 'knock': {
+        // 被别人的棍子扫到：由本机给自己施加击飞（冲量来自挥棍的人）
+        this._applyKnock(msg);
         break;
       }
       case 'proj': {
@@ -803,6 +828,69 @@ export class Game {
     return el;
   }
 
+  // 商人附近的「找小满买东西」按钮
+  _createMerchantHint() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
+      'min-width:clamp(86px,24vmin,142px);box-sizing:border-box;text-align:center;' +
+      'background:linear-gradient(150deg,#c99a3b,#8a6416);color:#fff;' +
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
+      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+    el.textContent = '找小满买东西';
+    // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.shop.toggle();
+      this._updateMerchantHint();
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 顶部的学币小牌，常驻显示
+  _createCoinBadge() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;' +
+      'background:linear-gradient(150deg,#c99a3b,#8a6416);color:#fff;padding:9px 12px;border-radius:12px;' +
+      'box-shadow:0 6px 18px rgba(0,0,0,.25);font:13px system-ui,"Microsoft YaHei",sans-serif;user-select:none;';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 学币变化后刷新顶部牌子与商店里的余额
+  _refreshCoins() {
+    const w = loadWallet(this._profile);
+    if (this._coinBadge) this._coinBadge.textContent = '学币 ' + w.coins;
+    if (this.shop && this.shop.isOpen()) this.shop.render();
+  }
+
+  // 商人按钮显隐：靠近 + 商店没开着
+  _updateMerchantHint() {
+    if (!this._merchantHint) return;
+    const show = !!this._merchantNear && !this.shop.isOpen();
+    if (this._merchantHintShown === show) return;
+    this._merchantHintShown = show;
+    this._merchantHint.style.display = show ? '' : 'none';
+  }
+
+  // 购买：永久拥有，直接进背包并挂到技能槽（按数字键触发）
+  _buyShopItem(id) {
+    const r = buyItem(this._profile, id);
+    if (!r.ok) { this._toast(r.reason); return; }
+    const item = r.item;
+    addToBag(getBagKey(this._profile), item.name, 1);
+    this._storeItemEffect(item.name, item.effect);
+    this._equipItemSkill(item.name);
+    this._refreshCoins();
+    this.shop.render();
+    this._toast('买下「' + item.name + '」，还剩 ' + r.coins + ' 学币');
+  }
+
   // 世界变红的全屏滤镜（pointer-events:none，只做视觉）
   _createRedOverlay() {
     const el = document.createElement('div');
@@ -864,7 +952,9 @@ export class Game {
     } else if (kind === 'dead') {
       this._setWorldRed(false);
       this._flash('#ffffff', 600);
-      this._toast('老师已被击败');
+      const coins = rewardBossKill(this._profile);
+      this._refreshCoins();
+      this._toast('老师已被击败，获得 ' + Config.BOSS_COIN_REWARD + ' 学币（共 ' + coins + '）');
     }
     this._updateBossUI();
   }
@@ -1109,6 +1199,102 @@ export class Game {
       gravity: 0.12,   // 粉笔头近乎直线飞，方便瞄准
       players: false,  // 只打 Boss
     });
+  }
+
+  // 棍子模型：挂在相机下，只有挥动那一下才显示
+  _createClubRig() {
+    const rig = new THREE.Group();
+    const shaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.045, 0.05, 1.25, 8),
+      new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.85 })
+    );
+    shaft.rotation.x = Math.PI / 2; // 圆柱默认沿 Y，转到沿 Z（指向正前方）
+    shaft.position.z = -0.62;
+    rig.add(shaft);
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(0.17, 0.17, 0.4),
+      new THREE.MeshStandardMaterial({ color: 0x4a4a52, roughness: 0.55 })
+    );
+    head.position.z = -1.3;
+    rig.add(head);
+    rig.position.set(0.24, -0.5, -0.25);
+    rig.visible = false;
+    this.camera.add(rig);
+    return rig;
+  }
+
+  // 挥棍：播横扫动画，动画推进到 CLUB_HIT_AT 时结算命中
+  _swingClub() {
+    const now = performance.now();
+    if (now - this._clubAt < Config.CLUB_COOLDOWN * 1000) return;
+    this._clubAt = now;
+    this._clubSwing = { t: 0, hit: false };
+    this._clubRig.visible = true;
+  }
+
+  _updateClub(dt) {
+    if (!this._clubSwing) return;
+    const sw = this._clubSwing;
+    sw.t += dt;
+    const k = Math.min(1, sw.t / Config.CLUB_SWING_TIME);
+    const e = 1 - (1 - k) * (1 - k); // 缓出，收尾更利落
+    this._clubRig.rotation.y = 0.95 - 1.9 * e; // 从右后方扫到左前方
+    this._clubRig.rotation.z = -0.25 + 0.5 * e;
+    if (!sw.hit && sw.t >= Config.CLUB_HIT_AT) {
+      sw.hit = true;
+      this._clubHitCheck();
+    }
+    if (k >= 1) {
+      this._clubSwing = null;
+      this._clubRig.visible = false;
+    }
+  }
+
+  // 命中结算：正前方 CLUB_ARC_DEG 张角内、CLUB_RANGE 内的其他玩家全部被击飞
+  _clubHitCheck() {
+    const s = this.localState;
+    const fx = -Math.sin(s.yaw);
+    const fz = -Math.cos(s.yaw);
+    const half = (Config.CLUB_ARC_DEG * Math.PI) / 180 / 2;
+    const cosHalf = Math.cos(half);
+    let n = 0;
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === s.id) continue;
+      const st = rp.state;
+      const dx = st.x - s.x;
+      const dz = st.z - s.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 1e-4 || d > Config.CLUB_RANGE) continue;
+      if (Math.abs(st.y - s.y) > 2.2) continue; // 高度差太大（楼顶/空中）扫不到
+      if ((dx * fx + dz * fz) / d < cosHalf) continue;
+      this.network.sendKnock(
+        id,
+        (dx / d) * Config.CLUB_KNOCK,
+        Config.CLUB_KNOCK_UP,
+        (dz / d) * Config.CLUB_KNOCK
+      );
+      n++;
+    }
+    this._toast(n > 0 ? ('棍子扫飞了 ' + n + ' 个玩家') : '棍子挥空了');
+  }
+
+  // 被棍子扫到：把冲量交给物理。必须用 velocityHold 短时间强制这个速度，
+  // 否则下一帧就会被输入直接覆盖（水平速度每帧由按键重算）。
+  _applyKnock(msg) {
+    const phys = this.localPlayer.physics;
+    phys.velocityHold = {
+      x: Number(msg.kx) || 0,
+      y: Number(msg.ky) || 0,
+      z: Number(msg.kz) || 0,
+      t: Config.CLUB_KNOCK_HOLD,
+    };
+    this._toast('被棍子扫飞了');
+  }
+
+  // 商人：靠近显隐按钮
+  _updateMerchant(dt) {
+    this.merchant.update(dt, this.localState.x, this.localState.z);
+    this._updateMerchantHint();
   }
 
   // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
@@ -1752,6 +1938,11 @@ export class Game {
           },
         };
       }
+      case 'club':
+        return {
+          label: '棍子',
+          run: () => this._swingClub(),
+        };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
         const dmg = (v && v > 0) ? v : 40;
@@ -2007,6 +2198,11 @@ export class Game {
     // AI 商人 NPC：靠近提示 + 可拾取道具的推进
     this.aiNpc.update(dt, this.localState.x, this.localState.z);
     this._updatePickups(dt);
+
+    // 商人小满：靠近显隐「找小满买东西」按钮
+    this._updateMerchant(dt);
+    // 棍子挥动动画与命中结算
+    this._updateClub(dt);
 
     // 传送门 / 老师 Boss：倒计时、追击、弹幕与 UI
     this._updateBoss(dt);

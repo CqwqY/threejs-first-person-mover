@@ -86,6 +86,12 @@ export class Network {
     this.send({ t: 'fx', target, effect });
   }
 
+  // 击飞上报：被棍子扫到的玩家由服务器转发一条击飞冲量，由他自己客户端施加
+  sendKnock(target, kx, ky, kz) {
+    if (!target) return;
+    this.send({ t: 'knock', target, kx, ky, kz });
+  }
+
   // 投掷物出手广播：让其他玩家看到「有一颗东西飞过去」
   sendProj(info) {
     if (!info) return;

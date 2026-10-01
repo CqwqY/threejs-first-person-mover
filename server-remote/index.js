@@ -344,6 +344,19 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 击飞广播：棍子扫到人时，把冲量转发给被扫到的玩家，由他自己的客户端施加
+    if (msg.t === 'knock') {
+      const target = String(msg.target || '');
+      if (!target || target === id) return;
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.min(40, Math.max(-40, n)) : 0; };
+      const out = { t: 'knock', from: id, kx: num(msg.kx), ky: num(msg.ky), kz: num(msg.kz) };
+      const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client.__id === target && client.readyState === WebSocket.OPEN) { client.send(raw); break; }
+      }
+      return;
+    }
+
     // 范围效果广播：投掷物附带的增益，钳制后转发给被覆盖的玩家
     if (msg.t === 'fx') {
       const eff = cleanFx(msg.effect);
