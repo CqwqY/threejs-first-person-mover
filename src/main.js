@@ -4,6 +4,7 @@ import { ensureAuth } from './ui/AuthUI.js';
 import { initDebugYawPanel } from './debug/DebugYawPanel.js';
 import { debugCalibFrame } from './player/PlayerModel.js';
 import { initMobileControls } from './ui/MobileControls.js';
+import { initMobileLayout } from './ui/MobileLayout.js';
 
 // 进游戏前登录/注册（游客可选）；拿到 token 与资料后创建游戏
 async function main() {
@@ -18,6 +19,8 @@ async function main() {
   game.start();
   // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过
   initMobileControls(game.input);
+  // 手机触屏：按键布局自适应 + 「调整/检查」入口（可拖动摆放跳跃键/技能槽/血条/对话选项卡）
+  initMobileLayout();
 
   // 暴露到全局，方便调试（联机验证 / 控制台检查玩家状态）
   window.__game = game;

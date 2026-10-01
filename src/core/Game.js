@@ -201,6 +201,7 @@ export class Game {
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
   _createHealthBar() {
     const box = document.createElement('div');
+    box.className = 'hp-box'; // 供手机端「按键布局调整」定位与检查
     box.style.cssText =
       'position:fixed;left:18px;bottom:22px;z-index:53;width:min(240px,42vw);' +
       'font:12px/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;user-select:none;pointer-events:none;';
@@ -394,6 +395,7 @@ export class Game {
   // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
   _createChatTab() {
     const el = document.createElement('div');
+    el.className = 'chat-tab'; // 供手机端「按键布局调整」定位与检查
     el.textContent = '按 F 与她对话';
     el.style.cssText =
       'position:fixed;right:26%;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
