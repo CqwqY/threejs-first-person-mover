@@ -70,49 +70,28 @@ export function attachSky(scene, opts = {}) {
   return sky;
 }
 
-// 夜空贴图（星空）——夜晚时叠在白天背景之上做交叉淡入
+// 夜空贴图（星空）——夜晚时整屏铺在 scene.background 上。
+// 这张图是一张普通照片（不是 360° 全景等距圆柱图），所以不能贴到球壳上：
+// 球壳会把整张图绕满 360°，而一个视锥只有 70° 左右，等于只看到图片的一小块，
+// 星空会被放大成一片模糊光斑、星系本体完全看不到。直接当整屏背景才是正常显示。
 const NIGHT_SKY_URL = 'sky/night_sky.png';
 
-// createNightSky(scene)：生成一个包住场景的夜空球壳，透明度由调用方按"夜的浓度"驱动。
-// 用球壳而不是直接换 scene.background，是为了能和白天背景做平滑过渡（背景贴图没法直接混色）。
-// 注意：球壳半径在 update 里按相机 far 动态缩放，否则用户把「视距」调小后整个球会被裁掉、夜空消失。
-export function createNightSky(scene) {
-  const mat = new THREE.MeshBasicMaterial({
-    map: null,
-    color: 0x05070f, // 贴图没加载成功时，至少天空会变暗而不是原样
-    side: THREE.BackSide,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-    fog: false,
+// loadNightSkyTexture()：预加载夜空贴图，成功后缓存到 skyTextures.night 供 Game 切背景用。
+export function loadNightSkyTexture() {
+  return new Promise((resolve) => {
+    new THREE.TextureLoader().load(
+      NIGHT_SKY_URL,
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        skyTextures.night = texture;
+        resolve(true);
+      },
+      undefined,
+      () => {
+        // 加载失败：夜里退回纯深色天空，并打一条日志便于定位路径问题
+        console.warn('[sky] 夜空贴图加载失败，夜里将退回纯深色天空:', NIGHT_SKY_URL);
+        resolve(false);
+      }
+    );
   });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), mat);
-  mesh.renderOrder = -1; // 与天空同层：先于地面/建筑绘制
-  mesh.visible = false;  // 白天完全不参与绘制，零开销
-  scene.add(mesh);
-
-  new THREE.TextureLoader().load(
-    NIGHT_SKY_URL,
-    (texture) => {
-      texture.colorSpace = THREE.SRGBColorSpace;
-      mat.map = texture;
-      mat.color.setHex(0xffffff); // 有贴图时按原色显示星空
-      mat.needsUpdate = true;
-      skyTextures.night = texture;
-      console.log('[sky] 夜空贴图已加载');
-    },
-    undefined,
-    () => {
-      // 加载失败：保留深色兜底，并打一条日志便于定位路径问题
-      console.warn('[sky] 夜空贴图加载失败，改用纯深色天空:', NIGHT_SKY_URL);
-    }
-  );
-
-  return mesh;
-}
-
-// 让夜空球壳刚好套在相机可视范围内（跟随 far，避免被裁剪）
-export function fitNightSky(mesh, camera) {
-  if (!mesh || !camera) return;
-  mesh.scale.setScalar(camera.far * 0.92);
 }

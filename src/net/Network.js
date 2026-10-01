@@ -98,6 +98,12 @@ export class Network {
     this.send({ t: 'boom', ...info });
   }
 
+  // Boss 事件广播：召唤 / 位姿 / 弹幕 / 伤害 / 死亡，由服务器转发给其他玩家
+  sendBoss(info) {
+    if (!info || !info.ev) return;
+    this.send({ t: 'boss', ...info });
+  }
+
   // 节流上报状态：在 20Hz 周期内只发送最新的一次 {t:"state", ...state}
   sendState(state) {
     this._pendingState = state;

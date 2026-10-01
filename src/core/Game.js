@@ -2,13 +2,14 @@
 import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { attachSky, createNightSky, fitNightSky, getSkyTextures } from '../world/SkyBox.js';
+import { attachSky, loadNightSkyTexture, getSkyTextures } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createAiNpc } from '../world/AiNpc.js';
 import { createVehicle } from '../world/Vehicle.js';
+import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
@@ -61,8 +62,7 @@ export class Game {
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，贴图/天空盒覆盖其上）
     this._dayBg = this.scene.background; // 记下兜底背景，夜里切星空后回白天时用它还原
     attachSky(this.scene); // 城市天空贴图（优先）→ 程序化天空兜底
-    // 夜空球壳：夜晚时叠在白天背景上做交叉淡入（白天 visible=false，完全不绘制）
-    this._nightSky = createNightSky(this.scene);
+    loadNightSkyTexture(); // 预加载星空图，夜里由 _updateDayNight 换到 scene.background
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
@@ -234,6 +234,25 @@ export class Game {
     this._skillMap = this._loadSkillSlots();
     this._restoreSkills();
 
+    // ---- 传送门与「老师」Boss：位于 (11,142)，靠近点「召唤老师」10 秒后出现 ----
+    this.boss = createTeacherBoss(this.scene);
+    this.boss.setOnEvent((msg) => this.network.sendBoss(msg));
+    this.boss.setOnBulletHit((id, isLocal, dmg) => {
+      if (isLocal) this._changeHealth(-dmg);        // 自己被打中：本地扣血
+      else this.network.sendHit(id, dmg);           // 别人被打中：走 hit 中继让他的客户端扣血
+    });
+    this.boss.setOnStatus(() => this._updateBossUI());
+    this._portalHint = this._createPortalHint();
+    this._attackBtn = this._createAttackButton();
+    this._bossBar = this._createBossBar();
+    this._chalkAt = 0;
+    // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）
+    this.renderer.domElement.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (document.pointerLockElement !== this.renderer.domElement) return;
+      this._attackBoss();
+    });
+
     // 本地可拾取的「生成物品」发光道具
     this._pickups = [];
 
@@ -342,15 +361,10 @@ export class Game {
     this._sun.intensity = this._dayBaseSun * sunUp;
     this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
     this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
-    // 天空贴图整体压暗 + 夜空交叉淡入。
-    // 夜浓度按「太阳亮度」算：sunUp 在 s=0 时就已经为 0（世界全黑），
-    // 若夜空等到更晚才全不透明，就会出现"世界全黑但天空还是白天贴图"的断层。
-    const night = Math.min(1, Math.max(0, 1 - sunUp / 0.35));
-
-    // 保底切换：夜浓度接近满值时，直接把 scene.background 换成星空贴图。
-    // 球壳负责平滑过渡；这一步保证即使球壳因任何原因没被渲染出来，夜里也一定能看到星空。
+    // 天空贴图整体压暗：日落时让白天贴图自然变黑（强度掉到 0），
+    // 这样等太阳完全落下再切星空图时，切换点前后都是全黑，不会出现跳变。
     const tex = getSkyTextures();
-    const wantNight = !!tex.night && night > 0.985;
+    const wantNight = !!tex.night && sunUp <= 0.001; // 太阳落到地平线以下之后
     if (wantNight !== this._skyNight) {
       this._skyNight = wantNight;
       // 回到白天时优先用城市贴图；没有就退回最初的颜色兜底
@@ -358,15 +372,8 @@ export class Game {
     }
 
     if ('backgroundIntensity' in this.scene) {
-      // 换成星空图时不再压暗（星空本身就暗）；白天按时段明暗
-      this.scene.backgroundIntensity = this._skyNight ? 1 : (0.08 + 0.92 * sunUp);
-    }
-
-    if (this._nightSky) {
-      fitNightSky(this._nightSky, this.camera); // 跟着相机 far 缩放，防止调小视距后球壳被裁掉
-      this._nightSky.visible = night > 0.01;
-      this._nightSky.material.opacity = night;
-      this._nightSky.position.copy(this.camera.position); // 天空不该有视差，跟着相机走
+      // 星空图不再压暗（本来就很暗）；白天按时段明暗，日落到 0 变全黑
+      this.scene.backgroundIntensity = this._skyNight ? 1 : sunUp;
     }
 
     // 校卡上的时间（0 = 00:00，0.5 = 12:00）：只在整分钟变化时写 DOM
@@ -437,6 +444,8 @@ export class Game {
       case 'join': {
         // 有新玩家加入：注册并显示模型（名牌用服务端下发的昵称/颜色）
         this.playerManager.addPlayer(msg.id, msg.state, msg.state.nick || `玩家${msg.state.num}`, msg.state.color || '#ffffff');
+        // 如果本机是 Boss 的 owner，补发一次当前状态，让新玩家立刻看到老师
+        if (this.boss) this.boss.broadcastNow();
         break;
       }
       case 'leave': {
@@ -471,6 +480,11 @@ export class Game {
       case 'proj': {
         // 别人扔了一颗投掷物：复刻一颗只播画面的小球
         this._spawnRemoteProjectile(msg);
+        break;
+      }
+      case 'boss': {
+        // 别人的「老师」事件：召唤 / 位姿 / 弹幕 / 伤害 / 死亡
+        if (this.boss) this.boss.netEvent(msg);
         break;
       }
       case 'boom': {
@@ -679,6 +693,147 @@ export class Game {
     } else {
       this._vehHint.style.display = 'none';
     }
+  }
+
+  // 传送门附近的「召唤老师」按钮：和上下车按钮同一位置（传送门与电动车相距 18 米，不会同时出现）
+  _createPortalHint() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
+      'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
+      'background:linear-gradient(150deg,#8a5cff,#5a2bd8);color:#fff;' +
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
+      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+    el.textContent = '召唤老师';
+    // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.boss.mode !== 'idle') return;
+      this.boss.summon();
+      this._toast('老师将在 ' + Config.BOSS_SPAWN_DELAY + ' 秒后出现');
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // Boss 战期间的「攻击」按钮（手机没有鼠标左键，必须给可点按钮）
+  _createAttackButton() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 27%);' +
+      'min-width:clamp(70px,20vmin,112px);box-sizing:border-box;text-align:center;' +
+      'background:linear-gradient(150deg,#e0693c,#b83a1f);color:#fff;' +
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
+      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+    el.textContent = '攻击';
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._attackBoss();
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 顶部的 Boss 血条：倒计时显示剩余秒数，出现后显示血量
+  _createBossBar() {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:58;display:none;' +
+      'top:calc(env(safe-area-inset-top, 0px) + clamp(56px,11vmin,78px));' +
+      'width:min(420px,62vw);user-select:none;pointer-events:none;' +
+      'font:clamp(11px,2.8vmin,13px)/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);';
+    const name = document.createElement('span');
+    name.textContent = '老师';
+    name.style.cssText = 'font-weight:600;color:#ffb4c6;';
+    const num = document.createElement('span');
+    row.appendChild(name);
+    row.appendChild(num);
+    const track = document.createElement('div');
+    track.style.cssText =
+      'height:10px;border-radius:6px;background:rgba(10,16,26,.7);border:1px solid rgba(255,180,198,.5);overflow:hidden;';
+    const fill = document.createElement('div');
+    fill.style.cssText = 'height:100%;width:100%;background:#e0526f;transition:width .18s ease;';
+    track.appendChild(fill);
+    box.appendChild(row);
+    box.appendChild(track);
+    document.body.appendChild(box);
+    return { box, num, fill };
+  }
+
+  // 每帧刷新 Boss 相关 UI：传送门按钮、攻击按钮、顶部血条。
+  // 用一个状态串做去重，避免每帧重复写 DOM。
+  _updateBossUI() {
+    const mode = this.boss.mode;
+    const P = Config.PORTAL_POS;
+    const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
+    const showPortal = mode === 'idle' && near;
+    const showAtk = mode === 'alive' && !this._dead;
+    const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
+    const hp = mode === 'alive' ? Math.max(0, Math.round(this.boss.hp)) : 0;
+    const key = [showPortal, showAtk, mode, seconds, hp].join('|');
+    if (key === this._bossUiKey) return;
+    this._bossUiKey = key;
+
+    if (this._portalHint) this._portalHint.style.display = showPortal ? '' : 'none';
+    if (this._attackBtn) this._attackBtn.style.display = showAtk ? '' : 'none';
+
+    const bar = this._bossBar;
+    if (!bar) return;
+    if (mode === 'countdown') {
+      bar.box.style.display = '';
+      bar.num.textContent = '来袭倒计时 ' + seconds + 's';
+      bar.fill.style.width = '100%';
+    } else if (mode === 'alive') {
+      bar.box.style.display = '';
+      bar.num.textContent = hp + ' / ' + this.boss.maxHp;
+      bar.fill.style.width = ((hp / this.boss.maxHp) * 100).toFixed(1) + '%';
+    } else {
+      bar.box.style.display = 'none';
+    }
+  }
+
+  // 每帧推进 Boss：把「离老师最近的玩家」作为追击目标，其余交给 TeacherBoss 内部模拟
+  _updateBoss(dt) {
+    const me = this.localState;
+    const bpos = this.boss.pos;
+    const players = [{ id: me.id || '__local', x: me.x, y: me.y, z: me.z, isLocal: true }];
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === me.id) continue;
+      const st = rp.state;
+      players.push({ id, x: st.x, y: st.y, z: st.z, isLocal: false });
+    }
+    let target = null;
+    let best = Config.BOSS_CHASE_RANGE;
+    for (const p of players) {
+      const d = Math.hypot(p.x - bpos.x, p.z - bpos.z);
+      if (d < best) { best = d; target = p; }
+    }
+    this.boss.update(dt, { target, players, colliders: this.colliders });
+    this._updateBossUI();
+  }
+
+  // Boss 战基础攻击：朝视线方向投出粉笔头（只对 Boss 结算伤害，不误伤玩家）
+  _attackBoss() {
+    if (!this.boss || this.boss.mode !== 'alive' || this._dead) return;
+    const now = performance.now();
+    if (now - this._chalkAt < Config.CHALK_COOLDOWN * 1000) return;
+    this._chalkAt = now;
+    this._throwProjectile({
+      damage: Config.CHALK_DAMAGE,
+      radius: Config.CHALK_RADIUS,
+      speed: Config.CHALK_SPEED,
+      color: 0xeaf2ff,
+      gravity: 0.12,   // 粉笔头近乎直线飞，方便瞄准
+      players: false,  // 只打 Boss
+    });
   }
 
   // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
@@ -1019,13 +1174,16 @@ export class Game {
       onHit: spec.onHit || null,
       id,
       visualOnly: !!spec.visualOnly, // 别人扔的：只播画面，命中不结算（爆炸由对方的 boom 消息驱动）
+      gravity: Number.isFinite(spec.gravity) ? spec.gravity : 1, // 重力系数（粉笔头近乎直线，取很小值）
+      players: spec.players !== false, // 是否结算对玩家的伤害（Boss 战的基础攻击不误伤玩家）
     });
-    // 把自己扔出去的这颗广播给其他人，让他们也能看到飞行轨迹
+    // 把自己扔出去的这颗广播给其他人，让他们也能看到飞行轨迹（带重力系数，保证弧线一致）
     if (!spec.visualOnly) {
       this.network.sendProj({
         id,
         x: start.x, y: start.y, z: start.z,
         vx: vel.x, vy: vel.y, vz: vel.z,
+        g: Number.isFinite(spec.gravity) ? spec.gravity : 1,
       });
     }
   }
@@ -1046,6 +1204,8 @@ export class Game {
     this._projectiles.push({
       mesh, vel, life: 4, damage: 0, radius: 0, onHit: null,
       id: String(msg.id || ''), visualOnly: true,
+      gravity: Number.isFinite(Number(msg.g)) ? Number(msg.g) : 1,
+      players: true,
     });
   }
 
@@ -1064,13 +1224,15 @@ export class Game {
       const px0 = p.mesh.position.x;
       const py0 = p.mesh.position.y;
       const pz0 = p.mesh.position.z;
-      p.vel.y += Config.GRAVITY * dt;
+      p.vel.y += Config.GRAVITY * (p.gravity === undefined ? 1 : p.gravity) * dt;
       p.mesh.position.addScaledVector(p.vel, dt);
       p.life -= dt;
       const pos = p.mesh.position;
       let hit = p.life <= 0 || pos.y <= 0.12;
       // 撞到场景碰撞体（建筑/墙）也爆开：走真实几何判定，不再用包围盒近似
       if (!hit && this._projectileHitsWorld(pos.x, pos.y, pos.z, 0.16, px0, py0, pz0)) hit = true;
+      // 打中「老师」Boss：直接在她身上爆开（伤害在 _explode 里按距离结算）
+      if (!hit && this.boss && this.boss.hitsAt(pos.x, pos.y, pos.z, 0.16)) hit = true;
       if (!hit) {
         // 竖直圆柱近似：水平 0.8 米内、高度区间内视为命中其他玩家
         for (const [id, rp] of this.playerManager.players) {
@@ -1145,16 +1307,20 @@ export class Game {
 
     const dSelf = Math.hypot(this.localState.x - c.x, this.localState.z - c.z);
     const inSelf = dSelf <= radius;
+    const hurtPlayers = p.players !== false; // Boss 战的基础攻击只打 Boss，不误伤玩家
 
     // 1) 伤害：半径内的自己直接扣血，远端玩家交给服务器转发
-    if (p.damage && inSelf) this._changeHealth(-p.damage);
-    if (p.damage) {
+    if (p.damage && hurtPlayers && inSelf) this._changeHealth(-p.damage);
+    if (p.damage && hurtPlayers) {
       for (const [id, rp] of this.playerManager.players) {
         if (id === this.localState.id) continue;
         const st = rp.state;
         if (Math.hypot(st.x - c.x, st.z - c.z) <= radius) this.network.sendHit(id, p.damage);
       }
     }
+
+    // 1.5) Boss：爆心落在她身上就扣血（伤害增量由所有人各自扣一份）
+    if (p.damage && this.boss && this.boss.hitsAt(c.x, c.y, c.z, radius)) this.boss.hurtBy(p.damage);
 
     // 2) 范围效果：半径内的玩家获得 onHit 指定的增益（治疗/加速/跳高/飞行/体型）
     const onHit = p.onHit;
@@ -1563,6 +1729,9 @@ export class Game {
     // AI 商人 NPC：靠近提示 + 可拾取道具的推进
     this.aiNpc.update(dt, this.localState.x, this.localState.z);
     this._updatePickups(dt);
+
+    // 传送门 / 老师 Boss：倒计时、追击、弹幕与 UI
+    this._updateBoss(dt);
 
     // 投掷物：推进飞行、命中/落地后结算范围伤害
     this._updateProjectiles(dt);

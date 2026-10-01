@@ -371,9 +371,37 @@ wss.on('connection', (ws) => {
         out.vx = num(msg.vx, 0, -80, 80);
         out.vy = num(msg.vy, 0, -80, 80);
         out.vz = num(msg.vz, 0, -80, 80);
+        out.g = num(msg.g, 1, 0, 1); // 重力系数（粉笔头近乎直线，取很小值）
       } else {
         out.radius = num(msg.radius, 3, 1, 20);
         out.damage = num(msg.damage, 0, 0, 120);
+      }
+      const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
+      }
+      return;
+    }
+
+    // Boss（老师）事件：召唤 / 位姿 / 弹幕 / 伤害 / 死亡。
+    // 服务器不模拟 Boss，只做数值钳制后转发给其他玩家；Boss 由召唤者（owner）在客户端模拟。
+    if (msg.t === 'boss') {
+      const ev = String(msg.ev || '');
+      if (ev !== 'start' && ev !== 'pose' && ev !== 'volley' && ev !== 'damage' && ev !== 'dead') return;
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const out = { t: 'boss', ev };
+      if (ev === 'pose') {
+        out.x = num(msg.x, 0, -1000, 1000);
+        out.z = num(msg.z, 0, -1000, 1000);
+        out.yaw = num(msg.yaw, 0, -20, 20);
+        out.hp = num(msg.hp, 1000, 0, 100000);
+      } else if (ev === 'volley') {
+        out.x = num(msg.x, 0, -1000, 1000);
+        out.y = num(msg.y, 0, -100, 500);
+        out.z = num(msg.z, 0, -1000, 1000);
+      } else if (ev === 'damage') {
+        out.dmg = num(msg.dmg, 0, 1, 120);
+        if (out.dmg <= 0) return;
       }
       const raw = JSON.stringify(out);
       for (const client of wss.clients) {

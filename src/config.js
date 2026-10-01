@@ -118,6 +118,32 @@ export const Config = {
 
   // ---- 昼夜循环 ----
   DAY_START: 0.35,   // 起始时刻（0 = 午夜，0.5 = 正午）
+
+  // ---- 传送门与「老师」Boss ----
+  PORTAL_POS: { x: 11, z: 142 },  // 传送门所在坐标
+  PORTAL_PROXIMITY: 4,            // 离传送门多近内出现「召唤老师」按钮（米）
+  PORTAL_RESET_DELAY: 4,          // 老师被击败后传送门重新可用的等待秒数
+  BOSS_MODEL: '/models/teacher.glb',
+  BOSS_HEIGHT: 2.0,               // 归一化后的模型身高（米），按包围盒等比缩放
+  BOSS_YAW_OFFSET: Math.PI,       // 模型自带朝向与「面朝 +Z」之间的补偿角（弧度），必要时调这个
+  BOSS_RADIUS: 0.45,              // 命中判定圆柱半径（米）
+  BOSS_HP: 1000,                  // Boss 血量上限（玩家 500 是玩家上限，Boss 单独放宽）
+  BOSS_SPAWN_DELAY: 10,           // 点击召唤后的出现倒计时（秒）
+  BOSS_CHASE_SPEED: 3.2,          // 追击移动速度（米/秒）
+  BOSS_CHASE_STOP: 6,             // 追到离目标这么近就停下（米）
+  BOSS_CHASE_RANGE: 45,           // 超过该距离不再追击（米）
+  BOSS_VOLLEY_INTERVAL: 2.6,      // 弹幕间隔（秒）
+  BOSS_VOLLEY_COUNT: 24,          // 每圈弹幕数量（向四周均分）
+  BOSS_BULLET_SPEED: 9,           // 弹幕飞行速度（米/秒）
+  BOSS_BULLET_LIFE: 4.5,          // 弹幕存活时间（秒）
+  BOSS_BULLET_DAMAGE: 12,         // 单发弹幕命中玩家的伤害
+  BOSS_BULLET_HIT_RADIUS: 0.55,   // 弹幕判定命中玩家的水平半径（米）
+  BOSS_NET_HZ: 10,                // 联机时 Boss 位姿/血量的广播频率
+  // Boss 战期间玩家的基础攻击（鼠标左键 / 手机「攻击」按钮）投出的粉笔头
+  CHALK_DAMAGE: 25,
+  CHALK_SPEED: 24,
+  CHALK_RADIUS: 1.6,              // 粉笔头落点爆炸半径（只对 Boss 结算，不误伤玩家）
+  CHALK_COOLDOWN: 0.35,           // 两次投掷的最小间隔（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
