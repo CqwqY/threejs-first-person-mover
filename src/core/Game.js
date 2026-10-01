@@ -501,10 +501,12 @@ export class Game {
         break;
       }
       case 'spawn_item': {
-        // 阿花把物品放进玩家背包，同时挂到技能槽（可点击/按数字键触发对应的技能效果）
+        // 阿花把物品放进玩家背包，并记住她给的效果（speed/jump/jetpack/size/null）
         const item = action.args.item || '神秘物品';
+        const effKey = action.args.effect || null;
         const key = getBagKey(this._profile);
         const n = addToBag(key, item, 1);
+        this._storeItemEffect(item, effKey);
         this._toast('阿花把「' + item + '」放进你的背包（累计 ' + n + ' 件）');
         this._equipItemSkill(item);
         break;
@@ -514,55 +516,83 @@ export class Game {
     }
   }
 
-  // 根据物品名返回 { label, run }：run 是触发后要执行的技能效果。
-  // 规则：物品名含关键词（阿花起的名字）即命中对应效果，否则给个默认的短暂提速。
-  _effectForItem(item) {
-    const name = item || '';
-    const phys = this.localPlayer.physics;
-    if (/疾风|跑得|速度|风力|风之靴/.test(name)) {
-      return {
-        label: '疾风',
-        run: () => {
-          const m = 2.2;
-          phys.speedMult = m;
-          this._toast('疾风：速度提升至 ' + m + ' 倍，持续 5 秒');
-          setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 5000);
-        },
-      };
-    }
-    if (/跳高|跳跃|弹簧|跳得/.test(name)) {
-      return {
-        label: '跃升',
-        run: () => {
-          const m = 1.8;
-          phys.jumpMult = m;
-          this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 5 秒');
-          setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, 5000);
-        },
-      };
-    }
-    if (/喷气|飞行|翅膀|背包|火箭/.test(name)) {
-      return {
-        label: '喷气',
-        run: () => {
-          phys.jetpack = true;
-          this._toast('喷气背包：空中按住空格上升，持续 6 秒');
-          setTimeout(() => { phys.jetpack = false; }, 6000);
-        },
-      };
-    }
-    return {
-      label: name,
-      run: () => {
-        const m = 1.5;
-        phys.speedMult = m;
-        this._toast('「' + name + '」生效：速度短暂提升');
-        setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 4000);
-      },
-    };
+  // 物品效果存储键：与背包一样按账号隔离
+  _itemEffectStoreKey() {
+    const id = this._profile ? (this._profile.username || this._profile.nickname || '') : '';
+    return 'fp_item_effect__' + (id || 'guest');
   }
 
-  // 把阿花给的物品挂到技能槽：按物品名映射效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
+  // 记住阿花给某件物品的效果（speed/jump/jetpack/size；null 视为装饰品）
+  _storeItemEffect(item, effect) {
+    if (!effect) return;
+    try {
+      const m = JSON.parse(localStorage.getItem(this._itemEffectStoreKey()) || '{}');
+      m[item] = effect;
+      localStorage.setItem(this._itemEffectStoreKey(), JSON.stringify(m));
+    } catch (e) { /* 存储不可用：本次会话内技能槽仍能用 */ }
+  }
+
+  _loadItemEffect(item) {
+    try {
+      const m = JSON.parse(localStorage.getItem(this._itemEffectStoreKey()) || '{}');
+      return m[item] || null;
+    } catch (e) { return null; }
+  }
+
+  // 根据阿花给的效果返回 { label, run }。无匹配效果（装饰品）只提示、不改属性。
+  _effectForItem(item) {
+    const phys = this.localPlayer.physics;
+    const eff = this._loadItemEffect(item);
+    switch (eff) {
+      case 'speed':
+        return {
+          label: '疾风',
+          run: () => {
+            const m = 2.2;
+            phys.speedMult = m;
+            this._toast('疾风：速度提升至 ' + m + ' 倍，持续 5 秒');
+            setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 5000);
+          },
+        };
+      case 'jump':
+        return {
+          label: '跃升',
+          run: () => {
+            const m = 1.8;
+            phys.jumpMult = m;
+            this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 5 秒');
+            setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, 5000);
+          },
+        };
+      case 'jetpack':
+        return {
+          label: '喷气',
+          run: () => {
+            phys.jetpack = true;
+            this._toast('喷气背包：空中按住空格上升，持续 6 秒');
+            setTimeout(() => { phys.jetpack = false; }, 6000);
+          },
+        };
+      case 'size':
+        return {
+          label: '体型',
+          run: () => {
+            const s = 1.6;
+            phys.sizeScale = s;
+            this._toast('体型变化：变为 ' + s + ' 倍，持续 6 秒');
+            setTimeout(() => { if (phys.sizeScale === s) phys.sizeScale = 1; }, 6000);
+          },
+        };
+      default:
+        // 装饰品：无属性变化，仅提示已使用
+        return {
+          label: '道具',
+          run: () => { this._toast('「' + item + '」已使用（装饰品，无特殊效果）'); },
+        };
+    }
+  }
+
+  // 把阿花给的物品挂到技能槽：用阿花选定的效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
   _equipItemSkill(item) {
     const eff = this._effectForItem(item);
     const keyName = this.skillSlots.registerSkill({ label: eff.label, onActivate: eff.run });
