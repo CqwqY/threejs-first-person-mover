@@ -107,6 +107,7 @@ export function createPlayerHUD(profile, hasToken) {
       <div class="idc-mini">
         <span class="idc-dot"></span>
         <span class="idc-mini-name"></span>
+        <span class="idc-time"></span>
         <span class="idc-hint">校卡</span>
       </div>
       <div class="idc-full">
@@ -115,6 +116,7 @@ export function createPlayerHUD(profile, hasToken) {
         <div class="idc-name"></div>
         <div class="idc-user"></div>
         <div class="idc-rows">
+          <div class="idc-row"><span>时间</span><b data-k="time"></b></div>
           <div class="idc-row"><span>称号</span><b data-k="title"></b></div>
           <div class="idc-row"><span>皮肤</span><b data-k="skin"></b></div>
           <div class="idc-row"><span>背包</span><b data-k="bag"></b></div>
@@ -133,6 +135,7 @@ export function createPlayerHUD(profile, hasToken) {
   const nameEl = root.querySelector('.idc-name');
   const userEl = root.querySelector('.idc-user');
   const quit = root.querySelector('.idc-quit');
+  const miniTime = root.querySelector('.idc-time');
   const cells = {};
   for (const b of root.querySelectorAll('.idc-row b')) cells[b.dataset.k] = b;
 
@@ -178,5 +181,11 @@ export function createPlayerHUD(profile, hasToken) {
 
   setProfile(profile);
 
-  return { root, setProfile };
+  // 更新校卡上的世界时间（由 Game 按昼夜循环驱动）
+  function setTime(text) {
+    if (miniTime) miniTime.textContent = text;
+    if (cells.time) cells.time.textContent = text;
+  }
+
+  return { root, setProfile, setTime };
 }

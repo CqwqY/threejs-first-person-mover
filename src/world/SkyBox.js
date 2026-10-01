@@ -62,3 +62,36 @@ export function attachSky(scene, opts = {}) {
   });
   return sky;
 }
+
+// 夜空贴图（星空）——夜晚时叠在白天背景之上做交叉淡入
+const NIGHT_SKY_URL = 'sky/night_sky.png';
+
+// createNightSky(scene)：生成一个包住场景的夜空球壳，透明度由调用方按"夜的浓度"驱动。
+// 用球壳而不是直接换 scene.background，是为了能和白天背景做平滑过渡（背景贴图没法直接混色）。
+export function createNightSky(scene) {
+  const mat = new THREE.MeshBasicMaterial({
+    map: null,
+    side: THREE.BackSide,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    fog: false,
+  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(460, 32, 16), mat);
+  mesh.renderOrder = -1; // 与天空同层：先于地面/建筑绘制
+  mesh.visible = false;  // 白天完全不参与绘制，零开销
+  scene.add(mesh);
+
+  new THREE.TextureLoader().load(
+    NIGHT_SKY_URL,
+    (texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      mat.map = texture;
+      mat.needsUpdate = true;
+    },
+    undefined,
+    () => { /* 加载失败：保持不可见，只有白天天空 */ }
+  );
+
+  return mesh;
+}

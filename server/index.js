@@ -435,12 +435,17 @@ setInterval(() => {
   }
 }, HEARTBEAT_INTERVAL);
 
+// 世界时刻（昼夜循环）：0 = 午夜，0.5 = 正午。
+// 只在有玩家在线时推进——没人在线就完全不计算，避免空跑消耗性能。
+let dayTime = 0.35;
+const DAY_SECONDS = 240; // 一昼夜对应的真实秒数（与客户端默认值一致，便于帧间外推）
+
 // 周期广播所有玩家状态（20Hz）
 setInterval(() => {
   const list = worldPlayers();
-  if (list.length > 0) {
-    broadcast({ t: 'snapshot', players: list });
-  }
+  if (list.length === 0) return; // 没人在线：跳过时间推进与广播
+  dayTime = (dayTime + SNAPSHOT_INTERVAL / 1000 / DAY_SECONDS) % 1;
+  broadcast({ t: 'snapshot', players: list, time: dayTime });
 }, SNAPSHOT_INTERVAL);
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);

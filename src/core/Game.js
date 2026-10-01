@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { attachSky } from '../world/SkyBox.js';
+import { attachSky, createNightSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
@@ -37,6 +37,9 @@ async function _fetchRemoteScene(scene, roots, target) {
 }
 
 export class Game {
+  // 与服务器一致的昼夜周期（秒）：联机时以服务器权威时间为准，这里用于两次快照之间的外推
+  static SYNC_DAY_SECONDS = 240;
+
   // token：登录会话 token（游客为空串）；profile：登录成功返回的用户资料（点名牌用）
   constructor(token = '', profile = null) {
     this._token = token;
@@ -57,6 +60,8 @@ export class Game {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，贴图/天空盒覆盖其上）
     attachSky(this.scene); // 城市天空贴图（优先）→ 程序化天空兜底
+    // 夜空球壳：夜晚时叠在白天背景上做交叉淡入（白天 visible=false，完全不绘制）
+    this._nightSky = createNightSky(this.scene);
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
@@ -91,6 +96,10 @@ export class Game {
     this._dayBaseAmbient = design.ambient;
     this._dayBaseHemi = design.hemi;
     this._dayAzDeg = design.sunAz;
+    // 服务器时间同步：快照里带世界时刻，收到后以此为基准帧间外推，保证所有客户端时间一致
+    this._netDayTime = null;
+    this._netDayAt = 0;
+    this._hudTimeText = '';
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
@@ -305,10 +314,19 @@ export class Game {
   }
 
   // 昼夜循环推进：0 = 午夜、0.5 = 正午。太阳高度角与强度、环境光/半球光、
-  // 天空亮度都随时间连续变化；关闭时保持编辑器设计的光照。
+  // 天空亮度与夜空贴图都随时间连续变化；关闭时保持编辑器设计的光照。
   _updateDayNight(dt) {
     if (!this._dayEnabled) return;
-    this._dayTime = (this._dayTime + dt / this._dayCycle) % 1;
+
+    // 时间来源：联机时以服务器快照里的世界时刻为准（帧间用服务器同一周期外推，所有人一致）；
+    // 未联机时本地按设置里的「一昼夜时长」推进
+    if (this._netDayTime !== null) {
+      const elapsed = (performance.now() - this._netDayAt) / 1000;
+      this._dayTime = (this._netDayTime + elapsed / Game.SYNC_DAY_SECONDS) % 1;
+    } else {
+      this._dayTime = (this._dayTime + dt / this._dayCycle) % 1;
+    }
+
     const s = Math.sin((this._dayTime - 0.25) * Math.PI * 2); // -1（午夜）~ 1（正午）
     const sunUp = Math.max(0, s);
     const off = computeSunOffset(s * 90, this._dayAzDeg);
@@ -319,6 +337,22 @@ export class Game {
     // 天空贴图整体压暗（three 的 backgroundIntensity；旧版本没有该属性则跳过）
     if ('backgroundIntensity' in this.scene) {
       this.scene.backgroundIntensity = 0.18 + 0.82 * sunUp;
+    }
+
+    // 夜空交叉淡入：太阳落到地平线以下后逐渐盖住白天天空；白天直接 visible=false 不参与绘制
+    const night = Math.min(1, Math.max(0, -s * 3));
+    if (this._nightSky) {
+      this._nightSky.visible = night > 0.01;
+      this._nightSky.material.opacity = night;
+      this._nightSky.position.copy(this.camera.position); // 天空不该有视差，跟着相机走
+    }
+
+    // 校卡上的时间（0 = 00:00，0.5 = 12:00）：只在整分钟变化时写 DOM
+    const mins = Math.floor(this._dayTime * 1440);
+    const text = String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
+    if (text !== this._hudTimeText) {
+      this._hudTimeText = text;
+      if (this.playerHUD && this.playerHUD.setTime) this.playerHUD.setTime(text);
     }
   }
 
@@ -389,7 +423,11 @@ export class Game {
         break;
       }
       case 'snapshot': {
-        // 周期快照：同步远程玩家（本地由 applySnapshot 内部跳过）
+        // 周期快照：同步远程玩家（本地由 applySnapshot 内部跳过）+ 世界时刻
+        if (typeof msg.time === 'number') {
+          this._netDayTime = msg.time;   // 服务器权威时间
+          this._netDayAt = performance.now();
+        }
         this.playerManager.applySnapshot(msg.players);
         break;
       }
