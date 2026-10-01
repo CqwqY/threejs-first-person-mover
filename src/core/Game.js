@@ -584,10 +584,15 @@ export class Game {
           },
         };
       default:
-        // 装饰品：无属性变化，仅提示已使用
+        // 兜底：后端没带 effect 时也保证「有感觉」——给个温和加速，而不是全变装饰品
         return {
-          label: '道具',
-          run: () => { this._toast('「' + item + '」已使用（装饰品，无特殊效果）'); },
+          label: item,
+          run: () => {
+            const m = 1.8;
+            phys.speedMult = m;
+            this._toast('「' + item + '」生效：速度短暂提升');
+            setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 4000);
+          },
         };
     }
   }
