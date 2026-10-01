@@ -4,7 +4,8 @@
 // 按包围盒等比缩放到 1.8 并让脚底落在 y=0；静态模型，不做骨骼动画，朝向由 applyCfg/modelDeg 控制。
 import * as THREE from 'three';
 import { instantiate } from '../world/AssetLoader.js';
-import { Config } from '../config.js';
+import { autoRig } from './AutoRig.js';
+// import { Config } from '../config.js'; // （移动时疯狂旋转功能临时注释，重开时取消这行）
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
@@ -37,37 +38,48 @@ function applyCfg(e) {
   }
 }
 
-// 构建一个模型的“身体”：加载 GLB（原模型自带正确贴图/UV），按包围盒等比缩放到 MODEL_HEIGHT、脚底落在 y=0。
-// 静态模型，不做骨骼动画；朝向由 applyCfg/modelDeg 控制。
+// 构建一个模型的“身体”：加载 GLB，优先用 AutoRig 绑定骨骼（让角色走/待机），
+// 失败则回退为静态等比缩放；朝向统一由 applyCfg/modelDeg 控制。
 function buildBody(entry) {
   return instantiate(`/assets/${entry.gender}.glb`)
     .then((model) => {
-      // 按世界坐标包围盒等比缩放，让身高=MODEL_HEIGHT、脚底 y=0
-      const box = new THREE.Box3();
-      model.traverse((o) => {
-        if (o.isMesh) {
-          o.geometry.computeBoundingBox();
-          box.expandByObject(o);
-        }
-      });
-      const sizeY = box.max.y - box.min.y;
-      const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
-      model.scale.setScalar(scale);
-      model.position.y = -box.min.y * scale; // 底边压到 y=0
-
       entry.root = null;
       entry.pivots = [];
       entry.skinnedMesh = null;
-
-      const holder = new THREE.Group();
-      holder.add(model);
-      holder.receiveShadow = true;
+      entry.group.userData.rig = null;
+      entry.faceHolder = null;
 
       const bodyHolder = entry.group.userData.bodyHolder;
       bodyHolder.clear();
-      bodyHolder.add(holder);
-      entry.group.userData.rig = null;
-      entry.faceHolder = holder;
+
+      // 尝试绑定骨骼：AutoRig 会把最大网格烘焙到脚底 y=0、身高 MODEL_HEIGHT，并生成蒙皮网格
+      const rig = autoRig(model, MODEL_HEIGHT);
+      if (rig) {
+        rig.group.receiveShadow = true;
+        bodyHolder.add(rig.group);
+        entry.group.userData.rig = rig;
+        rig.group.traverse((o) => { if (o.isSkinnedMesh) entry.skinnedMesh = o; });
+        entry.faceHolder = rig.group; // 整体朝向（modelDeg）作用于整套骨架+蒙皮
+      } else {
+        // 回退：手缩放到身高、脚底 y=0 的静态模型（AutoRig 失败时兜底）
+        const box = new THREE.Box3();
+        model.traverse((o) => {
+          if (o.isMesh) {
+            o.geometry.computeBoundingBox();
+            box.expandByObject(o);
+          }
+        });
+        const sizeY = box.max.y - box.min.y;
+        const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
+        model.scale.setScalar(scale);
+        model.position.y = -box.min.y * scale; // 底边压到 y=0
+        const holder = new THREE.Group();
+        holder.add(model);
+        holder.receiveShadow = true;
+        bodyHolder.add(holder);
+        entry.faceHolder = holder;
+      }
+
       applyCfg(entry);
     })
     .catch(() => {
@@ -75,18 +87,17 @@ function buildBody(entry) {
     });
 }
 
-// 移动时让模型疯狂旋转：按移动速度推进自转角（弧度），站着不动就冻结在当前角度。
-// 转过的角度只作为「朝向的临时偏移」叠加，不写回任何状态，所以停下时朝向不会被带偏。
-// group：玩家模型根节点；speed：本帧实际移动速度（米/秒）；dt：帧间隔（秒）。
-export function advanceSpin(group, speed, dt) {
-  const u = group.userData;
-  if (speed > Config.MODEL_SPIN_MIN_SPEED) {
-    // 跑得越快转得越快：以 MOVE_SPEED 为基准，冲刺（1.6 倍速）时约 1.6 倍转速
-    const k = Math.min(speed / Config.MOVE_SPEED, 2);
-    u.spin = (u.spin || 0) + Config.MODEL_SPIN_SPEED * k * dt;
-  }
-  return u.spin || 0;
-}
+// ---- 移动时让模型疯狂旋转【已临时注释，重开时取消注释并恢复 PlayerModel 的 Config 导入】----
+// // 移动时让模型疯狂旋转：按移动速度推进自转角（弧度），站着不动就冻结在当前角度。
+// // 转过的角度只作为「朝向的临时偏移」叠加，不写回任何状态，所以停下时朝向不会被带偏。
+// export function advanceSpin(group, speed, dt) {
+//   const u = group.userData;
+//   if (speed > Config.MODEL_SPIN_MIN_SPEED) {
+//     const k = Math.min(speed / Config.MOVE_SPEED, 2);
+//     u.spin = (u.spin || 0) + Config.MODEL_SPIN_SPEED * k * dt;
+//   }
+//   return u.spin || 0;
+// }
 
 // 供 ?calib 校准面板调用：实时调整所有玩家模型的朝向与骨架走向（后加载模型同样生效）
 export function setDebugYaw(modelDeg, skelDeg) {

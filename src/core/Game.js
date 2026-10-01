@@ -9,7 +9,6 @@ import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
-import { advanceSpin } from '../player/PlayerModel.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { Network } from '../net/Network.js';
@@ -272,14 +271,14 @@ export class Game {
     const s = this.localState;
     local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT, s.z);
 
-    // 本帧实际移动速度：驱动「移动时疯狂旋转」，也让骨头动画知道走得多快
+    // 本帧实际移动速度：让骨头动画知道走得多快（「移动时疯狂旋转」已临时注释）
     const dx = s.x - this._tpPrevX;
     const dz = s.z - this._tpPrevZ;
     const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
     this._tpPrevX = s.x;
     this._tpPrevZ = s.z;
 
-    local.model.rotation.set(0, s.yaw + advanceSpin(local.model, speed, dt), 0);
+    local.model.rotation.set(0, s.yaw, 0);
 
     const rig = local.model.userData.rig;
     if (rig) {

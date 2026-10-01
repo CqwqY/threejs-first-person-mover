@@ -1,7 +1,7 @@
 // 职责：代表一个远程玩家，组合 PlayerState（数据）与 PlayerModel（外观），并对状态做插值渲染。
 import { Config } from '../config.js';
 import { PlayerState } from './PlayerState.js';
-import { createPlayerModel, updateNameTag, advanceSpin } from './PlayerModel.js';
+import { createPlayerModel, updateNameTag } from './PlayerModel.js';
 
 export class RemotePlayer {
   // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色
@@ -56,9 +56,9 @@ export class RemotePlayer {
 
     this.syncModel();
 
-    // 用插值速度驱动骨骼动画与「移动时疯狂旋转」
+    // 用插值速度驱动骨骼动画（「移动时疯狂旋转」已临时注释，重开时：
+    //   恢复 import 里的 advanceSpin，并把本行 rotation.y 改为 state.yaw + advanceSpin(...)）
     const speed = dt > 0 ? Math.hypot(this.state.x - prevX, this.state.z - prevZ) / dt : 0;
-    this.model.rotation.y = this.state.yaw + advanceSpin(this.model, speed, dt);
 
     const rig = this.model.userData.rig;
     if (rig) {
