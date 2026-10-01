@@ -313,6 +313,8 @@ export class Game {
     this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
     this._hidePanel = this._createHidePanel();
     this._hideArrow = this._createHideArrow();
+    this._catchBtn = this._createCatchBtn();
+    this._hideTxtCache = '';
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
@@ -1502,7 +1504,8 @@ export class Game {
         for (const id of opts) {
           const o = document.createElement('option');
           o.value = id;
-          o.textContent = '玩家 ' + id.slice(-4);
+          const rp = this.playerManager.players.get(id);
+          o.textContent = (rp && rp.name) || ('玩家 ' + id.slice(-4)); // 用名牌上的名字，别暴露网络 id
           partnerSel.appendChild(o);
         }
         ov.style.display = 'flex';
@@ -1554,18 +1557,23 @@ export class Game {
     this._hide = { hider, seeker, color };
     this._setMorph(hider, color || '#cccccc');
     this._hideHintDeg = null;
-    this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
+    this._hideHintAt = 0;
+    // 开局先快速给一次方向，免得抓的人干等 30 秒以为坏了
+    this._hideReportTimer = Config.HIDE_FIRST_REPORT;
     if (hider === me) this._toast('你变成了方块，躲好（每 ' + Config.HIDE_REPORT_INTERVAL + ' 秒会报一次方向）');
-    else if (seeker === me) this._toast('开始抓人，每 ' + Config.HIDE_REPORT_INTERVAL + ' 秒会收到一次方向提示');
+    else if (seeker === me) this._toast('开始抓人，找到后点「抓到了」');
     this._updateHideArrow();
+    this._updateCatchBtn();
   }
 
   _endHide(broadcast) {
     const h = this._hide;
     this._hide = null;
     this._hideHintDeg = null;
+    this._hideHintAt = 0;
     if (this._hideArrow) this._hideArrow.style.display = 'none';
     if (h) this._setMorph(h.hider, null);
+    this._updateCatchBtn();
     if (broadcast && h) this.network.sendHide({ ev: 'end', hider: h.hider, seeker: h.seeker, color: h.color });
   }
 
@@ -1619,18 +1627,7 @@ export class Game {
     if (!h) return;
     const me = this.localState.id;
 
-    if (me === h.seeker) {
-      const target = this.playerManager.players.get(h.hider);
-      if (target) {
-        const d = Math.hypot(target.state.x - this.localState.x, target.state.z - this.localState.z);
-        if (d <= Config.HIDE_CATCH_RANGE) {
-          this._toast('抓到啦');
-          this._endHide(true);
-          return;
-        }
-      }
-      this._updateHideArrow();
-    }
+    if (me === h.seeker) this._updateHideArrow();
 
     if (me !== h.hider) return;
     this._hideReportTimer -= dt;
@@ -1667,7 +1664,50 @@ export class Game {
     const deg = (Math.atan2(right, fwd) * 180) / Math.PI;
     el.style.display = '';
     el.querySelector('.hd-arrow span').style.transform = 'rotate(' + deg.toFixed(1) + 'deg)';
-    el.querySelector('.hd-text').textContent = '捉迷藏：目标在这个方向（模糊 ±' + Config.HIDE_FUZZ_DEG + '°）';
+    const rp = this.playerManager.players.get(h.hider);
+    const who = (rp && rp.name) || '对方';
+    // 报点年龄：让抓的人看得出提示是活的、多久后会再刷新一次
+    const age = this._hideHintAt ? Math.max(0, Math.round((performance.now() - this._hideHintAt) / 1000)) : null;
+    const ageText = age == null ? '还没有报点' : (age <= 1 ? '刚报点' : (age + ' 秒前报的点'));
+    const text = '目标 ' + who + ' 在这个方向（' + ageText + '，模糊 ±' + Config.HIDE_FUZZ_DEG + '°）';
+    if (text !== this._hideTxtCache) {
+      this._hideTxtCache = text;
+      el.querySelector('.hd-text').textContent = text;
+    }
+  }
+
+  // 抓的人屏幕下方的「抓到了」按钮
+  _createCatchBtn() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
+      'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
+      'background:linear-gradient(150deg,#e0693c,#b83a1f);color:#fff;' +
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
+      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+    el.textContent = '抓到了';
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const h = this._hide;
+      if (!h || this.localState.id !== h.seeker) return;
+      this._toast('抓到啦');
+      this._endHide(true);
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 只有正在抓人的那位才显示「抓到了」
+  _updateCatchBtn() {
+    if (!this._catchBtn) return;
+    const h = this._hide;
+    const show = !!h && this.localState.id === h.seeker;
+    if (this._catchBtnShown === show) return;
+    this._catchBtnShown = show;
+    this._catchBtn.style.display = show ? '' : 'none';
   }
 
   // 别人发起的捉迷藏事件
@@ -1680,6 +1720,7 @@ export class Game {
     } else if (msg.ev === 'hint') {
       if (this._hide && this._hide.hider === msg.hider) {
         this._hideHintDeg = Number(msg.deg) || 0;
+        this._hideHintAt = performance.now();
         this._updateHideArrow();
       }
     } else if (msg.ev === 'end') {
@@ -1687,8 +1728,10 @@ export class Game {
       if (this._hide && this._hide.hider === msg.hider) {
         this._hide = null;
         this._hideHintDeg = null;
+        this._hideHintAt = 0;
         if (this._hideArrow) this._hideArrow.style.display = 'none';
       }
+      this._updateCatchBtn();
       if (msg.seeker === me || msg.hider === me) this._toast('捉迷藏结束');
     }
   }

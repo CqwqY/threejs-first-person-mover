@@ -16,6 +16,7 @@ export class RemotePlayer {
 
     // 名牌文字：优先用传入 name，其次从状态里的加入序号（num）推导，如"玩家1"
     const label = name || (stateData && stateData.num ? `玩家${stateData.num}` : id);
+    this.name = label; // 记下来供界面（如捉迷藏的选人列表）展示，避免到处只能看到 id
     // 人物素材：仅两份（girl/boy），按加入序号奇偶确定，让不同玩家使用不同模型
     const num = (stateData && stateData.num) || 0;
     const gender = num % 2 === 0 ? 'girl' : 'boy';
@@ -46,6 +47,7 @@ export class RemotePlayer {
 
   // 刷新头顶名牌文字/颜色（登录资料晚于 welcome 到达时用）
   setLabel(text, color) {
+    if (text) this.name = text;
     updateNameTag(this.model, text, color || '#ffffff');
   }
 
