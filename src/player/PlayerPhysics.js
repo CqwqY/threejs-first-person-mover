@@ -15,6 +15,8 @@ export class PlayerPhysics {
     // 运行时状态（由 AI 商人 NPC / 外部注入，不必改 Config 全局）
     this.speedMult = 1;   // 移动速度倍率（默认 1 = 正常）
     this.sizeScale = 1;   // 体型倍率（身高/碰撞半径/边界按此缩放，默认 1 = 正常）
+    this.jumpMult = 1;    // 起跳倍率（跳跃初速度乘它，默认 1 = 正常）
+    this.gravityMult = 1; // 重力倍率（重力加速度乘它，默认 1 = 正常）
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
   }
 
@@ -55,7 +57,7 @@ export class PlayerPhysics {
     this.velocity.z = move.z * speed;
 
     // ---- 3. 重力：竖直方向速度持续向下累加（GRAVITY 为负值）----
-    this.velocity.y += Config.GRAVITY * dt;
+    this.velocity.y += Config.GRAVITY * this.gravityMult * dt;
 
     // ---- 3.5 喷气背包：开启且按住空格、又在空中时，把竖直速度托住为上升/悬停 ----
     // 地面起跳仍走正常 jump；只要在空中按住空格就一直往上升，松开自然下落。
@@ -66,7 +68,7 @@ export class PlayerPhysics {
     // ---- 4. 跳跃：只有站在地面才允许跳 ----
     // 采用一次性探测（consumeJump），防止按住空格时连续起跳
     if (state.onGround && input.consumeJump()) {
-      this.velocity.y = Config.JUMP_VELOCITY; // 设置竖直初速度
+      this.velocity.y = Config.JUMP_VELOCITY * this.jumpMult; // 设置竖直初速度（受起跳倍率影响）
       state.onGround = false;
     }
 

@@ -282,12 +282,16 @@ export class Game {
     aichat.addMsg('busy', '阿花正在想…');
     const msgs = this._npcHistory || [];
     msgs.push({ role: 'user', content: text });
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
     try {
       const res = await fetch(API_BASE + '/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: msgs }),
+        signal: ctrl ? ctrl.signal : undefined,
       });
+      if (timer) clearTimeout(timer);
       const data = await res.json();
       if (!data || !data.ok) throw new Error((data && data.error) || ('http ' + res.status));
       const reply = data.reply || '…';
@@ -324,13 +328,41 @@ export class Game {
         }
         break;
       }
-      case 'teleport_player': {
-        const x = THREE.MathUtils.clamp(action.args.x, -Config.GROUND_WIDTH / 2, Config.GROUND_WIDTH / 2);
-        const z = THREE.MathUtils.clamp(action.args.z, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
-        state.x = x;
-        state.z = z;
-        state.y = Config.PLAYER_HEIGHT * phys.sizeScale;
-        this._toast('已传送');
+      case 'teleport_player':
+      case 'set_player_position': {
+        const x = action.args.x;
+        const z = action.args.z;
+        if (Number.isFinite(x)) state.x = THREE.MathUtils.clamp(x, -Config.GROUND_WIDTH / 2, Config.GROUND_WIDTH / 2);
+        if (Number.isFinite(z)) state.z = THREE.MathUtils.clamp(z, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
+        if (Number.isFinite(action.args.y)) state.y = action.args.y;
+        else state.y = Config.PLAYER_HEIGHT * phys.sizeScale;
+        this._toast('已移动');
+        break;
+      }
+      case 'set_player_jump': {
+        phys.jumpMult = action.args.multiplier;
+        this._toast('起跳力度已变为 ' + action.args.multiplier + ' 倍');
+        if (action.args.seconds && action.args.seconds > 0) {
+          const t = action.args.seconds;
+          setTimeout(() => { if (phys.jumpMult === action.args.multiplier) phys.jumpMult = 1; }, t * 1000);
+        }
+        break;
+      }
+      case 'set_player_gravity': {
+        phys.gravityMult = action.args.multiplier;
+        this._toast('重力已变为 ' + action.args.multiplier + ' 倍');
+        if (action.args.seconds && action.args.seconds > 0) {
+          const t = action.args.seconds;
+          setTimeout(() => { if (phys.gravityMult === action.args.multiplier) phys.gravityMult = 1; }, t * 1000);
+        }
+        break;
+      }
+      case 'set_player_velocity': {
+        const a = action.args;
+        if (Number.isFinite(a.x)) phys.velocity.x = a.x * phys.speedMult * 5;
+        if (Number.isFinite(a.y)) phys.velocity.y = a.y;
+        if (Number.isFinite(a.z)) phys.velocity.z = a.z * phys.speedMult * 5;
+        this._toast('已施加移动速度');
         break;
       }
       case 'grant_jetpack': {

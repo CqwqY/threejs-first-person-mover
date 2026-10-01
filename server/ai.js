@@ -5,101 +5,31 @@ import { GLM_API_KEY } from './ai.key.js';
 
 const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 const AI_MODEL = 'glm-4-flash'; // 智谱免费档模型
-const MAX_OUTPUT_TOKENS = 500;
+const MAX_OUTPUT_TOKENS = 800;
 const MAX_HISTORY = 12; // 最多带几条历史消息，防止无限增长烧 token
 
-// NPC 能调用的一批游戏动作。描述写得尽量像"给玩家施法/卖东西的商人"，让模型按玩家请求自然选择。
-const TOOLS = [
-  {
-    type: 'function',
-    function: {
-      name: 'set_player_speed',
-      description: '改变玩家的移动速度，为了让玩家跑得更快或更慢。玩家想要加速/冲刺/变慢时用。',
-      parameters: {
-        type: 'object',
-        properties: {
-          multiplier: { type: 'number', description: '移动速度倍率，1 是正常、2 是两倍快、0.5 是半速', minimum: 0.2, maximum: 5 },
-          seconds: { type: 'number', description: '持续秒数，省略则永久生效直到再次改变', minimum: 1, maximum: 300 },
-        },
-        required: ['multiplier'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'set_player_size',
-      description: '改变玩家的体型大小（身高和碰撞体积按比例缩放）。玩家想变大/变小/变巨人/变小矮人时用。',
-      parameters: {
-        type: 'object',
-        properties: {
-          scale: { type: 'number', description: '体型倍率，1 是正常、2 是双倍大、0.5 是半身', minimum: 0.3, maximum: 5 },
-          seconds: { type: 'number', description: '持续秒数，省略则永久直到再次改变' },
-        },
-        required: ['scale'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'teleport_player',
-      description: '把玩家传送到世界指定坐标（x, z）。玩家想瞬移、传送、飞到某处、回到某地时用。世界中心在 (0,0)，出生点约 (2,144)。',
-      parameters: {
-        type: 'object',
-        properties: {
-          x: { type: 'number', description: '目标 X 坐标' },
-          z: { type: 'number', description: '目标 Z 坐标' },
-          y: { type: 'number', description: '目标 Y（可选，省略则尽量贴近地面）' },
-        },
-        required: ['x', 'z'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'grant_jetpack',
-      description: '给玩家开启或关闭喷气背包。开启后按住空格跳跃键可以在空中持续上升（飞行）。玩家想要飞、滑翔、凌空、喷气背包、火箭飞时用。',
-      parameters: {
-        type: 'object',
-        properties: {
-          on: { type: 'boolean', description: 'true 开启喷气背包，false 关闭' },
-          seconds: { type: 'number', description: '持续秒数，省略则保持开关状态' },
-        },
-        required: ['on'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'spawn_item',
-      description: '在玩家面前生成一个可拾取的发光道具（物品）。玩家想买/要/领取一个物品时用。',
-      parameters: {
-        type: 'object',
-        properties: {
-          item: { type: 'string', description: '物品名称，例如：喷气背包、加速药水、金苹果、魔法盒' },
-          seconds: { type: 'number', description: '道具存在秒数，省略则 60 秒后消失', maximum: 300 },
-        },
-        required: ['item'],
-      },
-    },
-  },
-];
+const SYSTEM = `你是《花草中学》校园里的"AI 商人"NPC，名叫阿花，站在喷泉旁摆摊，热情、俏皮、爱开玩笑，对玩家说的话只讲一句，简短自然。
+玩家会来跟你聊天、向你买或要各种能力。除了聊天，你还能通过输出一个"动作"，真正改变玩家的游戏状态。
 
-const SYSTEM = `你是《花草中学》校园里的"AI 商人"NPC，名叫阿花。
-你站在校园喷泉旁摆摊，热情、俏皮、爱开玩笑，说话简短（一两句即可）。
-玩家会来跟你聊天、向你买/要各种能力。
-你可以用提供的工具帮玩家办到这些事：
-- set_player_speed 改速度
-- set_player_size 改体型
-- teleport_player 传送
-- grant_jetpack 喷气背包
-- spawn_item 生成道具
-当玩家提出这些请求时，请发起对应的工具调用，并用一句话交代"已经帮你办好了"。
-如果玩家只是闲聊或问路，就直接正常回答，不调用工具。
-凡是会威胁到别人的恶意请求（攻击、恶心他人、改别人）一律拒绝，并劝玩家好好玩。`;
+【输出要求】你每一次都必须只输出一个 JSON 对象，绝对不要输出任何其它文字、不要 markdown 代码块、不要注释、不要引号包裹。格式只有两种：
+1) 纯聊天/拒绝/问路时：
+{"reply":"你对玩家说的那句话","action":null}
+2) 玩家要能力/要物品时：
+{"reply":"你对玩家说的那句话","action":{"name":"动作名","args":{...}}}
+
+【可用的动作名和参数】
+- set_player_speed   改移动速度，args: {"multiplier":数字倍率,"seconds":可选秒数}
+- set_player_size    改体型/身高，args: {"scale":数字倍率,"seconds":可选秒数}
+- set_player_jump    改起跳力度，args: {"multiplier":数字倍率,"seconds":可选秒数}
+- set_player_gravity 改重力强弱，args: {"multiplier":数字倍率(0.1~3),"seconds":可选秒数}
+- set_player_velocity 直接设置当前移动速度矢量，args: {"x":数,"y":数,"z":数}（缺省为 null 不改动）
+- set_player_position 归位/传送到坐标，args: {"x":数,"z":数,"y":可选数}（只给 x 或 z 也行，缺省为 null 不改动）
+- teleport_player    传送玩家，args: {"x":数,"z":数,"y":可选数}
+- grant_jetpack      喷气背包（可在空中上升），args: {"on":true或false,"seconds":可选秒数}
+- spawn_item         生成可拾取发光物品，args: {"item":"物品名","seconds":可选秒数}
+
+规则：玩家要上述能力或要物品时输出对应动作；纯闲聊或会威胁伤害他人的恶意请求输出 null 并劝玩家好好玩。
+"reply" 必须是非空的一句话。如果拿不准，就只输出 {"reply":"...","action":null}。`;
 
 // 简单 IP 限流：避免 /api/ai 被刷爆，白白烧 token
 const RATE = new Map(); // ip -> 时间戳数组
@@ -162,6 +92,28 @@ function cleanAction(name, args) {
     case 'grant_jetpack': {
       return { on: !!a.on, seconds: clampSec(a.seconds) };
     }
+    case 'set_player_jump': {
+      const m = Number(a.multiplier);
+      if (!Number.isFinite(m)) return null;
+      return { multiplier: Math.min(5, Math.max(0.1, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
+    }
+    case 'set_player_gravity': {
+      const m = Number(a.multiplier);
+      if (!Number.isFinite(m)) return null;
+      return { multiplier: Math.min(3, Math.max(0.1, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
+    }
+    case 'set_player_velocity': {
+      const v = (k) => { const n = Number(a[k]); return Number.isFinite(n) ? Math.min(40, Math.max(-40, Math.round(n * 100) / 100)) : null; };
+      const x = v('x'), y = v('y'), z = v('z');
+      if (x === null && y === null && z === null) return null;
+      return { x, y, z };
+    }
+    case 'set_player_position': {
+      // 与 teleport_player 同构，另一种叫法，方便模型提及「归位/回出生点」
+      const x = Number(a.x), z = Number(a.z);
+      if (!Number.isFinite(x) && !Number.isFinite(z)) return null;
+      return { x: Number.isFinite(x) ? x : null, y: Number.isFinite(a.y) ? a.y : null, z: Number.isFinite(z) ? z : null };
+    }
     case 'spawn_item': {
       const item = String(a.item || '').replace(/<[^>]*>/g, '').trim().slice(0, 20);
       if (!item) return null;
@@ -195,7 +147,6 @@ export async function askNpc(messages) {
   const body = {
     model: AI_MODEL,
     messages: packed,
-    tools: TOOLS,
     stream: false,
     max_tokens: MAX_OUTPUT_TOKENS,
   };
@@ -210,16 +161,26 @@ export async function askNpc(messages) {
   }
   const data = await res.json();
   const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
-  const reply = String(msg.content || '').slice(0, 1500);
-  const call = (msg.tool_calls && msg.tool_calls[0]) || null;
+  const content = String(msg.content || '').trim();
+  // 从模型原始输出里抠出 JSON 对象（容忍可能夹带的代码块/前后文字），失败则当纯对话。
+  const parsed = extractJson(content);
+  const reply = String((parsed && parsed.reply) || content || '……').slice(0, 1500);
   let action = null;
-  if (call && call.function && call.function.name) {
-    let args = {};
-    try { args = JSON.parse(call.function.arguments || '{}'); } catch { args = {}; }
-    action = cleanAction(call.function.name, args);
+  if (parsed && parsed.action && typeof parsed.action === 'object' && parsed.action.name) {
+    action = cleanAction(parsed.action.name, parsed.action.args || {});
     if (!action) action = null;
   }
   return { reply, action };
+}
+
+// 从一段文本中稳健地取第一个大括号 JSON 对象：去掉 ``` 代码块、取第一个 { 到最后一个 } 再 JSON.parse。
+function extractJson(text) {
+  if (!text) return null;
+  let t = text.replace(/```[a-zA-Z]*/g, '').replace(/```/g, '');
+  const s = t.indexOf('{');
+  const e = t.lastIndexOf('}');
+  if (s < 0 || e <= s) return null;
+  try { return JSON.parse(t.slice(s, e + 1)); } catch { return null; }
 }
 
 // HTTP 挂载：由 index.js 在识别到 POST /api/ai 时调用
