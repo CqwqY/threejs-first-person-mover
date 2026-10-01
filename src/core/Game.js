@@ -13,6 +13,7 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
+import { setModelScale } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
@@ -471,11 +472,11 @@ export class Game {
         break;
       }
       case 'set_player_size': {
-        phys.sizeScale = action.args.scale;
+        phys.sizeTarget = action.args.scale;
         this._toast('体型已变为 ' + action.args.scale + ' 倍');
         if (action.args.seconds && action.args.seconds > 0) {
           const t = action.args.seconds;
-          setTimeout(() => { if (phys.sizeScale === action.args.scale) phys.sizeScale = 1; }, t * 1000);
+          setTimeout(() => { if (phys.sizeTarget === action.args.scale) phys.sizeTarget = 1; }, t * 1000);
         }
         break;
       }
@@ -609,9 +610,9 @@ export class Game {
         return {
           label: '体型',
           run: () => {
-            phys.sizeScale = s;
+            phys.sizeTarget = s; // 平滑过渡到目标体型
             this._toast('体型变化：变为 ' + s + ' 倍，持续 ' + secs + ' 秒');
-            setTimeout(() => { if (phys.sizeScale === s) phys.sizeScale = 1; }, secs * 1000);
+            setTimeout(() => { if (phys.sizeTarget === s) phys.sizeTarget = 1; }, secs * 1000);
           },
         };
       }
@@ -783,7 +784,9 @@ export class Game {
     // 本地玩家不走网络插值（物理直接写 this.localState），模型须从这里取位置/朝向，
     // 否则会一直停在出生点，切第三人称也看不到自己。
     const s = this.localState;
-    local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT, s.z);
+    const size = this.localPlayer.physics.sizeScale;
+    local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT * size, s.z);
+    setModelScale(local.model, size);
 
     // 本帧实际移动速度：让骨头动画知道走得多快（「移动时疯狂旋转」已临时注释）
     const dx = s.x - this._tpPrevX;
@@ -862,7 +865,8 @@ export class Game {
     this._sun.position.copy(st.position).add(this._sunOffset);
     st.updateMatrixWorld();
 
-    // 上报本地状态（内部按 20Hz 节流）
+    // 上报本地状态（内部按 20Hz 节流）；带上当前体型倍率，供其他玩家看到放大/缩小
+    this.localState.size = this.localPlayer.physics.sizeScale;
     this.network.sendState(this.localState.toJSON());
 
     // 渲染当前帧

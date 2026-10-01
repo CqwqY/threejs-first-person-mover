@@ -162,6 +162,15 @@ function _createFallbackBody() {
   return holder;
 }
 
+// 设置玩家模型的体型倍率：只缩放身体（名牌不跟着放大），并把名牌锚点抬到新的头顶高度
+export function setModelScale(group, s) {
+  const scale = s > 0 ? s : 1;
+  const bh = group.userData.bodyHolder;
+  if (bh) bh.scale.setScalar(scale);
+  const ha = group.userData.headAnchor;
+  if (ha) ha.position.y = NAME_TAG_Y * scale;
+}
+
 // 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）；color 控制昵称文字颜色（默认白）
 export function createNameTag(text, color = '#ffffff') {
   const canvas = document.createElement('canvas');

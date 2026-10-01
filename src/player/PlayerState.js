@@ -9,6 +9,7 @@ export class PlayerState {
     this.yaw = yaw; // 水平朝向，弧度
     this.pitch = pitch; // 俯仰，弧度
     this.onGround = onGround;
+    this.size = 1; // 体型倍率（1 = 正常）；由 NPC 效果改变，需同步给其他玩家
   }
 
   // 生成用于网络传输的纯 JSON 快照（不包含 onGround 之外的派生/本地字段）
@@ -20,6 +21,7 @@ export class PlayerState {
       z: this.z,
       yaw: this.yaw,
       pitch: this.pitch,
+      size: this.size,
     };
   }
 
@@ -32,16 +34,19 @@ export class PlayerState {
     if (data.yaw !== undefined) this.yaw = data.yaw;
     if (data.pitch !== undefined) this.pitch = data.pitch;
     if (data.onGround !== undefined) this.onGround = data.onGround;
+    if (data.size !== undefined) this.size = data.size;
     return this;
   }
 
-  // 把 x/y/z/yaw 向目标状态做线性插值。
+  // 把 x/y/z/yaw/size 向目标状态做线性插值。
   // alpha 介于 0~1，越接近 1 越贴近目标；pitch/onGround 不参与插值。
   lerpTo(target, alpha) {
     this.x += (target.x - this.x) * alpha;
     this.y += (target.y - this.y) * alpha;
     this.z += (target.z - this.z) * alpha;
     this.yaw += (target.yaw - this.yaw) * alpha;
+    const ts = target.size === undefined ? 1 : target.size;
+    this.size += (ts - this.size) * alpha;
     return this;
   }
 }

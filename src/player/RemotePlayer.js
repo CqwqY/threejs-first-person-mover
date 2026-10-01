@@ -1,7 +1,7 @@
 // 职责：代表一个远程玩家，组合 PlayerState（数据）与 PlayerModel（外观），并对状态做插值渲染。
 import { Config } from '../config.js';
 import { PlayerState } from './PlayerState.js';
-import { createPlayerModel, updateNameTag } from './PlayerModel.js';
+import { createPlayerModel, updateNameTag, setModelScale } from './PlayerModel.js';
 
 export class RemotePlayer {
   // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色
@@ -28,10 +28,12 @@ export class RemotePlayer {
     this.syncModel();
   }
 
-  // 把模型位置/朝向同步到插值状态。
-  // 模型原点在脚底，而 state.y 是相机高度（眼睛），所以脚底高度 = state.y - PLAYER_HEIGHT。
+  // 把模型位置/朝向/体型同步到插值状态。
+  // 模型原点在脚底，而 state.y 是相机高度（眼睛），所以脚底高度 = state.y - PLAYER_HEIGHT * 体型。
   syncModel() {
-    this.model.position.set(this.state.x, this.state.y - Config.PLAYER_HEIGHT, this.state.z);
+    const s = this.state.size || 1;
+    setModelScale(this.model, s);
+    this.model.position.set(this.state.x, this.state.y - Config.PLAYER_HEIGHT * s, this.state.z);
     this.model.rotation.set(0, this.state.yaw, 0);
   }
 

@@ -15,6 +15,7 @@ export class PlayerPhysics {
     // 运行时状态（由 AI 商人 NPC / 外部注入，不必改 Config 全局）
     this.speedMult = 1;   // 移动速度倍率（默认 1 = 正常）
     this.sizeScale = 1;   // 体型倍率（身高/碰撞半径/边界按此缩放，默认 1 = 正常）
+    this.sizeTarget = 1;  // 目标体型倍率；sizeScale 每帧向它平滑逼近（避免变大/变小时视点瞬移）
     this.jumpMult = 1;    // 起跳倍率（跳跃初速度乘它，默认 1 = 正常）
     this.gravityMult = 1; // 重力倍率（重力加速度乘它，默认 1 = 正常）
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
@@ -25,6 +26,13 @@ export class PlayerPhysics {
   // dt：秒；input：Input 实例；cameraYaw：相机水平朝向（弧度）；state：PlayerState 实例，读写它的 x/y/z/onGround；
   // colliders：世界空间 AABB 碰撞体 [{cx,cy,cz,hx,hy,hz}]（可选）。
   update(dt, input, cameraYaw, state, colliders = []) {
+    // ---- 0. 体型平滑过渡：sizeScale 以固定速率逼近 sizeTarget，约 0.3 秒完成一轮变化 ----
+    if (this.sizeScale !== this.sizeTarget) {
+      const rate = 3.2;
+      this.sizeScale += (this.sizeTarget - this.sizeScale) * Math.min(1, dt * rate);
+      if (Math.abs(this.sizeTarget - this.sizeScale) < 0.005) this.sizeScale = this.sizeTarget;
+    }
+
     // ---- 1. 计算水平移动方向 ----
     // 相机朝向（yaw = rotation.y，采用 plane 上方旋转）对应的前方向：
     //   相机默认看向 -Z，绕 Y 轴旋转 yaw 后，前方单位向量 = (-sin yaw, 0, -cos yaw)
@@ -110,6 +118,10 @@ export class PlayerPhysics {
       state.y = groundY;
       this.velocity.y = 0;
       state.onGround = true;
+    } else if (state.onGround && state.y - groundY < 0.6) {
+      // 缩小体型时脚底会离地：仍站在地面（落差很小）就贴回地面，避免悬空/掉落感
+      state.y = groundY;
+      this.velocity.y = 0;
     }
 
     // ---- 7. 边界限制：把玩家挡在矩形地面内（宽 x / 长 z） ----

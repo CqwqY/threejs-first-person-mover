@@ -224,6 +224,13 @@ const AUTH_DB = path.join(DATA_DIR, 'accounts.db');
 // 账号系统（SQLite，schema 由 auth.js 启动时自建），不碰地图/素材文件
 const auth = initAuth(AUTH_DB);
 
+// 体型倍率白名单钳制：只接受 0.3~2.5 的有限数值，其它一律按 1（正常）处理，避免脏值影响其他客户端渲染
+function clampSize(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(2.5, Math.max(0.3, n));
+}
+
 // 收集所有（id, 已上报状态）列表，用于 welcome / snapshot
 function worldPlayers() {
   return [...states.entries()].map(([pid, st]) => ({
@@ -233,6 +240,7 @@ function worldPlayers() {
     y: st.y,
     z: st.z,
     yaw: st.yaw,
+    size: st.size,
     nick: st.nick || ('玩家' + st.num),
     color: st.color || '#ffffff',
   }));
@@ -283,6 +291,7 @@ wss.on('connection', (ws) => {
     states.set(id, {
       num,
       x: msg.x, y: msg.y, z: msg.z, yaw: msg.yaw,
+      size: clampSize(msg.size),
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });
