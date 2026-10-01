@@ -5,8 +5,8 @@
 import * as THREE from 'three';
 import { instantiate } from '../world/AssetLoader.js';
 
-const MODEL_HEIGHT = 1.6;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
-const NAME_TAG_Y = 1.85;       // 名牌锚点高度（在头顶上方，随 MODEL_HEIGHT 一起放低）
+const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
+const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
 const DEG = Math.PI / 180;
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
