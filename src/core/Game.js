@@ -14,7 +14,7 @@ import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { getBagKey, addToBag, loadBag } from '../player/Inventory.js';
-import { createSkillSlots } from '../ui/SkillSlots.js';
+import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 
@@ -181,8 +181,10 @@ export class Game {
     this._createChatTab();
     this.aiNpc.onRange((r) => { this._chatTab.style.display = r ? '' : 'none'; });
 
-    // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能
+    // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能；恢复上次指定的槽位
     this.skillSlots = createSkillSlots();
+    this._skillMap = this._loadSkillSlots();
+    this._restoreSkills();
 
     // 本地可拾取的「生成物品」发光道具
     this._pickups = [];
@@ -390,11 +392,34 @@ export class Game {
       useBtn.style.cssText =
         'border:0;cursor:pointer;border-radius:8px;padding:6px 18px;color:#fff;font-weight:600;' +
         'background:linear-gradient(150deg,#3b7ddd,#1e55a8);';
-      useBtn.addEventListener('click', () => this._useItem(name));
+      // 槽位选择：选「直接使用」则只触发效果；选具体槽位则把该物品指定到该技能键后再触发
+      const slotSel = document.createElement('select');
+      slotSel.style.cssText =
+        'font:12px/1.4 system-ui,"Microsoft YaHei",sans-serif;color:#1f2933;border:1px solid #cbd5e1;' +
+        'border-radius:8px;padding:4px 6px;background:#fff;cursor:pointer;max-width:130px;';
+      const optNone = document.createElement('option');
+      optNone.value = '';
+      optNone.textContent = '直接使用';
+      slotSel.appendChild(optNone);
+      for (let i = 0; i < SLOT_COUNT; i++) {
+        const o = document.createElement('option');
+        o.value = String(i);
+        o.textContent = '装备到 ' + (i + 1) + ' 号槽';
+        slotSel.appendChild(o);
+      }
+      // 已经指定到某槽时，默认选中该槽，方便看出当前归属
+      const cur = Object.keys(this._skillMap).find((k) => this._skillMap[k] === name);
+      if (cur != null) slotSel.value = String(cur);
+      useBtn.addEventListener('click', () => {
+        const v = slotSel.value;
+        this._useItem(name, v === '' ? null : Number(v));
+        this._renderBag();
+      });
       meta.appendChild(nameEl);
       meta.appendChild(countEl);
       card.appendChild(icon);
       card.appendChild(meta);
+      card.appendChild(slotSel);
       card.appendChild(useBtn);
       grid.appendChild(card);
     }
@@ -606,14 +631,64 @@ export class Game {
 
   // 把阿花给的物品挂到技能槽：用阿花选定的效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
   _equipItemSkill(item) {
-    const eff = this._effectForItem(item);
-    const keyName = this.skillSlots.registerSkill({ label: eff.label, onActivate: eff.run });
-    const tag = keyName ? '（按 ' + keyName.slice(-1) + ' 触发）' : '';
-    this._toast('「' + item + '」已装备到技能槽' + tag);
+    // 已装备则刷新该槽；否则找第一个空槽
+    let idx = Object.keys(this._skillMap).find((k) => this._skillMap[k] === item);
+    if (idx == null) {
+      for (let i = 0; i < SLOT_COUNT; i++) { if (!(i in this._skillMap)) { idx = String(i); break; } }
+    }
+    if (idx == null) {
+      this._toast('技能槽已满，请在背包里把「' + item + '」指定到某个槽位');
+      return;
+    }
+    this._setSlot(Number(idx), item);
+    this._toast('「' + item + '」已装备到 ' + (Number(idx) + 1) + ' 号技能槽（按 ' + (Number(idx) + 1) + ' 触发）');
   }
 
-  // 背包「使用」：直接触发该物品对应的技能效果（与技能槽同源）。
-  _useItem(item) {
+  // 把物品装备到指定槽位（0 起），并持久化
+  _setSlot(index, item) {
+    const eff = this._effectForItem(item);
+    this.skillSlots.assign(index, { label: eff.label, onActivate: eff.run });
+    this._skillMap[index] = item;
+    this._saveSkillSlots(this._skillMap);
+  }
+
+  // 清空指定槽位
+  _clearSlot(index) {
+    this.skillSlots.clearSlot(index);
+    delete this._skillMap[index];
+    this._saveSkillSlots(this._skillMap);
+  }
+
+  // 启动时把上次保存的槽位指定恢复出来
+  _restoreSkills() {
+    for (const key of Object.keys(this._skillMap)) {
+      const idx = Number(key);
+      const item = this._skillMap[key];
+      if (idx >= 0 && idx < SLOT_COUNT && item) {
+        const eff = this._effectForItem(item);
+        this.skillSlots.assign(idx, { label: eff.label, onActivate: eff.run });
+      } else {
+        delete this._skillMap[key];
+      }
+    }
+  }
+
+  // 技能槽存储键：与背包一样按账号隔离
+  _skillStoreKey() {
+    const id = this._profile ? (this._profile.username || this._profile.nickname || '') : '';
+    return 'fp_skill_slots__' + (id || 'guest');
+  }
+  _loadSkillSlots() {
+    try { return JSON.parse(localStorage.getItem(this._skillStoreKey()) || '{}') || {}; }
+    catch (e) { return {}; }
+  }
+  _saveSkillSlots(map) {
+    try { localStorage.setItem(this._skillStoreKey(), JSON.stringify(map)); } catch (e) { /* 忽略 */ }
+  }
+
+  // 背包「使用」：指定槽位则先装备到该槽，再触发效果（与技能槽同源）。
+  _useItem(item, slotIndex) {
+    if (slotIndex != null && slotIndex >= 0) this._setSlot(slotIndex, item);
     const eff = this._effectForItem(item);
     eff.run();
   }
