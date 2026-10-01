@@ -3,6 +3,13 @@
 //   右侧拖动区   -> 转视角（yaw/pitch，复用鼠标视角的累计入口）
 // 非触屏设备（粗指针）不创建任何 DOM，保持桌面体验不变。
 import { Config } from '../config.js';
+import { onRelayout, viewportSize } from './layout.js';
+
+// 模块级持有者：把「清触摸残留」暴露给重排逻辑，旋转/地址栏变化时调用
+let _resetTouchState = null;
+export function resetTouchState() {
+  if (_resetTouchState) _resetTouchState();
+}
 
 export function initMobileControls(input) {
   const coarse =
@@ -14,8 +21,9 @@ export function initMobileControls(input) {
   const style = document.createElement('style');
   style.textContent = `
     .mc-zone{position:fixed;bottom:0;touch-action:none;user-select:none;-webkit-user-select:none;z-index:50}
-    .mc-left{left:0;width:44vw;height:42vh}
-    .mc-right{right:0;top:0;width:50vw;height:100vh}
+    /* dvh 跟随「可视视口」；不支持时回退到 vh。横屏下 42vh 可能比摇杆还矮，用 min-height 兜底 */
+    .mc-left{left:0;width:44vw;height:42vh;height:42dvh;min-height:200px}
+    .mc-right{right:0;top:0;width:50vw;height:100vh;height:100dvh}
     .mc-joy{position:absolute;left:20px;bottom:26px;width:118px;height:118px;border-radius:50%;
       border:2px solid rgba(255,255,255,.32);background:rgba(255,255,255,.08);
       box-sizing:content-box}
@@ -23,7 +31,8 @@ export function initMobileControls(input) {
       border-radius:50%;border:1px solid rgba(255,255,255,.18)}
     .mc-knob{position:absolute;left:50%;top:50%;width:54px;height:54px;transform:translate(-50%,-50%);
       border-radius:50%;background:rgba(255,255,255,.5);box-shadow:0 4px 12px rgba(0,0,0,.3)}
-    .mc-jump{position:fixed;right:20px;bottom:24px;width:72px;height:72px;border-radius:50%;z-index:51;
+    .mc-jump{position:fixed;right:20px;bottom:calc(env(safe-area-inset-bottom, 0px) + 24px);
+      width:72px;height:72px;border-radius:50%;z-index:51;
       display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.9);
       font-size:15px;font-weight:600;letter-spacing:1px;
       background:rgba(255,255,255,.12);border:2px solid rgba(255,255,255,.35);
@@ -90,13 +99,18 @@ export function initMobileControls(input) {
     knob.style.transform = '';
     input.setJoystick(0, 0);
   };
+  // 摇杆基点中心：布局变化后可能需要重算，所以抽成函数（原来只在 pointerdown 里算一次）
+  const refreshCenter = () => {
+    const r = base.getBoundingClientRect();
+    cx = r.left + r.width / 2;
+    cy = r.top + r.height / 2;
+  };
+
   zone.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     joyId = e.pointerId;
     zone.setPointerCapture(e.pointerId);
-    const r = base.getBoundingClientRect();
-    cx = r.left + r.width / 2;
-    cy = r.top + r.height / 2;
+    refreshCenter();
     joyDrag(e);
   });
   zone.addEventListener('pointermove', joyDrag);
@@ -138,4 +152,27 @@ export function initMobileControls(input) {
   look.addEventListener('pointermove', lookMove);
   look.addEventListener('pointerup', lookEnd);
   look.addEventListener('pointercancel', lookEnd);
+
+  // 清触摸残留：旋转/地址栏收起后，摇杆基点变了、跳跃可能收不到配对的 up，
+  // 会表现为「卡着不动」或「一直上升」。这里统一归零。
+  _resetTouchState = () => {
+    joyId = null;
+    lookId = null;
+    knob.style.transform = '';
+    input.setJoystick(0, 0);
+    input.setJumpHeld(false);
+  };
+
+  // 视口尺寸真的变了才清输入（visualViewport 的 scroll 也会触发重排，别把正在拖的摇杆打断）
+  let lastW = 0;
+  let lastH = 0;
+  onRelayout(() => {
+    const { width, height } = viewportSize();
+    if (width !== lastW || height !== lastH) {
+      lastW = width;
+      lastH = height;
+      if (_resetTouchState) _resetTouchState();
+    }
+    refreshCenter(); // 摇杆基点随布局重算
+  });
 }

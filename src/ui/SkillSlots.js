@@ -17,7 +17,8 @@ function injectStyle() {
     /* 容器不拦截触摸：只有具体槽位可点，缝隙仍可用来转视角 */
     .sk-box{position:fixed;z-index:60;display:flex;pointer-events:none;}
     .sk-box--mobile{right:calc(env(safe-area-inset-right, 0px) + 14px);bottom:118px;
-      flex-direction:column;align-items:center;gap:clamp(5px, 2vw, 9px);max-height:calc(100vh - 140px);}
+      flex-direction:column;align-items:center;gap:clamp(5px, 2vw, 9px);
+      max-height:calc(100vh - 140px);max-height:calc(100dvh - 140px);}
     .sk-box--desk{right:18px;bottom:22px;flex-direction:row;align-items:center;gap:8px;}
     /* 槽位尺寸自适应：小屏自动缩小，避免占满屏幕 */
     .sk-slot{pointer-events:auto;touch-action:none;user-select:none;-webkit-user-select:none;cursor:pointer;
