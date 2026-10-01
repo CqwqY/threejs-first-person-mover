@@ -222,11 +222,14 @@ export function initMobileLayout() {
     handles.length = 0;
   }
 
+  // 同样按下即响应：多点触控下（另一只手推着摇杆）click 可能不派发
   const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
-  toggle.addEventListener('pointerdown', stop);
-  toggle.addEventListener('click', () => { if (editing) exit(); else enter(); });
-  check.addEventListener('pointerdown', stop);
-  check.addEventListener('click', () => {
+  toggle.addEventListener('pointerdown', (e) => {
+    stop(e);
+    if (editing) exit(); else enter();
+  });
+  check.addEventListener('pointerdown', (e) => {
+    stop(e);
     if (!editing) enter();
     syncAll();
     const bad = handles.filter((r) => !r.ok).map((r) => r.it.label);

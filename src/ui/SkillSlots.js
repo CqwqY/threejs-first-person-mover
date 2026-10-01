@@ -80,13 +80,15 @@ export function createSkillSlots() {
     el.appendChild(keyEl);
 
     const slot = { el, labelEl: label, act: null, name: '', cdUntil: 0, keyName };
-    // 触摸优先：自行捕获指针并阻止冒泡，确保点击技能槽不会同时被转视角区吃掉
+    // 触摸优先：自行捕获指针并阻止冒泡，确保点击技能槽不会同时被转视角区吃掉。
+    // 直接按下即触发（不等 click）：多点触控时另一只手正按住摇杆，合成的 click 常常不派发，
+    // 会导致「边走边点技能」没反应。
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      fire(slot);
     });
-    el.addEventListener('click', (e) => { e.stopPropagation(); fire(slot); });
     box.appendChild(el);
     slots.push(slot);
     paint(slot);
