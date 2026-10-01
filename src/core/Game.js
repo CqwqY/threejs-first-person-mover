@@ -9,6 +9,7 @@ import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createAiNpc } from '../world/AiNpc.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
+import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
@@ -729,52 +730,11 @@ export class Game {
     });
   }
 
-  // 投掷物（球）与场景碰撞体的相交检测。
-  // 盒碰撞体（可带 rotY）按「点转到盒局部再做 AABB」；凸包 / trimesh 用其顶点算出的包围盒近似（结果缓存）。
-  _projectileHitsWorld(x, y, z, r) {
-    const cols = this.colliders;
-    if (!cols || !cols.length) return false;
-    for (const b of cols) {
-      if (!b) continue;
-      if (b.type === 'convex' || b.type === 'trimesh') {
-        let box = b.__aabb;
-        if (box === undefined) {
-          const src = b.vertices || b.positions;
-          if (!src || src.length < 3) { b.__aabb = null; box = null; }
-          else {
-            let minX = Infinity, minY = Infinity, minZ = Infinity;
-            let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-            for (let i = 0; i < src.length; i += 3) {
-              const px = src[i], py = src[i + 1], pz = src[i + 2];
-              if (px < minX) minX = px; if (px > maxX) maxX = px;
-              if (py < minY) minY = py; if (py > maxY) maxY = py;
-              if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
-            }
-            box = { minX, minY, minZ, maxX, maxY, maxZ };
-            b.__aabb = box;
-          }
-        }
-        if (box
-          && x > box.minX - r && x < box.maxX + r
-          && y > box.minY - r && y < box.maxY + r
-          && z > box.minZ - r && z < box.maxZ + r) return true;
-        continue;
-      }
-      // 盒：把点转到盒局部坐标（绕 Y 反向旋转 rotY）再做膨胀 AABB 判定
-      let lx = x - b.cx;
-      const ly = y - b.cy;
-      let lz = z - b.cz;
-      if (b.rotY) {
-        const c = Math.cos(b.rotY);
-        const s = Math.sin(b.rotY);
-        const nx = lx * c - lz * s;
-        const nz = lx * s + lz * c;
-        lx = nx;
-        lz = nz;
-      }
-      if (Math.abs(lx) < b.hx + r && Math.abs(ly) < b.hy + r && Math.abs(lz) < b.hz + r) return true;
-    }
-    return false;
+  // 投掷物（球）与场景碰撞体的相交检测，交给 projectileHit 模块：
+  // 盒按精确 OBB、trimesh 走 BVH + 真实三角形、convex 有索引三角形时也精确判定；
+  // 并带「线段扫描」，避免高速掠过薄墙。prev 为上一帧位置。
+  _projectileHitsWorld(x, y, z, r, fx, fy, fz) {
+    return projectileHitsWorld(this.colliders, x, y, z, r, fx, fy, fz);
   }
 
   // 每帧推进所有投掷物：受重力、撞地/撞建筑/命中玩家即爆开
@@ -782,13 +742,16 @@ export class Game {
     if (!this._projectiles.length) return;
     for (let i = this._projectiles.length - 1; i >= 0; i--) {
       const p = this._projectiles[i];
+      const px0 = p.mesh.position.x;
+      const py0 = p.mesh.position.y;
+      const pz0 = p.mesh.position.z;
       p.vel.y += Config.GRAVITY * dt;
       p.mesh.position.addScaledVector(p.vel, dt);
       p.life -= dt;
       const pos = p.mesh.position;
       let hit = p.life <= 0 || pos.y <= 0.12;
-      // 撞到场景碰撞体（建筑/墙）也爆开：盒按可旋转盒、凸包/网格按其包围盒近似
-      if (!hit && this._projectileHitsWorld(pos.x, pos.y, pos.z, 0.16)) hit = true;
+      // 撞到场景碰撞体（建筑/墙）也爆开：走真实几何判定，不再用包围盒近似
+      if (!hit && this._projectileHitsWorld(pos.x, pos.y, pos.z, 0.16, px0, py0, pz0)) hit = true;
       if (!hit) {
         // 竖直圆柱近似：水平 0.8 米内、高度区间内视为命中其他玩家
         for (const [id, rp] of this.playerManager.players) {
