@@ -247,7 +247,12 @@ wss.on('connection', (ws) => {
 
     // 登录：客户端连上后携带 token 鉴权，成功则把昵称/颜色挂到本连接，供名牌展示
     if (msg.t === 'auth') {
-      const pub = auth.getPublicByToken(msg.token);
+      let pub = null;
+      try {
+        pub = auth.getPublicByToken(msg.token);
+      } catch (e) {
+        console.warn('[relay] 鉴权异常（按游客处理）:', e); // 单条消息出错不能拖垮整个中继进程
+      }
       ws.__profile = pub;
       ws.send(JSON.stringify({ t: 'auth', ok: !!pub, profile: pub }));
       // 若此前已上报过自身状态，立即用登录资料刷新并广播给他人

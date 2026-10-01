@@ -94,12 +94,24 @@ function showModal(done) {
   name.focus();
 }
 
-// 进入游戏前的登录流程：已保存 token 则静默直进；否则弹窗登录/注册/游客
+// 进入游戏前的登录流程：已保存 token 则校验并直接进入；否则弹窗登录/注册/游客
 export async function ensureAuth() {
   const saved = localStorage.getItem('fp_token');
   if (saved) {
-    // 已有会话：直接进入。令牌是否失效由服务端 WS 握手在校验时兜底（见 Game._onNetworkMessage 的 auth 分支）
-    return { token: saved, profile: null };
+    try {
+      // 用 token 拉一次资料：拿到昵称/颜色后直接进入，HUD 不必干等 WS 回执
+      const out = await api('GET', '/api/profile', null, saved);
+      if (out && out.ok && out.profile) return { token: saved, profile: out.profile };
+      if (out && out.ok === false) {
+        // 服务端明确判定失效：清掉本地会话，走登录流程
+        localStorage.removeItem('fp_token');
+      } else {
+        return { token: saved, profile: null }; // 返回体异常，保守放行
+      }
+    } catch {
+      // 网络不通：仍带 token 进入（WS 侧会再校验），HUD 暂显「登录中」
+      return { token: saved, profile: null };
+    }
   }
   return new Promise((resolve) => showModal(resolve));
 }
