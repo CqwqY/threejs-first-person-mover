@@ -81,6 +81,16 @@ export class Game {
     const dOff = computeSunOffset(design.sunElev, design.sunAz);
     this._sunOffset.set(dOff.x, dOff.y, dOff.z);
 
+    // ---- 昼夜循环：以编辑器保存的光照设计作为「正午」基准，随时刻连续变化 ----
+    const gset = loadSettings('scene-settings-game-v1');
+    this._dayEnabled = gset.dayNight !== undefined ? !!gset.dayNight : true;
+    this._dayCycle = Math.max(30, Number(gset.dayCycle) || 240);
+    this._dayTime = Config.DAY_START;
+    this._dayBaseSun = design.sun;
+    this._dayBaseAmbient = design.ambient;
+    this._dayBaseHemi = design.hemi;
+    this._dayAzDeg = design.sunAz;
+
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
 
@@ -160,9 +170,11 @@ export class Game {
           setNameTagsVisible(v);   // 玩家头顶名牌总开关
           setHealthBarsVisible(v); // 血条跟着一起开关
         },
+        dayNight: (v) => { this._dayEnabled = !!v; }, // 昼夜循环开关
+        dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 240); }, // 一昼夜秒数
       },
       {
-        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag'],
+        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle'],
         storeKey: 'scene-settings-game-v1',
       }
     );
@@ -288,6 +300,24 @@ export class Game {
     this._setChatLock(false);
     this._updateHealthBar();
     this._toast('已在出生点重生');
+  }
+
+  // 昼夜循环推进：0 = 午夜、0.5 = 正午。太阳高度角与强度、环境光/半球光、
+  // 天空亮度都随时间连续变化；关闭时保持编辑器设计的光照。
+  _updateDayNight(dt) {
+    if (!this._dayEnabled) return;
+    this._dayTime = (this._dayTime + dt / this._dayCycle) % 1;
+    const s = Math.sin((this._dayTime - 0.25) * Math.PI * 2); // -1（午夜）~ 1（正午）
+    const sunUp = Math.max(0, s);
+    const off = computeSunOffset(s * 90, this._dayAzDeg);
+    this._sunOffset.set(off.x, off.y, off.z);
+    this._sun.intensity = this._dayBaseSun * sunUp;
+    this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
+    this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
+    // 天空贴图整体压暗（three 的 backgroundIntensity；旧版本没有该属性则跳过）
+    if ('backgroundIntensity' in this.scene) {
+      this.scene.backgroundIntensity = 0.18 + 0.82 * sunUp;
+    }
   }
 
   // 窗口尺寸变化时更新相机纵横比和渲染器尺寸
@@ -1457,6 +1487,9 @@ export class Game {
 
     // 计算本帧时间间隔；clamp 到 MAX_DELTA_TIME，防止切后台恢复时瞬间跳帧导致角色瞬移
     const dt = Math.min(this.clock.getDelta(), Config.MAX_DELTA_TIME);
+
+    // 昼夜循环：先更新太阳角度与光照，后面阴影定位要用到最新的 _sunOffset
+    this._updateDayNight(dt);
 
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     this.localPlayer.update(dt);

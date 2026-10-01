@@ -16,6 +16,8 @@ export const DEFAULT_SETTINGS = {
   shadowSize: 2048, // 阴影贴图边长
   castShadow: true, // 阴影总开关
   nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
+  dayNight: true, // 是否开启昼夜循环
+  dayCycle: 240, // 一昼夜时长（秒），越大变化越慢
 };
 
 const STORE_KEY = 'scene-settings-v1'; // 编辑器「光照设计」键：客户端也读取此键应用光照
@@ -68,6 +70,8 @@ const FIELDS = [
   },
   { id: 'castShadow', label: '阴影开关', kind: 'toggle', defaultValue: true },
   { id: 'nameTag', label: '显示名牌与血条', kind: 'toggle', defaultValue: true },
+  { id: 'dayNight', label: '昼夜循环', kind: 'toggle', defaultValue: true },
+  { id: 'dayCycle', label: '一昼夜时长(秒)', kind: 'range', min: 60, max: 1200, step: 20 },
 ];
 
 let styleInjected = false;

@@ -109,12 +109,15 @@ export const Config = {
   VEHICLE_POS: { x: -7, z: 144 }, // 停放点（未有人驾驶时固定停这里）
   VEHICLE_YAW: 0,                 // 停放时的朝向（弧度）
   VEHICLE_HEIGHT: 1.15,           // 归一化后的模型高度（米），按包围盒等比缩放
-  VEHICLE_YAW_OFFSET: 0,          // 模型自带朝向与"车头朝 -Z"之间的补偿角（弧度），必要时调这个
+  VEHICLE_YAW_OFFSET: Math.PI,    // 模型自带朝向与"车头朝 -Z"之间的补偿角（弧度），必要时调这个
   VEHICLE_SPEED: 16,              // 骑乘时的移动速度（米/秒）
   VEHICLE_KEY: 'KeyF',            // 上车/下车键
   VEHICLE_PROXIMITY: 2.6,         // 距离多远内可以上车（米）
   VEHICLE_SEAT_BACK: 0.95,        // 后座相对驾驶位向后偏移（米）
   VEHICLE_ID: 'scooter1',         // 载具标识，写进玩家状态用于配对前后座
+
+  // ---- 昼夜循环 ----
+  DAY_START: 0.35,   // 起始时刻（0 = 午夜，0.5 = 正午）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
