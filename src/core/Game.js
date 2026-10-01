@@ -13,6 +13,7 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
+import { getBagKey, addToBag } from '../player/Inventory.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 
@@ -306,7 +307,9 @@ export class Game {
   }
 
   // 执行 GLM 点名的工具动作。所有参数已经过后端清洗，这里只做贴上玩家。
+  // 阿花是物品商人：只允许 spawn_item（物品进背包），其余效果/移动动作一概忽略，不再改变玩家属性。
   _executeNpcAction(action) {
+    if (!action || action.name !== 'spawn_item') return;
     const state = this.localState;
     const phys = this.localPlayer.physics;
     switch (action.name) {
@@ -375,7 +378,11 @@ export class Game {
         break;
       }
       case 'spawn_item': {
-        this._spawnPickup(action.args.item, action.args.seconds || 60);
+        // 阿花把物品放进玩家背包（不是丢到地上给效果）
+        const item = action.args.item || '神秘物品';
+        const key = getBagKey(this._profile);
+        const n = addToBag(key, item, 1);
+        this._toast('阿花把「' + item + '」放进你的背包（累计 ' + n + ' 件）');
         break;
       }
       default:
