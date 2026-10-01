@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { attachSky, createNightSky } from '../world/SkyBox.js';
+import { attachSky, createNightSky, fitNightSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
@@ -100,6 +100,8 @@ export class Game {
     this._netDayTime = null;
     this._netDayAt = 0;
     this._hudTimeText = '';
+    // 本地时刻偏移（小时→一天比例）：只用于本地预览（想马上看夜晚就拖它），不参与联机同步
+    this._dayOffset = (Number(gset.dayOffset) || 0) / 24;
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
@@ -183,9 +185,10 @@ export class Game {
         dayNight: (v) => { this._dayEnabled = !!v; }, // 昼夜循环开关
         dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 240); }, // 一昼夜秒数
         bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
+        dayOffset: (v) => { this._dayOffset = (Number(v) || 0) / 24; }, // 本地时刻偏移（小时→一天比例）
       },
       {
-        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume'],
+        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
       }
     );
@@ -319,15 +322,18 @@ export class Game {
     if (!this._dayEnabled) return;
 
     // 时间来源：联机时以服务器快照里的世界时刻为准（帧间用服务器同一周期外推，所有人一致）；
-    // 未联机时本地按设置里的「一昼夜时长」推进
+    // 未联机时本地按设置里的「一昼夜时长」推进。最后叠加本地预览偏移。
+    let base;
     if (this._netDayTime !== null) {
       const elapsed = (performance.now() - this._netDayAt) / 1000;
-      this._dayTime = (this._netDayTime + elapsed / Game.SYNC_DAY_SECONDS) % 1;
+      base = (this._netDayTime + elapsed / Game.SYNC_DAY_SECONDS) % 1;
     } else {
-      this._dayTime = (this._dayTime + dt / this._dayCycle) % 1;
+      base = (this._dayTime + dt / this._dayCycle) % 1;
     }
+    this._dayTime = base;
+    const t = ((base + this._dayOffset) % 1 + 1) % 1; // 叠加本地偏移后的实际时刻
 
-    const s = Math.sin((this._dayTime - 0.25) * Math.PI * 2); // -1（午夜）~ 1（正午）
+    const s = Math.sin((t - 0.25) * Math.PI * 2); // -1（午夜）~ 1（正午）
     const sunUp = Math.max(0, s);
     const off = computeSunOffset(s * 90, this._dayAzDeg);
     this._sunOffset.set(off.x, off.y, off.z);
@@ -336,19 +342,20 @@ export class Game {
     this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
     // 天空贴图整体压暗（three 的 backgroundIntensity；旧版本没有该属性则跳过）
     if ('backgroundIntensity' in this.scene) {
-      this.scene.backgroundIntensity = 0.18 + 0.82 * sunUp;
+      this.scene.backgroundIntensity = 0.08 + 0.92 * sunUp; // 夜里压到很暗，白天全亮
     }
 
     // 夜空交叉淡入：太阳落到地平线以下后逐渐盖住白天天空；白天直接 visible=false 不参与绘制
     const night = Math.min(1, Math.max(0, -s * 3));
     if (this._nightSky) {
+      fitNightSky(this._nightSky, this.camera); // 跟着相机 far 缩放，防止调小视距后球壳被裁掉
       this._nightSky.visible = night > 0.01;
       this._nightSky.material.opacity = night;
       this._nightSky.position.copy(this.camera.position); // 天空不该有视差，跟着相机走
     }
 
     // 校卡上的时间（0 = 00:00，0.5 = 12:00）：只在整分钟变化时写 DOM
-    const mins = Math.floor(this._dayTime * 1440);
+    const mins = Math.floor(t * 1440);
     const text = String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
     if (text !== this._hudTimeText) {
       this._hudTimeText = text;
