@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS = {
   nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
   dayNight: true, // 是否开启昼夜循环
   dayCycle: 240, // 一昼夜时长（秒），越大变化越慢
+  bgmVolume: 0.25, // 背景音乐音量（0 = 静音），默认就很小声
 };
 
 const STORE_KEY = 'scene-settings-v1'; // 编辑器「光照设计」键：客户端也读取此键应用光照
@@ -72,6 +73,7 @@ const FIELDS = [
   { id: 'nameTag', label: '显示名牌与血条', kind: 'toggle', defaultValue: true },
   { id: 'dayNight', label: '昼夜循环', kind: 'toggle', defaultValue: true },
   { id: 'dayCycle', label: '一昼夜时长(秒)', kind: 'range', min: 60, max: 1200, step: 20 },
+  { id: 'bgmVolume', label: '背景音乐音量(0=静音)', kind: 'range', min: 0, max: 1, step: 0.05 },
 ];
 
 let styleInjected = false;

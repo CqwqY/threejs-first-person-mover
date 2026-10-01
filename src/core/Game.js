@@ -20,6 +20,7 @@ import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
+import { setBgmVolume } from '../audio/Bgm.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
 // target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
@@ -172,9 +173,10 @@ export class Game {
         },
         dayNight: (v) => { this._dayEnabled = !!v; }, // 昼夜循环开关
         dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 240); }, // 一昼夜秒数
+        bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
       },
       {
-        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle'],
+        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume'],
         storeKey: 'scene-settings-game-v1',
       }
     );
