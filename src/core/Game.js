@@ -682,7 +682,9 @@ export class Game {
         const key = getBagKey(this._profile);
         const n = addToBag(key, item, 1);
         this._storeItemEffect(item, effKey);
-        this._toast('阿花把「' + item + '」放进你的背包（累计 ' + n + ' 件）');
+        // 诊断用：把阿花返回的原始动作打到控制台，便于确认她到底写了什么效果
+        console.log('[阿花 action]', JSON.stringify(action));
+        this._toast('阿花把「' + item + '」放进背包 · 效果：' + this._describeEffect(effKey));
         this._equipItemSkill(item);
         break;
       }
@@ -856,17 +858,30 @@ export class Game {
         };
       }
       default:
-        // 兜底：后端没带 effect 时也保证「有感觉」——给个温和加速，而不是全变装饰品
+        // 兜底：没拿到有效效果（旧背包物品 / 后端未放行）时给个温和加速，
+        // 但标签与提示都写明「未识别」，避免把兜底误当成物品本身的真实效果。
         return {
-          label: item,
+          label: '未识别',
           run: () => {
             const m = 1.8;
             phys.speedMult = m;
-            this._toast('「' + item + '」生效：速度短暂提升');
+            this._toast('「' + item + '」没有有效效果（旧物品或后端未放行），暂按加速兜底');
             setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 4000);
           },
         };
     }
+  }
+
+  // 把阿花写的效果对象翻译成中文短语，用于提示/排查（后端会把非法效果整块删掉 → null）
+  _describeEffect(e) {
+    if (e == null) return '无（装饰品 / 或后端未放行该效果）';
+    if (typeof e !== 'object') return '格式错误（' + String(e) + '，应为对象）';
+    const k = e.k || '';
+    if (k === 'throw') return '投掷 伤害' + (e.v == null ? '?' : e.v) + ' 半径' + (e.r == null ? '?' : e.r);
+    if (k === 'jetpack') return '飞行 ' + (e.s == null ? '?' : e.s) + ' 秒';
+    const names = { speed: '加速', jump: '跳高', size: '体型' };
+    if (names[k]) return names[k] + ' ×' + (e.v == null ? '?' : e.v) + ' 持续 ' + (e.s == null ? '?' : e.s) + ' 秒';
+    return '未知类型(' + k + ')';
   }
 
   // 把阿花给的物品挂到技能槽：用阿花选定的效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
