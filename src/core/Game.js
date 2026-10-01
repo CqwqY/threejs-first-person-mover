@@ -295,12 +295,12 @@ export class Game {
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.controlLock = !!locked;
   }
 
-  // 屏幕中心右侧的「与阿花对话」选项卡：点击开/关底部对话栏
+  // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
   _createChatTab() {
     const el = document.createElement('div');
-    el.textContent = '与阿花对话';
+    el.textContent = '按 F 与她对话';
     el.style.cssText =
-      'position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
+      'position:fixed;right:26%;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
       'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:12px 14px;border-radius:14px;' +
       'box-shadow:0 6px 20px rgba(0,0,0,.3);user-select:none;' +
       'font:13px/1.4 system-ui,"Microsoft YaHei",sans-serif;text-align:center;';
@@ -331,19 +331,21 @@ export class Game {
   _buildBag() {
     const ov = document.createElement('div');
     ov.style.cssText =
-      'position:fixed;z-index:9550;top:64px;left:50%;transform:translateX(-50%);width:320px;max-height:60vh;' +
-      'overflow:auto;background:#fff;border:1px solid #dde3ec;border-radius:12px;' +
-      'box-shadow:0 12px 40px rgba(0,0,0,.25);padding:12px;display:none;' +
-      'font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;';
+      'position:fixed;z-index:9700;top:0;left:0;width:100vw;height:100vh;overflow:auto;' +
+      'background:rgba(255,255,255,.96);' +
+      'box-sizing:border-box;padding:70px 24px 40px;display:none;' +
+      'font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;color:#1f2933;';
     ov.innerHTML =
-      '<div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;margin-bottom:6px;">' +
-      '<span>我的背包</span>' +
-      '<button type="button" style="border:0;background:none;cursor:pointer;font-size:15px;padding:0 4px;">×</button></div>' +
-      '<div class="bag-list"></div>';
+      '<div style="position:fixed;top:0;left:0;right:0;z-index:1;display:flex;justify-content:space-between;align-items:center;' +
+      'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:14px 18px;box-sizing:border-box;">' +
+      '<h2 style="margin:0;font-size:17px;font-weight:700;">我的背包</h2>' +
+      '<button type="button" style="border:0;background:rgba(255,255,255,.2);color:#fff;cursor:pointer;' +
+      'font-size:16px;width:34px;height:34px;border-radius:8px;">×</button></div>' +
+      '<div class="bag-grid"></div>';
     document.body.appendChild(ov);
     ov.querySelector('button').addEventListener('click', () => { ov.style.display = 'none'; });
     this._bagOv = ov;
-    this._bagList = ov.querySelector('.bag-list');
+    this._bagList = ov.querySelector('.bag-grid');
   }
 
   _toggleBag() {
@@ -354,22 +356,48 @@ export class Game {
   _renderBag() {
     const bag = loadBag(getBagKey(this._profile));
     const entries = Object.entries(bag).filter(([, v]) => v > 0);
-    const list = this._bagList;
-    list.innerHTML = '';
+    const grid = this._bagList;
+    grid.innerHTML = '';
     if (!entries.length) {
-      list.textContent = '背包空空如也，去喷泉边找阿花要宝贝吧。';
+      grid.style.cssText = 'text-align:center;color:#7b8794;padding:40px 0;';
+      grid.textContent = '背包空空如也，去喷泉边找阿花要宝贝吧。';
       return;
     }
-    const frag = document.createDocumentFragment();
+    grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;padding-top:6px;';
     for (const [name, count] of entries) {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f2f6;';
-      row.innerHTML = '<span></span><b></b>';
-      row.firstElementChild.textContent = name;
-      row.lastElementChild.textContent = '× ' + count;
-      frag.appendChild(row);
+      const eff = this._effectForItem(name);
+      const card = document.createElement('div');
+      card.style.cssText =
+        'display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 12px;' +
+        'border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 4px 14px rgba(0,0,0,.06);';
+      // 图标：带颜色的圆角方块，里面放物品名的首字（阿花挑的图标以物品名首个字符为代表）
+      const icon = document.createElement('div');
+      icon.textContent = name.charAt(0) || '?';
+      icon.style.cssText =
+        'width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;' +
+        'background:' + this._itemColor(name) + ';color:#fff;font-weight:700;font-size:20px;';
+      const meta = document.createElement('div');
+      meta.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center;';
+      const nameEl = document.createElement('div');
+      nameEl.textContent = name;
+      nameEl.style.cssText = 'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;';
+      const countEl = document.createElement('div');
+      countEl.textContent = '× ' + count + '   ·' + eff.label;
+      countEl.style.cssText = 'font-size:12px;color:#7b8794;';
+      const useBtn = document.createElement('button');
+      useBtn.type = 'button';
+      useBtn.textContent = '使用';
+      useBtn.style.cssText =
+        'border:0;cursor:pointer;border-radius:8px;padding:6px 18px;color:#fff;font-weight:600;' +
+        'background:linear-gradient(150deg,#3b7ddd,#1e55a8);';
+      useBtn.addEventListener('click', () => this._useItem(name));
+      meta.appendChild(nameEl);
+      meta.appendChild(countEl);
+      card.appendChild(icon);
+      card.appendChild(meta);
+      card.appendChild(useBtn);
+      grid.appendChild(card);
     }
-    list.appendChild(frag);
   }
 
   // 把玩家一句话发给后端 GLM 代理，拿到 {reply, action} 后：展示回复并执行工具动作。
@@ -486,50 +514,74 @@ export class Game {
     }
   }
 
-  // 把阿花给的物品挂到技能槽：按物品名关键词映射出一个可触发的技能效果。
-  // 触发方式：点击槽位（手机）或按对应数字键（PC）。
-  _equipItemSkill(item) {
+  // 根据物品名返回 { label, run }：run 是触发后要执行的技能效果。
+  // 规则：物品名含关键词（阿花起的名字）即命中对应效果，否则给个默认的短暂提速。
+  _effectForItem(item) {
     const name = item || '';
     const phys = this.localPlayer.physics;
-    let label = name;
-    let onActivate = null;
-
     if (/疾风|跑得|速度|风力|风之靴/.test(name)) {
-      label = '疾风';
-      onActivate = () => {
-        const m = 2.2;
-        phys.speedMult = m;
-        this._toast('疾风：速度提升至 ' + m + ' 倍，持续 5 秒');
-        setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 5000);
+      return {
+        label: '疾风',
+        run: () => {
+          const m = 2.2;
+          phys.speedMult = m;
+          this._toast('疾风：速度提升至 ' + m + ' 倍，持续 5 秒');
+          setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 5000);
+        },
       };
-    } else if (/跳高|跳跃|弹簧|跳得/.test(name)) {
-      label = '跃升';
-      onActivate = () => {
-        const m = 1.8;
-        phys.jumpMult = m;
-        this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 5 秒');
-        setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, 5000);
+    }
+    if (/跳高|跳跃|弹簧|跳得/.test(name)) {
+      return {
+        label: '跃升',
+        run: () => {
+          const m = 1.8;
+          phys.jumpMult = m;
+          this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 5 秒');
+          setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, 5000);
+        },
       };
-    } else if (/喷气|飞行|翅膀|背包|火箭/.test(name)) {
-      label = '喷气';
-      onActivate = () => {
-        phys.jetpack = true;
-        this._toast('喷气背包：空中按住空格上升，持续 6 秒');
-        setTimeout(() => { phys.jetpack = false; }, 6000);
+    }
+    if (/喷气|飞行|翅膀|背包|火箭/.test(name)) {
+      return {
+        label: '喷气',
+        run: () => {
+          phys.jetpack = true;
+          this._toast('喷气背包：空中按住空格上升，持续 6 秒');
+          setTimeout(() => { phys.jetpack = false; }, 6000);
+        },
       };
-    } else {
-      // 其它物品：简单短暂提速，聊胜于无
-      onActivate = () => {
+    }
+    return {
+      label: name,
+      run: () => {
         const m = 1.5;
         phys.speedMult = m;
         this._toast('「' + name + '」生效：速度短暂提升');
         setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 4000);
-      };
-    }
+      },
+    };
+  }
 
-    const keyName = this.skillSlots.registerSkill({ label, onActivate });
+  // 把阿花给的物品挂到技能槽：按物品名映射效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
+  _equipItemSkill(item) {
+    const eff = this._effectForItem(item);
+    const keyName = this.skillSlots.registerSkill({ label: eff.label, onActivate: eff.run });
     const tag = keyName ? '（按 ' + keyName.slice(-1) + ' 触发）' : '';
-    this._toast('「' + name + '」已装备到技能槽' + tag);
+    this._toast('「' + item + '」已装备到技能槽' + tag);
+  }
+
+  // 背包「使用」：直接触发该物品对应的技能效果（与技能槽同源）。
+  _useItem(item) {
+    const eff = this._effectForItem(item);
+    eff.run();
+  }
+
+  // 给物品挑一个图标色：按名字散列到一个固定色板，保证同名拿到同色。
+  _itemColor(name) {
+    const palette = ['#e74c3c', '#e67e22', '#f1c40f', '#27ae60', '#16a085', '#3498db', '#9b59b6', '#e84393', '#2c3e50'];
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return palette[h % palette.length];
   }
 
   // spawn_item：在玩家正前方生成一个发光可拾取道具，走过去触碰即可拾取。

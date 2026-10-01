@@ -1,20 +1,16 @@
 // 职责：出生点旁的「AI 商人 NPC」。
-// 1. 在配置坐标搭一个简单商人形象 + 名牌；2. 每帧检测玩家距离，靠近显示「按 E 对话」提示；
-// 3. 玩家靠近按 E 时触发 onInteract 回调（由 Game 打开对话面板）。不产生物理碰撞体。
+// 1. 在配置坐标搭一个商人形象；2. 每帧检测玩家距离，靠近时通过 onRange 通知 Game 显隐对话选项卡；
+// 3. 玩家靠近按 F 时触发 onInteract 回调（由 Game 打开对话面板）。不产生物理碰撞体。
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
 
 
 
-// 建商人形象：用与玩家同款 boy 模型（静态显示，不绑定骨骼动画），外加上方名牌，出场即吸引注意。
+// 建商人形象：用与玩家同款 boy 模型（静态显示，不绑定骨骼动画），出场即吸引注意。
+// 名牌已按要求移除，识别靠屏幕右侧的「按 F 与她对话」选项卡。
 function buildMerchant() {
   const g = new THREE.Group();
-
-  // 名牌：挂在头上方
-  const sprite = makeLabel('阿花 · 物品商人', 1.7);
-  sprite.position.y = 2.2;
-  g.add(sprite);
 
   // 玩家同款 boy 模型：按包围盒等比缩放到 NPC 身高、脚底 y=0，静态展示
   instantiate('/assets/boy.glb')
@@ -33,30 +29,9 @@ function buildMerchant() {
       model.traverse((o) => { if (o.isMesh) o.castShadow = true; });
       g.add(model);
     })
-    .catch(() => { /* boy GLB 加载失败：保留名牌即可 */ });
+    .catch(() => { /* boy GLB 加载失败：模型留白即可 */ });
 
   return g;
-}
-
-function makeLabel(text, scale) {
-  const c = document.createElement('canvas');
-  c.width = 256; c.height = 72;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.beginPath();
-  ctx.roundRect(8, 8, 240, 56, 16);
-  ctx.fill();
-  ctx.fillStyle = '#7fd0ff';
-  ctx.font = 'bold 34px "Microsoft YaHei", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, 128, 36 + 2);
-  const tex = new THREE.CanvasTexture(c);
-  tex.minFilter = THREE.LinearFilter;
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
-  const sp = new THREE.Sprite(mat);
-  sp.scale.set(scale * 1.6, scale * 0.45, 1);
-  return sp;
 }
 
 // AiNpc(api)：注入一个 API 实例以获取目标文件名等；这里保持独立。
