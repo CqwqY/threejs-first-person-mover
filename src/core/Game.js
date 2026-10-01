@@ -15,7 +15,7 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale, setHeldText, setNameTagsVisible } from '../player/PlayerModel.js';
+import { setModelScale, setHeldText, setNameTagsVisible, setHealthBarsVisible } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
@@ -156,7 +156,10 @@ export class Game {
           this.renderer.shadowMap.enabled = !!v;
           this._sun.castShadow = !!v;
         },
-        nameTag: (v) => setNameTagsVisible(v), // 玩家头顶名牌总开关
+        nameTag: (v) => {
+          setNameTagsVisible(v);   // 玩家头顶名牌总开关
+          setHealthBarsVisible(v); // 血条跟着一起开关
+        },
       },
       {
         fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag'],
@@ -185,6 +188,11 @@ export class Game {
     // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
     this.vehicle = createVehicle(this.scene);
     this._vehDriver = null; // 后座时记住驾驶员的玩家 id
+    // 触屏不显示按键提示，桌面端补上 "(F)"
+    const coarsePointer =
+      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
+      'ontouchstart' in window;
+    this._vehKeyHint = coarsePointer ? '' : (' (' + Config.VEHICLE_KEY.slice(-1) + ')');
     this._vehHint = this._createVehicleHint();
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.VEHICLE_KEY) return;
@@ -436,12 +444,24 @@ export class Game {
 
   // ---- 电动车：上车 / 下车 / 每帧摆放 ----
 
+  // 上车/下车按钮：手机端没有 F 键，必须给一个可点的按钮；
+  // 放在屏幕下方中间（居中于两个拇指区之间），跟随安全区，尺寸用 vmin 以免旋转跳变。
   _createVehicleHint() {
     const el = document.createElement('div');
     el.style.cssText =
-      'position:fixed;left:50%;bottom:18%;transform:translateX(-50%);z-index:9000;display:none;' +
-      'background:rgba(0,0,0,.65);color:#fff;padding:6px 14px;border-radius:18px;pointer-events:none;' +
-      'font:13px/1.4 system-ui,"Microsoft YaHei",sans-serif;';
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
+      'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
+      'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;' +
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
+      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+    // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._toggleVehicle();
+    });
     document.body.appendChild(el);
     return el;
   }
@@ -553,17 +573,17 @@ export class Game {
       }
     }
 
-    // 3) 提示
+    // 3) 上车 / 下车按钮（触屏显示纯文字，桌面额外带按键提示）
     if (st.ride) {
-      this._vehHint.textContent = '按 ' + Config.VEHICLE_KEY.slice(-1) + ' 下车';
+      this._vehHint.textContent = '下车' + this._vehKeyHint;
       this._vehHint.style.display = '';
+      this._vehHint.style.opacity = '1';
     } else if (this._nearVehicle()) {
       const occupied = this._vehicleSeats();
       const full = occupied.driver && occupied.passenger;
-      this._vehHint.textContent = full
-        ? '电动车已满员'
-        : ('按 ' + Config.VEHICLE_KEY.slice(-1) + ' 上车');
+      this._vehHint.textContent = full ? '已满员' : ('上车' + this._vehKeyHint);
       this._vehHint.style.display = '';
+      this._vehHint.style.opacity = full ? '0.55' : '1';
     } else {
       this._vehHint.style.display = 'none';
     }

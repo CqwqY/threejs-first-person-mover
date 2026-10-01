@@ -67,7 +67,7 @@ const FIELDS = [
     options: ['512', '1024', '2048', '4096'],
   },
   { id: 'castShadow', label: '阴影开关', kind: 'toggle', defaultValue: true },
-  { id: 'nameTag', label: '显示玩家名牌', kind: 'toggle', defaultValue: true },
+  { id: 'nameTag', label: '显示名牌与血条', kind: 'toggle', defaultValue: true },
 ];
 
 let styleInjected = false;

@@ -181,6 +181,8 @@ export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff')
   hpSprite.scale.set(HP_W, HP_H, 1);
   hpSprite.position.y = -0.26;
   hpSprite.renderOrder = 11;
+  hpSprite.userData.isHpBar = true; // 供「显示名牌与血条」开关统一隐藏
+  hpSprite.visible = healthBarsVisible;
   headAnchor.add(hpSprite);
   const hpBar = { sprite: hpSprite, tex: hpTex, ctx: hpCanvas.getContext('2d'), shown: -1 };
   group.userData.hpBar = hpBar;
@@ -304,18 +306,29 @@ export function createNameTag(text, color = '#ffffff') {
   return sprite;
 }
 
-// 全局开关：是否显示玩家头顶名牌（血量条不受影响）
+// 全局开关：是否显示玩家头顶的名牌与血量条
 let nameTagsVisible = true;
-export function setNameTagsVisible(v) {
-  nameTagsVisible = !!v;
-  for (const e of models) {
-    const anchor = e.group && e.group.userData.headAnchor;
-    if (!anchor) continue;
-    for (const child of anchor.children) {
-      if (child.isSprite && child.userData.isNameTag) child.visible = nameTagsVisible;
-    }
+let healthBarsVisible = true;
+
+function applyHeadVisibility(group) {
+  const anchor = group && group.userData && group.userData.headAnchor;
+  if (!anchor) return;
+  for (const child of anchor.children) {
+    if (child.isSprite && child.userData.isNameTag) child.visible = nameTagsVisible;
+    if (child.userData.isHpBar) child.visible = healthBarsVisible;
   }
 }
+
+export function setNameTagsVisible(v) {
+  nameTagsVisible = !!v;
+  for (const e of models) applyHeadVisibility(e.group);
+}
+
+export function setHealthBarsVisible(v) {
+  healthBarsVisible = !!v;
+  for (const e of models) applyHeadVisibility(e.group);
+}
+
 export function getNameTagsVisible() {
   return nameTagsVisible;
 }
@@ -324,6 +337,9 @@ export function getNameTagsVisible() {
 export function updateNameTag(group, text, color = '#ffffff') {
   const anchor = group.userData.headAnchor;
   if (!anchor) return;
-  anchor.clear(); // 释放旧名牌子对象
+  // 只移除旧名牌：不能 anchor.clear()，否则会把同挂在头顶锚点下的血量条一起清掉
+  for (const child of [...anchor.children]) {
+    if (child.userData && child.userData.isNameTag) anchor.remove(child);
+  }
   if (text) anchor.add(createNameTag(text, color));
 }
