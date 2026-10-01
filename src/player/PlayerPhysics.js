@@ -18,8 +18,25 @@ export class PlayerPhysics {
     this.sizeTarget = 1;  // 目标体型倍率；sizeScale 每帧向它平滑逼近（避免变大/变小时视点瞬移）
     this.jumpMult = 1;    // 起跳倍率（跳跃初速度乘它，默认 1 = 正常）
     this.gravityMult = 1; // 重力倍率（重力加速度乘它，默认 1 = 正常）
+    this.speedMode = 'walk'; // 移动模式：walk/run/swim/fly，影响基础速度
+    this.maxJumps = 1;    // 最大连跳次数（1 = 只能落地后跳）
+    this._jumpsUsed = 0;  // 本次离地后已用掉的跳跃次数
+    this.terminalVelocity = null; // 下坠速度上限（米/秒），null = 不限制
+    this.frictionMult = 1;   // 地面摩擦倍率（仅影响无输入时的减速快慢）
+    this.accelMult = 1;      // 加速度倍率（仅影响有输入时提速快慢）
+    this.velocityHold = null; // 持续速度覆盖 {x,y,z,t}（t 秒内每帧强制该速度）
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
     this.controlLock = false; // 锁定操控：对话栏打开等 UI 占用时，移动/跳/喷气不响应
+  }
+
+  // 移动模式对应的基础速度系数：走路 1、奔跑 1.6、游泳 0.6、飞行 1.2
+  _modeFactor() {
+    switch (this.speedMode) {
+      case 'run': return 1.6;
+      case 'swim': return 0.6;
+      case 'fly': return 1.2;
+      default: return 1;
+    }
   }
 
   // 更新一帧物理。
@@ -61,14 +78,31 @@ export class PlayerPhysics {
     const sprint =
       input.sprinting() ||
       (input.joyMagnitude && input.joyMagnitude() >= 0.85);
-    const speed = Config.MOVE_SPEED * this.speedMult * (sprint ? Config.SPRINT_MULTIPLIER : 1);
+    const speed = Config.MOVE_SPEED * this.speedMult * this._modeFactor() * (sprint ? Config.SPRINT_MULTIPLIER : 1);
 
     // ---- 2. 水平速度 ----
-    this.velocity.x = move.x * speed;
-    this.velocity.z = move.z * speed;
+    // 默认（倍率均为 1）直接赋值，手感与原来完全一致；
+    // 一旦 NPC 调过加速度/摩擦，就改用指数逼近，让提速/减速更"有惯性"。
+    const targetVx = move.x * speed;
+    const targetVz = move.z * speed;
+    if (this.accelMult === 1 && this.frictionMult === 1) {
+      this.velocity.x = targetVx;
+      this.velocity.z = targetVz;
+    } else {
+      const moving = (move.x !== 0 || move.z !== 0);
+      // 有输入按加速度逼近目标；无输入时地面按摩擦力刹车、空中只留很小空气阻力
+      const rate = moving ? 12 * this.accelMult : (state.onGround ? 10 * this.frictionMult : 1.5);
+      const k = 1 - Math.exp(-dt * rate);
+      this.velocity.x += (targetVx - this.velocity.x) * k;
+      this.velocity.z += (targetVz - this.velocity.z) * k;
+    }
 
     // ---- 3. 重力：竖直方向速度持续向下累加（GRAVITY 为负值）----
     this.velocity.y += Config.GRAVITY * this.gravityMult * dt;
+    // 终端速度：限制下坠最快速度，避免高重力下穿地
+    if (this.terminalVelocity && this.velocity.y < -this.terminalVelocity) {
+      this.velocity.y = -this.terminalVelocity;
+    }
 
     // ---- 3.5 喷气背包：开启且按住空格、又在空中时，把竖直速度托住为上升/悬停 ----
     // 地面起跳仍走正常 jump；只要在空中按住空格就一直往上升，松开自然下落。
@@ -76,11 +110,23 @@ export class PlayerPhysics {
       this.velocity.y = Math.max(this.velocity.y + (Config.JETPACK_LIFT - this.velocity.y) * Math.min(1, dt * 8), Config.JETPACK_LIFT);
     }
 
-    // ---- 4. 跳跃：只有站在地面才允许跳 ----
+    // ---- 4. 跳跃：落地后重置连跳次数；只要还有剩余次数就允许再跳 ----
     // 采用一次性探测（consumeJump），防止按住空格时连续起跳
-    if (state.onGround && input.consumeJump() && !this.controlLock) {
+    if (state.onGround) this._jumpsUsed = 0;
+    if (!this.controlLock && this._jumpsUsed < this.maxJumps && input.consumeJump()) {
       this.velocity.y = Config.JUMP_VELOCITY * this.jumpMult; // 设置竖直初速度（受起跳倍率影响）
+      this._jumpsUsed++;
       state.onGround = false;
+    }
+
+    // ---- 4.5 持续速度覆盖：NPC 给的速度在 seconds 内每帧强制生效（覆盖重力/输入）----
+    if (this.velocityHold && this.velocityHold.t > 0) {
+      const h = this.velocityHold;
+      if (h.x !== null) this.velocity.x = h.x;
+      if (h.y !== null) this.velocity.y = h.y;
+      if (h.z !== null) this.velocity.z = h.z;
+      h.t -= dt;
+      if (h.t <= 0) this.velocityHold = null;
     }
 
     // ---- 5. 积分更新位置：把位置写入 state，供相机与网络读取 ----

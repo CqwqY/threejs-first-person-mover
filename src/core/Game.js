@@ -455,81 +455,99 @@ export class Game {
     }
   }
 
-  // 执行 GLM 点名的工具动作。所有参数已经过后端清洗，这里只做贴上玩家。
-  // 阿花是物品商人：只允许 spawn_item（物品进背包），其余效果/移动动作一概忽略，不再改变玩家属性。
+  // 执行 GLM 点名的工具动作。所有参数已经过后端清洗（越界值被钳制或整条丢弃），这里只做贴上玩家。
   _executeNpcAction(action) {
-    if (!action || action.name !== 'spawn_item') return;
+    if (!action || !action.name) return;
     const state = this.localState;
     const phys = this.localPlayer.physics;
+    const a = action.args || {};
+    // 带 seconds 的动作：到点自动恢复默认值（只在该值没被后续动作覆盖时还原）
+    const after = (secs, fn) => { if (secs && secs > 0) setTimeout(fn, secs * 1000); };
     switch (action.name) {
       case 'set_player_speed': {
-        phys.speedMult = action.args.multiplier;
-        this._toast('速度已变为 ' + action.args.multiplier + ' 倍');
-        if (action.args.seconds && action.args.seconds > 0) {
-          const t = action.args.seconds;
-          setTimeout(() => { if (phys.speedMult === action.args.multiplier) phys.speedMult = 1; }, t * 1000);
-        }
+        const m = a.multiplier;
+        phys.speedMult = m;
+        if (a.mode) phys.speedMode = a.mode;
+        this._toast('速度 ×' + m + (a.mode && a.mode !== 'walk' ? '（' + a.mode + '）' : ''));
+        after(a.seconds, () => { if (phys.speedMult === m) { phys.speedMult = 1; phys.speedMode = 'walk'; } });
         break;
       }
       case 'set_player_size': {
-        phys.sizeTarget = action.args.scale;
-        this._toast('体型已变为 ' + action.args.scale + ' 倍');
-        if (action.args.seconds && action.args.seconds > 0) {
-          const t = action.args.seconds;
-          setTimeout(() => { if (phys.sizeTarget === action.args.scale) phys.sizeTarget = 1; }, t * 1000);
-        }
+        const s = a.scale;
+        phys.sizeTarget = s;
+        this._toast('体型已变为 ' + s + ' 倍');
+        after(a.seconds, () => { if (phys.sizeTarget === s) phys.sizeTarget = 1; });
         break;
       }
       case 'teleport_player':
       case 'set_player_position': {
-        const x = action.args.x;
-        const z = action.args.z;
+        const x = a.x;
+        const z = a.z;
         if (Number.isFinite(x)) state.x = THREE.MathUtils.clamp(x, -Config.GROUND_WIDTH / 2, Config.GROUND_WIDTH / 2);
         if (Number.isFinite(z)) state.z = THREE.MathUtils.clamp(z, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
-        if (Number.isFinite(action.args.y)) state.y = action.args.y;
+        if (Number.isFinite(a.y)) state.y = a.y;
         else state.y = Config.PLAYER_HEIGHT * phys.sizeScale;
         this._toast('已移动');
         break;
       }
       case 'set_player_jump': {
-        phys.jumpMult = action.args.multiplier;
-        this._toast('起跳力度已变为 ' + action.args.multiplier + ' 倍');
-        if (action.args.seconds && action.args.seconds > 0) {
-          const t = action.args.seconds;
-          setTimeout(() => { if (phys.jumpMult === action.args.multiplier) phys.jumpMult = 1; }, t * 1000);
-        }
+        const m = a.multiplier;
+        phys.jumpMult = m;
+        if (a.max_jumps) phys.maxJumps = a.max_jumps;
+        this._toast('起跳力度 ×' + m + (a.max_jumps ? '，最多连跳 ' + a.max_jumps + ' 次' : ''));
+        after(a.seconds, () => {
+          if (phys.jumpMult === m) phys.jumpMult = 1;
+          if (a.max_jumps) phys.maxJumps = 1;
+        });
         break;
       }
       case 'set_player_gravity': {
-        phys.gravityMult = action.args.multiplier;
-        this._toast('重力已变为 ' + action.args.multiplier + ' 倍');
-        if (action.args.seconds && action.args.seconds > 0) {
-          const t = action.args.seconds;
-          setTimeout(() => { if (phys.gravityMult === action.args.multiplier) phys.gravityMult = 1; }, t * 1000);
-        }
+        const m = a.multiplier;
+        phys.gravityMult = m;
+        if (a.terminal_velocity) phys.terminalVelocity = a.terminal_velocity;
+        this._toast('重力 ×' + m + (a.terminal_velocity ? '，终端速度 ' + a.terminal_velocity : ''));
+        after(a.seconds, () => {
+          if (phys.gravityMult === m) phys.gravityMult = 1;
+          if (a.terminal_velocity) phys.terminalVelocity = null;
+        });
         break;
       }
       case 'set_player_velocity': {
-        const a = action.args;
-        if (Number.isFinite(a.x)) phys.velocity.x = a.x * phys.speedMult * 5;
-        if (Number.isFinite(a.y)) phys.velocity.y = a.y;
-        if (Number.isFinite(a.z)) phys.velocity.z = a.z * phys.speedMult * 5;
-        this._toast('已施加移动速度');
+        // 有 seconds：这段时间内每帧强制该速度；无 seconds：只给一次瞬时冲量
+        if (a.seconds && a.seconds > 0) {
+          phys.velocityHold = { x: a.x, y: a.y, z: a.z, t: a.seconds };
+        } else {
+          if (Number.isFinite(a.x)) phys.velocity.x = a.x;
+          if (Number.isFinite(a.y)) phys.velocity.y = a.y;
+          if (Number.isFinite(a.z)) phys.velocity.z = a.z;
+        }
+        this._toast('已施加速度' + (a.seconds ? '（持续 ' + a.seconds + ' 秒）' : ''));
+        break;
+      }
+      case 'set_player_friction': {
+        const m = a.multiplier;
+        phys.frictionMult = m;
+        this._toast('地面摩擦 ×' + m);
+        after(a.seconds, () => { if (phys.frictionMult === m) phys.frictionMult = 1; });
+        break;
+      }
+      case 'set_player_acceleration': {
+        const m = a.multiplier;
+        phys.accelMult = m;
+        this._toast('加速度 ×' + m);
+        after(a.seconds, () => { if (phys.accelMult === m) phys.accelMult = 1; });
         break;
       }
       case 'grant_jetpack': {
-        phys.jetpack = !!action.args.on;
+        phys.jetpack = !!a.on;
         this._toast(phys.jetpack ? '喷气背包已开启，空中按住空格上升' : '喷气背包已关闭');
-        if (action.args.seconds && action.args.seconds > 0) {
-          const t = action.args.seconds;
-          setTimeout(() => { phys.jetpack = false; }, t * 1000);
-        }
+        after(a.seconds, () => { phys.jetpack = false; });
         break;
       }
       case 'spawn_item': {
-        // 阿花把物品放进玩家背包，并记住她给的效果（speed/jump/jetpack/size/null）
-        const item = action.args.item || '神秘物品';
-        const effKey = action.args.effect || null;
+        // 阿花把物品放进玩家背包，并记住她给的效果（{k,v,s} 或 null）
+        const item = a.item || '神秘物品';
+        const effKey = a.effect || null;
         const key = getBagKey(this._profile);
         const n = addToBag(key, item, 1);
         this._storeItemEffect(item, effKey);

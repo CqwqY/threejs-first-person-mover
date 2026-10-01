@@ -9,34 +9,60 @@ const MAX_OUTPUT_TOKENS = 800;
 const MAX_HISTORY = 12; // 最多带几条历史消息，防止无限增长烧 token
 
 const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名叫阿花，在喷泉旁摆摊。热情、俏皮、爱开玩笑，说话简短（不超过三句）。
-
-核心职责：玩家想要什么，你就【当场自己发明一件对应的物品】，并【自己给这件物品写一个小效果】。物品名、强度、时长全部由你临时决定，不要照搬固定清单，也不要重复上一轮给过的东西。
+你既会给玩家物品，也能当场改动玩家的身体参数（速度/跳跃/重力/体型/摩擦/加速度/瞬时速度/传送/喷气背包），数值由你临时决定。
 
 【每次只输出一个 JSON，禁止任何其它文字、markdown代码块、注释、引号包裹】只有两种格式：
 1) 纯聊天 / 拒绝 / 闲聊：
 {"reply":"对玩家说的一句话","action":null}
-2) 给物品：
-{"reply":"对玩家说的一句话","action":{"name":"spawn_item","args":{"item":"物品名","effect":{"k":"效果类型","v":强度,"s":秒数}}}}
+2) 执行一个动作：
+{"reply":"对玩家说的一句话","action":{"name":"动作名","args":{参数}}}
 
-【最重要：effect 必须是对象，不能是字符串】
-- 错误（无效）：{"item":"疾风靴","effect":"speed"}
-- 正确：{"item":"疾风靴","effect":{"k":"speed","v":2.0,"s":5}}
-effect 对象固定三个字段：
-- k 只能是 speed / jump / jetpack / size 四个之一
-- v 强度：speed 1.2~3；jump 1.1~2.5；size 0.4~2.5（小于1变小、大于1变大）；jetpack 不写 v
-- s 持续秒数，2~10
-装饰品/食物/纪念品（金苹果、矿泉水、幸运符、校徽、小礼物）没有技能效果，effect 直接写 null。
+【动作清单：name + args】
 
-【必须自己创造，不要套模板】
-- 玩家"跑得快"：可给"疾风靴"(speed, v=2.2, s=6)，也可给"闪电钉鞋"(speed, v=2.6, s=4)。
-- 玩家"能飞吗"：可给"喷气背包"(jetpack, s=8)，也可给"竹蜻蜓"(jetpack, s=5)。
-- 玩家"变高/变大"：可给"变大丸"(size, v=1.8, s=6)，也可给"缩缩豆"(size, v=0.6, s=5)。
-强一点就调大 v，久一点就调大 s，但别超出上面的范围。
+1. spawn_item —— 给物品（最常用）
+   args: {"item":"物品名","effect":{"k":"speed/jump/jetpack/size","v":强度,"s":秒数}}
+   - effect 必须是对象，绝不能写成字符串！错误：{"effect":"speed"}；正确：{"effect":{"k":"speed","v":2,"s":5}}
+   - k=speed 加速(v 1.2~3)；k=jump 跳高(v 1.1~2.5)；k=size 变大变小(v 0.3~2.5，小于1变小)；k=jetpack 飞行(不写 v)；s 秒数 2~10
+   - 装饰品/食物没有效果，effect 直接写 null，例如 {"item":"矿泉水","effect":null}
+
+2. set_player_speed —— 改移动速度
+   args: {"multiplier":倍数(0.2~5),"seconds":秒数,"mode":"walk/run/swim/fly"}
+   mode 默认 walk；run 更快、swim 更慢、fly 略快。
+
+3. set_player_jump —— 改跳跃
+   args: {"multiplier":倍数(0.1~5),"seconds":秒数,"max_jumps":最大连跳次数(1~5)}
+
+4. set_player_gravity —— 改重力
+   args: {"multiplier":倍数(0.1~3),"seconds":秒数,"terminal_velocity":下坠速度上限(1~200)}
+
+5. set_player_size —— 改体型
+   args: {"scale":倍数(0.3~5),"seconds":秒数}
+
+6. set_player_velocity —— 给速度冲量
+   args: {"x":水平,"y":竖直(正=上升),"z":水平,"seconds":持续秒数}
+   带 seconds：这段时间一直保持该速度（可用来飞）；不带：只推一下。
+
+7. set_player_friction —— 地面摩擦（越大越"刹得住"）
+   args: {"multiplier":倍数(0.1~5),"seconds":秒数}
+
+8. set_player_acceleration —— 加速度（越大提速越快，常和摩擦搭配）
+   args: {"multiplier":倍数(0.1~5),"seconds":秒数}
+
+9. teleport_player（等同 set_player_position）—— 传送到坐标
+   args: {"x":横坐标,"z":纵坐标,"y":高度(可选)}
+
+10. grant_jetpack —— 喷气背包开关
+   args: {"on":true或false,"seconds":秒数}
+
+【seconds 说明】写了 seconds 就持续那么久后自动恢复；不写则长期有效。
+
+【必须自己创造】物品名、强度、时长都临时定，别套模板复读，同一个需求可以给不同东西。
 
 【使用规则】
-- 玩家明确想要东西/送我一个 → 给物品，一次一件。
+- 玩家想要东西 → 用 spawn_item。
+- 玩家想"飞/跳高/加速/变小变大/传送/变轻"等 → 用上面 2~10 的动作，数值你定。
 - 闲聊、问路、拒绝，或危险/恶意请求（武器、打人、作弊）→ action 恒为 null。
-- reply 一定非空、是给玩家看的一句话。`;
+- 每次只执行一个动作；reply 一定非空、是给玩家看的一句话。`;
 
 // 简单 IP 限流：避免 /api/ai 被刷爆，白白烧 token
 const RATE = new Map(); // ip -> 时间戳数组
@@ -82,7 +108,8 @@ function cleanAction(name, args) {
     case 'set_player_speed': {
       const m = Number(a.multiplier);
       if (!Number.isFinite(m)) return null;
-      return { multiplier: Math.min(5, Math.max(0.2, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
+      const mode = /^(walk|run|swim|fly)$/.test(String(a.mode || '')) ? String(a.mode) : 'walk';
+      return { multiplier: Math.min(5, Math.max(0.2, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds), mode };
     }
     case 'set_player_size': {
       const s = Number(a.scale);
@@ -102,18 +129,37 @@ function cleanAction(name, args) {
     case 'set_player_jump': {
       const m = Number(a.multiplier);
       if (!Number.isFinite(m)) return null;
-      return { multiplier: Math.min(5, Math.max(0.1, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
+      return {
+        multiplier: Math.min(5, Math.max(0.1, Math.round(m * 10) / 10)),
+        seconds: clampSec(a.seconds),
+        max_jumps: clampInt(a.max_jumps, 1, 5),
+      };
     }
     case 'set_player_gravity': {
       const m = Number(a.multiplier);
       if (!Number.isFinite(m)) return null;
-      return { multiplier: Math.min(3, Math.max(0.1, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
+      const tv = Number(a.terminal_velocity);
+      return {
+        multiplier: Math.min(3, Math.max(0.1, Math.round(m * 10) / 10)),
+        seconds: clampSec(a.seconds),
+        terminal_velocity: Number.isFinite(tv) && tv > 0 ? clampNum(tv, 1, 200) : null,
+      };
     }
     case 'set_player_velocity': {
       const v = (k) => { const n = Number(a[k]); return Number.isFinite(n) ? Math.min(40, Math.max(-40, Math.round(n * 100) / 100)) : null; };
       const x = v('x'), y = v('y'), z = v('z');
       if (x === null && y === null && z === null) return null;
-      return { x, y, z };
+      return { x, y, z, seconds: clampSec(a.seconds) };
+    }
+    case 'set_player_friction': {
+      const m = Number(a.multiplier);
+      if (!Number.isFinite(m)) return null;
+      return { multiplier: Math.min(5, Math.max(0.1, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
+    }
+    case 'set_player_acceleration': {
+      const m = Number(a.multiplier);
+      if (!Number.isFinite(m)) return null;
+      return { multiplier: Math.min(5, Math.max(0.1, Math.round(m * 10) / 10)), seconds: clampSec(a.seconds) };
     }
     case 'set_player_position': {
       // 与 teleport_player 同构，另一种叫法，方便模型提及「归位/回出生点」
@@ -146,10 +192,17 @@ function clampNum(v, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
+function clampInt(v, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(hi, Math.max(lo, Math.round(n)));
+}
+
+// 持续秒数：现在真实生效，钳制到 1~60 秒；非法或非正数返回 null（表示永久/一次性）
 function clampSec(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return null; // 秒数暂不强制，交给客户端默认值，避免复杂计时
+  return Math.min(60, Math.max(1, Math.round(n)));
 }
 
 // 只保留 role/content 干净的文本消息，通通转成简单对象，防注入系统提示。
