@@ -35,8 +35,25 @@ export function viewportSize() {
 }
 
 export function currentMode() {
+  // 优先用 matchMedia 的方向判定：iOS 旋转动画期间 innerWidth/Height 还是旧值，
+  // 而 (orientation: portrait) 会在动画一开始就切换，能避免"先按旧方向排一次"的抖动。
+  if (window.matchMedia) {
+    if (window.matchMedia('(orientation: portrait)').matches) return 'portrait';
+    if (window.matchMedia('(orientation: landscape)').matches) return 'landscape';
+  }
   const { width, height } = viewportSize();
   return width > height ? 'landscape' : 'portrait';
+}
+
+// 把当前可视视口尺寸写进 CSS 变量。
+// iOS 的 100vh 等于「大视口」（含地址栏）且旋转后不更新，用它排版必然错位；
+// 统一走 --app-vh / --app-vw，由这里按 visualViewport 实时刷新。
+function syncCssVars() {
+  const root = document.documentElement;
+  if (!root) return;
+  const { width, height } = viewportSize();
+  root.style.setProperty('--app-vw', width + 'px');
+  root.style.setProperty('--app-vh', height + 'px');
 }
 
 // ---- 存储 ----
@@ -170,9 +187,22 @@ export function setLayoutPaused(v) {
   paused = !!v;
 }
 
-// 统一重排：算视口 → 应用布局 → 通知订阅者（订阅者负责清输入残留、刷新编辑把手）
-export function relayout() {
+// 统一重排：算视口 → 应用布局 → 通知订阅者（订阅者负责清输入残留、刷新编辑把手）。
+// 带滞回：地址栏收缩会连发多次 resize，尺寸只差几像素时不再重排，避免来回跳。
+// force=true 强制重排（如用户手动点重置）。
+let lastApplied = { w: 0, h: 0, mode: '' };
+const SIZE_EPSILON = 8; // 小于该像素差视为"浏览器工具栏小幅变化"，忽略
+
+export function relayout(force) {
+  const { width, height } = viewportSize();
   const mode = currentMode();
+  const changed = !!force
+    || Math.abs(width - lastApplied.w) > SIZE_EPSILON
+    || Math.abs(height - lastApplied.h) > SIZE_EPSILON
+    || mode !== lastApplied.mode;
+  if (!changed) return;
+  lastApplied = { w: width, h: height, mode };
+  syncCssVars();
   if (!paused) applyLayout(mode);
   for (const cb of subs) {
     try { cb(mode); } catch (e) { /* 单个订阅者出错不影响其它 */ }
@@ -184,23 +214,41 @@ export function resetLayout() {
   try { localStorage.removeItem(STORE_KEY); } catch (e) { /* 忽略 */ }
   migrated = true;
   applyLayout(currentMode());
-  relayout();
+  relayout(true);
 }
 
-// 启动监听：resize / orientationchange / visualViewport；rAF 节流 + 延迟二次校正
+// 拦截浏览器手势：iOS 10+ 会忽略 meta 里的 user-scalable=no，
+// 所以必须自己拦 gesture*（双指捏合）与 dblclick（双击缩放）。
+function installGestureGuards() {
+  const prevent = (e) => { if (e.cancelable) e.preventDefault(); };
+  for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(ev, prevent, { passive: false });
+  }
+  document.addEventListener('dblclick', prevent, { passive: false });
+  document.addEventListener('touchstart', (e) => { if (e.touches.length > 1) prevent(e); }, { passive: false });
+  document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) prevent(e); }, { passive: false });
+}
+
+// 启动监听：resize / orientationchange / visualViewport / screen.orientation；rAF 节流 + 延迟二次校正
 let installed = false;
 export function installViewportWatcher(onChange) {
   if (typeof onChange === 'function') subs.push(onChange);
   if (installed) return;
   installed = true;
+  installGestureGuards();
+  syncCssVars();
   let raf = 0;
   const kick = () => {
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; relayout(); });
   };
-  const kickLate = () => setTimeout(kick, 260); // 旋转动画期间尺寸会读到旧值，补一次
+  // 旋转动画期间尺寸会读到旧值，稍后再校正一次（迟到的第二次才是终值）
+  const kickLate = () => setTimeout(kick, 260);
   window.addEventListener('resize', kick);
   window.addEventListener('orientationchange', () => { kick(); kickLate(); });
+  if (window.screen && window.screen.orientation && window.screen.orientation.addEventListener) {
+    window.screen.orientation.addEventListener('change', () => { kick(); kickLate(); });
+  }
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', kick);
     window.visualViewport.addEventListener('scroll', kick);

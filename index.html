@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>第一人称移动 · Three.js</title>
   <style>
     /* 页面无滚动条，铺满全屏 */
@@ -12,6 +12,13 @@
       padding: 0;
       height: 100%;
       overflow: hidden;
+      /* 整页禁止浏览器手势（缩放/下拉刷新/横向橡皮筋），不只加在控件上 */
+      touch-action: none;
+      overscroll-behavior: none;
+      /* WebKit 文字自动放大：旋转时会重算字号导致控件尺寸跳变，必须关掉 */
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+      -webkit-tap-highlight-color: transparent;
     }
     /* canvas 容器占满整个视口 */
     #app {

@@ -43,7 +43,9 @@ export class Game {
 
     // ---- 渲染器 ----
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    // dpr 封顶到 2：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
+    // 会反复触发 canvas 重算（掉帧/抖动的隐藏来源）
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -268,10 +270,14 @@ export class Game {
 
   // 窗口尺寸变化时更新相机纵横比和渲染器尺寸
   _onResize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    // 用可视视口（visualViewport）而不是 innerWidth/Height：iOS 上后者含地址栏，
+    // 会让 canvas 与用户实际看到的区域不一致
+    const vv = window.visualViewport;
+    const w = vv && vv.width ? vv.width : window.innerWidth;
+    const h = vv && vv.height ? vv.height : window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // dpr 封顶，且缩放后重新夹一次
     this.renderer.setSize(w, h);
   }
 

@@ -17,20 +17,20 @@ function injectStyle() {
     /* 容器不拦截触摸：只有具体槽位可点，缝隙仍可用来转视角 */
     .sk-box{position:fixed;z-index:60;display:flex;pointer-events:none;}
     .sk-box--mobile{right:calc(env(safe-area-inset-right, 0px) + 14px);bottom:118px;
-      flex-direction:column;align-items:center;gap:clamp(5px, 2vw, 9px);
-      max-height:calc(100vh - 140px);max-height:calc(100dvh - 140px);}
+      flex-direction:column;align-items:center;gap:clamp(5px, 2vmin, 9px);
+      max-height:calc(var(--app-vh, 100vh) - 140px);}
     .sk-box--desk{right:18px;bottom:22px;flex-direction:row;align-items:center;gap:8px;}
-    /* 槽位尺寸自适应：小屏自动缩小，避免占满屏幕 */
+    /* 槽位尺寸自适应：用 vmin（短边）而不是 vw——vw 在旋转后宽度翻倍会让控件突然变大 */
     .sk-slot{pointer-events:auto;touch-action:none;user-select:none;-webkit-user-select:none;cursor:pointer;
       box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
       background:rgba(10,16,26,.78);color:#fff;border:1px solid rgba(255,255,255,.28);
-      box-shadow:0 4px 12px rgba(0,0,0,.35);border-radius:clamp(9px, 3vw, 13px);text-align:center;
+      box-shadow:0 4px 12px rgba(0,0,0,.35);border-radius:clamp(9px, 3vmin, 13px);text-align:center;
       font-family:system-ui,"Microsoft YaHei",sans-serif;}
-    .sk-box--mobile .sk-slot{width:clamp(42px, 13vw, 58px);height:clamp(42px, 13vw, 58px);
-      font-size:clamp(10px, 3vw, 12px);}
+    .sk-box--mobile .sk-slot{width:clamp(42px, 12vmin, 58px);height:clamp(42px, 12vmin, 58px);
+      font-size:clamp(10px, 2.8vmin, 12px);}
     .sk-box--desk .sk-slot{min-width:56px;height:56px;font-size:12px;}
     .sk-label{font-weight:600;max-width:100%;padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-    .sk-key{font-size:clamp(9px, 2.6vw, 10px);color:rgba(255,255,255,.5);}
+    .sk-key{font-size:clamp(9px, 2.4vmin, 10px);color:rgba(255,255,255,.5);}
   `;
   document.head.appendChild(st);
 }

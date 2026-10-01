@@ -21,9 +21,10 @@ export function initMobileControls(input) {
   const style = document.createElement('style');
   style.textContent = `
     .mc-zone{position:fixed;bottom:0;touch-action:none;user-select:none;-webkit-user-select:none;z-index:50}
-    /* dvh 跟随「可视视口」；不支持时回退到 vh。横屏下 42vh 可能比摇杆还矮，用 min-height 兜底 */
-    .mc-left{left:0;width:44vw;height:42vh;height:42dvh;min-height:200px}
-    .mc-right{right:0;top:0;width:50vw;height:100vh;height:100dvh}
+    /* 高度用 --app-vh（visualViewport 实时写），不用 vh/dvh：
+       iOS 的 100vh 等于"大视口"（含地址栏）且旋转后不更新，会导致错位与跳动 */
+    .mc-left{left:0;width:44vw;height:calc(var(--app-vh, 100vh) * 0.42);min-height:200px}
+    .mc-right{right:0;top:0;width:50vw;height:var(--app-vh, 100vh)}
     .mc-joy{position:absolute;left:20px;bottom:26px;width:118px;height:118px;border-radius:50%;
       border:2px solid rgba(255,255,255,.32);background:rgba(255,255,255,.08);
       box-sizing:content-box}

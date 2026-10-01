@@ -19,10 +19,11 @@ export function initMobileLayout() {
   // ---- 自适应样式：尺寸随屏幕缩放 + 安全区 + 不使用会含浏览器工具栏的 100vh ----
   const style = document.createElement('style');
   style.textContent = `
-    .mc-jump{width:clamp(56px,15vw,78px);height:clamp(56px,15vw,78px);
-      font-size:clamp(13px,3.6vw,16px)}
-    .mc-joy{width:clamp(92px,27vw,124px);height:clamp(92px,27vw,124px)}
-    .mc-knob{width:clamp(42px,11vw,56px);height:clamp(42px,11vw,56px)}
+    /* 用 vmin（短边）而非 vw：vw 在旋转后宽度翻倍，控件会突然变大 */
+    .mc-jump{width:clamp(56px,15vmin,78px);height:clamp(56px,15vmin,78px);
+      font-size:clamp(13px,3.6vmin,16px)}
+    .mc-joy{width:clamp(92px,26vmin,124px);height:clamp(92px,26vmin,124px)}
+    .mc-knob{width:clamp(42px,11vmin,56px);height:clamp(42px,11vmin,56px)}
     .ml-bar{position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:80;display:flex;
       flex-direction:column;gap:6px;user-select:none;-webkit-user-select:none;
       font:12px/1.2 system-ui,"Microsoft YaHei",sans-serif}
