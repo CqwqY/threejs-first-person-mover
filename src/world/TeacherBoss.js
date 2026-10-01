@@ -164,6 +164,73 @@ export function createTeacherBoss(scene) {
     }
   }
 
+  // ---------- 落雷：先在随机落点画地面警示圈，预警结束后天降落雷 ----------
+  const bolts = [];
+  const boltWarnGeo = new THREE.RingGeometry(0.62, 1, 36);
+  const boltStrikeGeo = new THREE.CylinderGeometry(0.5, 0.5, 12, 14, 1, true);
+
+  function spawnBolt(x, z) {
+    // 每个落雷各自持有材质：它们会同时改透明度，共享材质会互相串味
+    const warn = new THREE.Mesh(boltWarnGeo, new THREE.MeshBasicMaterial({
+      color: 0xff5544, transparent: true, opacity: 0.4,
+      side: THREE.DoubleSide, depthWrite: false,
+    }));
+    warn.rotation.x = -Math.PI / 2;
+    warn.position.set(x, 0.06, z);
+    warn.scale.setScalar(Config.BOSS_BOLT_RADIUS);
+    scene.add(warn);
+
+    const strike = new THREE.Mesh(boltStrikeGeo, new THREE.MeshBasicMaterial({
+      color: 0xdff0ff, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    }));
+    strike.position.set(x, 6, z);
+    strike.scale.set(Config.BOSS_BOLT_RADIUS, 1, Config.BOSS_BOLT_RADIUS);
+    strike.visible = false;
+    scene.add(strike);
+
+    bolts.push({ x, z, warn, strike, t: 0, struck: false, life: 0 });
+  }
+
+  function clearBolts() {
+    for (const b of bolts) {
+      scene.remove(b.warn); b.warn.material.dispose();
+      scene.remove(b.strike); b.strike.material.dispose();
+    }
+    bolts.length = 0;
+  }
+
+  // 落雷推进：预警圈由大缩到落点大小，砸下来时对本地玩家结算一次伤害
+  function updateBolts(dt, local) {
+    for (let i = bolts.length - 1; i >= 0; i--) {
+      const b = bolts[i];
+      b.t += dt;
+      if (!b.struck) {
+        const k = Math.min(1, b.t / Config.BOSS_BOLT_WARN);
+        b.warn.scale.setScalar(Config.BOSS_BOLT_RADIUS * (1.45 - 0.45 * k));
+        b.warn.material.opacity = 0.3 + 0.5 * k;
+        if (b.t >= Config.BOSS_BOLT_WARN) {
+          b.struck = true;
+          b.warn.visible = false;
+          b.strike.visible = true;
+          if (local && !local.shield && Math.hypot(local.x - b.x, local.z - b.z) <= Config.BOSS_BOLT_RADIUS) {
+            if (onLocalDamage) onLocalDamage(Config.BOSS_BOLT_DAMAGE);
+          }
+        }
+      } else {
+        b.life += dt;
+        b.strike.material.opacity = 0.85 * Math.max(0, 1 - b.life / 0.35);
+        const s = Config.BOSS_BOLT_RADIUS * (1 + b.life * 1.6);
+        b.strike.scale.set(s, 1, s);
+        if (b.life >= 0.35) {
+          scene.remove(b.warn); b.warn.material.dispose();
+          scene.remove(b.strike); b.strike.material.dispose();
+          bolts.splice(i, 1);
+        }
+      }
+    }
+  }
+
   // ---------- 状态 ----------
   let mode = IDLE;
   let phase = 1;                   // 1 / 2 / 3
@@ -175,6 +242,9 @@ export function createTeacherBoss(scene) {
   let pz = P.z;
   let byaw = 0;                    // 当前朝向
   let laserAngle = 0;              // 激光当前旋转角
+  let laserOn = true;              // 激光是否处于「开启」的 10 秒窗口（关闭 5 秒时完全消失）
+  let laserTimer = 0;              // 当前开/关窗口的剩余时间
+  let boltTimer = 0;               // 下一次落雷的倒计时
   let volleyTimer = 0;
   let shiftTimer = 0;              // 阶段切换过场的剩余时间
   let resetTimer = 0;              // 被击败后传送门恢复的剩余时间
@@ -219,8 +289,10 @@ export function createTeacherBoss(scene) {
     netX = px;
     netZ = pz;
     netLaser = 0;
+    laserOn = false;
     laserGroup.visible = false;
     clearBullets();
+    clearBolts();
     setStatus();
   }
 
@@ -229,6 +301,7 @@ export function createTeacherBoss(scene) {
     phase = 1;
     hp = Config.BOSS_HP;
     volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.5; // 出现后先缓一下再开火
+    boltTimer = Config.BOSS_BOLT_INTERVAL;
     bossGroup.visible = true;
     laserGroup.visible = false;
     setStatus();
@@ -240,8 +313,12 @@ export function createTeacherBoss(scene) {
     hp = Config.BOSS_HP;
     mode = ALIVE;
     volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.6;
+    boltTimer = Config.BOSS_BOLT_INTERVAL;
     laserAngle = 0;
+    laserOn = n >= 2;
+    laserTimer = Config.BOSS_LASER_ON;
     clearBullets();
+    clearBolts();
     updateLaserGeometry();
     laserGroup.visible = n >= 2;
     if (onPhase) onPhase('enter', n);
@@ -255,6 +332,7 @@ export function createTeacherBoss(scene) {
     shiftTimer = Config.BOSS_PHASE_SHIFT;
     hp = 0;
     clearBullets();
+    clearBolts();
     laserGroup.visible = false;
     emit({ ev: 'shift', ph: next });
     if (onPhase) onPhase('shift', next);
@@ -268,6 +346,7 @@ export function createTeacherBoss(scene) {
     bossGroup.visible = false;
     laserGroup.visible = false;
     clearBullets();
+    clearBolts();
     emit({ ev: 'dead' });
     if (onPhase) onPhase('dead', phase);
     setStatus();
@@ -315,8 +394,10 @@ export function createTeacherBoss(scene) {
           netLaser = Number(msg.la) || 0;
           if (Number.isFinite(Number(msg.ph))) phase = Number(msg.ph);
           if (Number.isFinite(Number(msg.hp))) hp = Number(msg.hp);
+          // 激光的开/关窗口也随位姿下发，避免各端各自计时后错开
+          if (msg.lv !== undefined) laserOn = !!Number(msg.lv);
           updateLaserGeometry();
-          if (phase >= 2) laserGroup.visible = true;
+          laserGroup.visible = phase >= 2 && laserOn;
           setStatus();
         }
         break;
@@ -325,6 +406,12 @@ export function createTeacherBoss(scene) {
           fireVolley(Number(msg.x) || px, Number(msg.y) || (Config.BOSS_HEIGHT * 0.6), Number(msg.z) || pz);
         }
         break;
+      case 'bolt': {
+        const bx = Number(msg.x);
+        const bz = Number(msg.z);
+        if (Number.isFinite(bx) && Number.isFinite(bz)) spawnBolt(bx, bz);
+        break;
+      }
       case 'shift':
         if (mode === ALIVE || mode === SHIFT) {
           mode = SHIFT;
@@ -358,7 +445,7 @@ export function createTeacherBoss(scene) {
   function broadcastNow() {
     if (!owner || mode === IDLE) return;
     if (mode === COUNTDOWN) { emit({ ev: 'start' }); return; }
-    if (mode === ALIVE) emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: phase, la: laserAngle });
+    if (mode === ALIVE) emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: phase, la: laserAngle, lv: laserOn ? 1 : 0 });
     else if (mode === SHIFT) emit({ ev: 'shift', ph: nextPhase });
   }
 
@@ -395,9 +482,9 @@ export function createTeacherBoss(scene) {
     if (!blocked(px, pz, px, nz, colliders)) { pz = nz; }
   }
 
-  // ---------- 打本地玩家：碰到秒杀 ----------
+  // ---------- 打本地玩家：碰到秒杀（护盾期间免疫） ----------
   function checkContact(local) {
-    if (!local) return;
+    if (!local || local.shield) return;
     const reach = Config.BOSS_RADIUS + Config.PLAYER_RADIUS + Config.BOSS_CONTACT_PAD;
     if (Math.hypot(local.x - px, local.z - pz) > reach) return;
     // 竖直方向也要有重叠（站在楼顶/高空时碰不到）：老师占 [0, BOSS_HEIGHT]，玩家占 [y-身高, y]
@@ -410,7 +497,8 @@ export function createTeacherBoss(scene) {
   function checkLasers(local, dt) {
     laserHitCd = Math.max(0, laserHitCd - dt);
     shieldBlockCd = Math.max(0, shieldBlockCd - dt);
-    if (!local || laserHitCd > 0) return;
+    if (!laserOn || !local) return;  // 激光处于 5 秒消失窗口时不结算
+    if (laserHitCd > 0) return;
 
     const low = Config.BOSS_LASER_LOW;
     const high = laserHeight();
@@ -496,13 +584,33 @@ export function createTeacherBoss(scene) {
           emit({ ev: 'volley', x: px, y: by, z: pz });
         }
       } else {
-        laserAngle += (phase >= 3 ? Config.BOSS_LASER_SPIN_3 : Config.BOSS_LASER_SPIN_2) * dt;
+        // 激光开 10 秒、关 5 秒：关闭窗口整组隐藏，给玩家一段纯输出时间
+        laserTimer -= dt;
+        if (laserTimer <= 0) {
+          laserOn = !laserOn;
+          laserTimer = laserOn ? Config.BOSS_LASER_ON : Config.BOSS_LASER_OFF;
+          laserGroup.visible = laserOn;
+        }
+        if (laserOn) laserAngle += (phase >= 3 ? Config.BOSS_LASER_SPIN_3 : Config.BOSS_LASER_SPIN_2) * dt;
+      }
+
+      // 落雷：每隔一段时间在老师附近的随机落点砸一道，先给地面警示圈
+      boltTimer -= dt;
+      if (boltTimer <= 0) {
+        boltTimer = Config.BOSS_BOLT_INTERVAL;
+        const a = Math.random() * Math.PI * 2;
+        const r = Config.BOSS_BOLT_SPREAD_MIN
+          + Math.random() * (Config.BOSS_BOLT_SPREAD_MAX - Config.BOSS_BOLT_SPREAD_MIN);
+        const bx = px + Math.cos(a) * r;
+        const bz = pz + Math.sin(a) * r;
+        spawnBolt(bx, bz);
+        emit({ ev: 'bolt', x: bx, z: bz });
       }
 
       netPoseTimer -= dt;
       if (netPoseTimer <= 0) {
         netPoseTimer = 1 / Config.BOSS_NET_HZ;
-        emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: phase, la: laserAngle });
+        emit({ ev: 'pose', x: px, z: pz, yaw: byaw, hp, ph: phase, la: laserAngle, lv: laserOn ? 1 : 0 });
       }
     } else {
       // 位姿插值：按 10Hz 收到的目标平滑靠近，避免瞬移
@@ -513,8 +621,9 @@ export function createTeacherBoss(scene) {
       laserAngle += Math.atan2(Math.sin(netLaser - laserAngle), Math.cos(netLaser - laserAngle)) * k;
     }
 
-    // ---- 场地效果：接触秒杀 + 激光 / 弹幕命中（都只判本地玩家） ----
+    // ---- 场地效果：落雷 + 接触秒杀 + 激光 / 弹幕命中（都只判本地玩家） ----
     const local = ctx.local;
+    updateBolts(dt, local);
     if (local) {
       checkContact(local);
       if (phase >= 2) checkLasers(local, dt);
@@ -528,7 +637,7 @@ export function createTeacherBoss(scene) {
           b.mesh.rotation.y += dt * 4;
 
           let dead = b.life <= 0;
-          if (!dead) {
+          if (!dead && !local.shield) {
             const d = Math.hypot(b.mesh.position.x - local.x, b.mesh.position.z - local.z);
             const cy = local.y - Config.PLAYER_HEIGHT / 2; // 玩家躯干中心高度
             if (d <= Config.BOSS_BULLET_HIT_RADIUS && Math.abs(b.mesh.position.y - cy) <= 1.1) {

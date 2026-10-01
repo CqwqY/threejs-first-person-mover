@@ -150,13 +150,22 @@ export const Config = {
   BOSS_LASER_COUNT: 3,            // 同时存在的激光数量
   BOSS_LASER_LEN: 26,             // 激光长度（米）
   BOSS_LASER_THICK: 0.35,         // 激光厚度（米）
-  BOSS_LASER_DAMAGE: 120,         // 被激光扫到的伤害
+  BOSS_LASER_DAMAGE: 80,          // 被激光扫到的伤害
   BOSS_LASER_HIT_COOLDOWN: 1.2,   // 同一玩家被激光命中的最小间隔（秒）
   BOSS_LASER_SPIN_2: 1.05,        // 二阶段旋转角速度（弧度/秒）
   BOSS_LASER_SPIN_3: 1.35,        // 三阶段旋转角速度（弧度/秒）
   BOSS_LASER_LOW: 0.05,           // 激光下沿高度（米）
   BOSS_LASER_HIGH_2: 0.6,         // 二阶段激光上沿高度（米）：跳起来（最高约 0.9m）就能躲开
   BOSS_LASER_HIGH_3: 5.0,         // 三阶段激光上沿高度（米）：跳不过去，必须用护盾
+  BOSS_LASER_ON: 10,              // 激光持续开启时长（秒）
+  BOSS_LASER_OFF: 5,              // 激光消失时长（秒）：给玩家留出输出窗口
+  // 落雷：每隔一段时间在老师附近随机位置落一道雷，落下前先给地面警示圈
+  BOSS_BOLT_INTERVAL: 10,         // 落雷间隔（秒）
+  BOSS_BOLT_WARN: 1.6,            // 预警时长（秒）
+  BOSS_BOLT_RADIUS: 3,            // 落雷伤害半径（米）
+  BOSS_BOLT_DAMAGE: 100,          // 落雷伤害
+  BOSS_BOLT_SPREAD_MIN: 2,        // 随机落点离老师的最近距离（米）
+  BOSS_BOLT_SPREAD_MAX: 11,       // 随机落点离老师的最远距离（米）
   // 三阶段：手动开启的间歇性护盾
   BOSS_SHIELD_KEY: 'KeyQ',        // 开启护盾的键
   BOSS_SHIELD_DURATION: 1.5,      // 护盾持续时间（秒）
@@ -168,6 +177,12 @@ export const Config = {
   CHALK_SPEED: 24,
   CHALK_RADIUS: 1.6,              // 粉笔头落点爆炸半径（只对 Boss 结算，不误伤玩家）
   CHALK_COOLDOWN: 0.28,           // 两次投掷的最小间隔（秒）
+  // 技能槽 0 号位的「超级激光」：Boss 战期间占用 0 号槽，
+  // 对老师累计造成 SUPER_CHARGE 点伤害后充能完成，触发一次追踪导弹，用完重新充能
+  SUPER_CHARGE: 300,
+  SUPER_MISSILE_DAMAGE: 300,      // 追踪导弹命中老师的伤害
+  SUPER_MISSILE_SPEED: 26,        // 追踪导弹飞行速度（米/秒）
+  SUPER_MISSILE_LIFE: 8,          // 追踪导弹最长飞行时间（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。

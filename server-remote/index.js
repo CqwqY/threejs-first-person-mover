@@ -387,7 +387,7 @@ wss.on('connection', (ws) => {
     // 服务器不模拟 Boss，只做数值钳制后转发给其他玩家；Boss 由召唤者（owner）在客户端模拟。
     if (msg.t === 'boss') {
       const ev = String(msg.ev || '');
-      if (ev !== 'start' && ev !== 'pose' && ev !== 'volley' && ev !== 'damage' && ev !== 'shift' && ev !== 'phase' && ev !== 'dead') return;
+      if (ev !== 'start' && ev !== 'pose' && ev !== 'volley' && ev !== 'damage' && ev !== 'shift' && ev !== 'phase' && ev !== 'dead' && ev !== 'bolt') return;
       const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
       const out = { t: 'boss', ev };
       if (ev === 'pose') {
@@ -397,12 +397,16 @@ wss.on('connection', (ws) => {
         out.hp = num(msg.hp, 1000, 0, 100000);
         out.ph = Math.round(num(msg.ph, 1, 1, 3));   // 当前阶段
         out.la = num(msg.la, 0, -1000, 1000);        // 激光旋转角
+        out.lv = Math.round(num(msg.lv, 1, 0, 1));   // 激光是否处于开启窗口
       } else if (ev === 'volley') {
         out.x = num(msg.x, 0, -1000, 1000);
         out.y = num(msg.y, 0, -100, 500);
         out.z = num(msg.z, 0, -1000, 1000);
+      } else if (ev === 'bolt') {
+        out.x = num(msg.x, 0, -1000, 1000);
+        out.z = num(msg.z, 0, -1000, 1000);
       } else if (ev === 'damage') {
-        out.dmg = num(msg.dmg, 0, 1, 120);
+        out.dmg = num(msg.dmg, 0, 1, 1000); // 上限放宽到 1000：追踪导弹一次 300
         if (out.dmg <= 0) return;
       } else if (ev === 'shift' || ev === 'phase') {
         out.ph = Math.round(num(msg.ph, 2, 1, 3));

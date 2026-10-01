@@ -40,6 +40,9 @@ async function _fetchRemoteScene(scene, roots, target) {
 // 老师 Boss 的阶段名（1 起，索引 0 占位）
 const BOSS_PHASE_NAMES = ['', '一阶段', '二阶段', '三阶段'];
 
+// 圆锥几何默认朝 +Y，制导导弹用它转到飞行方向
+const UP_Y = new THREE.Vector3(0, 1, 0);
+
 export class Game {
   // 与服务器一致的昼夜周期（秒）：联机时以服务器权威时间为准，这里用于两次快照之间的外推
   static SYNC_DAY_SECONDS = 240;
@@ -269,6 +272,13 @@ export class Game {
     );
     this._shieldMesh.visible = false;
     this.scene.add(this._shieldMesh);
+
+    // 超级激光（技能槽 0 号位）：对老师累计造成 SUPER_CHARGE 伤害后充能，可发射一次追踪导弹
+    this._superDmg = 0;         // 本轮已对老师造成的伤害
+    this._superCharged = false; // 是否已充能完毕
+    this._superActive = false;  // 0 号槽当前是否被超级激光占用
+    this._superLabel = '';      // 0 号槽当前文案（用于去重）
+    this._missiles = [];        // 在飞的追踪导弹
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
@@ -870,6 +880,109 @@ export class Game {
     this._updateBossUI();
   }
 
+  // 对老师造成的伤害累计到超级激光的充能进度里
+  _addSuperCharge(dmg) {
+    if (this._superCharged || !(dmg > 0)) return;
+    this._superDmg += dmg;
+    if (this._superDmg >= Config.SUPER_CHARGE) {
+      this._superDmg = Config.SUPER_CHARGE;
+      this._superCharged = true;
+      this._toast('超级激光充能完成，按 1 发射追踪导弹');
+    }
+  }
+
+  // Boss 战期间把 0 号技能槽改成超级激光；打完后还原原本装在 0 号槽的物品
+  _updateSuperSlot() {
+    if (!this.skillSlots) return;
+    const active = this.boss && this.boss.mode !== 'idle' && this.boss.mode !== 'dead';
+    if (active) {
+      const label = this._superCharged
+        ? '追踪导弹'
+        : ('充能 ' + Math.min(Config.SUPER_CHARGE, Math.floor(this._superDmg)) + '/' + Config.SUPER_CHARGE);
+      if (this._superActive && this._superLabel === label) return;
+      this._superActive = true;
+      this._superLabel = label;
+      this.skillSlots.assign(0, { label, onActivate: () => this._fireHomingMissile() });
+      return;
+    }
+    if (!this._superActive) return;
+    // 战斗结束：还原 0 号槽（不写回 localStorage，原来装的是什么就还原什么）
+    this._superActive = false;
+    this._superLabel = '';
+    this._superDmg = 0;
+    this._superCharged = false;
+    const item = this._skillMap ? this._skillMap[0] : null;
+    if (item) {
+      const eff = this._effectForItem(item);
+      this.skillSlots.assign(0, { label: eff.label, onActivate: eff.run });
+    } else {
+      this.skillSlots.clearSlot(0);
+    }
+  }
+
+  // 发射追踪导弹：命中老师造成大额伤害，用完重新充能
+  _fireHomingMissile() {
+    if (!this._superCharged) {
+      this._toast('超级激光充能中 ' + Math.floor(this._superDmg) + '/' + Config.SUPER_CHARGE);
+      return;
+    }
+    if (!this.boss || this.boss.mode !== 'alive') {
+      this._toast('现在没有可锁定的目标');
+      return;
+    }
+    this._superCharged = false;
+    this._superDmg = 0;
+    this._superLabel = ''; // 强制下一帧刷新槽位文案
+
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
+    const mesh = new THREE.Mesh(
+      new THREE.ConeGeometry(0.22, 0.9, 10),
+      new THREE.MeshBasicMaterial({ color: 0x7ff0ff })
+    );
+    mesh.position.set(s.x, s.y, s.z).addScaledVector(dir, 0.9);
+    mesh.quaternion.setFromUnitVectors(UP_Y, dir); // 圆锥默认朝 +Y，转到飞行方向
+    this.scene.add(mesh);
+    this._missiles.push({ mesh, dir, life: Config.SUPER_MISSILE_LIFE });
+    this._toast('追踪导弹已发射');
+  }
+
+  // 追踪导弹推进：朝老师缓慢转向（制导），贴近后爆炸并结算伤害
+  _updateMissiles(dt) {
+    if (!this._missiles.length) return;
+    const alive = this.boss && this.boss.mode === 'alive';
+    const bp = alive ? this.boss.pos : null;
+    for (let i = this._missiles.length - 1; i >= 0; i--) {
+      const m = this._missiles[i];
+      m.life -= dt;
+      if (bp) {
+        const want = new THREE.Vector3(bp.x - m.mesh.position.x, Config.BOSS_HEIGHT * 0.5 - m.mesh.position.y, bp.z - m.mesh.position.z);
+        if (want.lengthSq() > 1e-6) {
+          want.normalize();
+          m.dir.lerp(want, Math.min(1, dt * 3.2)).normalize();
+          m.mesh.quaternion.setFromUnitVectors(UP_Y, m.dir);
+        }
+      }
+      m.mesh.position.addScaledVector(m.dir, Config.SUPER_MISSILE_SPEED * dt);
+
+      const hit = !!bp
+        && Math.hypot(m.mesh.position.x - bp.x, m.mesh.position.z - bp.z) < 1.4
+        && m.mesh.position.y < Config.BOSS_HEIGHT + 1.2;
+      if (hit) {
+        this._playExplosion(m.mesh.position.clone(), 2.6, Config.SUPER_MISSILE_DAMAGE);
+        this.boss.hurtBy(Config.SUPER_MISSILE_DAMAGE);
+      }
+      if (hit || m.life <= 0) {
+        this.scene.remove(m.mesh);
+        m.mesh.geometry.dispose();
+        m.mesh.material.dispose();
+        this._missiles.splice(i, 1);
+      }
+    }
+  }
+
   // 顶部的 Boss 血条：倒计时显示剩余秒数，出现后显示血量
   _createBossBar() {
     const box = document.createElement('div');
@@ -978,6 +1091,7 @@ export class Game {
       local: { x: me.x, y: me.y, z: me.z, shield },
       colliders: this.colliders,
     });
+    this._updateSuperSlot();
     this._updateBossUI();
   }
 
@@ -1481,7 +1595,10 @@ export class Game {
     }
 
     // 1.5) Boss：爆心落在她身上就扣血（伤害增量由所有人各自扣一份）
-    if (p.damage && this.boss && this.boss.hitsAt(c.x, c.y, c.z, radius)) this.boss.hurtBy(p.damage);
+    if (p.damage && this.boss && this.boss.hitsAt(c.x, c.y, c.z, radius)) {
+      this.boss.hurtBy(p.damage);
+      this._addSuperCharge(p.damage); // 打在她身上的伤害同时给超级激光充能
+    }
 
     // 2) 范围效果：半径内的玩家获得 onHit 指定的增益（治疗/加速/跳高/飞行/体型）
     const onHit = p.onHit;
@@ -1893,6 +2010,8 @@ export class Game {
 
     // 传送门 / 老师 Boss：倒计时、追击、弹幕与 UI
     this._updateBoss(dt);
+    // 超级激光的追踪导弹
+    this._updateMissiles(dt);
 
     // 投掷物：推进飞行、命中/落地后结算范围伤害
     this._updateProjectiles(dt);
