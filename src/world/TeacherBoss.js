@@ -231,6 +231,104 @@ export function createTeacherBoss(scene) {
     }
   }
 
+  // ---------- 掩体：在朝向玩家的那一侧升起一圈石墙挡住粉笔头，10 秒后缩回地面 ----------
+  // 石墙同时写进 Game 的碰撞体列表，所以玩家自己也撞不过去，只能绕到背后的缺口打她。
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a7a6a, roughness: 0.95, metalness: 0 });
+
+  let wall = null;           // { group, blocks, colliders, t, added }
+  let collidersRef = null;   // Game 的碰撞体数组（同一引用），掩体升好后临时插进去
+
+  // 0 → 刚冒头；1 → 完全立起；再回落到 0 表示缩回完成
+  function wallHeightFactor(t) {
+    const rise = Config.BOSS_WALL_RISE;
+    if (t < rise) return t / rise;
+    if (t < rise + Config.BOSS_WALL_DURATION) return 1;
+    return Math.max(0, 1 - (t - rise - Config.BOSS_WALL_DURATION) / rise);
+  }
+
+  function applyWallHeight(k) {
+    const H = Config.BOSS_WALL_HEIGHT;
+    for (const b of wall.blocks) {
+      b.mesh.scale.y = Math.max(0.001, k);
+      b.mesh.position.y = (H * k) / 2; // 底边始终贴地
+    }
+  }
+
+  function attachWallColliders() {
+    if (!wall || wall.added || !collidersRef) return;
+    for (const c of wall.colliders) collidersRef.push(c);
+    wall.added = true;
+  }
+
+  function detachWallColliders() {
+    if (!wall || !wall.added || !collidersRef) return;
+    for (const c of wall.colliders) {
+      const i = collidersRef.indexOf(c);
+      if (i >= 0) collidersRef.splice(i, 1);
+    }
+    wall.added = false;
+  }
+
+  function raiseWall(x, z, yaw) {
+    if (wall) return;
+    const arc = (Config.BOSS_WALL_ARC * Math.PI) / 180;
+    const n = Math.max(1, Config.BOSS_WALL_COUNT);
+    const step = arc / n;
+    const w = Math.max(0.6, Config.BOSS_WALL_RADIUS * step * 1.1); // 略宽于弧长，块与块之间不留缝
+    const group = new THREE.Group();
+    group.position.set(x, 0, z);
+    group.rotation.y = yaw; // 局部 +Z 朝向玩家，缺口自然留在她背后
+    scene.add(group);
+
+    const blocks = [];
+    const colliders = [];
+    for (let i = 0; i < n; i++) {
+      const a = -arc / 2 + (i + 0.5) * step;
+      const lx = Math.sin(a) * Config.BOSS_WALL_RADIUS;
+      const lz = Math.cos(a) * Config.BOSS_WALL_RADIUS;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(w, Config.BOSS_WALL_HEIGHT, Config.BOSS_WALL_THICK),
+        wallMat
+      );
+      mesh.position.set(lx, 0, lz);
+      mesh.rotation.y = a;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+      blocks.push({ mesh });
+      // 组内局部坐标 → 世界坐标（绕 Y 旋转 yaw）
+      colliders.push({
+        cx: x + Math.cos(yaw) * lx + Math.sin(yaw) * lz,
+        cy: Config.BOSS_WALL_HEIGHT / 2,
+        cz: z - Math.sin(yaw) * lx + Math.cos(yaw) * lz,
+        hx: w / 2,
+        hy: Config.BOSS_WALL_HEIGHT / 2,
+        hz: Config.BOSS_WALL_THICK / 2,
+        rotY: yaw + a,
+      });
+    }
+    wall = { group, blocks, colliders, t: 0, added: false };
+    applyWallHeight(0.001);
+  }
+
+  function removeWall() {
+    if (!wall) return;
+    detachWallColliders();
+    for (const b of wall.blocks) b.mesh.geometry.dispose();
+    scene.remove(wall.group);
+    wall = null;
+  }
+
+  function updateWall(dt) {
+    if (!wall) return;
+    wall.t += dt;
+    const k = wallHeightFactor(wall.t);
+    applyWallHeight(k);
+    if (k >= 1) attachWallColliders();
+    else if (wall.t >= Config.BOSS_WALL_RISE + Config.BOSS_WALL_DURATION) detachWallColliders();
+    if (k <= 0) removeWall();
+  }
+
   // ---------- 状态 ----------
   let mode = IDLE;
   let phase = 1;                   // 1 / 2 / 3
@@ -245,6 +343,7 @@ export function createTeacherBoss(scene) {
   let laserOn = true;              // 激光是否处于「开启」的 10 秒窗口（关闭 5 秒时完全消失）
   let laserTimer = 0;              // 当前开/关窗口的剩余时间
   let boltTimer = 0;               // 下一次落雷的倒计时
+  let wallTimer = 0;               // 下一次升掩体的倒计时
   let volleyTimer = 0;
   let shiftTimer = 0;              // 阶段切换过场的剩余时间
   let resetTimer = 0;              // 被击败后传送门恢复的剩余时间
@@ -293,6 +392,7 @@ export function createTeacherBoss(scene) {
     laserGroup.visible = false;
     clearBullets();
     clearBolts();
+    removeWall();
     setStatus();
   }
 
@@ -302,6 +402,7 @@ export function createTeacherBoss(scene) {
     hp = Config.BOSS_HP;
     volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.5; // 出现后先缓一下再开火
     boltTimer = Config.BOSS_BOLT_INTERVAL;
+    wallTimer = Config.BOSS_WALL_INTERVAL;
     bossGroup.visible = true;
     laserGroup.visible = false;
     setStatus();
@@ -314,6 +415,7 @@ export function createTeacherBoss(scene) {
     mode = ALIVE;
     volleyTimer = Config.BOSS_VOLLEY_INTERVAL * 0.6;
     boltTimer = Config.BOSS_BOLT_INTERVAL;
+    wallTimer = Config.BOSS_WALL_INTERVAL;
     laserAngle = 0;
     laserOn = n >= 2;
     laserTimer = Config.BOSS_LASER_ON;
@@ -333,6 +435,7 @@ export function createTeacherBoss(scene) {
     hp = 0;
     clearBullets();
     clearBolts();
+    removeWall();
     laserGroup.visible = false;
     emit({ ev: 'shift', ph: next });
     if (onPhase) onPhase('shift', next);
@@ -350,6 +453,7 @@ export function createTeacherBoss(scene) {
     laserGroup.visible = false;
     clearBullets();
     clearBolts();
+    removeWall();
     if (broadcast) emit({ ev: 'dead' });
     if (onPhase) onPhase('dead', phase);
     setStatus();
@@ -415,6 +519,12 @@ export function createTeacherBoss(scene) {
         if (Number.isFinite(bx) && Number.isFinite(bz)) spawnBolt(bx, bz);
         break;
       }
+      case 'wall': {
+        const wx = Number(msg.x);
+        const wz = Number(msg.z);
+        if (Number.isFinite(wx) && Number.isFinite(wz)) raiseWall(wx, wz, Number(msg.yaw) || 0);
+        break;
+      }
       case 'shift':
         // 只在战斗态接受，重复的 shift（例如别人晚加入时补发）不会把过场重播一遍
         if (mode === ALIVE) {
@@ -424,6 +534,7 @@ export function createTeacherBoss(scene) {
           hp = 0;
           clearBullets();
           clearBolts();
+          removeWall();
           laserGroup.visible = false;
           if (onPhase) onPhase('shift', nextPhase);
           setStatus();
@@ -552,6 +663,10 @@ export function createTeacherBoss(scene) {
     beam.material.opacity = 0.12 + 0.08 * (0.5 + 0.5 * Math.sin(animT * 1.1 + 1));
     ringOuter.material.opacity = mode === IDLE ? 0.65 : 0.3;
 
+    // 掩体：动画在任何状态下都要推进（含过场）；碰撞体只在完全立起时生效
+    collidersRef = ctx.colliders || collidersRef;
+    updateWall(dt);
+
     if (mode === DEAD) {
       resetTimer -= dt;
       if (resetTimer <= 0) { mode = IDLE; phase = 1; hp = 0; setStatus(); }
@@ -580,7 +695,8 @@ export function createTeacherBoss(scene) {
 
     // ---- 移动 / 攻击：只有 owner 模拟，其他人按收到的位姿插值 ----
     if (owner) {
-      if (ctx.target) chase(dt, ctx.target, ctx.colliders);
+      // 掩体立着时她躲在墙后不动，等墙缩回再继续追
+      if (ctx.target && !wall) chase(dt, ctx.target, ctx.colliders);
 
       if (phase === 1) {
         volleyTimer -= dt;
@@ -612,6 +728,17 @@ export function createTeacherBoss(scene) {
         const bz = pz + Math.sin(a) * r;
         spawnBolt(bx, bz);
         emit({ ev: 'bolt', x: bx, z: bz });
+      }
+
+      // 掩体：每隔一段时间在朝向玩家的一侧升起一圈石墙，10 秒后缩回
+      if (!wall) {
+        wallTimer -= dt;
+        if (wallTimer <= 0) {
+          wallTimer = Config.BOSS_WALL_INTERVAL;
+          const wy = ctx.target ? Math.atan2(ctx.target.x - px, ctx.target.z - pz) : byaw;
+          raiseWall(px, pz, wy);
+          emit({ ev: 'wall', x: px, z: pz, yaw: wy });
+        }
       }
 
       netPoseTimer -= dt;

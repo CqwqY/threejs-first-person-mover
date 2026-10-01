@@ -159,6 +159,16 @@ export const Config = {
   BOSS_LASER_HIGH_3: 5.0,         // 三阶段激光上沿高度（米）：跳不过去，必须用护盾
   BOSS_LASER_ON: 10,              // 激光持续开启时长（秒）
   BOSS_LASER_OFF: 5,              // 激光消失时长（秒）：给玩家留出输出窗口
+  // 掩体：老师定期在朝向玩家的那一侧升起一圈石墙挡住粉笔头，10 秒后缩回地面。
+  // 石头会同时进碰撞体列表，所以玩家自己也撞不过去，只能绕到背后的缺口打她。
+  BOSS_WALL_INTERVAL: 16,         // 两次升墙之间的间隔（秒）
+  BOSS_WALL_DURATION: 10,         // 掩体保持时长（秒）
+  BOSS_WALL_COUNT: 6,             // 一圈的墙块数量
+  BOSS_WALL_ARC: 250,             // 墙块铺开的角度（度），其余角度留作缺口
+  BOSS_WALL_RADIUS: 2.8,          // 墙离老师的距离（米）
+  BOSS_WALL_HEIGHT: 2.8,          // 墙高（米）
+  BOSS_WALL_THICK: 0.35,          // 墙厚（米）
+  BOSS_WALL_RISE: 0.8,            // 升起 / 缩回的动画时长（秒）
   // 落雷：每隔一段时间在老师附近随机位置落一道雷，落下前先给地面警示圈
   BOSS_BOLT_INTERVAL: 10,         // 落雷间隔（秒）
   BOSS_BOLT_WARN: 1.6,            // 预警时长（秒）

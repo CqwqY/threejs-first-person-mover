@@ -387,7 +387,7 @@ wss.on('connection', (ws) => {
     // 服务器不模拟 Boss，只做数值钳制后转发给其他玩家；Boss 由召唤者（owner）在客户端模拟。
     if (msg.t === 'boss') {
       const ev = String(msg.ev || '');
-      if (ev !== 'start' && ev !== 'pose' && ev !== 'volley' && ev !== 'damage' && ev !== 'shift' && ev !== 'phase' && ev !== 'dead' && ev !== 'bolt') return;
+      if (ev !== 'start' && ev !== 'pose' && ev !== 'volley' && ev !== 'damage' && ev !== 'shift' && ev !== 'phase' && ev !== 'dead' && ev !== 'bolt' && ev !== 'wall') return;
       const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
       const out = { t: 'boss', ev };
       if (ev === 'pose') {
@@ -405,6 +405,10 @@ wss.on('connection', (ws) => {
       } else if (ev === 'bolt') {
         out.x = num(msg.x, 0, -1000, 1000);
         out.z = num(msg.z, 0, -1000, 1000);
+      } else if (ev === 'wall') {
+        out.x = num(msg.x, 0, -1000, 1000);
+        out.z = num(msg.z, 0, -1000, 1000);
+        out.yaw = num(msg.yaw, 0, -20, 20);
       } else if (ev === 'damage') {
         out.dmg = num(msg.dmg, 0, 1, 1000); // 上限放宽到 1000：追踪导弹一次 300
         if (out.dmg <= 0) return;
