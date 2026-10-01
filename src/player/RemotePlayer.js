@@ -1,7 +1,7 @@
 // 职责：代表一个远程玩家，组合 PlayerState（数据）与 PlayerModel（外观），并对状态做插值渲染。
 import { Config } from '../config.js';
 import { PlayerState } from './PlayerState.js';
-import { createPlayerModel } from './PlayerModel.js';
+import { createPlayerModel, updateNameTag } from './PlayerModel.js';
 
 export class RemotePlayer {
   // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色
@@ -38,6 +38,11 @@ export class RemotePlayer {
   // 收到新快照时更新目标状态
   applyState(stateData) {
     this.target.fromJSON(stateData);
+  }
+
+  // 刷新头顶名牌文字/颜色（登录资料晚于 welcome 到达时用）
+  setLabel(text, color) {
+    updateNameTag(this.model, text, color || '#ffffff');
   }
 
   // 每帧：把 state 向 target 插值，再把模型位置/朝向同步到 state，并按移动速度驱动骨骼动画

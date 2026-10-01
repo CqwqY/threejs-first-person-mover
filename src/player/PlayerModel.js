@@ -182,3 +182,11 @@ export function createNameTag(text, color = '#ffffff') {
   sprite.scale.set(1.6, 0.45, 1);
   return sprite;
 }
+
+// 就地替换玩家头顶名牌（拿到登录资料后刷新昵称/颜色用）；text 为空则移除名牌
+export function updateNameTag(group, text, color = '#ffffff') {
+  const anchor = group.userData.headAnchor;
+  if (!anchor) return;
+  anchor.clear(); // 释放旧名牌子对象
+  if (text) anchor.add(createNameTag(text, color));
+}

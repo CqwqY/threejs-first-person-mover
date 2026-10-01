@@ -5,6 +5,7 @@ import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, createSettingsButton, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
+import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
@@ -32,6 +33,7 @@ export class Game {
   constructor(token = '', profile = null) {
     this._token = token;
     this._profile = profile;
+    this._placed = false; // 是否已用服务端出生点定位过（断线重连不再重定位，避免被拉回出生点）
 
     // ---- 渲染器 ----
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -152,6 +154,9 @@ export class Game {
       }
     );
     createSettingsButton({ text: '画面', panel: this.settingsPanel });
+
+    // 左上角玩家信息 HUD：显示当前账号名字，并提供退出登录
+    this.playerHUD = createPlayerHUD(this._profile, !!this._token);
   }
 
   // 窗口尺寸变化时更新相机纵横比和渲染器尺寸
@@ -167,18 +172,31 @@ export class Game {
   _onNetworkMessage(msg) {
     switch (msg.t) {
       case 'auth': {
-        // 服务端确认登录结果：刷新本地资料（昵称/颜色用于自己的名牌）
-        if (msg.ok && msg.profile) this._profile = msg.profile;
-        else if (!msg.ok) console.warn('[Game] 登录令牌失效，将以游客身份显示');
+        // 服务端确认登录结果：刷新本地资料（昵称/颜色用于 HUD 与自己的名牌）
+        if (msg.ok && msg.profile) {
+          this._profile = msg.profile;
+          this.playerHUD.setProfile(msg.profile);
+          this._refreshLocalLabel();
+        } else if (!msg.ok) {
+          // 令牌失效：清掉本地会话，退回游客态（下次进入会重新弹登录）
+          localStorage.removeItem('fp_token');
+          this._profile = null;
+          this.playerHUD.setProfile(null, false);
+          this._refreshLocalLabel();
+        }
         break;
       }
       case 'welcome': {
         // 确定本地 id，注册自己（模型隐藏），并加入服务器已存在的玩家
+        const firstPlace = !this._placed; // 仅首次进入才用出生点；重连保留当前位置
         this.localState.id = msg.id;
         // 用服务端分配的出生点初始化本地位置/朝向，避免都堆在原点
-        this.localState.x = msg.spawn.x;
-        this.localState.z = msg.spawn.z;
-        this.localState.yaw = msg.spawn.yaw;
+        if (firstPlace) {
+          this.localState.x = msg.spawn.x;
+          this.localState.z = msg.spawn.z;
+          this.localState.yaw = msg.spawn.yaw;
+          this._placed = true;
+        }
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         this.playerManager.setLocal(msg.id);
         // 本地名牌：登录了用昵称，否则游客样式
@@ -222,6 +240,20 @@ export class Game {
   toggleThirdPerson() {
     this.thirdPerson = !this.thirdPerson;
     this.playerManager.setLocalVisible(this.thirdPerson);
+  }
+
+  // 刷新本地玩家头顶名牌（登录资料晚于 welcome 到达时调用；第三人称可见）
+  _refreshLocalLabel() {
+    const local = this.playerManager.getLocalPlayer();
+    if (!local) return;
+    if (this._profile) {
+      local.setLabel(
+        this._profile.nickname || this._profile.username || '',
+        this._profile.nicknameColor || '#ffffff'
+      );
+    } else {
+      local.setLabel(`玩家${this.localState.num}`);
+    }
   }
 
   // 第三人称：本地模型跟随自身位置朝向并播放行走动画，相机位于玩家后上方看向角色

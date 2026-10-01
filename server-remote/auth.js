@@ -102,7 +102,7 @@ export function initAuth(dbPath) {
 
   // 需要登录的请求：从 Authorization: Bearer <token> 取 token，解析出用户
   function userFromAuth(req) {
-    stmts.clearExpired.run();
+    stmts.clearExpired.run(Date.now()); // 清理过期会话（占位符必须传参，否则 better-sqlite3 抛错导致进程崩溃）
     const h = req.headers.authorization || '';
     const token = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
     if (!token) return null;
