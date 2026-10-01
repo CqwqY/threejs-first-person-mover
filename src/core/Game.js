@@ -309,11 +309,9 @@ export class Game {
     this._gatlingHeat = 0;          // 0~100，满 100 过热
     this._gatlingOverheated = false;
     this._gatlingCd = 0;
-    this._tracers = [];             // 弹道线（共用几何与材质，同一时刻通常只有一条）
-    this._tracerGeo = new THREE.CylinderGeometry(0.02, 0.02, 1, 5);
-    this._tracerMat = new THREE.MeshBasicMaterial({
-      color: 0xffd76a, transparent: true, opacity: 0.85, depthWrite: false,
-    });
+    this._bullets = [];             // 在飞的子弹（只做视觉，命中是瞬时判定）
+    this._bulletGeo = new THREE.SphereGeometry(0.08, 8, 6);
+    this._bulletMat = new THREE.MeshBasicMaterial({ color: 0xffd76a });
     this._gatlingBar = this._createGatlingBar();
 
     // ---- 黑洞：扔出去不断变大，10 秒后把范围内的人吸过去 ----
@@ -1751,6 +1749,7 @@ export class Game {
     }
 
     // 老师：比前面的玩家更近就改打她
+    let hitBoss = false;
     if (this.boss && this.boss.mode === 'alive') {
       const bp = this.boss.pos;
       const cy = Config.BOSS_HEIGHT * 0.5;
@@ -1761,28 +1760,60 @@ export class Game {
         const pz = s.z + dz * t;
         if (Math.hypot(px - bp.x, pz - bp.z) <= Config.BOSS_RADIUS + Config.GATLING_HIT_RADIUS
           && Math.abs(py - cy) < Config.BOSS_HEIGHT) {
-          hitId = null;
-          this.boss.hurtBy(Config.GATLING_DAMAGE);
-          this._addSuperCharge(Config.GATLING_DAMAGE);
+          hitBoss = true;
+          hitT = t;
         }
       }
     }
 
-    if (hitId) this.network.sendHit(hitId, Config.GATLING_DAMAGE);
+    // 墙体拦截：射线被墙挡住就打不到墙后的人（也决定了子弹视觉飞到哪）
+    const probe = Number.isFinite(hitT) ? Math.min(Config.GATLING_RANGE, hitT + 1) : Config.GATLING_RANGE;
+    const clear = this._gatlingClearDistance(s.x, s.y, s.z, dx, dy, dz, probe);
 
-    this._spawnTracer(s.x + dx * 0.6, s.y + dy * 0.6, s.z + dz * 0.6, dx, dy, dz);
+    if (Number.isFinite(hitT) && hitT <= clear) {
+      if (hitBoss) {
+        this.boss.hurtBy(Config.GATLING_DAMAGE);
+        this._addSuperCharge(Config.GATLING_DAMAGE);
+      } else if (hitId) {
+        this.network.sendHit(hitId, Config.GATLING_DAMAGE);
+      }
+    }
+
+    // 子弹视觉：从枪口沿射线飞出去，打到墙或目标就消失
+    const travel = Math.min(Number.isFinite(hitT) ? hitT : Config.GATLING_RANGE, clear);
+    this._spawnBullet(s.x, s.y, s.z, dx, dy, dz, travel);
     this._gatlingHeat = Math.min(100, this._gatlingHeat + Config.GATLING_HEAT_PER_SHOT);
   }
 
-  // 弹道线：一小截发光柱，很快就淡掉
-  _spawnTracer(x, y, z, dx, dy, dz) {
-    const len = 12;
-    const m = new THREE.Mesh(this._tracerGeo, this._tracerMat);
-    m.position.set(x + dx * len / 2, y + dy * len / 2, z + dz * len / 2);
-    m.scale.y = len;
-    m.quaternion.setFromUnitVectors(UP_Y, new THREE.Vector3(dx, dy, dz));
-    this.scene.add(m);
-    this._tracers.push({ mesh: m, t: 0 });
+  // 射线能穿过多远：以固定步进向前采样，每一步都用「线段扫描」判定，
+  // 所以薄墙、楼板都拦得住；返回被挡住的距离（一路通畅就是 maxDist）。
+  _gatlingClearDistance(ox, oy, oz, dx, dy, dz, maxDist) {
+    const step = Config.GATLING_BULLET_STEP;
+    let px = ox;
+    let py = oy;
+    let pz = oz;
+    for (let t = step; t <= maxDist; t += step) {
+      const x = ox + dx * t;
+      const y = oy + dy * t;
+      const z = oz + dz * t;
+      if (this._projectileHitsWorld(x, y, z, 0.1, px, py, pz)) return Math.max(0.5, t - step);
+      px = x;
+      py = y;
+      pz = z;
+    }
+    return maxDist;
+  }
+
+  _spawnBullet(ox, oy, oz, dx, dy, dz, maxDist) {
+    const mesh = new THREE.Mesh(this._bulletGeo, this._bulletMat);
+    mesh.position.set(ox + dx * 0.6, oy + dy * 0.6, oz + dz * 0.6);
+    this.scene.add(mesh);
+    this._bullets.push({
+      mesh, dx, dy, dz,
+      ox: ox + dx * 0.6, oy: oy + dy * 0.6, oz: oz + dz * 0.6,
+      traveled: 0,
+      maxDist: Math.max(0.6, maxDist),
+    });
   }
 
   _updateGatling(dt) {
@@ -1805,14 +1836,25 @@ export class Game {
       }
     }
 
-    for (let i = this._tracers.length - 1; i >= 0; i--) {
-      const tr = this._tracers[i];
-      tr.t += dt;
-      if (tr.t >= Config.GATLING_TRACER_TIME) {
-        this.scene.remove(tr.mesh);
-        this._tracers.splice(i, 1);
+    // 子弹一直往前飞，飞满距离或撞到墙后由 _fireGatling 算出的 travel 消失
+    if (this._bullets.length) {
+      const speed = Config.GATLING_BULLET_SPEED * dt;
+      for (let i = this._bullets.length - 1; i >= 0; i--) {
+        const b = this._bullets[i];
+        b.traveled += speed;
+        if (b.traveled >= b.maxDist) {
+          this.scene.remove(b.mesh);
+          this._bullets.splice(i, 1);
+          continue;
+        }
+        b.mesh.position.set(
+          b.ox + b.dx * b.traveled,
+          b.oy + b.dy * b.traveled,
+          b.oz + b.dz * b.traveled
+        );
       }
     }
+
     this._updateGatlingUI();
   }
 

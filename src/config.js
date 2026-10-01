@@ -243,7 +243,8 @@ export const Config = {
   GATLING_HEAT_PER_SHOT: 3.5, // 每发增加的热量（0~100，满 100 过热）
   GATLING_COOL_RATE: 28,      // 不射击时每秒散热量
   GATLING_RECOVER_AT: 30,     // 过热后要降到这个热量才能继续开火
-  GATLING_TRACER_TIME: 0.07,  // 弹道线残留时长（秒）
+  GATLING_BULLET_SPEED: 90,   // 子弹飞行速度（米/秒），只影响视觉，命中仍是瞬时判定
+  GATLING_BULLET_STEP: 2,     // 射线拦截墙体的步进距离（米）；每步用线段扫描，薄墙也拦得住
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
