@@ -27,6 +27,20 @@ export function addToBag(key, item, n = 1) {
   return bag[item];
 }
 
+// 从背包移除物品（销毁），返回剩余数量；减到 0 则整条删除。
+export function removeFromBag(key, item, n = 1) {
+  const bag = loadBag(key);
+  if (!bag[item]) return 0;
+  bag[item] = Math.max(0, bag[item] - n);
+  if (bag[item] === 0) delete bag[item];
+  try {
+    localStorage.setItem(key, JSON.stringify(bag));
+  } catch (e) {
+    /* 存储不可用：本次会话内仍然生效 */
+  }
+  return bag[item] || 0;
+}
+
 // 背包内物品总件数
 export function totalItems(bag) {
   return Object.entries(bag).reduce((s, [, v]) => s + v, 0);

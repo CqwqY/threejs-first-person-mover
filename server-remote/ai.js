@@ -20,9 +20,9 @@ const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名�
 【动作清单：name + args】
 
 1. spawn_item —— 给物品（最常用）
-   args: {"item":"物品名","effect":{"k":"speed/jump/jetpack/size","v":强度,"s":秒数}}
+   args: {"item":"物品名","effect":{"k":"speed/jump/jetpack/size/throw","v":强度,"r":半径(仅throw),"s":秒数}}
    - effect 必须是对象，绝不能写成字符串！错误：{"effect":"speed"}；正确：{"effect":{"k":"speed","v":2,"s":5}}
-   - k=speed 加速(v 1.2~3)；k=jump 跳高(v 1.1~2.5)；k=size 变大变小(v 0.3~2.5，小于1变小)；k=jetpack 飞行(不写 v)；s 秒数 2~10
+   - k=speed 加速(v 1.2~3)；k=jump 跳高(v 1.1~2.5)；k=size 变大变小(v 0.3~2.5，小于1变小)；k=jetpack 飞行(不写 v)；k=throw 投掷物(v=伤害1~120, r=爆炸半径1~20)；s 秒数 2~10
    - 装饰品/食物没有效果，effect 直接写 null，例如 {"item":"矿泉水","effect":null}
 
 2. set_player_speed —— 改移动速度
@@ -53,6 +53,20 @@ const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名�
 
 10. grant_jetpack —— 喷气背包开关
    args: {"on":true或false,"seconds":秒数}
+
+11. set_player_health —— 血量接口（上限 500，不可超过）
+   args: {"value":直接设定(0~500)} 或 {"delta":增量(正回血/负扣血，-500~500)}
+   例：满血 {"value":500}；加血 {"delta":80}；扣血 {"delta":-60}
+   注意：降到 0 会死亡并自动重生，别滥用。
+
+12. hold_item —— 手持物（默认就是手上举着一段文字，最长 8 字）
+   args: {"text":"文字"}；传空串 {"text":""} 表示放下。
+
+13. spawn_projectile —— 直接投掷一个范围投掷物
+   args: {"damage":伤害(1~120),"radius":爆炸半径米(1~20),"speed":出手速度(4~40)}
+   命中地面或玩家后爆开，半径内所有玩家（含你自己）受伤。伤害请克制，别动辄上百。
+
+【数值平衡】伤害建议 15~60；范围 2~6 米；血量别一次扣光，留点余地。
 
 【seconds 说明】写了 seconds 就持续那么久后自动恢复；不写则长期有效。
 
@@ -167,6 +181,32 @@ function cleanAction(name, args) {
       if (!Number.isFinite(x) && !Number.isFinite(z)) return null;
       return { x: Number.isFinite(x) ? x : null, y: Number.isFinite(a.y) ? a.y : null, z: Number.isFinite(z) ? z : null };
     }
+    case 'set_player_health': {
+      // 血量接口：value 直接设定（0~500，上限硬性 500），delta 增量（正回血/负扣血）
+      const value = Number(a.value);
+      const delta = Number(a.delta);
+      const out = {};
+      if (Number.isFinite(value)) out.value = clampNum(value, 0, 500);
+      if (Number.isFinite(delta)) out.delta = clampNum(delta, -500, 500);
+      if (out.value === undefined && out.delta === undefined) return null;
+      return out;
+    }
+    case 'hold_item': {
+      // 手持物：默认就是手上举着一段文字；传空串表示放下
+      const text = String(a.text || '').replace(/<[^>]*>/g, '').trim().slice(0, 8);
+      return { text };
+    }
+    case 'spawn_projectile': {
+      // 直接投掷一个范围投掷物：伤害 1~120、半径 1~20，防止一击秒杀与超大范围
+      const dmg = Number(a.damage);
+      const rad = Number(a.radius);
+      const spd = Number(a.speed);
+      return {
+        damage: Number.isFinite(dmg) && dmg > 0 ? clampNum(dmg, 1, 120) : 0,
+        radius: clampNum(Number.isFinite(rad) ? rad : 2, 1, 20),
+        speed: clampNum(Number.isFinite(spd) ? spd : 18, 4, 40),
+      };
+    }
     case 'spawn_item': {
       const item = String(a.item || '').replace(/<[^>]*>/g, '').trim().slice(0, 20);
       if (!item) return null;
@@ -179,6 +219,8 @@ function cleanAction(name, args) {
       else if (k === 'jump') effect = { k, v: clampNum(e.v == null ? 1.6 : e.v, 1.1, 2.5), s };
       else if (k === 'jetpack') effect = { k, s };
       else if (k === 'size') effect = { k, v: clampNum(e.v == null ? 1.5 : e.v, 0.3, 2.5), s };
+      // 投掷物：v = 伤害、r = 爆炸半径，由阿花指定
+      else if (k === 'throw') effect = { k, v: clampNum(e.v == null ? 40 : e.v, 1, 120), r: clampNum(e.r == null ? 3 : e.r, 1, 20), s };
       // effect 为 null 的整块删除 → 无效果对象，前端按装饰品/兜底处理
       return { item, effect, seconds: s };
     }

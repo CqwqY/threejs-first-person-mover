@@ -13,8 +13,8 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale } from '../player/PlayerModel.js';
-import { getBagKey, addToBag, loadBag } from '../player/Inventory.js';
+import { setModelScale, setHeldText } from '../player/PlayerModel.js';
+import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
@@ -189,6 +189,82 @@ export class Game {
 
     // 本地可拾取的「生成物品」发光道具
     this._pickups = [];
+
+    // 血量与战斗：血量存在 localState 里（会随状态同步给其他玩家）
+    this.localState.health = Config.HEALTH_MAX;
+    this._dead = false;
+    this._createHealthBar();
+    this._projectiles = []; // 在飞的投掷物
+  }
+
+  // 左下角血量条：数值 + 横条，满血绿色、越低越红
+  _createHealthBar() {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;left:18px;bottom:22px;z-index:53;width:min(240px,42vw);' +
+      'font:12px/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;user-select:none;pointer-events:none;';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.6);';
+    const label = document.createElement('span');
+    label.textContent = '生命';
+    const num = document.createElement('span');
+    num.textContent = Config.HEALTH_MAX + ' / ' + Config.HEALTH_MAX;
+    row.appendChild(label);
+    row.appendChild(num);
+    const track = document.createElement('div');
+    track.style.cssText =
+      'height:10px;border-radius:6px;background:rgba(10,16,26,.65);border:1px solid rgba(255,255,255,.28);overflow:hidden;';
+    const fill = document.createElement('div');
+    fill.style.cssText = 'height:100%;width:100%;background:#2ecc71;transition:width .18s ease,background .18s ease;';
+    track.appendChild(fill);
+    box.appendChild(row);
+    box.appendChild(track);
+    document.body.appendChild(box);
+    this._hpNum = num;
+    this._hpFill = fill;
+  }
+
+  // 刷新血量条显示
+  _updateHealthBar() {
+    if (!this._hpFill) return;
+    const max = Config.HEALTH_MAX;
+    const hp = Math.max(0, Math.min(max, Math.round(this.localState.health)));
+    const ratio = hp / max;
+    this._hpFill.style.width = (ratio * 100).toFixed(1) + '%';
+    this._hpFill.style.background = ratio > 0.5 ? '#2ecc71' : (ratio > 0.2 ? '#f1c40f' : '#e74c3c');
+    this._hpNum.textContent = hp + ' / ' + max;
+  }
+
+  // 扣血/回血（正数回血、负数扣血）；到 0 触发死亡重生
+  _changeHealth(delta) {
+    const max = Config.HEALTH_MAX;
+    const next = Math.max(0, Math.min(max, this.localState.health + delta));
+    this.localState.health = next;
+    this._updateHealthBar();
+    if (next <= 0 && !this._dead) this._die();
+  }
+
+  // 死亡：锁住操控，短暂延迟后满血重生到出生点
+  _die() {
+    this._dead = true;
+    this._setChatLock(true);
+    this._toast('你被击倒了，即将在出生点重生');
+    setTimeout(() => this._respawn(), Config.RESPAWN_DELAY * 1000);
+  }
+
+  // 重生：满血、清速度，回到服务器分配的出生点
+  _respawn() {
+    const sp = this._spawn || { x: 0, z: 0, yaw: 0 };
+    this.localState.health = Config.HEALTH_MAX;
+    this.localState.x = sp.x;
+    this.localState.z = sp.z;
+    this.localState.yaw = sp.yaw || 0;
+    this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    this.localPlayer.physics.velocity.set(0, 0, 0);
+    this._dead = false;
+    this._setChatLock(false);
+    this._updateHealthBar();
+    this._toast('已在出生点重生');
   }
 
   // 窗口尺寸变化时更新相机纵横比和渲染器尺寸
@@ -229,6 +305,7 @@ export class Game {
           this.localState.yaw = msg.spawn.yaw;
           this._placed = true;
         }
+        this._spawn = msg.spawn; // 记住出生点，死亡重生时用
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         this.playerManager.setLocal(msg.id);
         // 本地名牌：登录了用昵称，否则游客样式
@@ -255,6 +332,15 @@ export class Game {
       case 'snapshot': {
         // 周期快照：同步远程玩家（本地由 applySnapshot 内部跳过）
         this.playerManager.applySnapshot(msg.players);
+        break;
+      }
+      case 'hit': {
+        // 别人用投掷物打中了我：扣血（伤害已由服务端钳制）
+        const dmg = Number(msg.damage) || 0;
+        if (dmg > 0 && !this._dead) {
+          this._changeHealth(-dmg);
+          this._toast('受到 ' + dmg + ' 点伤害');
+        }
         break;
       }
       default:
@@ -416,12 +502,26 @@ export class Game {
         this._useItem(name, v === '' ? null : Number(v));
         this._renderBag();
       });
+      // 销毁：把该物品从背包里丢掉（每次减 1，减到 0 整条移除）
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.textContent = '销毁';
+      delBtn.style.cssText =
+        'border:1px solid #e0b4b4;cursor:pointer;border-radius:8px;padding:5px 14px;color:#b03030;font-weight:600;background:#fff;';
+      delBtn.addEventListener('click', () => {
+        removeFromBag(getBagKey(this._profile), name, 1);
+        this._renderBag();
+      });
+      const btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex;flex-direction:column;gap:6px;align-items:center;width:100%;';
+      btnRow.appendChild(slotSel);
+      btnRow.appendChild(useBtn);
+      btnRow.appendChild(delBtn);
       meta.appendChild(nameEl);
       meta.appendChild(countEl);
       card.appendChild(icon);
       card.appendChild(meta);
-      card.appendChild(slotSel);
-      card.appendChild(useBtn);
+      card.appendChild(btnRow);
       grid.appendChild(card);
     }
   }
@@ -544,6 +644,37 @@ export class Game {
         after(a.seconds, () => { phys.jetpack = false; });
         break;
       }
+      case 'set_player_health': {
+        if (Number.isFinite(a.value)) {
+          const target = Math.max(0, Math.min(Config.HEALTH_MAX, a.value));
+          this.localState.health = target;
+          this._updateHealthBar();
+          if (target <= 0 && !this._dead) this._die();
+        } else if (Number.isFinite(a.delta)) {
+          this._changeHealth(a.delta);
+        }
+        this._toast('血量：' + Math.round(this.localState.health) + ' / ' + Config.HEALTH_MAX);
+        break;
+      }
+      case 'hold_item': {
+        // 手持物：默认就是手上举着一段文字（第三人称与他人可见）
+        const text = a.text || '';
+        this.localState.hold = text;
+        this._toast(text ? '手持：' + text : '已放下手持物');
+        break;
+      }
+      case 'spawn_projectile': {
+        // 直接投掷：伤害/范围由阿花指定，后端已钳制
+        const dmg = Number(a.damage) || 0;
+        this._throwProjectile({
+          damage: dmg,
+          radius: Number(a.radius) || 2,
+          speed: Number(a.speed) || Config.PROJECTILE_SPEED,
+          color: dmg > 0 ? 0xff6a3c : 0x4cd97b,
+        });
+        this._toast(dmg > 0 ? '投掷物已出手（伤害 ' + dmg + '）' : '投掷物已出手');
+        break;
+      }
       case 'spawn_item': {
         // 阿花把物品放进玩家背包，并记住她给的效果（{k,v,s} 或 null）
         const item = a.item || '神秘物品';
@@ -557,6 +688,84 @@ export class Game {
       }
       default:
         break;
+    }
+  }
+
+  // 投掷物：沿视线方向抛出一个小球，飞行中受重力，撞地或撞到玩家后爆开结算范围效果
+  _throwProjectile(spec) {
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP);
+    const start = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.8);
+    const color = spec.color || 0xff6a3c;
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 12, 12),
+      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.1 })
+    );
+    mesh.position.copy(start);
+    this.scene.add(mesh);
+    this._projectiles.push({
+      mesh,
+      vel: dir.clone().multiplyScalar(spec.speed || Config.PROJECTILE_SPEED),
+      life: 4,
+      damage: spec.damage || 0,
+      radius: spec.radius || 2,
+    });
+  }
+
+  // 每帧推进所有投掷物：受重力、撞地/命中玩家即爆开
+  _updateProjectiles(dt) {
+    if (!this._projectiles.length) return;
+    for (let i = this._projectiles.length - 1; i >= 0; i--) {
+      const p = this._projectiles[i];
+      p.vel.y += Config.GRAVITY * dt;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      p.life -= dt;
+      const pos = p.mesh.position;
+      let hit = p.life <= 0 || pos.y <= 0.12;
+      if (!hit) {
+        // 竖直圆柱近似：水平 0.8 米内、高度区间内视为命中其他玩家
+        for (const [id, rp] of this.playerManager.players) {
+          if (id === this.localState.id) continue;
+          const st = rp.state;
+          const d = Math.hypot(pos.x - st.x, pos.z - st.z);
+          if (d < 0.8 && Math.abs(pos.y - (st.y - Config.PLAYER_HEIGHT / 2)) < 1.2) { hit = true; break; }
+        }
+      }
+      if (!hit) continue;
+      this._explode(p);
+      this.scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mesh.material.dispose();
+      this._projectiles.splice(i, 1);
+    }
+  }
+
+  // 爆开：范围内玩家受伤（自己也在范围内就一起结算），并画一圈扩散光环
+  _explode(p) {
+    const c = p.mesh.position;
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(Math.max(0.2, p.radius * 0.45), p.radius, 32),
+      new THREE.MeshBasicMaterial({
+        color: p.damage > 0 ? 0xff5a3c : 0x4cd97b,
+        transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(c.x, 0.06, c.z);
+    this.scene.add(ring);
+    setTimeout(() => { this.scene.remove(ring); ring.geometry.dispose(); ring.material.dispose(); }, 450);
+
+    if (!p.damage) return;
+    if (Math.hypot(this.localState.x - c.x, this.localState.z - c.z) <= p.radius) {
+      this._changeHealth(-p.damage);
+    }
+    // 其他玩家：伤害交给服务器转发（服务端会再钳制一次）
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === this.localState.id) continue;
+      const st = rp.state;
+      if (Math.hypot(st.x - c.x, st.z - c.z) <= p.radius) this.network.sendHit(id, p.damage);
     }
   }
 
@@ -631,6 +840,18 @@ export class Game {
             phys.sizeTarget = s; // 平滑过渡到目标体型
             this._toast('体型变化：变为 ' + s + ' 倍，持续 ' + secs + ' 秒');
             setTimeout(() => { if (phys.sizeTarget === s) phys.sizeTarget = 1; }, secs * 1000);
+          },
+        };
+      }
+      case 'throw': {
+        // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）
+        const dmg = (v && v > 0) ? v : 40;
+        const rad = Number.isFinite(Number(eff.r)) && Number(eff.r) > 0 ? Number(eff.r) : 3;
+        return {
+          label: '投掷',
+          run: () => {
+            this._throwProjectile({ damage: dmg, radius: rad, color: 0xff6a3c });
+            this._toast('投掷：' + rad + ' 米内造成 ' + dmg + ' 点伤害');
           },
         };
       }
@@ -805,6 +1026,7 @@ export class Game {
     const size = this.localPlayer.physics.sizeScale;
     local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT * size, s.z);
     setModelScale(local.model, size);
+    setHeldText(local.model, s.hold || '');
 
     // 本帧实际移动速度：让骨头动画知道走得多快（「移动时疯狂旋转」已临时注释）
     const dx = s.x - this._tpPrevX;
@@ -854,6 +1076,9 @@ export class Game {
     // AI 商人 NPC：靠近提示 + 可拾取道具的推进
     this.aiNpc.update(dt, this.localState.x, this.localState.z);
     this._updatePickups(dt);
+
+    // 投掷物：推进飞行、命中/落地后结算范围伤害
+    this._updateProjectiles(dt);
 
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);

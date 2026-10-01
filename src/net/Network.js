@@ -74,6 +74,12 @@ export class Network {
     this._handlers.push(callback);
   }
 
+  // 命中上报：把自己的投掷伤害告诉服务器，由服务器转发给被命中的玩家扣血
+  sendHit(target, damage) {
+    if (!target) return;
+    this.send({ t: 'hit', target, damage });
+  }
+
   // 节流上报状态：在 20Hz 周期内只发送最新的一次 {t:"state", ...state}
   sendState(state) {
     this._pendingState = state;

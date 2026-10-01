@@ -10,6 +10,8 @@ export class PlayerState {
     this.pitch = pitch; // 俯仰，弧度
     this.onGround = onGround;
     this.size = 1; // 体型倍率（1 = 正常）；由 NPC 效果改变，需同步给其他玩家
+    this.health = 500; // 当前血量（上限 500，由 NPC/AI 接口改动，需同步）
+    this.hold = ''; // 手持物的文字（3D 显示在手上，空串 = 手上没东西）
   }
 
   // 生成用于网络传输的纯 JSON 快照（不包含 onGround 之外的派生/本地字段）
@@ -22,6 +24,8 @@ export class PlayerState {
       yaw: this.yaw,
       pitch: this.pitch,
       size: this.size,
+      health: this.health,
+      hold: this.hold,
     };
   }
 
@@ -35,10 +39,12 @@ export class PlayerState {
     if (data.pitch !== undefined) this.pitch = data.pitch;
     if (data.onGround !== undefined) this.onGround = data.onGround;
     if (data.size !== undefined) this.size = data.size;
+    if (data.health !== undefined) this.health = data.health;
+    if (data.hold !== undefined) this.hold = data.hold;
     return this;
   }
 
-  // 把 x/y/z/yaw/size 向目标状态做线性插值。
+  // 把 x/y/z/yaw/size 向目标状态做线性插值；health/hold 直接同步（不做插值）。
   // alpha 介于 0~1，越接近 1 越贴近目标；pitch/onGround 不参与插值。
   lerpTo(target, alpha) {
     this.x += (target.x - this.x) * alpha;
@@ -47,6 +53,8 @@ export class PlayerState {
     this.yaw += (target.yaw - this.yaw) * alpha;
     const ts = target.size === undefined ? 1 : target.size;
     this.size += (ts - this.size) * alpha;
+    if (target.health !== undefined) this.health = target.health;
+    if (target.hold !== undefined) this.hold = target.hold;
     return this;
   }
 }

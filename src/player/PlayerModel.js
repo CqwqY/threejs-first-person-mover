@@ -8,6 +8,7 @@ import { instantiate } from '../world/AssetLoader.js';
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
+const HAND_POS = { x: 0.34, y: 1.05, z: 0.16 }; // 手部锚点（模型局部坐标，原点在脚底）
 const DEG = Math.PI / 180;
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
@@ -134,6 +135,12 @@ export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff')
   group.add(headAnchor);
   group.userData.headAnchor = headAnchor;
 
+  // ---- 手部锚点：手持物（3D 文字）挂在这里 ----
+  const handAnchor = new THREE.Object3D();
+  handAnchor.position.set(HAND_POS.x, HAND_POS.y, HAND_POS.z);
+  group.add(handAnchor);
+  group.userData.handAnchor = handAnchor;
+
   if (label) {
     headAnchor.add(createNameTag(label, color));
   }
@@ -162,13 +169,44 @@ function _createFallbackBody() {
   return holder;
 }
 
-// 设置玩家模型的体型倍率：只缩放身体（名牌不跟着放大），并把名牌锚点抬到新的头顶高度
+// 设置玩家模型的体型倍率：只缩放身体（名牌/手持物不跟着放大），并把锚点抬到新的高度
 export function setModelScale(group, s) {
   const scale = s > 0 ? s : 1;
   const bh = group.userData.bodyHolder;
   if (bh) bh.scale.setScalar(scale);
   const ha = group.userData.headAnchor;
   if (ha) ha.position.y = NAME_TAG_Y * scale;
+  const hand = group.userData.handAnchor;
+  if (hand) hand.position.set(HAND_POS.x * scale, HAND_POS.y * scale, HAND_POS.z * scale);
+}
+
+// 设置手持物：一段显示在手上的 3D 文字（别人与第三人称可见）；text 为空则清空手持
+export function setHeldText(group, text) {
+  const hand = group.userData.handAnchor;
+  if (!hand) return;
+  const cur = group.userData.heldText || '';
+  if (cur === text) return; // 文字没变不重建，避免每帧建画布
+  group.userData.heldText = text;
+  hand.clear();
+  if (!text) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(20,26,38,0.82)';
+  ctx.beginPath();
+  ctx.roundRect(4, 12, 120, 40, 10);
+  ctx.fill();
+  ctx.fillStyle = '#ffe08a';
+  ctx.font = 'bold 32px "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 64, 33);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sp.scale.set(0.6, 0.3, 1);
+  hand.add(sp);
 }
 
 // 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）；color 控制昵称文字颜色（默认白）

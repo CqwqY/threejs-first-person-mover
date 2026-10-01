@@ -231,6 +231,25 @@ function clampSize(v) {
   return Math.min(2.5, Math.max(0.3, n));
 }
 
+// 血量钳制：0~500，非法按满血处理
+function clampHealth(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 500;
+  return Math.min(500, Math.max(0, Math.round(n)));
+}
+
+// 单次伤害钳制：1~120，防止一击秒杀；非法返回 0（视为无效命中）
+function clampDamage(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(120, Math.max(1, Math.round(n)));
+}
+
+// 手持物文字：去标签、限长 8 字，防注入
+function clampHold(v) {
+  return String(v || '').replace(/<[^>]*>/g, '').trim().slice(0, 8);
+}
+
 // 收集所有（id, 已上报状态）列表，用于 welcome / snapshot
 function worldPlayers() {
   return [...states.entries()].map(([pid, st]) => ({
@@ -241,6 +260,8 @@ function worldPlayers() {
     z: st.z,
     yaw: st.yaw,
     size: st.size,
+    health: st.health,
+    hold: st.hold,
     nick: st.nick || ('玩家' + st.num),
     color: st.color || '#ffffff',
   }));
@@ -248,6 +269,7 @@ function worldPlayers() {
 
 wss.on('connection', (ws) => {
   const id = newId();
+  ws.__id = id; // 记在连接上，便于 hit 广播时按 id 找到目标客户端
   const num = allocNum(); // 复用最小空闲编号，避免重连把数字推到几十
   const spawn = spawnForNum(num);
   spawns.set(id, spawn);
@@ -284,6 +306,21 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 命中广播：投掷物的伤害由发起方计算，这里只做区间钳制后转发给被命中的玩家。
+    // 客户端收到后自行扣血（信任模型：校园内小游戏，不做服务器权威战斗）。
+    if (msg.t === 'hit') {
+      const dmg = clampDamage(msg.damage);
+      const target = String(msg.target || '');
+      if (!target || dmg <= 0 || target === id) return;
+      for (const client of wss.clients) {
+        if (client.__id === target && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ t: 'hit', from: id, damage: dmg }));
+          break;
+        }
+      }
+      return;
+    }
+
     if (msg.t !== 'state') return;
 
     const isFresh = !states.has(id); // 是否第一次上报（用于 join 广播）
@@ -292,6 +329,8 @@ wss.on('connection', (ws) => {
       num,
       x: msg.x, y: msg.y, z: msg.z, yaw: msg.yaw,
       size: clampSize(msg.size),
+      health: clampHealth(msg.health),
+      hold: clampHold(msg.hold),
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });

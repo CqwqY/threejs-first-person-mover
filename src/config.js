@@ -93,6 +93,16 @@ export const Config = {
   NPC_PROXIMITY: 3.2,
   // 触发对话的键（e.code）
   NPC_KEY: 'KeyF',
+
+  // ---- 血量与战斗 ----
+  HEALTH_MAX: 500,        // 血量上限（任何接口都不得超过这个值）
+  RESPAWN_DELAY: 1.2,     // 死亡后自动重生的等待秒数
+  // 投掷物默认参数（AI 未指定时使用；AI 指定的会被后端钳制到安全区间）
+  PROJECTILE_SPEED: 18,   // 出手初速度（米/秒）
+  PROJECTILE_RADIUS_MIN: 1,
+  PROJECTILE_RADIUS_MAX: 20,
+  DAMAGE_MIN: 1,
+  DAMAGE_MAX: 120,        // 单次伤害上限，避免一击秒杀
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
