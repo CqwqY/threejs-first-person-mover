@@ -182,7 +182,7 @@ export class Game {
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         this.playerManager.setLocal(msg.id);
         // 本地名牌：登录了用昵称，否则游客样式
-        const myNick = this._profile ? (this._profile.nickname || `玩家${msg.num}`) : `玩家${msg.num}`;
+        const myNick = this._profile ? (this._profile.nickname || this._profile.username || `玩家${msg.num}`) : `玩家${msg.num}`;
         const myColor = this._profile ? (this._profile.nicknameColor || '#ffffff') : '#ffffff';
         this.playerManager.addPlayer(msg.id, this.localState, myNick, myColor);
         for (const p of msg.players) {

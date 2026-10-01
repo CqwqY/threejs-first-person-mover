@@ -253,7 +253,7 @@ wss.on('connection', (ws) => {
       // 若此前已上报过自身状态，立即用登录资料刷新并广播给他人
       if (pub && states.has(id)) {
         const cur = states.get(id);
-        states.set(id, { ...cur, nick: pub.nickname || ('玩家' + cur.num), color: pub.nicknameColor || '#ffffff' });
+        states.set(id, { ...cur, nick: pub.nickname || pub.username || ('玩家' + cur.num), color: pub.nicknameColor || '#ffffff' });
         broadcast({ t: 'join', id, state: states.get(id) });
       }
       return;
@@ -266,7 +266,7 @@ wss.on('connection', (ws) => {
     states.set(id, {
       num,
       x: msg.x, y: msg.y, z: msg.z, yaw: msg.yaw,
-      nick: pub ? (pub.nickname || ('玩家' + num)) : ('玩家' + num),
+      nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });
 
