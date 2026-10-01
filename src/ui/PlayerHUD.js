@@ -15,9 +15,9 @@ function injectStyle() {
     }
     .idc-card {
       position: relative; width: 156px; height: 42px;
-      background: rgba(255,255,255,.74); backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,.68); border-radius: 13px;
-      box-shadow: 0 6px 20px rgba(0,0,0,.16); overflow: hidden; cursor: pointer;
+      background: #ffffff;
+      border: 1px solid #e3e7ee; border-radius: 13px;
+      box-shadow: 0 6px 20px rgba(0,0,0,.18); overflow: hidden; cursor: pointer;
       transition: width .22s cubic-bezier(.4,0,.2,1), height .22s cubic-bezier(.4,0,.2,1), border-radius .22s ease;
     }
     .idc.open .idc-card { width: 216px; height: 310px; border-radius: 16px; }
@@ -29,10 +29,10 @@ function injectStyle() {
     .idc.open .idc-mini { opacity: 0; pointer-events: none; }
     .idc-dot { width: 9px; height: 9px; border-radius: 50%; background: #8a94a6; flex: 0 0 auto; }
     .idc-mini-name {
-      font-size: 14px; font-weight: 600; max-width: 82px;
+      font-size: 14px; font-weight: 600; color: #000; max-width: 82px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .idc-hint { margin-left: auto; font-size: 11px; color: #97a0ad; }
+    .idc-hint { margin-left: auto; font-size: 11px; color: #000; }
 
     .idc-full {
       position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -42,8 +42,8 @@ function injectStyle() {
 
     .idc-top {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 9px 12px; font-size: 11px; letter-spacing: 3px; color: #7c8695;
-      border-bottom: 1px solid rgba(0,0,0,.06);
+      padding: 9px 12px; font-size: 11px; letter-spacing: 3px; color: #000;
+      border-bottom: 1px solid #eceff4;
     }
     .idc-top-dot { width: 8px; height: 8px; border-radius: 50%; background: #8a94a6; }
 
@@ -52,28 +52,28 @@ function injectStyle() {
       width: 54px; height: 54px; border-radius: 50%; background: #cfd6e0; flex: 0 0 auto;
       display: flex; align-items: center; justify-content: center;
       font-size: 22px; font-weight: 700; color: #fff;
-      box-shadow: 0 0 0 2px rgba(255,255,255,.85);
+      box-shadow: 0 0 0 2px #eef1f6;
     }
     .idc-name {
-      margin-top: 9px; font-size: 15px; font-weight: 700; max-width: 100%;
+      margin-top: 9px; font-size: 15px; font-weight: 700; color: #000; max-width: 100%;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .idc-user { font-size: 11px; color: #8b95a3; margin-top: 2px; height: 14px; }
+    .idc-user { font-size: 11px; color: #000; margin-top: 2px; height: 14px; }
 
-    .idc-rows { width: 100%; margin-top: 12px; border-top: 1px solid rgba(0,0,0,.06); padding-top: 8px; }
-    .idc-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 3px 0; color: #8b95a3; }
+    .idc-rows { width: 100%; margin-top: 12px; border-top: 1px solid #eceff4; padding-top: 8px; }
+    .idc-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 3px 0; color: #000; }
     .idc-row b {
-      color: #3a4250; font-weight: 600; max-width: 112px;
+      color: #000; font-weight: 600; max-width: 112px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
 
     .idc-quit {
       margin-top: auto; width: 100%; padding: 7px 0; font-size: 12px;
       border: 1px solid #d5dae3; border-radius: 9px;
-      background: rgba(255,255,255,.9); color: #5a6472; cursor: pointer;
+      background: #fff; color: #000; cursor: pointer;
       font-family: inherit;
     }
-    .idc-quit:hover { background: #fff; color: #1f2430; }
+    .idc-quit:hover { background: #f2f5fa; }
     .idc-quit.hidden { display: none; }
   `;
   document.head.appendChild(style);
@@ -151,12 +151,10 @@ export function createPlayerHUD(profile, hasToken) {
     const color = (p && p.nicknameColor) || '#8a94a6';
 
     miniName.textContent = name;
-    miniName.style.color = color;
     miniDot.style.background = color;
     topDot.style.background = color;
 
     nameEl.textContent = name;
-    nameEl.style.color = color;
     userEl.textContent = p && p.username ? '@' + p.username : '';
 
     // 头像：昵称色圆底 + 名字首字（Array.from 处理多字节字符）
