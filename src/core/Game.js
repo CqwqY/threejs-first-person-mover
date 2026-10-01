@@ -4,7 +4,7 @@ import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
-import { createSettingsPanel, createSettingsButton, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
+import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createAiNpc } from '../world/AiNpc.js';
@@ -159,12 +159,7 @@ export class Game {
         storeKey: 'scene-settings-game-v1',
       }
     );
-    // 设置入口：停靠在屏幕右侧中部，齿轮图标
-    createSettingsButton({
-      panel: this.settingsPanel,
-      icon: true,
-      position: { right: 18, top: '50%', centerY: true },
-    });
+    // 设置入口统一在顶部校卡右侧的「设置」按钮，不再额外挂悬浮齿轮（旧按钮定位与顶部重复）
 
     // 顶部校卡：显示当前账号名字，点击展开查看详情，并可在卡内退出登录
     this.playerHUD = createPlayerHUD(this._profile, !!this._token);
@@ -196,6 +191,7 @@ export class Game {
     this._dead = false;
     this._createHealthBar();
     this._projectiles = []; // 在飞的投掷物
+    this._projSeq = 0;      // 投掷物自增 id，用于和别人同步「哪一颗爆炸了」
     this._fx = [];          // 在播的爆炸特效
   }
 
@@ -350,6 +346,31 @@ export class Game {
         // 被别人投掷物的范围效果覆盖：在本机直接生效
         this._applyEffect(msg.effect);
         this._toast('受到范围效果：' + this._describeEffect(msg.effect));
+        break;
+      }
+      case 'proj': {
+        // 别人扔了一颗投掷物：复刻一颗只播画面的小球
+        this._spawnRemoteProjectile(msg);
+        break;
+      }
+      case 'boom': {
+        // 别人的投掷物炸了：先把他那颗小球悄悄收掉，再在同一位置播爆炸特效
+        const rid = String(msg.id || '');
+        for (let i = this._projectiles.length - 1; i >= 0; i--) {
+          const pr = this._projectiles[i];
+          if (pr.visualOnly && pr.id === rid) {
+            this.scene.remove(pr.mesh);
+            pr.mesh.geometry.dispose();
+            pr.mesh.material.dispose();
+            this._projectiles.splice(i, 1);
+          }
+        }
+        const bx = Number(msg.x);
+        const by = Number(msg.y);
+        const bz = Number(msg.z);
+        if ([bx, by, bz].every(Number.isFinite)) {
+          this._playExplosion(new THREE.Vector3(bx, by, bz), Number(msg.radius) || 3, Number(msg.damage) || 0);
+        }
         break;
       }
       default:
@@ -720,13 +741,44 @@ export class Game {
     );
     mesh.position.copy(start);
     this.scene.add(mesh);
+    const vel = dir.clone().multiplyScalar(spec.speed || Config.PROJECTILE_SPEED);
+    const id = spec.visualOnly ? (spec.id || '') : String(this.localState.id || 'me') + '-' + (++this._projSeq);
     this._projectiles.push({
       mesh,
-      vel: dir.clone().multiplyScalar(spec.speed || Config.PROJECTILE_SPEED),
+      vel,
       life: 4,
       damage: spec.damage || 0,
       radius: spec.radius || 2,
       onHit: spec.onHit || null,
+      id,
+      visualOnly: !!spec.visualOnly, // 别人扔的：只播画面，命中不结算（爆炸由对方的 boom 消息驱动）
+    });
+    // 把自己扔出去的这颗广播给其他人，让他们也能看到飞行轨迹
+    if (!spec.visualOnly) {
+      this.network.sendProj({
+        id,
+        x: start.x, y: start.y, z: start.z,
+        vx: vel.x, vy: vel.y, vz: vel.z,
+      });
+    }
+  }
+
+  // 别人扔的投掷物：本地只复刻一颗会飞的小球，命中后静默移除（真正的爆炸由 boom 消息触发）
+  _spawnRemoteProjectile(msg) {
+    const x = Number(msg.x);
+    const y = Number(msg.y);
+    const z = Number(msg.z);
+    if (![x, y, z].every(Number.isFinite)) return;
+    const vel = new THREE.Vector3(Number(msg.vx) || 0, Number(msg.vy) || 0, Number(msg.vz) || 0);
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 12, 12),
+      new THREE.MeshStandardMaterial({ color: 0xff6a3c, emissive: 0xff6a3c, emissiveIntensity: 1.1 })
+    );
+    mesh.position.set(x, y, z);
+    this.scene.add(mesh);
+    this._projectiles.push({
+      mesh, vel, life: 4, damage: 0, radius: 0, onHit: null,
+      id: String(msg.id || ''), visualOnly: true,
     });
   }
 
@@ -762,7 +814,8 @@ export class Game {
         }
       }
       if (!hit) continue;
-      this._explode(p);
+      // 别人扔的只静默移除（爆炸由对方的 boom 消息负责播特效，避免重复播两遍）
+      if (!p.visualOnly) this._explode(p);
       this.scene.remove(p.mesh);
       p.mesh.geometry.dispose();
       p.mesh.material.dispose();
@@ -770,11 +823,9 @@ export class Game {
     }
   }
 
-  // 爆开：范围内玩家受伤（自己也在范围内就一起结算），并播放爆炸特效
-  _explode(p) {
-    const c = p.mesh.position.clone();
-    const radius = p.radius;
-    const color = p.damage > 0 ? 0xff7a3c : 0x4cd97b;
+  // 播放爆炸特效（本机扔的，以及别人广播过来的 boom，都走这里）
+  _playExplosion(c, radius, damage) {
+    const color = damage > 0 ? 0xff7a3c : 0x4cd97b;
 
     const group = new THREE.Group();
     group.position.copy(c);
@@ -816,6 +867,14 @@ export class Game {
     }
 
     this._fx.push({ group, ball, ring, shards, t: 0, life: 0.6 });
+  }
+
+  // 本机投掷物爆开：播特效 + 结算伤害/范围效果 + 把爆炸位置广播给其他人
+  _explode(p) {
+    const c = p.mesh.position.clone();
+    const radius = p.radius;
+    this._playExplosion(c, radius, p.damage);
+    this.network.sendBoom({ id: p.id, x: c.x, y: c.y, z: c.z, radius, damage: p.damage });
 
     const dSelf = Math.hypot(this.localState.x - c.x, this.localState.z - c.z);
     const inSelf = dSelf <= radius;

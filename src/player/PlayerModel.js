@@ -9,6 +9,8 @@ import { instantiate } from '../world/AssetLoader.js';
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
 const HAND_POS = { x: 0.34, y: 1.05, z: 0.16 }; // 手部锚点（模型局部坐标，原点在脚底）
+const HP_W = 0.9;   // 血量条宽度（世界单位）
+const HP_H = 0.085; // 血量条高度
 const DEG = Math.PI / 180;
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
@@ -145,6 +147,19 @@ export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff')
     headAnchor.add(createNameTag(label, color));
   }
 
+  // ---- 血量条：名牌下方一条，Sprite 始终面向相机（depthTest:false 保证被人挡住也可见）----
+  const hpBg = new THREE.Sprite(new THREE.SpriteMaterial({
+    color: 0x141a26, transparent: true, opacity: 0.85, depthTest: false,
+  }));
+  hpBg.scale.set(HP_W, HP_H, 1);
+  hpBg.position.y = -0.26;
+  const hpFill = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x2ecc71, depthTest: false }));
+  hpFill.scale.set(HP_W, HP_H, 1);
+  hpFill.position.set(0, -0.26, 0.001); // 略前置，避免与底色同深度闪烁
+  headAnchor.add(hpBg);
+  headAnchor.add(hpFill);
+  group.userData.hpBar = { fill: hpFill };
+
   // 注册本次模型条目，并立即构建身体
   const entry = { group, gender, faceHolder: null, root: null, pivots: [], skinnedMesh: null };
   models.push(entry);
@@ -178,6 +193,16 @@ export function setModelScale(group, s) {
   if (ha) ha.position.y = NAME_TAG_Y * scale;
   const hand = group.userData.handAnchor;
   if (hand) hand.position.set(HAND_POS.x * scale, HAND_POS.y * scale, HAND_POS.z * scale);
+}
+
+// 刷新玩家头顶血量条：按比例缩放绿色条（左端固定），过半绿、居中黄、偏低红
+export function setHealthBar(group, hp, max) {
+  const bar = group.userData.hpBar;
+  if (!bar) return;
+  const ratio = max > 0 ? Math.max(0, Math.min(1, hp / max)) : 0;
+  bar.fill.scale.x = Math.max(1e-4, HP_W * ratio);
+  bar.fill.position.x = -HP_W * (1 - ratio) / 2;
+  bar.fill.material.color.setHex(ratio > 0.5 ? 0x2ecc71 : (ratio > 0.2 ? 0xf1c40f : 0xe74c3c));
 }
 
 // 设置手持物：一段显示在手上的 3D 文字（别人与第三人称可见）；text 为空则清空手持

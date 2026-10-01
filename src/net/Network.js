@@ -86,6 +86,18 @@ export class Network {
     this.send({ t: 'fx', target, effect });
   }
 
+  // 投掷物出手广播：让其他玩家看到「有一颗东西飞过去」
+  sendProj(info) {
+    if (!info) return;
+    this.send({ t: 'proj', ...info });
+  }
+
+  // 爆炸广播：让其他玩家在同样的位置播爆炸特效
+  sendBoom(info) {
+    if (!info) return;
+    this.send({ t: 'boom', ...info });
+  }
+
   // 节流上报状态：在 20Hz 周期内只发送最新的一次 {t:"state", ...state}
   sendState(state) {
     this._pendingState = state;

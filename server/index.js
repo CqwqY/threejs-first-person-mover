@@ -350,6 +350,30 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 投掷物出手 / 爆炸：广播给其他玩家播特效（服务器不做命中判定，只钳制数值）
+    if (msg.t === 'proj' || msg.t === 'boom') {
+      const pid = String(msg.id || '').slice(0, 24);
+      if (!pid) return;
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const out = { t: msg.t, id: pid };
+      out.x = num(msg.x, 0, -1000, 1000);
+      out.y = num(msg.y, 0, -100, 500);
+      out.z = num(msg.z, 0, -1000, 1000);
+      if (msg.t === 'proj') {
+        out.vx = num(msg.vx, 0, -80, 80);
+        out.vy = num(msg.vy, 0, -80, 80);
+        out.vz = num(msg.vz, 0, -80, 80);
+      } else {
+        out.radius = num(msg.radius, 3, 1, 20);
+        out.damage = num(msg.damage, 0, 0, 120);
+      }
+      const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
+      }
+      return;
+    }
+
     if (msg.t !== 'state') return;
 
     const isFresh = !states.has(id); // 是否第一次上报（用于 join 广播）
