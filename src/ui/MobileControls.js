@@ -39,18 +39,20 @@ export function initMobileControls(input) {
   document.body.appendChild(jumpBtn);
   const jumpPress = (e) => {
     e.preventDefault();
-    jumpBtn.setPointerCapture(e.pointerId); // 捕获指针：手指滑出按钮也能收到 pointerup
     input.setJumpHeld(true); // 按住期间等同按住空格（喷气背包据此持续上升）
     input.queueJump();       // 同时入队一次起跳，落地瞬间即可跳
+    // 捕获指针，保证手指滑出按钮也能收到 pointerup（放在最后，避免捕获失败影响上面的置位）
+    try { jumpBtn.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
   };
   const jumpRelease = (e) => {
     e.preventDefault();
     input.setJumpHeld(false);
   };
+  // 注意：不要监听 pointerleave——触摸下设置指针捕获后浏览器可能触发一次 leave，
+  // 会被误判成「松开」，导致喷气无法持续上升。只用 up / cancel 收尾。
   jumpBtn.addEventListener('pointerdown', jumpPress);
   jumpBtn.addEventListener('pointerup', jumpRelease);
   jumpBtn.addEventListener('pointercancel', jumpRelease);
-  jumpBtn.addEventListener('pointerleave', jumpRelease);
 
   // ---- 左侧摇杆 ----
   const zone = document.createElement('div');
