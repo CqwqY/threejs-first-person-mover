@@ -7,7 +7,13 @@ import { initMobileControls } from './ui/MobileControls.js';
 
 // 进游戏前登录/注册（游客可选）；拿到 token 与资料后创建游戏
 async function main() {
-  const auth = await ensureAuth();
+  // 登录流程任何异常都不能让整个页面留在白屏：失败就按游客进入
+  let auth = { token: '', profile: null };
+  try {
+    auth = await ensureAuth();
+  } catch (e) {
+    console.warn('[main] 登录流程失败，以游客身份进入:', e);
+  }
   const game = new Game(auth.token, auth.profile);
   game.start();
   // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过

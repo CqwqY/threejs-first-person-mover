@@ -14,15 +14,23 @@ function apiBase() {
 }
 
 async function api(method, path, body, token) {
-  const res = await fetch(apiBase() + path, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: 'Bearer ' + token } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return res.json();
+  // 超时兜底：后端重启或不可达时请求会一直挂着，若不加限制则会拖住游戏启动（表现为白屏）
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5000);
+  try {
+    const res = await fetch(apiBase() + path, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: 'Bearer ' + token } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ac.signal,
+    });
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // 显示登录/注册弹窗；用户完成一次交互后 resolve
