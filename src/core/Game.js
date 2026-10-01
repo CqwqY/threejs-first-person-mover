@@ -303,6 +303,19 @@ export class Game {
     this._clubAt = 0;
     this._clubSwing = null;     // { t, hit }
 
+    // ---- 加特林：技能槽切换开火模式，按住左键持续扫射，会过热 ----
+    this._gatlingOn = false;
+    this._gatlingHeld = false;
+    this._gatlingHeat = 0;          // 0~100，满 100 过热
+    this._gatlingOverheated = false;
+    this._gatlingCd = 0;
+    this._tracers = [];             // 弹道线（共用几何与材质，同一时刻通常只有一条）
+    this._tracerGeo = new THREE.CylinderGeometry(0.02, 0.02, 1, 5);
+    this._tracerMat = new THREE.MeshBasicMaterial({
+      color: 0xffd76a, transparent: true, opacity: 0.85, depthWrite: false,
+    });
+    this._gatlingBar = this._createGatlingBar();
+
     // ---- 黑洞：扔出去不断变大，10 秒后把范围内的人吸过去 ----
     this._holes = [];
 
@@ -313,7 +326,6 @@ export class Game {
     this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
     this._hidePanel = this._createHidePanel();
     this._hideArrow = this._createHideArrow();
-    this._catchBtn = this._createCatchBtn();
     this._hideTxtCache = '';
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
@@ -324,11 +336,17 @@ export class Game {
       this._activateShield();
     });
 
-    // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）
+    // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
+    // 开了加特林就改成「按住持续扫射」
     this.renderer.domElement.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       if (document.pointerLockElement !== this.renderer.domElement) return;
+      if (this._gatlingOn) { this._gatlingHeld = true; return; }
       this._attackBoss();
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button !== 0) return;
+      this._gatlingHeld = false;
     });
 
     // 本地可拾取的「生成物品」发光道具
@@ -827,8 +845,12 @@ export class Game {
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      // 开了加特林就改成按住持续扫射（松手停火）
+      if (this._gatlingOn) { this._gatlingHeld = true; return; }
       this._attackBoss();
     });
+    el.addEventListener('pointerup', () => { this._gatlingHeld = false; });
+    el.addEventListener('pointercancel', () => { this._gatlingHeld = false; });
     document.body.appendChild(el);
     return el;
   }
@@ -1145,7 +1167,7 @@ export class Game {
     const P = Config.PORTAL_POS;
     const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
     const showPortal = mode === 'idle' && near;
-    const showAtk = mode === 'alive' && !this._dead;
+    const showAtk = (mode === 'alive' && !this._dead) || this._gatlingOn;
     const showShield = mode === 'alive' && phase >= 3 && !this._dead;
     const shieldReady = performance.now() >= this._shieldReadyAt;
     const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
@@ -1561,9 +1583,8 @@ export class Game {
     // 开局先快速给一次方向，免得抓的人干等 30 秒以为坏了
     this._hideReportTimer = Config.HIDE_FIRST_REPORT;
     if (hider === me) this._toast('你变成了方块，躲好（每 ' + Config.HIDE_REPORT_INTERVAL + ' 秒会报一次方向）');
-    else if (seeker === me) this._toast('开始抓人，找到后点「抓到了」');
+    else if (seeker === me) this._toast('开始抓人，走到对方附近就算抓到');
     this._updateHideArrow();
-    this._updateCatchBtn();
   }
 
   _endHide(broadcast) {
@@ -1573,7 +1594,6 @@ export class Game {
     this._hideHintAt = 0;
     if (this._hideArrow) this._hideArrow.style.display = 'none';
     if (h) this._setMorph(h.hider, null);
-    this._updateCatchBtn();
     if (broadcast && h) this.network.sendHide({ ev: 'end', hider: h.hider, seeker: h.seeker, color: h.color });
   }
 
@@ -1604,7 +1624,10 @@ export class Game {
     if (rp && id !== this.localState.id) rp.model.visible = false;
   }
 
-  // 方块跟着人走（第一人称看不到自己的方块，第三人称才显示）
+  // 方块跟着人走。
+  // 用「模型实际渲染到的位置」而不是网络状态来定位：远程玩家的模型位置由 RemotePlayer 每帧
+  // 插值写入，本地玩家第三人称也写模型位置，这样方块一定贴着人，不会留在原地。
+  // 第一人称看不到自己，所以本地方块只在第三人称显示。
   _updateMorphs() {
     if (!this._morphs.size) return;
     const s = this.localState;
@@ -1615,9 +1638,12 @@ export class Game {
         continue;
       }
       const rp = this.playerManager.players.get(id);
-      if (!rp) continue;
-      const st = rp.state;
-      m.mesh.position.set(st.x, st.y - Config.PLAYER_HEIGHT * 0.5, st.z);
+      if (!rp) { m.mesh.visible = false; continue; }
+      const p = rp.model.position; // 模型原点在脚底
+      m.mesh.position.set(p.x, p.y + Config.HIDE_BLOCK_SIZE * 0.5, p.z);
+      m.mesh.visible = true;
+      // 人形模型每帧确保是藏起来的，否则被别处重置可见性后会「留在原地」
+      if (rp.model.visible) rp.model.visible = false;
     }
   }
 
@@ -1627,7 +1653,19 @@ export class Game {
     if (!h) return;
     const me = this.localState.id;
 
-    if (me === h.seeker) this._updateHideArrow();
+    if (me === h.seeker) {
+      // 抓到判定用距离：抓的人走到躲的人附近就自动算抓到
+      const target = this.playerManager.players.get(h.hider);
+      if (target) {
+        const d = Math.hypot(target.state.x - this.localState.x, target.state.z - this.localState.z);
+        if (d <= Config.HIDE_CATCH_RANGE) {
+          this._toast('抓到啦');
+          this._endHide(true);
+          return;
+        }
+      }
+      this._updateHideArrow();
+    }
 
     if (me !== h.hider) return;
     this._hideReportTimer -= dt;
@@ -1676,38 +1714,145 @@ export class Game {
     }
   }
 
-  // 抓的人屏幕下方的「抓到了」按钮
-  _createCatchBtn() {
-    const el = document.createElement('div');
-    el.style.cssText =
-      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
-      'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
-      'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
-      'background:linear-gradient(150deg,#e0693c,#b83a1f);color:#fff;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
-      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
-    el.textContent = '抓到了';
-    el.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const h = this._hide;
-      if (!h || this.localState.id !== h.seeker) return;
-      this._toast('抓到啦');
-      this._endHide(true);
-    });
-    document.body.appendChild(el);
-    return el;
+  // ---------- 加特林 ----------
+
+  // 按技能槽切换开火模式：开启后按住左键（手机按住「攻击」）持续扫射
+  _toggleGatling() {
+    this._gatlingOn = !this._gatlingOn;
+    this._gatlingHeld = false;
+    this._updateGatlingUI();
+    this._toast(this._gatlingOn ? '加特林已就绪，按住左键扫射' : '已收起加特林');
   }
 
-  // 只有正在抓人的那位才显示「抓到了」
-  _updateCatchBtn() {
-    if (!this._catchBtn) return;
-    const h = this._hide;
-    const show = !!h && this.localState.id === h.seeker;
-    if (this._catchBtnShown === show) return;
-    this._catchBtnShown = show;
-    this._catchBtn.style.display = show ? '' : 'none';
+  // 开火：瞬时射线判定（扫射用抛体太吵），伤害只由自己这边的客户端结算
+  _fireGatling() {
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dx = -Math.sin(s.yaw) * cosP;
+    const dy = sinP;
+    const dz = -Math.cos(s.yaw) * cosP;
+
+    // 其他玩家：取射线到躯干中心的最近距离
+    let hitId = null;
+    let hitT = Infinity;
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === s.id) continue;
+      const st = rp.state;
+      const cy = st.y - Config.PLAYER_HEIGHT / 2;
+      const t = (st.x - s.x) * dx + (cy - s.y) * dy + (st.z - s.z) * dz;
+      if (t < 0 || t > Config.GATLING_RANGE || t >= hitT) continue;
+      const px = s.x + dx * t;
+      const py = s.y + dy * t;
+      const pz = s.z + dz * t;
+      if (Math.hypot(px - st.x, py - cy, pz - st.z) > Config.GATLING_HIT_RADIUS + Config.PLAYER_RADIUS) continue;
+      hitId = id;
+      hitT = t;
+    }
+
+    // 老师：比前面的玩家更近就改打她
+    if (this.boss && this.boss.mode === 'alive') {
+      const bp = this.boss.pos;
+      const cy = Config.BOSS_HEIGHT * 0.5;
+      const t = (bp.x - s.x) * dx + (cy - s.y) * dy + (bp.z - s.z) * dz;
+      if (t >= 0 && t <= Config.GATLING_RANGE && t < hitT) {
+        const px = s.x + dx * t;
+        const py = s.y + dy * t;
+        const pz = s.z + dz * t;
+        if (Math.hypot(px - bp.x, pz - bp.z) <= Config.BOSS_RADIUS + Config.GATLING_HIT_RADIUS
+          && Math.abs(py - cy) < Config.BOSS_HEIGHT) {
+          hitId = null;
+          this.boss.hurtBy(Config.GATLING_DAMAGE);
+          this._addSuperCharge(Config.GATLING_DAMAGE);
+        }
+      }
+    }
+
+    if (hitId) this.network.sendHit(hitId, Config.GATLING_DAMAGE);
+
+    this._spawnTracer(s.x + dx * 0.6, s.y + dy * 0.6, s.z + dz * 0.6, dx, dy, dz);
+    this._gatlingHeat = Math.min(100, this._gatlingHeat + Config.GATLING_HEAT_PER_SHOT);
+  }
+
+  // 弹道线：一小截发光柱，很快就淡掉
+  _spawnTracer(x, y, z, dx, dy, dz) {
+    const len = 12;
+    const m = new THREE.Mesh(this._tracerGeo, this._tracerMat);
+    m.position.set(x + dx * len / 2, y + dy * len / 2, z + dz * len / 2);
+    m.scale.y = len;
+    m.quaternion.setFromUnitVectors(UP_Y, new THREE.Vector3(dx, dy, dz));
+    this.scene.add(m);
+    this._tracers.push({ mesh: m, t: 0 });
+  }
+
+  _updateGatling(dt) {
+    // 散热：不开火时按固定速率降热
+    if (this._gatlingHeat > 0) {
+      this._gatlingHeat = Math.max(0, this._gatlingHeat - Config.GATLING_COOL_RATE * dt);
+    }
+    if (this._gatlingOverheated && this._gatlingHeat <= Config.GATLING_RECOVER_AT) {
+      this._gatlingOverheated = false;
+      this._toast('加特林冷却完成');
+    }
+
+    this._gatlingCd -= dt;
+    if (this._gatlingOn && this._gatlingHeld && !this._gatlingOverheated && this._gatlingCd <= 0) {
+      this._gatlingCd = Config.GATLING_INTERVAL;
+      this._fireGatling();
+      if (this._gatlingHeat >= 100) {
+        this._gatlingOverheated = true;
+        this._toast('加特林过热了，等它冷却');
+      }
+    }
+
+    for (let i = this._tracers.length - 1; i >= 0; i--) {
+      const tr = this._tracers[i];
+      tr.t += dt;
+      if (tr.t >= Config.GATLING_TRACER_TIME) {
+        this.scene.remove(tr.mesh);
+        this._tracers.splice(i, 1);
+      }
+    }
+    this._updateGatlingUI();
+  }
+
+  _createGatlingBar() {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:61;display:none;pointer-events:none;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 34%);width:min(220px,52vw);text-align:center;' +
+      'font:clamp(11px,2.8vmin,12px)/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;';
+    const track = document.createElement('div');
+    track.style.cssText =
+      'height:8px;border-radius:5px;background:rgba(10,16,26,.6);border:1px solid rgba(255,255,255,.3);overflow:hidden;';
+    const fill = document.createElement('div');
+    fill.style.cssText = 'height:100%;width:0%;background:#2ecc71;transition:width .06s linear;';
+    track.appendChild(fill);
+    const txt = document.createElement('div');
+    txt.style.cssText = 'margin-top:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);';
+    txt.textContent = '加特林';
+    box.appendChild(track);
+    box.appendChild(txt);
+    document.body.appendChild(box);
+    return { box, fill, txt };
+  }
+
+  _updateGatlingUI() {
+    const bar = this._gatlingBar;
+    if (!bar) return;
+    const show = this._gatlingOn;
+    if (this._gatlingBarShown !== show) {
+      this._gatlingBarShown = show;
+      bar.box.style.display = show ? '' : 'none';
+    }
+    if (!show) return;
+    const heat = Math.round(this._gatlingHeat);
+    const key = heat + '|' + (this._gatlingOverheated ? 1 : 0);
+    if (key === this._gatlingBarKey) return;
+    this._gatlingBarKey = key;
+    bar.fill.style.width = heat + '%';
+    bar.fill.style.background = this._gatlingOverheated ? '#e74c3c' : (heat > 65 ? '#f1c40f' : '#2ecc71');
+    bar.txt.textContent = this._gatlingOverheated ? '加特林过热中，等它冷却' : ('加特林 ' + heat + '%');
   }
 
   // 别人发起的捉迷藏事件
@@ -1731,7 +1876,6 @@ export class Game {
         this._hideHintAt = 0;
         if (this._hideArrow) this._hideArrow.style.display = 'none';
       }
-      this._updateCatchBtn();
       if (msg.seeker === me || msg.hider === me) this._toast('捉迷藏结束');
     }
   }
@@ -2392,6 +2536,11 @@ export class Game {
           label: '捉迷藏',
           run: () => this._useHideToy(),
         };
+      case 'gatling':
+        return {
+          label: '加特林',
+          run: () => this._toggleGatling(),
+        };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
         const dmg = (v && v > 0) ? v : 40;
@@ -2654,6 +2803,8 @@ export class Game {
     this._updateClub(dt);
     // 黑洞：长大与吸人
     this._updateHoles(dt);
+    // 加特林：散热、持续开火、弹道线
+    this._updateGatling(dt);
     // 捉迷藏：方块跟人走、方向提示、抓到判定
     this._updateMorphs();
     this._updateHideReport(dt);

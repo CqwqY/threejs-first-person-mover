@@ -29,6 +29,13 @@ export const SHOP_ITEMS = [
     desc: '变成任意颜色的方块。开始前先选和谁玩、谁抓；每 30 秒向抓的人报告自己的模糊方向。',
     effect: { k: 'hide' },
   },
+  {
+    id: 'gatling',
+    name: '加特林',
+    price: 200,
+    desc: '按技能槽开火模式后，按住鼠标左键持续扫射。单发 5 点伤害，打久了会过热。',
+    effect: { k: 'gatling' },
+  },
 ];
 
 function walletKey(profile) {

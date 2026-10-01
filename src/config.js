@@ -233,6 +233,17 @@ export const Config = {
   HIDE_REPORT_INTERVAL: 30,   // 每隔多久向抓的人报告一次模糊方向（秒）
   HIDE_FUZZ_DEG: 40,          // 方向模糊量（±度）
   HIDE_BLOCK_SIZE: 1.0,       // 变成的方块边长（米）
+  HIDE_CATCH_RANGE: 1.8,      // 抓的人离躲的人这么近就算抓到（米）
+
+  // ---- 加特林（持续扫射 / 过热）----
+  GATLING_DAMAGE: 5,          // 单发伤害
+  GATLING_INTERVAL: 0.1,      // 两发之间的间隔（秒）
+  GATLING_RANGE: 60,          // 射程（米）
+  GATLING_HIT_RADIUS: 0.55,   // 弹道命中判定半径（米）
+  GATLING_HEAT_PER_SHOT: 3.5, // 每发增加的热量（0~100，满 100 过热）
+  GATLING_COOL_RATE: 28,      // 不射击时每秒散热量
+  GATLING_RECOVER_AT: 30,     // 过热后要降到这个热量才能继续开火
+  GATLING_TRACER_TIME: 0.07,  // 弹道线残留时长（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
