@@ -195,12 +195,17 @@ export const Config = {
   SUPER_MISSILE_LIFE: 8,          // 追踪导弹最长飞行时间（秒）
 
   // ---- 商人「小满」与商店 ----
-  MERCHANT_POS: { x: -12, z: 144 },  // 商人所在坐标
+  MERCHANT_POS: { x: -14, z: 149 },  // 商人所在坐标
   MERCHANT_PROXIMITY: 3.6,           // 离多近内出现「找小满买东西」按钮（米）
   MERCHANT_MODEL: '/assets/girl.glb', // 女生模型
   MERCHANT_HEIGHT: 1.75,             // 归一化后的身高（米）
   MERCHANT_YAW: Math.PI * 0.25,      // 站姿朝向（弧度），让她面朝出生点方向
   BOSS_COIN_REWARD: 50,              // 击败老师奖励的学币
+
+  // 兑换码：键统一按小写比较，值是要发的学币数。每个账号每个码只能用一次。
+  REDEEM_CODES: {
+    huacaozhongxue: 4000,
+  },
 
   // ---- 棍子（横扫击飞）----
   CLUB_RANGE: 3.6,           // 横扫半径（米）

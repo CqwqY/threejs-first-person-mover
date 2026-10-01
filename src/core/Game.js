@@ -12,7 +12,7 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill } from '../player/Shop.js';
+import { loadWallet, buyItem, rewardBossKill, redeemCode } from '../player/Shop.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
@@ -288,7 +288,10 @@ export class Game {
     this.scene.add(this.merchant.group);
     this._merchantHint = this._createMerchantHint();
     this.merchant.onRange((r) => { this._merchantNear = !!r; });
-    this.shop = createShopPanel({ onBuy: (id) => this._buyShopItem(id) });
+    this.shop = createShopPanel({
+      onBuy: (id) => this._buyShopItem(id),
+      onRedeem: (code) => this._redeemCode(code),
+    });
     this.shop.setState(() => loadWallet(this._profile));
     this._coinBadge = this._createCoinBadge();
     this._refreshCoins();
@@ -910,6 +913,16 @@ export class Game {
     this._refreshCoins();
     this.shop.render();
     this._toast('买下「' + item.name + '」，还剩 ' + r.coins + ' 学币');
+  }
+
+  // 兑换码：成功后刷新顶部余额并让商店重绘
+  _redeemCode(code) {
+    const r = redeemCode(this._profile, code);
+    if (r.ok) {
+      this._refreshCoins();
+      this.shop.render();
+    }
+    return r;
   }
 
   // 世界变红的全屏滤镜（pointer-events:none，只做视觉）

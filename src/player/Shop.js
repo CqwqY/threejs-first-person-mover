@@ -36,16 +36,17 @@ function walletKey(profile) {
   return KEY_PREFIX + (id || 'guest');
 }
 
-// 读钱包：{ coins: 学币数, owned: [已购商品 id] }
+// 读钱包：{ coins: 学币数, owned: [已购商品 id], redeemed: [已用过的兑换码] }
 export function loadWallet(profile) {
   try {
     const raw = JSON.parse(localStorage.getItem(walletKey(profile)) || '{}');
     return {
       coins: Math.max(0, Math.floor(Number(raw && raw.coins) || 0)),
       owned: Array.isArray(raw && raw.owned) ? raw.owned.map(String) : [],
+      redeemed: Array.isArray(raw && raw.redeemed) ? raw.redeemed.map(String) : [],
     };
   } catch (e) {
-    return { coins: 0, owned: [] };
+    return { coins: 0, owned: [], redeemed: [] };
   }
 }
 
@@ -85,4 +86,20 @@ export function buyItem(profile, itemId) {
 // 击败老师之类的奖励入口统一走这里，方便以后调数值
 export function rewardBossKill(profile) {
   return addCoins(profile, Config.BOSS_COIN_REWARD);
+}
+
+// 兑换码：大小写不敏感，每个账号每个码只能用一次。
+// 成功返回 { ok:true, coins, value }，失败返回 { ok:false, reason }。
+export function redeemCode(profile, code) {
+  const c = String(code || '').trim().toLowerCase();
+  if (!c) return { ok: false, reason: '请输入兑换码' };
+  const codes = Config.REDEEM_CODES || {};
+  if (!Object.prototype.hasOwnProperty.call(codes, c)) return { ok: false, reason: '兑换码无效' };
+  const value = Math.max(0, Math.floor(Number(codes[c]) || 0));
+  const w = loadWallet(profile);
+  if (w.redeemed.includes(c)) return { ok: false, reason: '这个兑换码已经兑换过了' };
+  w.coins += value;
+  w.redeemed.push(c);
+  saveWallet(profile, w);
+  return { ok: true, coins: w.coins, value };
 }

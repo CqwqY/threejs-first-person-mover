@@ -2,7 +2,7 @@
 // 商品卡片：图标、名称、说明、价格、购买按钮；已购商品显示「已拥有」。
 import { SHOP_ITEMS } from '../player/Shop.js';
 
-export function createShopPanel({ onBuy }) {
+export function createShopPanel({ onBuy, onRedeem }) {
   const ov = document.createElement('div');
   ov.style.cssText =
     'position:fixed;z-index:9700;top:0;left:0;width:100vw;height:100vh;overflow:auto;' +
@@ -14,15 +14,33 @@ export function createShopPanel({ onBuy }) {
     '<h2 style="margin:0;font-size:17px;font-weight:700;">小满的杂货铺</h2>' +
     '<div style="display:flex;align-items:center;gap:14px;">' +
     '<span class="shop-coins" style="font-weight:600;">学币 0</span>' +
-    '<button type="button" style="border:0;background:rgba(255,255,255,.2);color:#fff;cursor:pointer;' +
+    '<button type="button" class="shop-bar-close" style="border:0;background:rgba(255,255,255,.2);color:#fff;cursor:pointer;' +
     'font-size:16px;width:34px;height:34px;border-radius:8px;">×</button></div></div>' +
     '<p style="margin:0 0 14px;color:#7b8794;">用学币换点好玩的东西。击败一次老师拿 50 学币。</p>' +
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 18px;">' +
+    '<input class="shop-code" type="text" placeholder="输入兑换码" autocomplete="off" spellcheck="false" ' +
+    'style="font:14px/1.4 system-ui,\'Microsoft YaHei\',sans-serif;color:#1f2933;border:1px solid #cbd5e1;' +
+    'border-radius:8px;padding:8px 10px;background:#fff;min-width:180px;" />' +
+    '<button class="shop-redeem" type="button" style="border:0;cursor:pointer;border-radius:8px;padding:9px 18px;' +
+    'color:#fff;font-weight:600;background:linear-gradient(150deg,#c99a3b,#8a6416);">兑换</button>' +
+    '<span class="shop-redeem-msg" style="font-size:13px;color:#7b8794;"></span></div>' +
     '<div class="shop-grid"></div>';
   document.body.appendChild(ov);
 
   const coinsEl = ov.querySelector('.shop-coins');
   const grid = ov.querySelector('.shop-grid');
-  ov.querySelector('button').addEventListener('click', () => { ov.style.display = 'none'; });
+  const codeInput = ov.querySelector('.shop-code');
+  const redeemMsg = ov.querySelector('.shop-redeem-msg');
+  ov.querySelector('.shop-bar-close').addEventListener('click', () => { ov.style.display = 'none'; });
+  ov.querySelector('.shop-redeem').addEventListener('click', submitCode);
+  codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitCode(); });
+
+  function submitCode() {
+    const r = onRedeem(codeInput.value);
+    redeemMsg.style.color = r.ok ? '#2e7d32' : '#b03030';
+    redeemMsg.textContent = r.ok ? ('兑换成功，+' + r.value + ' 学币') : r.reason;
+    if (r.ok) codeInput.value = '';
+  }
 
   // getState() 由 Game 注入：返回 { coins, owned:[id] }，保证界面与钱包永远一致
   let getState = () => ({ coins: 0, owned: [] });
