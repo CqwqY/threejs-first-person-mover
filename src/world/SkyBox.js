@@ -6,6 +6,12 @@ import { Sky } from 'three/addons/objects/Sky.js';
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
 
+// 已加载的天空贴图引用：供 Game 在「白天/夜晚」之间直接切换 scene.background 用
+const skyTextures = { day: null, night: null };
+export function getSkyTextures() {
+  return skyTextures;
+}
+
 // asyncLoadSky(scene, fin)：异步加载并应用贴图天空，成功时移除程序化 Sky 兜底并设背景。
 // 返回一个 Promise（供需要按时序处理的调用方等待；失败自动静默回退）。
 export function loadSkyTexture(scene) {
@@ -17,6 +23,7 @@ export function loadSkyTexture(scene) {
         texture.mapping = THREE.EquirectangularReflectionMapping;
         texture.colorSpace = THREE.SRGBColorSpace;
         scene.background = texture;
+        skyTextures.day = texture;
         resolve(true);
       },
       undefined,
@@ -91,6 +98,8 @@ export function createNightSky(scene) {
       mat.map = texture;
       mat.color.setHex(0xffffff); // 有贴图时按原色显示星空
       mat.needsUpdate = true;
+      skyTextures.night = texture;
+      console.log('[sky] 夜空贴图已加载');
     },
     undefined,
     () => {

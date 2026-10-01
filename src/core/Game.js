@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { attachSky, createNightSky, fitNightSky } from '../world/SkyBox.js';
+import { attachSky, createNightSky, fitNightSky, getSkyTextures } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
@@ -59,6 +59,7 @@ export class Game {
     // ---- 场景与相机 ----
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，贴图/天空盒覆盖其上）
+    this._dayBg = this.scene.background; // 记下兜底背景，夜里切星空后回白天时用它还原
     attachSky(this.scene); // 城市天空贴图（优先）→ 程序化天空兜底
     // 夜空球壳：夜晚时叠在白天背景上做交叉淡入（白天 visible=false，完全不绘制）
     this._nightSky = createNightSky(this.scene);
@@ -102,6 +103,7 @@ export class Game {
     this._hudTimeText = '';
     // 本地时刻偏移（小时→一天比例）：只用于本地预览（想马上看夜晚就拖它），不参与联机同步
     this._dayOffset = (Number(gset.dayOffset) || 0) / 24;
+    this._skyNight = false; // 当前背景是否已切到星空贴图
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
@@ -340,13 +342,26 @@ export class Game {
     this._sun.intensity = this._dayBaseSun * sunUp;
     this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
     this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
-    // 天空贴图整体压暗（three 的 backgroundIntensity；旧版本没有该属性则跳过）
-    if ('backgroundIntensity' in this.scene) {
-      this.scene.backgroundIntensity = 0.08 + 0.92 * sunUp; // 夜里压到很暗，白天全亮
+    // 天空贴图整体压暗 + 夜空交叉淡入。
+    // 夜浓度按「太阳亮度」算：sunUp 在 s=0 时就已经为 0（世界全黑），
+    // 若夜空等到更晚才全不透明，就会出现"世界全黑但天空还是白天贴图"的断层。
+    const night = Math.min(1, Math.max(0, 1 - sunUp / 0.35));
+
+    // 保底切换：夜浓度接近满值时，直接把 scene.background 换成星空贴图。
+    // 球壳负责平滑过渡；这一步保证即使球壳因任何原因没被渲染出来，夜里也一定能看到星空。
+    const tex = getSkyTextures();
+    const wantNight = !!tex.night && night > 0.985;
+    if (wantNight !== this._skyNight) {
+      this._skyNight = wantNight;
+      // 回到白天时优先用城市贴图；没有就退回最初的颜色兜底
+      this.scene.background = wantNight ? tex.night : (tex.day || this._dayBg);
     }
 
-    // 夜空交叉淡入：太阳落到地平线以下后逐渐盖住白天天空；白天直接 visible=false 不参与绘制
-    const night = Math.min(1, Math.max(0, -s * 3));
+    if ('backgroundIntensity' in this.scene) {
+      // 换成星空图时不再压暗（星空本身就暗）；白天按时段明暗
+      this.scene.backgroundIntensity = this._skyNight ? 1 : (0.08 + 0.92 * sunUp);
+    }
+
     if (this._nightSky) {
       fitNightSky(this._nightSky, this.camera); // 跟着相机 far 缩放，防止调小视距后球壳被裁掉
       this._nightSky.visible = night > 0.01;
