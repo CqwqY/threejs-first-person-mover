@@ -13,7 +13,7 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { getBagKey, addToBag } from '../player/Inventory.js';
+import { getBagKey, addToBag, loadBag } from '../player/Inventory.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 
@@ -165,6 +165,8 @@ export class Game {
 
     // 顶部校卡：显示当前账号名字，点击展开查看详情，并可在卡内退出登录
     this.playerHUD = createPlayerHUD(this._profile, !!this._token);
+    // 顶部校卡两侧：左侧「背包」、右侧「设置」
+    this._createTopButtons();
 
     // ---- AI 商人 NPC：出生点旁喷泉处的阿花，靠近按 F 或点右侧选项卡打开对话栏 ----
     this.aiChat = createNpcChat();
@@ -299,6 +301,69 @@ export class Game {
     el.addEventListener('click', () => { this.aiChat.toggle(); });
     document.body.appendChild(el);
     this._chatTab = el;
+  }
+
+  // 顶部校卡两侧按钮：左侧「背包」、右侧「设置」+ 一个展示物品的背包浮层
+  _createTopButtons() {
+    const mkBtn = (text, posCss, onClick) => {
+      const b = document.createElement('div');
+      b.textContent = text;
+      b.style.cssText =
+        'position:fixed;z-index:9500;cursor:pointer;user-select:none;' +
+        'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:10px 13px;border-radius:12px;' +
+        'box-shadow:0 6px 18px rgba(0,0,0,.25);font:13px system-ui,"Microsoft YaHei",sans-serif;' + posCss;
+      b.addEventListener('click', onClick);
+      document.body.appendChild(b);
+      return b;
+    };
+    // 校卡在 top 14px 居中(宽最大224)，按钮让它贴着卡左右两侧
+    this._btnBag = mkBtn('背包', 'right:calc(50% + 122px);top:14px;', () => this._toggleBag());
+    this._btnSettings = mkBtn('设置', 'left:calc(50% + 122px);top:14px;', () => this.settingsPanel.toggle());
+    this._buildBag();
+  }
+
+  _buildBag() {
+    const ov = document.createElement('div');
+    ov.style.cssText =
+      'position:fixed;z-index:9550;top:64px;left:50%;transform:translateX(-50%);width:320px;max-height:60vh;' +
+      'overflow:auto;background:#fff;border:1px solid #dde3ec;border-radius:12px;' +
+      'box-shadow:0 12px 40px rgba(0,0,0,.25);padding:12px;display:none;' +
+      'font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;';
+    ov.innerHTML =
+      '<div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;margin-bottom:6px;">' +
+      '<span>我的背包</span>' +
+      '<button type="button" style="border:0;background:none;cursor:pointer;font-size:15px;padding:0 4px;">×</button></div>' +
+      '<div class="bag-list"></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('button').addEventListener('click', () => { ov.style.display = 'none'; });
+    this._bagOv = ov;
+    this._bagList = ov.querySelector('.bag-list');
+  }
+
+  _toggleBag() {
+    this._renderBag();
+    this._bagOv.style.display = this._bagOv.style.display === 'none' ? 'block' : 'none';
+  }
+
+  _renderBag() {
+    const bag = loadBag(getBagKey(this._profile));
+    const entries = Object.entries(bag).filter(([, v]) => v > 0);
+    const list = this._bagList;
+    list.innerHTML = '';
+    if (!entries.length) {
+      list.textContent = '背包空空如也，去喷泉边找阿花要宝贝吧。';
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const [name, count] of entries) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f2f6;';
+      row.innerHTML = '<span></span><b></b>';
+      row.firstElementChild.textContent = name;
+      row.lastElementChild.textContent = '× ' + count;
+      frag.appendChild(row);
+    }
+    list.appendChild(frag);
   }
 
   // 把玩家一句话发给后端 GLM 代理，拿到 {reply, action} 后：展示回复并执行工具动作。
