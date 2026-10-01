@@ -339,7 +339,10 @@ export function createTeacherBoss(scene) {
     setStatus();
   }
 
-  function endFight() {
+  // 结束战斗。broadcast 只有 owner 传 true：否则每个客户端收到 dead 后再回发一次 dead，
+  // 两端会无限互相触发，表现就是「击败之后一直闪白光」。
+  function endFight(broadcast) {
+    if (mode === DEAD || mode === IDLE) return; // 幂等：重复的 dead 不再播一遍过场
     mode = DEAD;
     hp = 0;
     resetTimer = Config.PORTAL_RESET_DELAY;
@@ -347,7 +350,7 @@ export function createTeacherBoss(scene) {
     laserGroup.visible = false;
     clearBullets();
     clearBolts();
-    emit({ ev: 'dead' });
+    if (broadcast) emit({ ev: 'dead' });
     if (onPhase) onPhase('dead', phase);
     setStatus();
   }
@@ -364,7 +367,7 @@ export function createTeacherBoss(scene) {
   function afterHpChange() {
     if (hp > 0 || !owner) { setStatus(); return; }
     if (phase < 3) startShift(phase + 1);
-    else endFight();
+    else endFight(true);
   }
 
   // ---------- 对外操作 ----------
@@ -413,20 +416,24 @@ export function createTeacherBoss(scene) {
         break;
       }
       case 'shift':
-        if (mode === ALIVE || mode === SHIFT) {
+        // 只在战斗态接受，重复的 shift（例如别人晚加入时补发）不会把过场重播一遍
+        if (mode === ALIVE) {
           mode = SHIFT;
           nextPhase = Number(msg.ph) || (phase + 1);
           shiftTimer = Config.BOSS_PHASE_SHIFT;
           hp = 0;
           clearBullets();
+          clearBolts();
           laserGroup.visible = false;
           if (onPhase) onPhase('shift', nextPhase);
           setStatus();
         }
         break;
-      case 'phase':
-        enterPhase(Number(msg.ph) || 2);
+      case 'phase': {
+        const n = Number(msg.ph) || 2;
+        if (mode === SHIFT || n !== phase) enterPhase(n);
         break;
+      }
       case 'damage':
         if (mode === ALIVE) {
           hp = Math.max(0, hp - Math.max(0, Number(msg.dmg) || 0));
@@ -434,7 +441,7 @@ export function createTeacherBoss(scene) {
         }
         break;
       case 'dead':
-        if (mode !== IDLE) endFight();
+        endFight(false); // 不再回发 dead，避免两端互相触发
         break;
       default:
         break;
