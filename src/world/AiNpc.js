@@ -3,6 +3,7 @@
 // 3. 玩家靠近按 E 时触发 onInteract 回调（由 Game 打开对话面板）。不产生物理碰撞体。
 import * as THREE from 'three';
 import { Config } from '../config.js';
+import { instantiate } from './AssetLoader.js';
 
 let styleInjected = false;
 function injectStyle() {
@@ -22,31 +23,33 @@ function injectStyle() {
   document.head.appendChild(st);
 }
 
-// 建一个简单的商人形象：头 + 身子 + 一顶帽，外加上方名牌，不抢玩家模型的样式
+// 建商人形象：用与玩家同款 boy 模型（静态显示，不绑定骨骼动画），外加上方名牌，出场即吸引注意。
 function buildMerchant() {
   const g = new THREE.Group();
 
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4a7cba });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.9, 0.35), bodyMat);
-  body.position.y = 0.95;
-  body.castShadow = true;
-  g.add(body);
-
-  const headMat = new THREE.MeshStandardMaterial({ color: 0xc7a07c });
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 16), headMat);
-  head.position.y = 1.55;
-  head.castShadow = true;
-  g.add(head);
-
-  const hatMat = new THREE.MeshStandardMaterial({ color: 0x4a7cba });
-  const hat = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.3, 8), hatMat);
-  hat.position.y = 1.82;
-  g.add(hat);
-
   // 名牌：挂在头上方
-  const sprite = makeLabel('阿花 · AI 商人', 1.7);
-  sprite.position.y = 2.25;
+  const sprite = makeLabel('阿花 · 物品商人', 1.7);
+  sprite.position.y = 2.2;
   g.add(sprite);
+
+  // 玩家同款 boy 模型：按包围盒等比缩放到 NPC 身高、脚底 y=0，静态展示
+  instantiate('/assets/boy.glb')
+    .then((model) => {
+      const box = new THREE.Box3();
+      model.traverse((o) => {
+        if (o.isMesh) {
+          o.geometry.computeBoundingBox();
+          box.expandByObject(o);
+        }
+      });
+      const sizeY = box.max.y - box.min.y;
+      const s = sizeY > 1e-4 ? 1.8 / sizeY : 1.8;
+      model.scale.setScalar(s);
+      model.position.y = -box.min.y * s; // 底边压到 y=0
+      model.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+      g.add(model);
+    })
+    .catch(() => { /* boy GLB 加载失败：保留名牌即可 */ });
 
   return g;
 }

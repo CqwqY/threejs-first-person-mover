@@ -4,7 +4,6 @@
 // 按包围盒等比缩放到 1.8 并让脚底落在 y=0；静态模型，不做骨骼动画，朝向由 applyCfg/modelDeg 控制。
 import * as THREE from 'three';
 import { instantiate } from '../world/AssetLoader.js';
-import { autoRig, useNativeSkeleton } from './AutoRig.js';
 // import { Config } from '../config.js'; // （移动时疯狂旋转功能临时注释，重开时取消这行）
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
@@ -52,33 +51,23 @@ function buildBody(entry) {
       const bodyHolder = entry.group.userData.bodyHolder;
       bodyHolder.clear();
 
-      // 优先驱动 GLB 自带的真实骨骼（动作贴合模型绑骨）；没有自带骨骼再退回启发式 AutoRig。
-      const rig = useNativeSkeleton(model, MODEL_HEIGHT) || autoRig(model, MODEL_HEIGHT);
-      if (rig) {
-        rig.group.receiveShadow = true;
-        bodyHolder.add(rig.group);
-        entry.group.userData.rig = rig;
-        rig.group.traverse((o) => { if (o.isSkinnedMesh) entry.skinnedMesh = o; });
-        entry.faceHolder = rig.group; // 整体朝向（modelDeg）作用于整套骨架+蒙皮
-      } else {
-        // 回退：手缩放到身高、脚底 y=0 的静态模型（AutoRig 失败时兜底）
-        const box = new THREE.Box3();
-        model.traverse((o) => {
-          if (o.isMesh) {
-            o.geometry.computeBoundingBox();
-            box.expandByObject(o);
-          }
-        });
-        const sizeY = box.max.y - box.min.y;
-        const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
-        model.scale.setScalar(scale);
-        model.position.y = -box.min.y * scale; // 底边压到 y=0
-        const holder = new THREE.Group();
-        holder.add(model);
-        holder.receiveShadow = true;
-        bodyHolder.add(holder);
-        entry.faceHolder = holder;
-      }
+      // 静态显示：无骨骼、无动画。按包围盒等比缩放到身高、脚底压到 y=0。
+      const box = new THREE.Box3();
+      model.traverse((o) => {
+        if (o.isMesh) {
+          o.geometry.computeBoundingBox();
+          box.expandByObject(o);
+        }
+      });
+      const sizeY = box.max.y - box.min.y;
+      const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
+      model.scale.setScalar(scale);
+      model.position.y = -box.min.y * scale; // 底边压到 y=0
+      const holder = new THREE.Group();
+      holder.add(model);
+      holder.receiveShadow = true;
+      bodyHolder.add(holder);
+      entry.faceHolder = holder;
 
       applyCfg(entry);
     })
