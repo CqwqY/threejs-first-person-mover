@@ -88,6 +88,13 @@ export class Input {
     this._jumpQueued = true;
   }
 
+  // 手机跳跃按钮的「按住」状态：置位后等同于按住空格，
+  // 供喷气背包等需要持续按住的逻辑（isDown('Space')）使用。
+  setJumpHeld(v) {
+    if (v) this._keys.add('Space');
+    else this._keys.delete('Space');
+  }
+
   // 读取并清零本帧的鼠标移动量（像素）
   // 返回 { x, y }，LocalPlayer 据此更新 yaw / pitch
   takeMouseDelta() {

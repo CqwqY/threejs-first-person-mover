@@ -39,10 +39,18 @@ export function initMobileControls(input) {
   document.body.appendChild(jumpBtn);
   const jumpPress = (e) => {
     e.preventDefault();
-    input.queueJump();
+    jumpBtn.setPointerCapture(e.pointerId); // 捕获指针：手指滑出按钮也能收到 pointerup
+    input.setJumpHeld(true); // 按住期间等同按住空格（喷气背包据此持续上升）
+    input.queueJump();       // 同时入队一次起跳，落地瞬间即可跳
+  };
+  const jumpRelease = (e) => {
+    e.preventDefault();
+    input.setJumpHeld(false);
   };
   jumpBtn.addEventListener('pointerdown', jumpPress);
-  jumpBtn.addEventListener('pointercancel', (e) => e.preventDefault());
+  jumpBtn.addEventListener('pointerup', jumpRelease);
+  jumpBtn.addEventListener('pointercancel', jumpRelease);
+  jumpBtn.addEventListener('pointerleave', jumpRelease);
 
   // ---- 左侧摇杆 ----
   const zone = document.createElement('div');
