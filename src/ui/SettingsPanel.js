@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS = {
   shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心）
   shadowSize: 2048, // 阴影贴图边长
   castShadow: true, // 阴影总开关
+  nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
 };
 
 const STORE_KEY = 'scene-settings-v1'; // 编辑器「光照设计」键：客户端也读取此键应用光照
@@ -66,6 +67,7 @@ const FIELDS = [
     options: ['512', '1024', '2048', '4096'],
   },
   { id: 'castShadow', label: '阴影开关', kind: 'toggle', defaultValue: true },
+  { id: 'nameTag', label: '显示玩家名牌', kind: 'toggle', defaultValue: true },
 ];
 
 let styleInjected = false;

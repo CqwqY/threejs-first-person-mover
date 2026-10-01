@@ -26,6 +26,7 @@ export class PlayerPhysics {
     this.accelMult = 1;      // 加速度倍率（仅影响有输入时提速快慢）
     this.velocityHold = null; // 持续速度覆盖 {x,y,z,t}（t 秒内每帧强制该速度）
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
+    this.canJump = true;  // 是否允许跳跃（骑电动车时关掉）
     this.controlLock = false; // 锁定操控：对话栏打开等 UI 占用时，移动/跳/喷气不响应
   }
 
@@ -113,7 +114,7 @@ export class PlayerPhysics {
     // ---- 4. 跳跃：落地后重置连跳次数；只要还有剩余次数就允许再跳 ----
     // 采用一次性探测（consumeJump），防止按住空格时连续起跳
     if (state.onGround) this._jumpsUsed = 0;
-    if (!this.controlLock && this._jumpsUsed < this.maxJumps && input.consumeJump()) {
+    if (this.canJump && !this.controlLock && this._jumpsUsed < this.maxJumps && input.consumeJump()) {
       this.velocity.y = Config.JUMP_VELOCITY * this.jumpMult; // 设置竖直初速度（受起跳倍率影响）
       this._jumpsUsed++;
       state.onGround = false;

@@ -299,7 +299,25 @@ export function createNameTag(text, color = '#ffffff') {
   const sprite = new THREE.Sprite(material);
   sprite.scale.set(1.6, 0.45, 1);
   sprite.renderOrder = 10; // 名牌在最底层，血量条压在其上
+  sprite.userData.isNameTag = true; // 供「显示名牌」开关统一隐藏
+  sprite.visible = nameTagsVisible;
   return sprite;
+}
+
+// 全局开关：是否显示玩家头顶名牌（血量条不受影响）
+let nameTagsVisible = true;
+export function setNameTagsVisible(v) {
+  nameTagsVisible = !!v;
+  for (const e of models) {
+    const anchor = e.group && e.group.userData.headAnchor;
+    if (!anchor) continue;
+    for (const child of anchor.children) {
+      if (child.isSprite && child.userData.isNameTag) child.visible = nameTagsVisible;
+    }
+  }
+}
+export function getNameTagsVisible() {
+  return nameTagsVisible;
 }
 
 // 就地替换玩家头顶名牌（拿到登录资料后刷新昵称/颜色用）；text 为空则移除名牌

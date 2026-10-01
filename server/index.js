@@ -250,6 +250,12 @@ function clampHold(v) {
   return String(v || '').replace(/<[^>]*>/g, '').trim().slice(0, 8);
 }
 
+// 载具座位：只接受 0/1/2，其余一律按"没骑"处理
+function clampRide(v) {
+  const n = Number(v);
+  return (n === 1 || n === 2) ? n : 0;
+}
+
 // 范围效果白名单钳制（投掷物附带增益）：只允许治疗/加速/跳高/飞行/体型，参数一律夹到安全区间
 function cleanFx(v) {
   if (!v || typeof v !== 'object') return null;
@@ -277,6 +283,8 @@ function worldPlayers() {
     size: st.size,
     health: st.health,
     hold: st.hold,
+    ride: st.ride,
+    veh: st.veh,
     nick: st.nick || ('玩家' + st.num),
     color: st.color || '#ffffff',
   }));
@@ -384,6 +392,8 @@ wss.on('connection', (ws) => {
       size: clampSize(msg.size),
       health: clampHealth(msg.health),
       hold: clampHold(msg.hold),
+      ride: clampRide(msg.ride),
+      veh: String(msg.veh || '').slice(0, 16),
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });

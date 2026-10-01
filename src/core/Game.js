@@ -8,13 +8,14 @@ import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/Setti
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createAiNpc } from '../world/AiNpc.js';
+import { createVehicle } from '../world/Vehicle.js';
 import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale, setHeldText } from '../player/PlayerModel.js';
+import { setModelScale, setHeldText, setNameTagsVisible } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
@@ -155,9 +156,10 @@ export class Game {
           this.renderer.shadowMap.enabled = !!v;
           this._sun.castShadow = !!v;
         },
+        nameTag: (v) => setNameTagsVisible(v), // 玩家头顶名牌总开关
       },
       {
-        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow'],
+        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag'],
         storeKey: 'scene-settings-game-v1',
       }
     );
@@ -179,6 +181,17 @@ export class Game {
     // 屏幕中心右侧的「与阿花对话」选项卡：仅在靠近阿花时显示，点击开/关对话栏
     this._createChatTab();
     this.aiNpc.onRange((r) => { this._chatTab.style.display = r ? '' : 'none'; });
+
+    // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
+    this.vehicle = createVehicle(this.scene);
+    this._vehDriver = null; // 后座时记住驾驶员的玩家 id
+    this._vehHint = this._createVehicleHint();
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.VEHICLE_KEY) return;
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
+      this._toggleVehicle();
+    });
 
     // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能；恢复上次指定的槽位
     this.skillSlots = createSkillSlots();
@@ -256,6 +269,7 @@ export class Game {
   // 重生：满血、清速度，回到服务器分配的出生点
   _respawn() {
     const sp = this._spawn || { x: 0, z: 0, yaw: 0 };
+    if (this.localState.ride) this._dismountVehicle(); // 死亡时若在车上，先下车
     this.localState.health = Config.HEALTH_MAX;
     this.localState.x = sp.x;
     this.localState.z = sp.z;
@@ -418,6 +432,141 @@ export class Game {
   }
   _setChatLock(locked) {
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.controlLock = !!locked;
+  }
+
+  // ---- 电动车：上车 / 下车 / 每帧摆放 ----
+
+  _createVehicleHint() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;bottom:18%;transform:translateX(-50%);z-index:9000;display:none;' +
+      'background:rgba(0,0,0,.65);color:#fff;padding:6px 14px;border-radius:18px;pointer-events:none;' +
+      'font:13px/1.4 system-ui,"Microsoft YaHei",sans-serif;';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 载具当前占用的座位（driver / passenger 为玩家 id，null 表示空）
+  _vehicleSeats() {
+    const out = { driver: null, passenger: null };
+    const consider = (id, st) => {
+      if (!st || st.veh !== Config.VEHICLE_ID) return;
+      if (st.ride === 1) out.driver = id;
+      else if (st.ride === 2) out.passenger = id;
+    };
+    consider(this.localState.id || '__local', this.localState);
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === this.localState.id) continue;
+      consider(id, rp.state);
+    }
+    return out;
+  }
+
+  _playerStateById(id) {
+    if (!id) return null;
+    if (id === this.localState.id) return this.localState;
+    const rp = this.playerManager.players.get(id);
+    return rp ? rp.state : null;
+  }
+
+  // 载具当前位置（有人驾驶时在驾驶员脚下，否则在停放点）
+  _vehiclePos() {
+    const seats = this._vehicleSeats();
+    const d = this._playerStateById(seats.driver);
+    if (d) return { x: d.x, z: d.z };
+    return { x: Config.VEHICLE_POS.x, z: Config.VEHICLE_POS.z };
+  }
+
+  _nearVehicle() {
+    const p = this._vehiclePos();
+    return Math.hypot(this.localState.x - p.x, this.localState.z - p.z) <= Config.VEHICLE_PROXIMITY;
+  }
+
+  _toggleVehicle() {
+    if (this.localState.ride) { this._dismountVehicle(); return; }
+    if (!this._nearVehicle()) return;
+    const seats = this._vehicleSeats();
+    if (!seats.driver) this._mountVehicle(1);
+    else if (!seats.passenger) this._mountVehicle(2, seats.driver);
+    else this._toast('电动车已经坐满了');
+  }
+
+  // seat：1 = 驾驶位，2 = 后座；driverId 仅后座需要
+  _mountVehicle(seat, driverId) {
+    const st = this.localState;
+    const phys = this.localPlayer.physics;
+    st.ride = seat;
+    st.veh = Config.VEHICLE_ID;
+    this.input.consumeJump(); // 清掉待处理的跳跃请求
+    phys.canJump = false;      // 骑乘时不能跳
+    if (seat === 1) {
+      phys.speedMult = Config.VEHICLE_SPEED / Config.MOVE_SPEED; // 速度很快
+      this._toast('已上车（驾驶位）：速度很快，但不能跳跃');
+    } else {
+      this._vehDriver = driverId || null;
+      phys.controlLock = true; // 后座不参与操控
+      phys.velocity.set(0, 0, 0);
+      this._toast('已上车（后座）');
+    }
+  }
+
+  _dismountVehicle() {
+    const st = this.localState;
+    st.ride = 0;
+    st.veh = '';
+    this._vehDriver = null;
+    const phys = this.localPlayer.physics;
+    phys.canJump = true;
+    // 别把对话栏的操控锁一起解掉
+    phys.controlLock = !!(this.aiChat && this.aiChat.isOpen());
+    phys.speedMult = 1;
+    phys.speedMode = 'walk';
+    this._toast('已下车');
+  }
+
+  _updateVehicle(dt) {
+    const st = this.localState;
+    const seats = this._vehicleSeats();
+
+    // 1) 车体：有人驾驶就跟驾驶员，否则回停放点
+    if (seats.driver) {
+      const d = this._playerStateById(seats.driver);
+      if (d) this.vehicle.setPose(d.x, d.y - Config.PLAYER_HEIGHT * (d.size || 1), d.z, d.yaw);
+    } else {
+      this.vehicle.park();
+    }
+
+    // 2) 后座：把本地玩家钉在驾驶位后方；驾驶员不在了就自动下车
+    if (st.ride === 2) {
+      const d = this._playerStateById(seats.driver);
+      if (d) {
+        const back = Config.VEHICLE_SEAT_BACK;
+        st.x = d.x + Math.sin(d.yaw) * back;
+        st.z = d.z + Math.cos(d.yaw) * back;
+        st.y = d.y;
+        st.yaw = d.yaw;
+        st.pitch = d.pitch;
+        this.localPlayer.physics.velocity.set(0, 0, 0);
+      } else {
+        this._dismountVehicle();
+        this._toast('驾驶员离开了，已下车');
+      }
+    }
+
+    // 3) 提示
+    if (st.ride) {
+      this._vehHint.textContent = '按 ' + Config.VEHICLE_KEY.slice(-1) + ' 下车';
+      this._vehHint.style.display = '';
+    } else if (this._nearVehicle()) {
+      const occupied = this._vehicleSeats();
+      const full = occupied.driver && occupied.passenger;
+      this._vehHint.textContent = full
+        ? '电动车已满员'
+        : ('按 ' + Config.VEHICLE_KEY.slice(-1) + ' 上车');
+      this._vehHint.style.display = '';
+    } else {
+      this._vehHint.style.display = 'none';
+    }
   }
 
   // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
@@ -1292,6 +1441,9 @@ export class Game {
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     this.localPlayer.update(dt);
     this.playerManager.update(dt);
+
+    // 电动车：摆放车体、钉住后座、刷新上下车提示（必须在玩家更新之后）
+    this._updateVehicle(dt);
 
     // AI 商人 NPC：靠近提示 + 可拾取道具的推进
     this.aiNpc.update(dt, this.localState.x, this.localState.z);
