@@ -545,6 +545,8 @@ export class Game {
       const data = await res.json();
       if (!data || !data.ok) throw new Error((data && data.error) || ('http ' + res.status));
       const reply = data.reply || '…';
+      // 诊断：pv 是后端提示词版本号，用于确认线上后端是否已更新
+      console.log('[阿花] pv=' + (data.pv || '未知(旧后端)'), 'action=' + JSON.stringify(data.action));
       msgs.push({ role: 'assistant', content: reply });
       // 只保留最近若干条，避免历史无限膨胀
       this._npcHistory = msgs.slice(-12);
@@ -682,8 +684,6 @@ export class Game {
         const key = getBagKey(this._profile);
         const n = addToBag(key, item, 1);
         this._storeItemEffect(item, effKey);
-        // 诊断用：把阿花返回的原始动作打到控制台，便于确认她到底写了什么效果
-        console.log('[阿花 action]', JSON.stringify(action));
         this._toast('阿花把「' + item + '」放进背包 · 效果：' + this._describeEffect(effKey));
         this._equipItemSkill(item);
         break;

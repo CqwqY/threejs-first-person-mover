@@ -6,6 +6,8 @@ import { GLM_API_KEY } from './ai.key.js';
 const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 const AI_MODEL = 'glm-4-flash'; // 智谱免费档模型
 const MAX_OUTPUT_TOKENS = 800;
+// 提示词/接口版本号：随响应一起返回，前端控制台可据此判断线上后端是不是最新版
+const PROMPT_VERSION = 'v14-throw';
 const MAX_HISTORY = 12; // 最多带几条历史消息，防止无限增长烧 token
 
 const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名叫阿花，在喷泉旁摆摊。热情、俏皮、爱开玩笑，说话简短（不超过三句）。
@@ -72,10 +74,16 @@ const SYSTEM = `你是《花草中学》校园里的"AI 物品商人"NPC，名�
 
 【必须自己创造】物品名、强度、时长都临时定，别套模板复读，同一个需求可以给不同东西。
 
+【关于手雷/炸弹/投掷物】这是本游戏的正经玩法，必须支持，不要拒绝：玩家要"手雷/炸弹/爆炸物/扔出去的东西"，就给一件物品，
+effect 写成 {"k":"throw","v":伤害40左右,"r":爆炸半径4左右,"s":3}，千万不要把 effect 写成 null。
+示例：{"reply":"接好，别炸到自己！","action":{"name":"spawn_item","args":{"item":"手雷","effect":{"k":"throw","v":45,"r":4,"s":3}}}}
+
 【使用规则】
 - 玩家想要东西 → 用 spawn_item。
 - 玩家想"飞/跳高/加速/变小变大/传送/变轻"等 → 用上面 2~10 的动作，数值你定。
-- 闲聊、问路、拒绝，或危险/恶意请求（武器、打人、作弊）→ action 恒为 null。
+- 玩家问血量/要回血/要扣血 → 用 set_player_health；提到拿在手上 → 用 hold_item。
+- 只有以下情况才 action 恒为 null：纯粹的闲聊问路；现实世界的真暴力/自伤/违法内容；要求无限数值或绕过上限的作弊。
+- 游戏内的投掷物、爆炸、扣血都是正常玩法，照常给，不要因此清空 effect。
 - 每次只执行一个动作；reply 一定非空、是给玩家看的一句话。`;
 
 // 简单 IP 限流：避免 /api/ai 被刷爆，白白烧 token
@@ -210,19 +218,28 @@ function cleanAction(name, args) {
     case 'spawn_item': {
       const item = String(a.item || '').replace(/<[^>]*>/g, '').trim().slice(0, 20);
       if (!item) return null;
-      // effect 由 AI（阿花）自己撰写：{k:类型, v:强度, s:秒数}。后端只做类型白名单 + 区间钳制，保证安全。
-      const e = (a.effect && typeof a.effect === 'object') ? a.effect : {};
-      const k = String(e.k || '');
-      const s = clampNum(e.s == null ? a.seconds : e.s, 2, 10);
+      // effect 由 AI 撰写：可能是对象 {k,v,s,r}、纯字符串 "throw"、中文别名「投掷」，
+      // 参数也可能写在 args 顶层（damage/radius/v/r/s）。这里统一归一化，尽量不丢弃她的意图。
+      const raw = a.effect;
+      const obj = (raw && typeof raw === 'object') ? raw : {};
+      const rawKind = (raw && typeof raw === 'object') ? raw.k : raw;
+      const pick = (kk) => (obj[kk] != null ? obj[kk] : a[kk]);
+      const k = kindOf(rawKind);
+      const s = clampNum(pick('s') == null ? a.seconds : pick('s'), 2, 10);
+      const v = pick('v');
       let effect = null;
-      if (k === 'speed') effect = { k, v: clampNum(e.v == null ? 1.8 : e.v, 1.2, 3), s };
-      else if (k === 'jump') effect = { k, v: clampNum(e.v == null ? 1.6 : e.v, 1.1, 2.5), s };
+      if (k === 'speed') effect = { k, v: clampNum(v == null ? 1.8 : v, 1.2, 3), s };
+      else if (k === 'jump') effect = { k, v: clampNum(v == null ? 1.6 : v, 1.1, 2.5), s };
       else if (k === 'jetpack') effect = { k, s };
-      else if (k === 'size') effect = { k, v: clampNum(e.v == null ? 1.5 : e.v, 0.3, 2.5), s };
-      // 投掷物：v = 伤害、r = 爆炸半径，由阿花指定
-      else if (k === 'throw') effect = { k, v: clampNum(e.v == null ? 40 : e.v, 1, 120), r: clampNum(e.r == null ? 3 : e.r, 1, 20), s };
-      // effect 为 null 的整块删除 → 无效果对象，前端按装饰品/兜底处理
-      return { item, effect, seconds: s };
+      else if (k === 'size') effect = { k, v: clampNum(v == null ? 1.5 : v, 0.3, 2.5), s };
+      else if (k === 'throw') {
+        const dmg = v != null ? v : (pick('damage') != null ? pick('damage') : 40);
+        const rad = pick('r') != null ? pick('r') : (pick('radius') != null ? pick('radius') : 3);
+        effect = { k, v: clampNum(dmg, 1, 120), r: clampNum(rad, 1, 20), s };
+      }
+      // 回显 AI 原本写的效果，便于前端排查（null=她确实写了 null/装饰品）
+      const echo = raw === undefined ? null : String(typeof raw === 'string' ? raw : JSON.stringify(raw)).slice(0, 80);
+      return { item, effect, seconds: s, _raw: echo };
     }
     default:
       return null;
@@ -232,6 +249,20 @@ function clampNum(v, lo, hi) {
   const n = Number(v);
   if (!Number.isFinite(n)) return lo;
   return Math.min(hi, Math.max(lo, n));
+}
+
+// 效果类型归一化：容忍大小写、纯字符串写法、以及中文别名，避免阿花换个说法就被整块丢弃
+const KIND_ALIAS = {
+  speed: 'speed', jump: 'jump', jetpack: 'jetpack', size: 'size', throw: 'throw',
+  加速: 'speed', 速度: 'speed', 疾风: 'speed', 跑得快: 'speed', 提速: 'speed',
+  跳: 'jump', 跳高: 'jump', 跳跃: 'jump', 弹簧: 'jump', 连跳: 'jump',
+  飞: 'jetpack', 飞行: 'jetpack', 喷气: 'jetpack', 喷气背包: 'jetpack', 翅膀: 'jetpack',
+  体型: 'size', 变大: 'size', 变小: 'size', 缩小: 'size', 巨人: 'size',
+  投掷: 'throw', 投掷物: 'throw', 爆炸: 'throw', 手雷: 'throw', 炸弹: 'throw', 爆裂: 'throw', 投: 'throw',
+};
+function kindOf(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  return KIND_ALIAS[s] || KIND_ALIAS[s.toLowerCase()] || '';
 }
 
 function clampInt(v, lo, hi) {
@@ -304,7 +335,7 @@ export async function askNpc(messages) {
     reply = '嗯嗯，我在呢。';
   }
   reply = reply.slice(0, 1500);
-  return { reply, action };
+  return { reply, action, pv: PROMPT_VERSION };
 }
 
 // 动作名 → reply 缺失时的兜底台词（让玩家只看到自然的话，不暴露底层参数）
