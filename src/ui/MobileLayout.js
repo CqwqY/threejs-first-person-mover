@@ -24,11 +24,19 @@ export function initMobileLayout() {
       font-size:clamp(13px,3.6vmin,16px)}
     .mc-joy{width:clamp(92px,26vmin,124px);height:clamp(92px,26vmin,124px)}
     .mc-knob{width:clamp(42px,11vmin,56px);height:clamp(42px,11vmin,56px)}
-    .ml-bar{position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:80;display:flex;
-      flex-direction:column;gap:6px;user-select:none;-webkit-user-select:none;
-      font:12px/1.2 system-ui,"Microsoft YaHei",sans-serif}
+    /* 侧栏：贴左上角（避开左下摇杆与左下血条），跟随安全区，默认收起只留一个小页签 */
+    .ml-bar{position:fixed;z-index:80;display:flex;flex-direction:column;gap:6px;
+      left:calc(env(safe-area-inset-left, 0px) + 8px);
+      top:calc(env(safe-area-inset-top, 0px) + 52px);
+      user-select:none;-webkit-user-select:none;
+      font:clamp(11px,2.8vmin,12px)/1.2 system-ui,"Microsoft YaHei",sans-serif}
+    .ml-tab{background:rgba(10,16,26,.72);color:#fff;border:1px solid rgba(255,255,255,.3);
+      border-radius:8px;padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
+      user-select:none;-webkit-user-select:none;letter-spacing:1px}
+    .ml-panel{display:none;flex-direction:column;gap:6px}
+    .ml-panel.open{display:flex}
     .ml-btn{background:rgba(10,16,26,.72);color:#fff;border:1px solid rgba(255,255,255,.3);
-      border-radius:8px;padding:7px 10px;cursor:pointer;text-align:center;touch-action:none;
+      border-radius:8px;padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
       user-select:none;-webkit-user-select:none}
     .ml-btn.on{background:#2e7ddd;border-color:#8fc3ff}
     .ml-handle{position:fixed;z-index:81;border:2px dashed #ffd479;border-radius:10px;
@@ -56,20 +64,39 @@ export function initMobileLayout() {
     toastTimer = setTimeout(() => { toastEl.style.display = 'none'; }, 2600);
   }
 
-  // ---- 控制条：调整 / 检查 / 重置 ----
+  // ---- 侧栏：小页签 + 可收起的按钮组（避免长占屏幕） ----
   const bar = document.createElement('div');
   bar.className = 'ml-bar';
+  const tab = document.createElement('div');
+  tab.className = 'ml-tab';
+  tab.textContent = '布局';
+  const panel = document.createElement('div');
+  panel.className = 'ml-panel';
+  bar.appendChild(tab);
+  bar.appendChild(panel);
   const mkBtn = (text) => {
     const b = document.createElement('div');
     b.className = 'ml-btn';
     b.textContent = text;
-    bar.appendChild(b);
+    panel.appendChild(b);
     return b;
   };
   const toggle = mkBtn('调整');
   const check = mkBtn('检查');
   const reset = mkBtn('重置');
   document.body.appendChild(bar);
+
+  let panelOpen = false;
+  const setPanelOpen = (v) => {
+    panelOpen = !!v;
+    panel.classList.toggle('open', panelOpen);
+    tab.classList.toggle('on', panelOpen);
+  };
+  tab.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPanelOpen(!panelOpen);
+  });
 
   let editing = false;
   const handles = [];
@@ -164,6 +191,7 @@ export function initMobileLayout() {
   function enter() {
     editing = true;
     setLayoutPaused(true); // 编辑期间暂停自动重排，避免拖到一半被挪走
+    setPanelOpen(true);    // 展开侧栏，保证「完成」可见
     toggle.classList.add('on');
     toggle.textContent = '完成';
     buildHandles();

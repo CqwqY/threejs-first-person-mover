@@ -76,8 +76,14 @@ function injectStyle() {
   styleInjected = true;
   const css = `
     .gx-win {
-      position: fixed; right: 20px; top: 64px; z-index: 9999;
-      width: 260px; background: rgba(24,26,32,.92); color: #e8eaf0;
+      position: fixed; z-index: 9999;
+      /* 跟随安全区；宽度/高度都收在可视区内，横屏竖屏都不溢出 */
+      right: calc(env(safe-area-inset-right, 0px) + 12px);
+      top: calc(env(safe-area-inset-top, 0px) + 56px);
+      width: min(280px, calc(100vw - 24px));
+      max-height: calc(var(--app-vh, 100vh) - 76px);
+      overflow-y: auto; -webkit-overflow-scrolling: touch;
+      background: rgba(24,26,32,.92); color: #e8eaf0;
       border: 1px solid rgba(255,255,255,.12); border-radius: 10px;
       box-shadow: 0 14px 40px rgba(0,0,0,.5);
       font: 12px/1.6 system-ui, sans-serif;
