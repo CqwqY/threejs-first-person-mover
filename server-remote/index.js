@@ -42,6 +42,11 @@ function mimeFor(ext) {
 }
 
 // HTTP 服务：承载「保存地图 / 素材清单 / 上传 / 静态资源」接口，并用 upgrade 事件转交给 WebSocket 中继
+// 兜底：未捕获异常/未处理的 Promise 拒绝只记录，不让中继进程整体退出
+// （否则任何一个畸形请求都可能把服务打崩，踢掉全部在线玩家）
+process.on('unhandledRejection', (e) => console.warn('[relay] 未处理的 Promise 拒绝:', e));
+process.on('uncaughtException', (e) => console.warn('[relay] 未捕获异常:', e));
+
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');

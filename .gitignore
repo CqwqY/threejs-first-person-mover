@@ -2,6 +2,11 @@
 node_modules/
 dist/
 
+# 账号数据库（含密码哈希与会话，绝不能入库）
+*.db
+*.db-wal
+*.db-shm
+
 # 包管理器锁文件（可选，若希望锁定版本可保留 package-lock.json）
 npm-debug.log*
 
