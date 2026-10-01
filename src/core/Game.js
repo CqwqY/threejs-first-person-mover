@@ -14,6 +14,7 @@ import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { getBagKey, addToBag, loadBag } from '../player/Inventory.js';
+import { createSkillSlots } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 
@@ -176,8 +177,13 @@ export class Game {
     this.aiNpc = createAiNpc();
     this.aiNpc.setInteract(() => this._openChat());
     this.scene.add(this.aiNpc.group);
-    // 屏幕中心右侧的「与阿花对话」选项卡：点击开/关对话栏
+    // 屏幕中心右侧的「与阿花对话」选项卡：仅在靠近阿花时显示，点击开/关对话栏
     this._createChatTab();
+    this.aiNpc.onRange((r) => { this._chatTab.style.display = r ? '' : 'none'; });
+
+    // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能
+    this.skillSlots = createSkillSlots();
+
     // 本地可拾取的「生成物品」发光道具
     this._pickups = [];
   }
@@ -294,7 +300,7 @@ export class Game {
     const el = document.createElement('div');
     el.textContent = '与阿花对话';
     el.style.cssText =
-      'position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;' +
+      'position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
       'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:12px 14px;border-radius:14px;' +
       'box-shadow:0 6px 20px rgba(0,0,0,.3);user-select:none;' +
       'font:13px/1.4 system-ui,"Microsoft YaHei",sans-serif;text-align:center;';
@@ -467,16 +473,63 @@ export class Game {
         break;
       }
       case 'spawn_item': {
-        // 阿花把物品放进玩家背包（不是丢到地上给效果）
+        // 阿花把物品放进玩家背包，同时挂到技能槽（可点击/按数字键触发对应的技能效果）
         const item = action.args.item || '神秘物品';
         const key = getBagKey(this._profile);
         const n = addToBag(key, item, 1);
         this._toast('阿花把「' + item + '」放进你的背包（累计 ' + n + ' 件）');
+        this._equipItemSkill(item);
         break;
       }
       default:
         break;
     }
+  }
+
+  // 把阿花给的物品挂到技能槽：按物品名关键词映射出一个可触发的技能效果。
+  // 触发方式：点击槽位（手机）或按对应数字键（PC）。
+  _equipItemSkill(item) {
+    const name = item || '';
+    const phys = this.localPlayer.physics;
+    let label = name;
+    let onActivate = null;
+
+    if (/疾风|跑得|速度|风力|风之靴/.test(name)) {
+      label = '疾风';
+      onActivate = () => {
+        const m = 2.2;
+        phys.speedMult = m;
+        this._toast('疾风：速度提升至 ' + m + ' 倍，持续 5 秒');
+        setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 5000);
+      };
+    } else if (/跳高|跳跃|弹簧|跳得/.test(name)) {
+      label = '跃升';
+      onActivate = () => {
+        const m = 1.8;
+        phys.jumpMult = m;
+        this._toast('跃升：起跳力度提升至 ' + m + ' 倍，持续 5 秒');
+        setTimeout(() => { if (phys.jumpMult === m) phys.jumpMult = 1; }, 5000);
+      };
+    } else if (/喷气|飞行|翅膀|背包|火箭/.test(name)) {
+      label = '喷气';
+      onActivate = () => {
+        phys.jetpack = true;
+        this._toast('喷气背包：空中按住空格上升，持续 6 秒');
+        setTimeout(() => { phys.jetpack = false; }, 6000);
+      };
+    } else {
+      // 其它物品：简单短暂提速，聊胜于无
+      onActivate = () => {
+        const m = 1.5;
+        phys.speedMult = m;
+        this._toast('「' + name + '」生效：速度短暂提升');
+        setTimeout(() => { if (phys.speedMult === m) phys.speedMult = 1; }, 4000);
+      };
+    }
+
+    const keyName = this.skillSlots.registerSkill({ label, onActivate });
+    const tag = keyName ? '（按 ' + keyName.slice(-1) + ' 触发）' : '';
+    this._toast('「' + name + '」已装备到技能槽' + tag);
   }
 
   // spawn_item：在玩家正前方生成一个发光可拾取道具，走过去触碰即可拾取。

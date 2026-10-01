@@ -15,7 +15,7 @@ export function initMobileControls(input) {
   style.textContent = `
     .mc-zone{position:fixed;bottom:0;touch-action:none;user-select:none;-webkit-user-select:none;z-index:50}
     .mc-left{left:0;width:44vw;height:42vh}
-    .mc-right{right:0;width:56vw;height:48vh}
+    .mc-right{right:0;top:0;width:50vw;height:100vh}
     .mc-joy{position:absolute;left:20px;bottom:26px;width:118px;height:118px;border-radius:50%;
       border:2px solid rgba(255,255,255,.32);background:rgba(255,255,255,.08);
       box-sizing:content-box}

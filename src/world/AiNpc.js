@@ -5,23 +5,7 @@ import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
 
-let styleInjected = false;
-function injectStyle() {
-  if (styleInjected || typeof document === 'undefined') return;
-  styleInjected = true;
-  const st = document.createElement('style');
-  st.textContent = `
-    .npc-hint {
-      position: fixed; top: 18%; left: 50%; transform: translateX(-50%); z-index: 9000;
-      background: rgba(0,0,0,.7); color: #fff; padding: 7px 14px; border-radius: 20px;
-      font: 13px/1.4 system-ui, "Microsoft YaHei", sans-serif; pointer-events: none;
-      box-shadow: 0 4px 16px rgba(0,0,0,.3);
-    }
-    .npc-hint.hidden { display: none; }
-    .npc-hint b { color: #ffd479; }
-  `;
-  document.head.appendChild(st);
-}
+
 
 // 建商人形象：用与玩家同款 boy 模型（静态显示，不绑定骨骼动画），外加上方名牌，出场即吸引注意。
 function buildMerchant() {
@@ -77,26 +61,22 @@ function makeLabel(text, scale) {
 
 // AiNpc(api)：注入一个 API 实例以获取目标文件名等；这里保持独立。
 export function createAiNpc() {
-  injectStyle();
-
   const pos = Config.NPC_POS;
   const merchant = buildMerchant();
   merchant.position.set(pos.x, 0, pos.z);
 
-  const hint = document.createElement('div');
-  hint.className = 'npc-hint hidden';
-  hint.innerHTML = '靠近 <b>阿花</b> · 按 <b>F</b> 与她对话';
-  document.body.appendChild(hint);
-
   let inRange = false;
   let onInteract = null;
+  let onRange = null; // 进出范围回调：(inRange:boolean)=>void，由 Game 用来显隐「与阿花对话」选项卡
 
   function checkRange(px, pz) {
     const d = Math.hypot(px - pos.x, pz - pos.z);
-    const wasIn = inRange;
-    inRange = d <= Config.NPC_PROXIMITY;
-    hint.classList.toggle('hidden', !inRange);
-    return !wasIn && inRange;
+    const now = d <= Config.NPC_PROXIMITY;
+    if (now !== inRange) {
+      inRange = now;
+      if (onRange) onRange(now);
+    }
+    return now;
   }
 
   const keyHandler = (e) => {
@@ -116,14 +96,13 @@ export function createAiNpc() {
 
   function dispose() {
     window.removeEventListener('keydown', keyHandler);
-    hint.remove();
   }
 
   return {
     group: merchant,
-    hint,
     update,
     setInteract,
+    onRange: (fn) => { onRange = fn; },
     setVisible(v) { merchant.visible = v; },
     dispose,
   };
