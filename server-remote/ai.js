@@ -164,13 +164,47 @@ export async function askNpc(messages) {
   const content = String(msg.content || '').trim();
   // 从模型原始输出里抠出 JSON 对象（容忍可能夹带的代码块/前后文字），失败则当纯对话。
   const parsed = extractJson(content);
-  const reply = String((parsed && parsed.reply) || content || '……').slice(0, 1500);
+  // 解析出动作（先于 reply 兜底，因为 reply 缺失时要用动作名生成一句话）
   let action = null;
   if (parsed && parsed.action && typeof parsed.action === 'object' && parsed.action.name) {
     action = cleanAction(parsed.action.name, parsed.action.args || {});
     if (!action) action = null;
   }
+  // 计算对玩家可见的「说话」，绝不把模型原始 JSON 直接当回复漏出去。
+  const cleanReply = parseString(parsed && parsed.reply);
+  const looksJson = /"reply"\s*:|\"action\"\s*:|\"name\"\s*:|\"[a-zA-Z]+\"\s*:\s*"/.test(content);
+  let reply;
+  if (cleanReply) {
+    reply = cleanReply;
+  } else if (action) {
+    reply = ACTION_SAYING[action.name] || '搞定啦。';
+  } else if (!looksJson && content && content.length <= 200) {
+    reply = content; // 只有规范的一段纯文字闲聊才允许直接显示
+  } else {
+    reply = '嗯嗯，我在呢。';
+  }
+  reply = reply.slice(0, 1500);
   return { reply, action };
+}
+
+// 动作名 → reply 缺失时的兜底台词（让玩家只看到自然的话，不暴露底层参数）
+const ACTION_SAYING = {
+  set_player_speed: '行，帮你调好了速度。',
+  set_player_size: '好了，体型已帮你调整。',
+  set_player_jump: '跳得更高些咯。',
+  set_player_gravity: '重力调好了，走你。',
+  set_player_velocity: '给你加了把劲。',
+  set_player_position: '人已挪到目的地。',
+  teleport_player: '刷的一下，到了。',
+  grant_jetpack: '喷气背包开好啦。',
+  spawn_item: '宝箱在前头，去捡吧。',
+};
+
+// 把值规整成非空字符串，否则返回 null
+function parseString(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  return s ? s : null;
 }
 
 // 从一段文本中稳健地取第一个大括号 JSON 对象：去掉 ``` 代码块、取第一个 { 到最后一个 } 再 JSON.parse。
