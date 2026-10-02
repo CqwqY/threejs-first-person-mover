@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { instantiate } from './AssetLoader.js';
 import { editorMapData } from './editorMapData.js';
 import { API_BASE } from '../config.js';
@@ -52,6 +53,189 @@ function normScale(s) {
   }
   const v = (typeof s === 'number' && Number.isFinite(s)) ? s : 1;
   return { x: v, y: v, z: v };
+}
+
+// ===========================================================================
+// 静态网格合并（draw call 优化）
+// ---------------------------------------------------------------------------
+// 编辑器导入的模型常被导出成「几百个几十三角形的小网格」——线上那两栋室内模型分别是
+// 828 / 837 个网格，而三角形只有 3.3 万 / 5.1 万。三角形数根本不是瓶颈，瓶颈是**提交次数**：
+// 每个网格一次 draw call，开了阴影后主渲染 + 阴影贴图两趟各来一次 → 一栋楼就多出约 1600 次提交。
+// 这正是「多一栋复杂建筑就卡」的主因。
+//
+// 这些都是静态景物（没有骨骼动画、没有 morph），把「几何属性布局一致 + 材质外观一致」的子网格
+// 烘进一个几何体后，通常只剩几个网格。合并只在**游戏侧**做（编辑器要保留逐网格选中能力）。
+// 顶点/索引布局或材质外观有任何差异都不会被合并，最坏情况是「没效果」而不是「画错」。
+//
+// 唯一的例外是镜像节点（scale.x = -1 之类，导出模型里的对称结构很常见）：这类子网格的矩阵行列式为负，
+// 合并后新网格挂在 root 下、行列式变回正，three 的背面剔除判定会跟着翻 → 必须同时把绕向翻回来
+// （见 flipTriangleWinding）。这不是「可以不管的边角情况」，漏了就会在模型上直接看到内壁。
+// ===========================================================================
+
+// 非渲染相关的材质字段：不参与外观指纹（改了它们不会改变画面）
+const MATERIAL_SKIP_KEYS = new Set(['uuid', 'id', 'name', 'type', 'version', 'userData', 'defines', 'uniforms', 'needsUpdate']);
+
+// 把任意材质属性值折成一个稳定字符串（深度受限，避免循环引用/巨对象）
+function valueSig(v, depth) {
+  if (v === null || v === undefined) return '-';
+  const t = typeof v;
+  if (t === 'number') return Number.isFinite(v) ? String(v) : 'nan';
+  if (t === 'boolean') return v ? '1' : '0';
+  if (t === 'string') return v;
+  if (t === 'function') return 'fn';
+  if (depth <= 0) return 'deep';
+  if (Array.isArray(v)) return '[' + v.map((x) => valueSig(x, depth - 1)).join(';') + ']';
+  if (typeof v.getHexString === 'function') return '#' + v.getHexString();       // Color
+  if (typeof v.uuid === 'string') return 'u:' + v.uuid;                           // Texture 等
+  if (typeof v.toArray === 'function') return '(' + v.toArray().map((x) => valueSig(x, 0)).join(',') + ')'; // Vector/Matrix
+  const keys = Object.keys(v);
+  if (!keys.length) return 'obj';
+  return '{' + keys.map((k) => k + '=' + valueSig(v[k], depth - 1)).join(',') + '}';
+}
+
+// 指纹缓存：同一材质/几何实例在一份场景里会被反复用到（合并时要给每个网格算一次键），
+// 缓存后 837 个网格只需算几十次，省掉大量重复的字符串拼接。
+const _matSigCache = new WeakMap();
+const _geoSigCache = new WeakMap();
+
+// 材质外观指纹：外观一致的两个材质（哪怕是不相干的实例）合并后画面上没有区别。
+// 用「首实例」作为合并网格的材质。这样既吃掉「导出器给每个 primitive 复制一份材质」的情况，
+// 也不会把真正不同的材质并到一起。
+function materialSigKey(m) {
+  if (!m) return 'null';
+  const cached = _matSigCache.get(m);
+  if (cached !== undefined) return cached;
+  const keys = Object.keys(m).filter((k) => !MATERIAL_SKIP_KEYS.has(k)).sort();
+  const parts = [];
+  for (const k of keys) parts.push(k + '=' + valueSig(m[k], 3));
+  const sig = parts.join('|');
+  _matSigCache.set(m, sig);
+  return sig;
+}
+
+// 几何布局指纹：mergeGeometries 要求索引有无一致、属性集合/分量数/类型一致、morph 相对性一致。
+// 把这几项编进分组键，就能保证 mergeGeometries 不会因不兼容而返回 null。
+function geometrySigKey(g) {
+  const cached = _geoSigCache.get(g);
+  if (cached !== undefined) return cached;
+  const names = Object.keys(g.attributes || {}).sort();
+  let s = g.index ? 'idx' : 'non';
+  if (g.drawMode !== undefined && g.drawMode !== 0) s += ':dm' + g.drawMode; // 非三角形图元不合并
+  s += g.morphTargetsRelative ? ':mr' : '';
+  for (const n of names) {
+    const a = g.attributes[n];
+    s += '|' + n + ':' + a.itemSize + ':' + (a.array ? a.array.constructor.name : '?') + ':' + (a.normalized ? 1 : 0);
+  }
+  _geoSigCache.set(g, s);
+  return s;
+}
+
+// 翻转每个三角形的顶点绕向（索引网格换两个索引；非索引网格把每个三角形的第 2、3 个顶点整份对调）。
+// 只动「顺序」，不动任何属性值 —— 所以顶点位置和法线都不会变，光照不受影响，只有背面剔除的判定会翻过来。
+//
+// 为什么必须做：three 的 WebGLRenderer 里
+//   const frontFaceCW = ( object.isMesh && object.matrixWorld.determinant() < 0 );
+// 即绕向怎么解读取决于**网格自身矩阵行列式的正负**。合并把镜像烘进了几何体（新网格挂在 root 下、
+// 行列式为正），若这里的子网格相对矩阵行列式为负而不翻绕向，那批三角形就会被当成背面剔掉 ——
+// 表现是模型上出现「内壁/破面」。导出模型里的对称结构常被写成 scale.x = -1，所以这条必不能漏。
+//
+// 导出出来也为了让自检能直接用它翻一整个房间，验证「翻绕向不影响碰撞解算」。
+export function flipTriangleWinding(g) {
+  const idx = g.index;
+  if (idx) {
+    const a = idx.array;
+    for (let i = 0; i + 2 < a.length; i += 3) { const t = a[i + 1]; a[i + 1] = a[i + 2]; a[i + 2] = t; }
+    idx.needsUpdate = true;
+    return;
+  }
+  const pos = g.attributes.position;
+  if (!pos) return;
+  const count = pos.count;
+  for (const name of Object.keys(g.attributes)) {
+    const at = g.attributes[name];
+    const arr = at.array, it = at.itemSize;
+    for (let i = 0; i + 2 < count; i += 3) {
+      for (let k = 0; k < it; k++) {
+        const i1 = (i + 1) * it + k, i2 = (i + 2) * it + k;
+        const t = arr[i1]; arr[i1] = arr[i2]; arr[i2] = t;
+      }
+    }
+    at.needsUpdate = true;
+  }
+}
+
+// 把 root 下的静态子网格按「几何布局 + 材质外观」合并，返回 { before, after } 供日志。
+export function mergeStaticMeshes(root) {
+  const meshes = [];
+  root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes && o.geometry.attributes.position) meshes.push(o); });
+  const before = meshes.length;
+  if (before < 8) return { before, after: before }; // 网格太少，合并收益抵不上开销
+
+  root.updateMatrixWorld(true);
+  const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const rel = new THREE.Matrix4();
+
+  const groups = new Map(); // 分组键 -> { material, list: [mesh] }
+  for (const o of meshes) {
+    // 不能合并的：骨骼/morph 网格（几何会随动画变）、材质数组网格（各部分要各自渲染）。
+    // 注意**不要**按 geometry.groups 跳过：three 里只有「材质是数组」时才会按 group 分开提交，
+    // 单材质的网格即使有 6 个 group 也只有 1 次 draw call（而 Box/Sphere 等内置几何默认就是多 group），
+    // 按 group 跳过会让内置几何与不少导出模型完全无法合并。
+    if (o.isSkinnedMesh || (o.morphTargetInfluences && o.morphTargetInfluences.length)) continue;
+    if (Array.isArray(o.material)) continue;
+    const key = geometrySigKey(o.geometry) + '#' + materialSigKey(o.material);
+    let grp = groups.get(key);
+    if (!grp) { grp = { material: o.material, list: [] }; groups.set(key, grp); }
+    grp.list.push(o);
+  }
+
+  let mergedGroups = 0;
+  for (const grp of groups.values()) {
+    if (grp.list.length < 2) continue; // 单件没有合并收益
+    const geos = [];
+    for (const o of grp.list) {
+      // 必须克隆：instantiate 是浅克隆，geometry 与缓存的源模型共享，直接 applyMatrix4 会污染源模型
+      const g = o.geometry.clone();
+      rel.multiplyMatrices(toRoot, o.matrixWorld);
+      g.applyMatrix4(rel);
+      // 相对矩阵行列式为负（镜像节点）→ 顶点被镜像、绕向却还留在原处，
+      // 而新网格自身的行列式为正，three 的 frontFace 判定会据此翻转 → 必须显式翻回来。
+      if (rel.determinant() < 0) flipTriangleWinding(g);
+      geos.push(g);
+    }
+    let merged = null;
+    try { merged = mergeGeometries(geos, false); } catch (e) { merged = null; }
+    if (!merged) {
+      for (const g of geos) g.dispose();
+      continue; // 属性布局意外不一致：保留原件，画面不受影响
+    }
+    for (const g of geos) g.dispose(); // 中间克隆体已烘进 merged
+
+    const mesh = new THREE.Mesh(merged, grp.material);
+    mesh.name = (grp.material && grp.material.name) ? 'merged-' + grp.material.name : 'merged';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    root.add(mesh); // 几何已烘到 root 局部空间，所以直接挂在 root 下、保持单位变换
+    for (const o of grp.list) o.removeFromParent();
+    mergedGroups++;
+  }
+
+  // 清掉被掏空的中转节点：合并后模型树里会留下大量空 Group，
+  // 它们每帧仍要走一次 updateMatrixWorld，也拖慢 setEditorSceneVisible 之类的遍历。
+  for (let pass = 0; pass < 6; pass++) {
+    const dead = [];
+    root.traverse((o) => { if (o !== root && !o.isMesh && o.children.length === 0) dead.push(o); });
+    if (!dead.length) break;
+    for (const o of dead) o.removeFromParent();
+  }
+
+  return { before, after: countMeshes(root), mergedGroups };
+}
+
+function countMeshes(root) {
+  let n = 0;
+  root.traverse((o) => { if (o.isMesh) n++; });
+  return n;
 }
 
 // buildEditorBuildings(scene, roots, dataOverride, outColliders)：roots 为 buildScenery 返回的统一可编辑根列表，
@@ -107,9 +291,13 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     // 逐 mesh 求盒/凸包只会得到一个罩住整栋楼的大凸包，完全不可用；trimesh 直接取三角形本身，
     // 再配合 3D 宽相位（XZ 分格 + Y 分层）与 BVH，多层楼板才能各自正确碰撞。
     const isComplex = it.collisionMode === 'complex';
+    // 跨 object3D 的稳定缓存键：同一 url + 同一变换只烘一次（场景重建时可直接复用，含位置/朝向/缩放）
+    const bakeKey = it.url
+      ? [it.url, it.x ?? 0, it.y ?? 0, it.z ?? 0, it.rotY ?? 0, sc.x, sc.y, sc.z].join('|')
+      : '';
     const bakeComplex = () => {
       holder.updateMatrixWorld(true);
-      bakeTriMeshAsync(holder)
+      bakeTriMeshAsync(holder, { key: bakeKey })
         .then((tm) => {
           if (gen !== _buildGen) return; // 场景已重建：丢弃过期结果
           if (tm && tm.triCount > 0) colliders.push(tm);
@@ -117,19 +305,25 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
         .catch(() => {});
     };
 
+    // 模型加载完成后的统一处理：合并静态子网格 → 开阴影 → 按需烘焙 trimesh
+    const setupModel = (m) => {
+      holder.add(m);
+      holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
+      const st = mergeStaticMeshes(m);
+      if (st.after < st.before) {
+        console.info('[EditorBuildings] ' + (holder.name || 'model') + ' 网格合并 ' + st.before + ' → ' + st.after +
+          '（主渲染 + 阴影贴图两趟各少 ' + (st.before - st.after) + ' 次 draw call）');
+      }
+      enableShadows(m);
+      if (isComplex) bakeComplex();
+    };
+
     // 统一绝对路径 /assets/xxx.glb 调用；兼容旧的内嵌 data URL 记录
     if (it.url) {
-      instantiate(it.url)
-        .then((m) => { holder.add(m); enableShadows(m); if (isComplex) bakeComplex(); })
-        .catch(() => {});
+      instantiate(it.url).then(setupModel).catch(() => {});
     } else if (it.data) {
       const loader = new GLTFLoader();
-      loader.load(
-        it.data,
-        (gltf) => { holder.add(gltf.scene); enableShadows(gltf.scene); if (isComplex) bakeComplex(); },
-        undefined,
-        () => {}
-      );
+      loader.load(it.data, (gltf) => setupModel(gltf.scene), undefined, () => {});
     }
 
     // 碰撞体：OBB（有向包围盒），把朝向 rotY（Y 轴旋转角）一并给出，使碰撞体随模型旋转。

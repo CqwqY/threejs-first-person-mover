@@ -26,6 +26,30 @@ const MAX_LAYERS_PER_TRI = 256;     // 单个三角形最多占用的 Y 层数�
 // 同一个物体只烘焙一次：WeakMap 不阻止 object3D 被回收
 const bakeCache = new WeakMap();
 
+// 稳定 key 缓存：WeakMap 以 object3D 为键，而 buildEditorBuildings 每次重建都会造**新的** holder，
+// 于是同一份模型（同一 url + 同一变换）会被反复完整烘焙——启动时「打包数据 + 远端数据」两趟就是两遍，
+// 其中第一遍的结果还会被 EditorBuildings 的代数守卫丢弃。调用方传入 opts.key 后，
+// 同一 key 的并发/后续请求共享同一次烘焙（进行中时共享 Promise），几何在世界空间完全一致，可安全复用。
+// key 必须含位置/朝向/缩放：它们变了，烘出来的世界空间三角形就不同。
+const bakeByKey = new Map(); // key -> collider 或 { pending: Promise }
+const BAKE_KEY_MAX = 32;     // 上限：防止编辑器反复改位置后 key 无限堆积（每个 collider 都带几十万 float）
+
+function keyedCached(key) {
+  if (!key) return null;
+  const hit = bakeByKey.get(key);
+  if (!hit) return null;
+  return hit.pending ? null : hit; // 进行中：交给 bakeTriMeshAsync 去共享 Promise
+}
+
+// 超限时按插入顺序淘汰最老的**已完成**条目（进行中的 Promise 不能丢，否则并发请求会重复烘焙）
+function pruneBakeKeys() {
+  if (bakeByKey.size <= BAKE_KEY_MAX) return;
+  for (const [k, v] of bakeByKey) {
+    if (bakeByKey.size <= BAKE_KEY_MAX) break;
+    if (!v.pending) bakeByKey.delete(k);
+  }
+}
+
 // 自身及所有祖先可见才算可见（与 simpleGen 保持一致：隐藏的辅助网格不参与碰撞）
 function isVisible(o) {
   let p = o;
@@ -255,12 +279,18 @@ function finalizeTriMesh(posArr, object3D) {
 }
 
 // 同步烘焙（核心实现；Node 数值仿真与编辑器同步场景都可用）。
-// opts: { force? }  force=true 时忽略缓存重新烘焙。
+// opts: { force?, key? }  force=true 时忽略缓存重新烘焙；key 为跨 object3D 的稳定标识（见 bakeByKey）。
 export function bakeTriMesh(object3D, opts = {}) {
   if (!object3D) return null;
+  const key = opts.key;
   if (!opts.force) {
     const cached = bakeCache.get(object3D);
     if (cached) return cached;
+    const byKey = keyedCached(key);
+    if (byKey) {
+      bakeCache.set(object3D, byKey);
+      return byKey;
+    }
   }
   const meshes = [];
   object3D.updateMatrixWorld(true);
@@ -270,6 +300,7 @@ export function bakeTriMesh(object3D, opts = {}) {
   const collider = finalizeTriMesh(posArr, object3D);
   collider.meshCount = meshes.length;
   bakeCache.set(object3D, collider);
+  if (key) { bakeByKey.set(key, collider); pruneBakeKeys(); }
   return collider;
 }
 
@@ -282,11 +313,22 @@ function yieldToMain(fn) {
 
 // 异步分批烘焙：把「逐 mesh 提取三角形」切成若干片，每片累积到一定三角形数就让出主线程。
 // 返回 Promise<TriMeshCollider>。烘焙是静态几何的一次性开销，切片后基本不影响帧率。
+// opts: { force?, key?, chunkTris? }
 export function bakeTriMeshAsync(object3D, opts = {}) {
   if (!object3D) return Promise.resolve(null);
+  const key = opts.key;
   if (!opts.force) {
     const cached = bakeCache.get(object3D);
     if (cached) return Promise.resolve(cached);
+    if (key) {
+      const hit = bakeByKey.get(key);
+      if (hit) {
+        // 已完成 → 直接复用；进行中 → 共享同一个 Promise（同一几何只烘一次）
+        const p = hit.pending ? hit.pending : Promise.resolve(hit);
+        p.then((c) => { if (c) bakeCache.set(object3D, c); });
+        return p;
+      }
+    }
   }
   object3D.updateMatrixWorld(true);
   const meshes = [];
@@ -294,7 +336,13 @@ export function bakeTriMeshAsync(object3D, opts = {}) {
   const chunk = Math.max(1, Math.floor(opts.chunkTris || Config.TRIMESH_BAKE_CHUNK_TRIS));
   const posArr = [];
   let i = 0;
-  return new Promise((resolve) => {
+  const promise = new Promise((resolve) => {
+    const finish = (collider) => {
+      collider.meshCount = meshes.length;
+      bakeCache.set(object3D, collider);
+      if (key) { bakeByKey.set(key, collider); pruneBakeKeys(); } // 结算：用结果替换掉进行中的占位
+      resolve(collider);
+    };
     const step = () => {
       const base = posArr.length / 9;
       while (i < meshes.length) {
@@ -306,18 +354,16 @@ export function bakeTriMeshAsync(object3D, opts = {}) {
         yieldToMain(step); // 还有剩余，让出主线程后继续
         return;
       }
-      const collider = finalizeTriMesh(posArr, object3D);
-      collider.meshCount = meshes.length;
-      bakeCache.set(object3D, collider);
-      resolve(collider);
+      finish(finalizeTriMesh(posArr, object3D));
     };
     if (meshes.length === 0) {
-      const collider = finalizeTriMesh(posArr, object3D);
-      collider.meshCount = 0;
-      bakeCache.set(object3D, collider);
-      resolve(collider);
+      finish(finalizeTriMesh(posArr, object3D));
       return;
     }
     yieldToMain(step);
   });
+  // 登记「进行中」占位。注意 meshes 为空时 finish 会在 Promise 执行器里同步跑完并把结果写进 key，
+  // 此时绝不能再用占位把它盖回去（用 has 判断而不是无条件 set）。
+  if (key && !bakeByKey.has(key)) bakeByKey.set(key, { pending: promise });
+  return promise;
 }

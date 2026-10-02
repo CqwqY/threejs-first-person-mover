@@ -18,6 +18,27 @@ import { Config } from '../../config.js';
 const SKIN = 0.02;      // 查询膨胀（米）：让「刚好贴上」的接触也能被检出
 const MIN_DEPTH = 1e-4; // 小于该穿透深度视为刚好接触，不再迭代
 
+// 取三角形的烘焙法线（finalizeTriMesh 写入 tm.normals，SAT 直接复用可省掉每候选一次开方）。
+// 兜一层防御：万一将来有外部构造的 trimesh 没带 normals，就按烘焙时同样的算法现算并挂回去——
+// 症状宁可是一次性的计算，也不要每帧抛异常（那比「少一栋楼的碰撞」难查得多）。
+function normalsFor(tm) {
+  const need = tm.triCount * 3;
+  const n = tm.normals;
+  if (n && n.length >= need) return n;
+  const p = tm.positions;
+  const made = new Float32Array(need);
+  for (let t = 0; t < tm.triCount; t++) {
+    const o = t * 9;
+    const ux = p[o + 3] - p[o], uy = p[o + 4] - p[o + 1], uz = p[o + 5] - p[o + 2];
+    const vx = p[o + 6] - p[o], vy = p[o + 7] - p[o + 1], vz = p[o + 8] - p[o + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1; // 退化三角形 → 0，与烘焙一致
+    made[t * 3] = nx / len; made[t * 3 + 1] = ny / len; made[t * 3 + 2] = nz / len;
+  }
+  tm.normals = made;
+  return made;
+}
+
 // 复用的接触结果对象（避免每帧大量临时对象）
 const _hit = {
   depth: 0,
@@ -29,15 +50,17 @@ const _hit = {
 
 // 玩家 AABB（中心 c，半尺寸 h）+ 三角形 的最小平移向量（MTV）。
 // 13 根分离轴：3 根盒轴 + 1 根三角面法线 + 9 根 (盒轴 × 三角边) 叉乘轴。
+// fnx/fny/fnz：三角形面法线，由烘焙阶段（finalizeTriMesh）算好并存在 tm.normals 里，
+//   这里直接复用——每个候选省掉一次叉乘 + 一次开方，而候选数是室内帧率的直接乘数。
 // 返回复用的 _hit；不相交返回 null。
-function boxTriMTV(cx, cy, cz, hx, hy, hz, ax, ay, az, bx, by, bz, ex, ey, ez) {
-  // 三角面法线
-  const ux = bx - ax, uy = by - ay, uz = bz - az;
-  const vx = ex - ax, vy = ey - ay, vz = ez - az;
-  let fnx = uy * vz - uz * vy, fny = uz * vx - ux * vz, fnz = ux * vy - uy * vx;
-  const nlen = Math.sqrt(fnx * fnx + fny * fny + fnz * fnz);
-  if (!(nlen > 1e-12)) return null; // 退化三角形
-  fnx /= nlen; fny /= nlen; fnz /= nlen;
+function boxTriMTV(cx, cy, cz, hx, hy, hz, ax, ay, az, bx, by, bz, ex, ey, ez, fnx, fny, fnz) {
+  // 退化/非单位兜底：烘焙时已单位化（Float32 精度下 nlen2 ≈ 1），正常路径不会进 if。
+  const nlen2 = fnx * fnx + fny * fny + fnz * fnz;
+  if (!(nlen2 > 1e-12)) return null; // 退化三角形（烘焙时法线被置 0）
+  if (nlen2 < 0.999 || nlen2 > 1.001) {
+    const inv = 1 / Math.sqrt(nlen2);
+    fnx *= inv; fny *= inv; fnz *= inv;
+  }
 
   let bestDepth = Infinity, bnx = 0, bny = 0, bnz = 0, bestPlane = false;
   let planeDepth = 0, pnx = 0, pny = 0, pnz = 0;
@@ -78,7 +101,7 @@ function boxTriMTV(cx, cy, cz, hx, hy, hz, ax, ay, az, bx, by, bz, ex, ey, ez) {
   if (!test(fnx, fny, fnz, true)) return null;
 
   // 9 根叉乘轴（盒轴 × 三角边）：展开写避免临时数组
-  const e0x = ux, e0y = uy, e0z = uz;
+  const e0x = bx - ax, e0y = by - ay, e0z = bz - az;   // 边 a→b（与面法线的 u 同向）
   const e1x = ex - bx, e1y = ey - by, e1z = ez - bz;
   const e2x = ax - ex, e2y = ay - ey, e2z = az - ez;
   // 盒 X 轴 × e = (0, -e.z, e.y)
@@ -119,13 +142,23 @@ function resolvePenetration(state, velocity, trimeshes) {
 
     for (let mi = 0; mi < trimeshes.length; mi++) {
       const tm = trimeshes[mi];
+      // ---- 逐建筑 AABB 早淘汰 ----
+      // tm.minX..maxZ 是烘焙时算好的世界包围盒（finalizeTriMesh 里顺带得到，零额外开销）。
+      // query() 内部会把查询盒向外扩 SKIN，所以这里也用 SKIN 膨胀后再判——判据严格是上界，不会漏接触。
+      // 收益随「场景里的复杂建筑个数」线性增长：站在 A 栋里时，B 栋连一次 query 都不进
+      // （此前每帧要为空建筑白跑 n 子步 × 最多 6 轮 × 每栋一次 BVH 下降）。
+      if (minX - SKIN > tm.maxX || maxX + SKIN < tm.minX ||
+          minY - SKIN > tm.maxY || maxY + SKIN < tm.minY ||
+          minZ - SKIN > tm.maxZ || maxZ + SKIN < tm.minZ) continue;
       tm.query(minX, minY, minZ, maxX, maxY, maxZ, _cand, SKIN);
       const p = tm.positions;
+      const nrm = normalsFor(tm);
       for (let ci = 0; ci < _cand.length; ci++) {
         const t = _cand[ci];
         const o = t * 9;
         const hit = boxTriMTV(cx, cy, cz, R, hh, R,
-          p[o], p[o + 1], p[o + 2], p[o + 3], p[o + 4], p[o + 5], p[o + 6], p[o + 7], p[o + 8]);
+          p[o], p[o + 1], p[o + 2], p[o + 3], p[o + 4], p[o + 5], p[o + 6], p[o + 7], p[o + 8],
+          nrm[t * 3], nrm[t * 3 + 1], nrm[t * 3 + 2]);
         if (!hit) continue;
         let dx, dy, dz, dep;
         if (hit.plane) {
@@ -214,11 +247,12 @@ export function resolveMove(state, velocity, trimeshes, dt) {
   const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
   if (!(dist > 1e-9)) return;
 
-  // 子步长自适应：step = min(单步最大位移, |Δ| / 步数基准)。
-  // 保证「任何速度下单步位移都不超过 TRIMESH_SUBSTEP_MAX_DIST」，
-  // 因此下落再快也是一步步贴过去，不会一帧跨过薄楼板（厚度可低至 0.12m）。
-  const stepDist = Math.min(Config.TRIMESH_SUBSTEP_MAX_DIST, dist / Config.TRIMESH_SUBSTEP_MAX_COUNT);
-  let n = Math.ceil(dist / stepDist);
+  // 子步数 = ceil(|Δ| / 单步最大位移)，只做「最小步数」而不是「固定步数」。
+  // 不变式：每步子步位移 ≤ TRIMESH_SUBSTEP_MAX_DIST —— 这正是防穿透的全部依据，
+  // 而步数只要满足它就够：多切的那些子步解算结果与单步完全一致（MTV 精确推出到刚好接触），
+  // 只是把同一份工作量重复了 N 遍。旧写法 step = min(MAX_DIST, |Δ| / 24) 会让任何小于 3.6m 的
+  // 位移都固定跑 24 个子步（走 10cm 也是 24 次），是室内帧率的主要来源，故去掉该下限。
+  let n = Math.ceil(dist / Config.TRIMESH_SUBSTEP_MAX_DIST);
   if (!(n >= 1)) n = 1;
   if (n > Config.TRIMESH_SUBSTEP_HARD_MAX) n = Config.TRIMESH_SUBSTEP_HARD_MAX;
   const sx = dx / n, sy = dy / n, sz = dz / n;

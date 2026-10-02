@@ -53,6 +53,16 @@ async function _fetchRemoteScene(game, scene, roots, target) {
 // 老师 Boss 的阶段名（1 起，索引 0 占位）
 const BOSS_PHASE_NAMES = ['', '一阶段', '二阶段', '三阶段'];
 
+// 是否开启性能 HUD：地址栏里带 perf 即开（#perf / ?perf=1 都行）。
+// 用 URL 开关而不是快捷键，一是手机上也能用，二是不用去抢已经排满的键位。
+function perfEnabled() {
+  try {
+    return (String(location.search || '') + String(location.hash || '')).includes('perf');
+  } catch (e) {
+    return false;
+  }
+}
+
 // 圆锥几何默认朝 +Y，制导导弹用它转到飞行方向
 const UP_Y = new THREE.Vector3(0, 1, 0);
 
@@ -497,6 +507,54 @@ export class Game {
     this._dropGeo = null;       // 丢弃物共用几何（立方体，避免每件都新建）
     this._dropLabelTex = new Map(); // 物品名 → Canvas 贴图（缓存，同名共用）
     this._dropLabelMat = new Map(); // 物品名 → Sprite 材质（缓存，同名共用）
+    // 性能 HUD：地址栏带 perf（#perf / ?perf）时出现，用于定位「卡在哪」（物理 / 渲染 / 其他）
+    this._perf = perfEnabled() ? this._createPerfHud() : null;
+  }
+
+  // ============ 性能 HUD ============
+  // 为什么要有它：室内帧率问题靠「猜」会一直猜错（碰撞？渲染？提交次数？），
+  // 直接把一帧拆成物理 / 渲染 / 其他三段摆在屏幕上，一眼就能定位。
+  _createPerfHud() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;right:8px;top:8px;z-index:70;pointer-events:none;' +
+      'font:11px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre;' +
+      'background:rgba(0,0,0,.58);color:#7CFFB0;padding:6px 8px;border-radius:6px;' +
+      'text-shadow:0 1px 2px rgba(0,0,0,.85);';
+    el.textContent = '性能统计中…';
+    document.body.appendChild(el);
+    return { el, frames: 0, phys: 0, render: 0, acc: 0, t: 0, txt: '' };
+  }
+
+  _updatePerfHud(dt, physMs, renderMs, totalMs) {
+    const p = this._perf;
+    if (!p) return;
+    p.frames++;
+    p.phys += physMs; p.render += renderMs; p.acc += totalMs; p.t += dt;
+    if (p.t < 0.25) return; // 每 0.25 秒刷新一次，避免读屏本身影响测量
+    const n = Math.max(1, p.frames);
+    const frame = p.acc / n;
+    const phys = p.phys / n;
+    const rend = p.render / n;
+    p.frames = 0; p.phys = 0; p.render = 0; p.acc = 0; p.t = 0;
+
+    // 碰撞体规模：判断「卡」是不是真的来自碰撞（复杂建筑的数量与三角形总数）
+    let boxes = 0, hulls = 0, tms = 0, tris = 0, meshCount = 0;
+    for (const c of this.colliders) {
+      if (!c) continue;
+      if (c.type === 'trimesh') { tms++; tris += c.triCount || 0; meshCount += c.meshCount || 0; }
+      else if (c.type === 'convex') hulls++;
+      else boxes++;
+    }
+    const txt =
+      'FPS ' + (frame > 0 ? (1000 / frame) : 0).toFixed(0).padStart(3) +
+      '   帧 ' + frame.toFixed(1) + ' ms\n' +
+      '物理 ' + phys.toFixed(2) + ' ms   渲染 ' + rend.toFixed(2) +
+      ' ms   其他 ' + Math.max(0, frame - phys - rend).toFixed(2) + ' ms\n' +
+      '碰撞体 盒' + boxes + ' 凸包' + hulls + ' trimesh' + tms +
+      '   三角形 ' + tris.toLocaleString() + '\n' +
+      '复杂建筑网格数 ' + meshCount.toLocaleString() + '（烘焙时的网格数，合并生效后会很小）';
+    if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
@@ -4744,6 +4802,7 @@ export class Game {
 
     // 计算本帧时间间隔；clamp 到 MAX_DELTA_TIME，防止切后台恢复时瞬间跳帧导致角色瞬移
     const dt = Math.min(this.clock.getDelta(), Config.MAX_DELTA_TIME);
+    const _pt0 = this._perf ? performance.now() : 0; // 性能 HUD 采样起点（关闭时零开销）
 
     // 昼夜循环：先更新太阳角度与光照，后面阴影定位要用到最新的 _sunOffset
     this._updateDayNight(dt);
@@ -4754,7 +4813,9 @@ export class Game {
 
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     // 灵魂出窍时冻结肉身：跳过本地玩家更新，鼠标/键位交给灵魂相机
+    const _pt1 = this._perf ? performance.now() : 0;
     if (!this._soul) this.localPlayer.update(dt);
+    const _pt2 = this._perf ? performance.now() : 0; // 物理（含 trimesh 解算）耗时
     this.playerManager.update(dt);
 
     // 主世界（城市）专属系统：对战中整组跳过，避免城市 NPC/Boss/载具与竞技场互串
@@ -4857,6 +4918,13 @@ export class Game {
     }
 
     // 渲染当前帧
+    const _pt3 = this._perf ? performance.now() : 0;
     this.renderer.render(this.scene, this.camera);
+
+    // 性能 HUD（#perf）：把一帧拆成 物理 / 渲染 / 其他 三段，每 0.25s 刷一次
+    if (this._perf) {
+      const now = performance.now();
+      this._updatePerfHud(dt, _pt2 - _pt1, now - _pt3, now - _pt0);
+    }
   }
 }
