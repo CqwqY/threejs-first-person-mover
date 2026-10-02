@@ -58,17 +58,17 @@ export function ensureTheme() {
     /* ---- 按钮 ---- */
     .kui-btn {
       box-sizing: border-box;
-      border: 10px solid transparent;
-      border-image: url('/ui/button_rectangle.png') 22 fill / 10px stretch;
+      border: 8px solid transparent;
+      border-image: url('/ui/button_rectangle.png') 22 fill / 8px stretch;
       background: transparent;
       color: var(--kui-ink);
       font-family: var(--kui-font);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       line-height: 1.15;
-      padding: 0 6px;
-      min-height: 38px;
-      min-width: 92px;
+      padding: 0 5px;
+      min-height: 34px;
+      min-width: 72px;
       cursor: pointer;
       user-select: none;
       -webkit-user-select: none;
@@ -84,9 +84,31 @@ export function ensureTheme() {
     }
     /* 主按钮：用在「确认/购买/进入」这类正向动作上 */
     .kui-btn--primary {
-      border-image: url('/ui/button_rectangle_depth.png') 22 fill / 10px stretch;
+      border-image: url('/ui/button_rectangle_depth.png') 22 fill / 8px stretch;
       color: #fff;
       text-shadow: 0 1px 0 rgba(9, 30, 60, .35);
+    }
+    /* 彩色按钮：同一套 Kenney 按钮素材按颜色重新染色，用来区分不同动作 */
+    .kui-btn--red,
+    .kui-btn--danger {
+      border-image: url('/ui/button_rectangle_red.png') 22 fill / 8px stretch;
+      color: #fff;
+      text-shadow: 0 1px 0 rgba(74, 14, 8, .4);
+    }
+    .kui-btn--green {
+      border-image: url('/ui/button_rectangle_green.png') 22 fill / 8px stretch;
+      color: #fff;
+      text-shadow: 0 1px 0 rgba(12, 56, 30, .4);
+    }
+    .kui-btn--yellow {
+      border-image: url('/ui/button_rectangle_yellow.png') 22 fill / 8px stretch;
+      color: #4a3208;
+      text-shadow: 0 1px 0 rgba(255, 255, 255, .3);
+    }
+    .kui-btn--grey {
+      border-image: url('/ui/button_rectangle_grey.png') 22 fill / 8px stretch;
+      color: var(--kui-ink);
+      text-shadow: 0 1px 0 rgba(255, 255, 255, .3);
     }
     /* 次级按钮：只留描边，不抢主按钮的注意力 */
     .kui-btn--ghost {
@@ -97,19 +119,17 @@ export function ensureTheme() {
       color: var(--kui-ink);
     }
     .kui-btn--ghost:hover { background: rgba(255, 255, 255, .22); }
-    /* 危险按钮：退出登录、删除这类 */
-    .kui-btn--danger { border-image: none; border: 2px solid var(--kui-danger); border-radius: var(--kui-radius); background: rgba(217, 83, 79, .12); color: #7d1f1c; }
 
     /* 方形图标按钮：关闭、返回、加减号 */
     .kui-iconbtn {
       box-sizing: border-box;
-      border: 8px solid transparent;
-      border-image: url('/ui/button_square.png') 20 fill / 8px stretch;
+      border: 7px solid transparent;
+      border-image: url('/ui/button_square.png') 20 fill / 7px stretch;
       background: transparent;
       color: var(--kui-ink);
-      width: 44px; height: 44px;
+      width: 36px; height: 36px;
       display: inline-flex; align-items: center; justify-content: center;
-      font: 700 15px/1 var(--kui-font);
+      font: 700 14px/1 var(--kui-font);
       cursor: pointer; padding: 0;
       -webkit-tap-highlight-color: transparent;
       transition: filter .12s ease, transform .08s ease;

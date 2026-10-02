@@ -662,12 +662,12 @@ export class Game {
   // 放在屏幕下方中间（居中于两个拇指区之间），跟随安全区，尺寸用 vmin 以免旋转跳变。
   _createVehicleHint() {
     const el = document.createElement('div');
-    el.className = 'kui-btn';
+    el.className = 'kui-btn kui-btn--grey';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
-      'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'min-width:clamp(58px,16vmin,92px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
     el.addEventListener('pointerdown', (e) => {
@@ -824,12 +824,12 @@ export class Game {
   // 传送门附近的「召唤老师」按钮：和上下车按钮同一位置（传送门与电动车相距 18 米，不会同时出现）
   _createPortalHint() {
     const el = document.createElement('div');
-    el.className = 'kui-btn kui-btn--primary';
+    el.className = 'kui-btn kui-btn--yellow';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
-      'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'min-width:clamp(58px,16vmin,92px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '召唤老师';
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
@@ -847,12 +847,12 @@ export class Game {
   // Boss 战期间的「攻击」按钮（手机没有鼠标左键，必须给可点按钮）
   _createAttackButton() {
     const el = document.createElement('div');
-    el.className = 'kui-btn kui-btn--danger';
+    el.className = 'kui-btn kui-btn--red';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 27%);' +
-      'min-width:clamp(70px,20vmin,112px);box-sizing:border-box;text-align:center;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'min-width:clamp(54px,15vmin,86px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '攻击';
     el.addEventListener('pointerdown', (e) => {
@@ -871,12 +871,12 @@ export class Game {
   // 三阶段的「护盾」按钮（手机没有 Q 键）
   _createShieldButton() {
     const el = document.createElement('div');
-    el.className = 'kui-btn kui-btn--primary';
+    el.className = 'kui-btn kui-btn--green';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 37%);' +
-      'min-width:clamp(70px,20vmin,112px);box-sizing:border-box;text-align:center;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'min-width:clamp(54px,15vmin,86px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '护盾';
     el.addEventListener('pointerdown', (e) => {
@@ -895,8 +895,8 @@ export class Game {
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
-      'min-width:clamp(86px,24vmin,142px);box-sizing:border-box;text-align:center;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'min-width:clamp(66px,18vmin,104px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '找小满买东西';
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
@@ -1949,7 +1949,7 @@ export class Game {
     el.textContent = '按 F 与她对话';
     el.style.cssText =
       'position:fixed;right:26%;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
-      'padding:12px 14px;user-select:none;text-align:center;';
+      'padding:9px 12px;user-select:none;text-align:center;';
     el.addEventListener('click', () => { this.aiChat.toggle(); });
     document.body.appendChild(el);
     this._chatTab = el;
@@ -1959,17 +1959,17 @@ export class Game {
   _createTopButtons() {
     const mkBtn = (text, posCss, onClick) => {
       const b = document.createElement('div');
-      b.className = 'kui-btn';
+      b.className = 'kui-btn kui-btn--grey';
       b.textContent = text;
       b.style.cssText =
-        'position:fixed;z-index:9500;cursor:pointer;user-select:none;padding:10px 13px;' + posCss;
+        'position:fixed;z-index:9500;cursor:pointer;user-select:none;padding:7px 10px;' + posCss;
       b.addEventListener('click', onClick);
       document.body.appendChild(b);
       return b;
     };
-    // 校卡在 top 14px 居中(宽最大224)，按钮让它贴着卡左右两侧
-    this._btnBag = mkBtn('背包', 'right:calc(50% + 122px);top:14px;', () => this._toggleBag());
-    this._btnSettings = mkBtn('设置', 'left:calc(50% + 122px);top:14px;', () => this.settingsPanel.toggle());
+    // 校卡展开时最宽 268px，按钮让它贴着卡左右两侧（50% + 134 再留 10px 间距）
+    this._btnBag = mkBtn('背包', 'right:calc(50% + 144px);top:14px;', () => this._toggleBag());
+    this._btnSettings = mkBtn('设置', 'left:calc(50% + 144px);top:14px;', () => this.settingsPanel.toggle());
     this._buildBag();
   }
 

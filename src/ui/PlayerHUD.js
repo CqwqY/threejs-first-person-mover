@@ -29,13 +29,13 @@ function ensureCardLayout() {
     .idc-card, .idc-card * { box-sizing: border-box; }
     /* 外层蓝色卡套：卡本体是套里的白卡，展开时套子一起变大 */
     .idc-card {
-      position: relative; width: 156px; height: 44px;
+      position: relative; width: 190px; height: 44px;
       background: linear-gradient(150deg, var(--kui-blue), var(--kui-blue-dark));
       border: 1px solid var(--kui-blue-deep); border-radius: var(--kui-radius);
       box-shadow: var(--kui-shadow); overflow: hidden; cursor: pointer;
       transition: width .22s cubic-bezier(.4,0,.2,1), height .22s cubic-bezier(.4,0,.2,1), border-radius .22s ease;
     }
-    .idc.open .idc-card { width: 224px; height: 368px; border-radius: 16px; }
+    .idc.open .idc-card { width: 268px; height: 368px; border-radius: 16px; }
 
     .idc-mini {
       position: absolute; inset: 4px; border-radius: 9px; background: var(--kui-paper);
@@ -45,7 +45,7 @@ function ensureCardLayout() {
     .idc.open .idc-mini { opacity: 0; pointer-events: none; }
     .idc-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--kui-ink-soft); flex: 0 0 auto; }
     .idc-mini-name {
-      font-size: 14px; font-weight: 600; color: var(--kui-ink); max-width: 68px;
+      font-size: 14px; font-weight: 600; color: var(--kui-ink); max-width: 100px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .idc-hint { margin-left: auto; font-size: 11px; color: var(--kui-ink); }
@@ -82,7 +82,7 @@ function ensureCardLayout() {
     .idc-rows { width: 100%; margin-top: 10px; border-top: 1px solid var(--kui-blue-soft); padding-top: 5px; }
     .idc-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 3px 0; color: var(--kui-ink); }
     .idc-row b {
-      color: var(--kui-ink); font-weight: 600; max-width: 112px;
+      color: var(--kui-ink); font-weight: 600; max-width: 156px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
 
