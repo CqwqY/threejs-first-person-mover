@@ -7,6 +7,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+import { RectAreaLightHelper } from 'three/addons/helpers/RectAreaLightHelper.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { ConvexMeshDecomposition } from 'vhacd-js';
 import { instantiate } from '../world/AssetLoader.js';
 import { generateSimple } from '../world/collision/simpleGen.js';
@@ -154,6 +156,8 @@ export function createEditor() {
     ghost: null,
     selected: null,   // 当前选中对象（置于置中的 objects / scenery / placed）
     placed: [],       // 用户摆放的对象 {id,kind,name,url|data,x,y,z,rotY,scale,obj}
+    lights: [],       // 光源 {id,type,x,y,z,color,intensity,distance,decay,width,height,rotY,rotX,obj,helper}
+    selectedLightId: null, // 右侧「光源」面板当前选中的光源 id
     scenery: [],      // 游戏景物（可编辑，不随保存持久化）
     placingEmpty: false, // 空碰撞体放置中：幽灵仅圆环，点击在落点生成空碰撞体
     copyMode: false,  // 复制模式：拖动 3D 轴时先复制一份，本次拖动作用于副本
@@ -232,6 +236,24 @@ export function createEditor() {
     cGridInfo: document.getElementById('cGridInfo'),
     cList: document.getElementById('cList'),
     cClearAll: document.getElementById('cClearAll'),
+    btnAddPointLight: document.getElementById('btnAddPointLight'),
+    btnAddAreaLight: document.getElementById('btnAddAreaLight'),
+    lightList: document.getElementById('lightList'),
+    lightEditor: document.getElementById('lightEditor'),
+    lightPointFields: document.getElementById('lightPointFields'),
+    lightAreaFields: document.getElementById('lightAreaFields'),
+    lX: document.getElementById('lX'),
+    lY: document.getElementById('lY'),
+    lZ: document.getElementById('lZ'),
+    lColor: document.getElementById('lColor'),
+    lIntensity: document.getElementById('lIntensity'),
+    lDistance: document.getElementById('lDistance'),
+    lDecay: document.getElementById('lDecay'),
+    lWidth: document.getElementById('lWidth'),
+    lHeight: document.getElementById('lHeight'),
+    lRotY: document.getElementById('lRotY'),
+    lRotX: document.getElementById('lRotX'),
+    lDel: document.getElementById('lDel'),
   };
 
   // ---------- 可编辑对象：游戏景物 + 地形/道路/墙体 ----------
@@ -1294,6 +1316,196 @@ export function createEditor() {
     buildGridColliders(state.selected);
   };
 
+  // ---------- 光源（点光源 / 面光源） ----------
+  // 面光源（RectAreaLight）需要先用 LTC 贴图初始化一次，否则不发光；全局只需调用一次。
+  RectAreaLightUniformsLib.init();
+
+  // 颜色统一成 #rrggbb 字符串（存档里就是这个格式）
+  function lightColorHex(rec) {
+    return (rec && typeof rec.color === 'string' && rec.color) ? rec.color : '#ffffff';
+  }
+
+  // 按 rotY/rotX（单位为度）设置面光源朝向，必须与游戏端 EditorBuildings.buildEditorLights 完全一致：
+  // RectAreaLight 沿「本地 -Z」发光，所以直接用 YXZ 欧拉角赋值（rotX 俯仰、负值朝下，rotY 偏航），
+  // 不能用 lookAt —— lookAt 会让本地 +Z 指向目标，等于把发光面转反 180°（编辑器里朝下、游戏里朝上）。
+  function applyAreaOrientation(light, rec) {
+    light.rotation.order = 'YXZ';
+    light.rotation.set((rec.rotX ?? -90) * DEG, (rec.rotY ?? 0) * DEG, 0);
+  }
+
+  // 把数据记录实例化为真实灯光 + 辅助器，并挂进场景（rec.obj / rec.helper）
+  function buildLightObject(rec) {
+    if (rec.type === 'area') {
+      const light = new THREE.RectAreaLight(
+        new THREE.Color(lightColorHex(rec)),
+        rec.intensity ?? 3,
+        Math.max(0.01, rec.width ?? 4),
+        Math.max(0.01, rec.height ?? 3)
+      );
+      light.position.set(rec.x ?? 0, rec.y ?? 3, rec.z ?? 0);
+      applyAreaOrientation(light, rec);
+      const helper = new RectAreaLightHelper(light);
+      light.add(helper); // RectAreaLightHelper 必须作为灯光的子节点才能跟随朝向
+      scene.add(light);
+      rec.obj = light;
+      rec.helper = helper;
+    } else {
+      rec.type = 'point';
+      const light = new THREE.PointLight(
+        new THREE.Color(lightColorHex(rec)),
+        rec.intensity ?? 20,
+        rec.distance ?? 12,
+        rec.decay ?? 2
+      );
+      light.position.set(rec.x ?? 0, rec.y ?? 3, rec.z ?? 0);
+      scene.add(light);
+      const helper = new THREE.PointLightHelper(light, 0.4);
+      scene.add(helper);
+      rec.obj = light;
+      rec.helper = helper;
+    }
+  }
+
+  // 数据字段变化后同步到真实灯光（位置/颜色/强度/尺寸/朝向）
+  function applyLightTransforms(rec) {
+    const light = rec.obj;
+    if (!light) return;
+    light.position.set(rec.x ?? 0, rec.y ?? 3, rec.z ?? 0);
+    light.color.set(lightColorHex(rec));
+    light.intensity = rec.intensity ?? 0;
+    if (rec.type === 'area') {
+      light.width = Math.max(0.01, rec.width ?? 4);
+      light.height = Math.max(0.01, rec.height ?? 3);
+      applyAreaOrientation(light, rec);
+    } else {
+      light.distance = Math.max(0, rec.distance ?? 0);
+      light.decay = Math.max(0, rec.decay ?? 2);
+    }
+    // 点光源 helper 需要手动刷新颜色（面光源 helper 每帧自动跟随灯光矩阵）
+    if (rec.helper && typeof rec.helper.update === 'function') rec.helper.update();
+  }
+
+  // 新建光源：默认落在相机注视点上方 3 米处；面光源默认俯仰 -90°（朝下照）
+  function addLight(type) {
+    const rec = {
+      id: nextId(),
+      type: type === 'area' ? 'area' : 'point',
+      x: controls.target.x, y: 3, z: controls.target.z,
+      color: '#ffffff',
+      intensity: type === 'area' ? 3 : 20,
+      distance: 12, decay: 2,
+      width: 4, height: 3, rotY: 0, rotX: -90,
+    };
+    buildLightObject(rec);
+    state.lights.push(rec);
+    state.selectedLightId = rec.id;
+    markDirty();
+    syncLightPanel();
+  }
+
+  // 删除光源：从场景移除灯光与辅助器并释放资源
+  function removeLight(rec) {
+    if (!rec) return;
+    if (rec.helper) {
+      if (rec.type === 'area' && rec.obj) rec.obj.remove(rec.helper);
+      else scene.remove(rec.helper);
+      if (typeof rec.helper.dispose === 'function') rec.helper.dispose();
+    }
+    if (rec.obj) {
+      scene.remove(rec.obj);
+      if (typeof rec.obj.dispose === 'function') rec.obj.dispose();
+    }
+    state.lights = state.lights.filter((l) => l !== rec);
+    if (state.selectedLightId === rec.id) state.selectedLightId = null;
+    markDirty();
+    syncLightPanel();
+  }
+
+  function selectedLight() {
+    return state.lights.find((l) => l.id === state.selectedLightId) || null;
+  }
+
+  // 光源列表：每行显示类型 + 编号，点击选中，选中行高亮
+  function syncLightList() {
+    const wrap = StepUI.lightList;
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!state.lights.length) {
+      const e = document.createElement('div');
+      e.className = 'lempty';
+      e.textContent = '暂无光源（用顶栏「加点光源 / 加面光源」添加）';
+      wrap.appendChild(e);
+      return;
+    }
+    state.lights.forEach((rec) => {
+      const li = document.createElement('div');
+      li.className = (rec.id === state.selectedLightId) ? 'litem sel' : 'litem';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = (rec.type === 'area' ? '面光源' : '点光源');
+      li.appendChild(nm);
+      const idEl = document.createElement('span');
+      idEl.className = 'oid';
+      idEl.textContent = rec.id;
+      li.appendChild(idEl);
+      li.onclick = () => { state.selectedLightId = rec.id; syncLightPanel(); };
+      wrap.appendChild(li);
+    });
+  }
+
+  // 选中光源的属性编辑：位置/颜色/强度 + 按类型显示距离/衰减或宽/高/朝向
+  function syncLightUI() {
+    const rec = selectedLight();
+    if (StepUI.lightEditor) StepUI.lightEditor.style.display = rec ? 'block' : 'none';
+    const isArea = !!(rec && rec.type === 'area');
+    if (StepUI.lightPointFields) StepUI.lightPointFields.style.display = isArea ? 'none' : 'block';
+    if (StepUI.lightAreaFields) StepUI.lightAreaFields.style.display = isArea ? 'block' : 'none';
+    if (!rec) return;
+    if (StepUI.lX) StepUI.lX.value = Math.round((rec.x ?? 0) * 100) / 100;
+    if (StepUI.lY) StepUI.lY.value = Math.round((rec.y ?? 0) * 100) / 100;
+    if (StepUI.lZ) StepUI.lZ.value = Math.round((rec.z ?? 0) * 100) / 100;
+    if (StepUI.lColor) StepUI.lColor.value = lightColorHex(rec);
+    if (StepUI.lIntensity) StepUI.lIntensity.value = rec.intensity ?? 0;
+    if (StepUI.lDistance) StepUI.lDistance.value = rec.distance ?? 0;
+    if (StepUI.lDecay) StepUI.lDecay.value = rec.decay ?? 2;
+    if (StepUI.lWidth) StepUI.lWidth.value = rec.width ?? 4;
+    if (StepUI.lHeight) StepUI.lHeight.value = rec.height ?? 3;
+    if (StepUI.lRotY) StepUI.lRotY.value = rec.rotY ?? 0;
+    if (StepUI.lRotX) StepUI.lRotX.value = rec.rotX ?? 0;
+  }
+
+  function syncLightPanel() {
+    syncLightList();
+    syncLightUI();
+  }
+
+  // 属性输入框绑定（带空值保护，缺元素不报错）
+  function bindLightProp(el, apply) {
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const rec = selectedLight();
+      if (!rec) return;
+      apply(rec, el.value);
+      applyLightTransforms(rec);
+      markDirty();
+    });
+  }
+  bindLightProp(StepUI.lX, (r, v) => { r.x = parseFloat(v) || 0; });
+  bindLightProp(StepUI.lY, (r, v) => { r.y = parseFloat(v) || 0; });
+  bindLightProp(StepUI.lZ, (r, v) => { r.z = parseFloat(v) || 0; });
+  bindLightProp(StepUI.lColor, (r, v) => { r.color = v; });
+  bindLightProp(StepUI.lIntensity, (r, v) => { r.intensity = Math.max(0, parseFloat(v) || 0); });
+  bindLightProp(StepUI.lDistance, (r, v) => { r.distance = Math.max(0, parseFloat(v) || 0); });
+  bindLightProp(StepUI.lDecay, (r, v) => { r.decay = Math.max(0, parseFloat(v) || 0); });
+  bindLightProp(StepUI.lWidth, (r, v) => { r.width = Math.max(0.01, parseFloat(v) || 0.01); });
+  bindLightProp(StepUI.lHeight, (r, v) => { r.height = Math.max(0.01, parseFloat(v) || 0.01); });
+  bindLightProp(StepUI.lRotY, (r, v) => { r.rotY = parseFloat(v) || 0; });
+  bindLightProp(StepUI.lRotX, (r, v) => { r.rotX = parseFloat(v) || 0; });
+
+  if (StepUI.btnAddPointLight) StepUI.btnAddPointLight.onclick = () => addLight('point');
+  if (StepUI.btnAddAreaLight) StepUI.btnAddAreaLight.onclick = () => addLight('area');
+  if (StepUI.lDel) StepUI.lDel.onclick = () => removeLight(selectedLight());
+
   // 大纲：摆放对象（可删除）+ 游戏景物（内建，仅可选中编辑）
   function outlinerUpdate() {
     StepUI.outliner.innerHTML = '';
@@ -1392,6 +1604,27 @@ export function createEditor() {
         if (!out.url && rec.data) out.data = rec.data;
         return out;
       }),
+      // 光源：与 placed 平级。按类型写全各自字段——点光源含 distance/decay；
+      // 面光源含 width/height/rotY/rotX（rotX 为俯仰，负值朝下）。
+      lights: state.lights.map((rec) => {
+        const out = {
+          id: rec.id,
+          type: rec.type === 'area' ? 'area' : 'point',
+          x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0,
+          color: lightColorHex(rec),
+          intensity: rec.intensity ?? 1,
+        };
+        if (out.type === 'area') {
+          out.width = rec.width ?? 4;
+          out.height = rec.height ?? 3;
+          out.rotY = rec.rotY ?? 0;
+          out.rotX = rec.rotX ?? 0;
+        } else {
+          out.distance = rec.distance ?? 12;
+          out.decay = rec.decay ?? 2;
+        }
+        return out;
+      }),
     };
   }
 
@@ -1465,7 +1698,31 @@ export function createEditor() {
       state.placed.push(rec);
       buildColliderVis(rec);
     }
+
+    // 3) 重建光源（点/面）。旧存档没有 lights 字段时按空数组处理。
+    const lightList = (data && Array.isArray(data.lights)) ? data.lights : [];
+    for (const it of lightList) {
+      if (!it) continue;
+      const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+      const rec = {
+        id: claimId(it.id),
+        type: it.type === 'area' ? 'area' : 'point',
+        x: num(it.x, 0), y: num(it.y, 3), z: num(it.z, 0),
+        color: (typeof it.color === 'string' && it.color) ? it.color : '#ffffff',
+        intensity: num(it.intensity, it.type === 'area' ? 3 : 20),
+        distance: num(it.distance, 12),
+        decay: num(it.decay, 2),
+        width: num(it.width, 4),
+        height: num(it.height, 3),
+        rotY: num(it.rotY, 0),
+        rotX: num(it.rotX, 0),
+      };
+      buildLightObject(rec);
+      state.lights.push(rec);
+    }
+
     outlinerUpdate();
+    syncLightPanel();
   }
 
   // 「保存场景」：把当前用户摆放清单 POST 到服务器写入编辑器场景文件

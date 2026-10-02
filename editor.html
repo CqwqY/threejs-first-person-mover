@@ -113,6 +113,19 @@
     #outliner li.sel .oid, #sceneryList li.sel .oid { color: #dbe6f2; }
     #outliner li .del { cursor: pointer; color: #f88; background: none; border: 0; padding: 0 3px; }
 
+    /* 光源列表（点光源 / 面光源），排版与碰撞体列表保持一致 */
+    #lightList { max-height: 160px; overflow-y: auto; }
+    #lightList .litem {
+      display: flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 3px;
+      color: #b9c3cf; font-size: 11px; cursor: pointer;
+    }
+    #lightList .litem:hover { background: #333; }
+    #lightList .litem .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #lightList .litem .oid { font-size: 10px; color: #7d8894; font-family: Consolas, monospace; flex-shrink: 0; }
+    #lightList .litem.sel { background: #3a6ea5; color: #fff; }
+    #lightList .litem.sel .oid { color: #dbe6f2; }
+    #lightList .lempty { color: #7d8894; font-size: 11px; padding: 2px 4px; }
+
     /* 状态栏 */
     #statusbar {
       display: flex; align-items: center; gap: 18px; height: 26px; padding: 0 12px;
@@ -152,6 +165,8 @@
       <span class="spacer"></span>
       <button class="action primary" id="btnLibrary">素材库</button>
       <button class="action primary" id="btnSettings">画面</button>
+      <button class="action primary" id="btnAddPointLight">加点光源</button>
+      <button class="action primary" id="btnAddAreaLight">加面光源</button>
       <a class="action primary" id="btnPlay" href="/" target="_blank">试玩</a>
       <button class="action primary" id="btnSave">保存场景</button>
       <button class="action danger" id="btnClear">清空全部</button>
@@ -211,6 +226,28 @@
             <button id="cClearAll" type="button" style="background:#a33;border:0;color:#fff;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer">全部删除</button>
           </div>
           <div id="cList"></div>
+        </div>
+        <div id="lightPanel">
+          <div class="panel-title">光源</div>
+          <div id="lightList"></div>
+          <div id="lightEditor" style="display:none">
+            <div class="field"><label>位置 X</label><input id="lX" type="number" step="0.1" /></div>
+            <div class="field"><label>高度 Y</label><input id="lY" type="number" step="0.1" /></div>
+            <div class="field"><label>位置 Z</label><input id="lZ" type="number" step="0.1" /></div>
+            <div class="field"><label>颜色</label><input id="lColor" type="color" /></div>
+            <div class="field"><label>强度</label><input id="lIntensity" type="number" step="0.1" min="0" /></div>
+            <div id="lightPointFields">
+              <div class="field"><label>照射距离</label><input id="lDistance" type="number" step="0.5" min="0" /></div>
+              <div class="field"><label>衰减</label><input id="lDecay" type="number" step="0.1" min="0" /></div>
+            </div>
+            <div id="lightAreaFields" style="display:none">
+              <div class="field"><label>宽</label><input id="lWidth" type="number" step="0.1" min="0.1" /></div>
+              <div class="field"><label>高</label><input id="lHeight" type="number" step="0.1" min="0.1" /></div>
+              <div class="field"><label style="width:58px">水平朝向°</label><input id="lRotY" type="number" step="1" /></div>
+              <div class="field"><label style="width:58px">俯仰°</label><input id="lRotX" type="number" step="1" /></div>
+            </div>
+            <button id="lDel" class="import-btn" type="button" style="margin-top:4px">删除该光源</button>
+          </div>
         </div>
         <div>
           <div class="panel-title">场景</div>

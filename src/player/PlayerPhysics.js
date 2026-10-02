@@ -211,12 +211,22 @@ export class PlayerPhysics {
 
         // 选最小穿透轴解析（竖直优先，其次 X 再 Z，保证顶面着陆稳定）
         if (oy <= ox && oy <= oz) {
+          const boxBottom = b.cy - b.hy;
+          const feet = state.y - Config.PLAYER_HEIGHT * this.sizeScale;
           if (py > b.cy) {
-            state.y = b.cy + b.hy + Config.PLAYER_HEIGHT * this.sizeScale;
+            // 玩家竖直中心在盒中心之上：落到盒顶
+            state.y = boxBottom + b.hy * 2 + Config.PLAYER_HEIGHT * this.sizeScale;
             if (this.velocity.y < 0) this.velocity.y = 0;
             state.onGround = true;
+          } else if (boxBottom <= feet) {
+            // 盒底面在玩家脚底之下 = 玩家整体嵌在盒子里（宽大模型的常见情形）。
+            // 竖直方向没有出路：往下推会把人塞进地里（再被地面钳回来），跳起也会被立刻清零，
+            // 表现为「进到模型里就跳不起来」。改为按水平最小穿透轴把玩家推出盒体。
+            if (ox <= oz) state.x += px > b.cx ? ox : -ox;
+            else state.z += pz > b.cz ? oz : -oz;
           } else {
-            state.y = b.cy - b.hy;
+            // 真正的天花板：玩家从下方顶到盒底面，挡回向上的速度
+            state.y = boxBottom;
             if (this.velocity.y > 0) this.velocity.y = 0;
           }
         } else if (ox <= oz) {
@@ -257,12 +267,20 @@ export class PlayerPhysics {
 
       // 竖直穿透最小 → 顶面/底面解析（保持在转动的盒顶站稳）
       if (oy <= minPen) {
+        const boxBottom = b.cy - b.hy;
+        const feet = state.y - Config.PLAYER_HEIGHT * this.sizeScale;
         if (py > b.cy) {
-          state.y = b.cy + b.hy + Config.PLAYER_HEIGHT * this.sizeScale;
+          state.y = boxBottom + b.hy * 2 + Config.PLAYER_HEIGHT * this.sizeScale;
           if (this.velocity.y < 0) this.velocity.y = 0;
           state.onGround = true;
+        } else if (boxBottom <= feet) {
+          // 玩家整体嵌在盒内（同 AABB 路径）：竖直无出路，改沿水平最小穿透轴推出，
+          // 否则向下推会把人塞进地里、跳起也会被清零。
+          const dirE = ((px - b.cx) * bestL.x + (pz - b.cz) * bestL.z) >= 0 ? 1 : -1;
+          state.x += bestL.x * minPen * dirE;
+          state.z += bestL.z * minPen * dirE;
         } else {
-          state.y = b.cy - b.hy;
+          state.y = boxBottom;
           if (this.velocity.y > 0) this.velocity.y = 0;
         }
         continue;

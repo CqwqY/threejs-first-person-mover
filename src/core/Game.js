@@ -13,7 +13,7 @@ import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode } from '../player/Shop.js';
-import { buildEditorBuildings, fetchRemoteScene } from '../world/EditorBuildings.js';
+import { buildEditorBuildings, buildEditorLights, fetchRemoteScene } from '../world/EditorBuildings.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
@@ -36,6 +36,7 @@ async function _fetchRemoteScene(scene, roots, target) {
   try {
     target.length = 0;
     buildEditorBuildings(scene, roots, data, target);
+    buildEditorLights(scene, data); // 远端光源覆盖打包数据；函数内部会先清掉上一次的光源，不会重复叠加
   } catch (e) {
     console.warn('[Game] 应用远程场景失败，回退打包数据:', e);
   }
@@ -118,6 +119,7 @@ export class Game {
 
     // ---- 编辑器开发的地图：import src/world/editorMapData.js 渲染保存的建筑 ----
     this.colliders = buildEditorBuildings(this.scene, roots);
+    buildEditorLights(this.scene); // 编辑器保存的点光源 / 面光源（用打包数据）
 
     // 在线同步：运行时从后端拉取最新场景（编辑器保存的那份），拉到则替换打包数据重建。
     // 拉取失败会自动回退到上面打包的 editorMapData，保证离线时也有内容。
@@ -300,12 +302,14 @@ export class Game {
     this._coinBadge = this._createCoinBadge();
     this._refreshCoins();
 
-    // ---- 棍子：挂在相机下的挥动模型（只有挥的那一下才显示）----
+    // ---- 棍子：挂在相机下的手持模型（技能槽里装备了棍子就一直握在手上，挥动时才播动画）----
     // 相机要进场景图，否则挂在它下面的模型不会被渲染
     this.scene.add(this.camera);
     this._clubRig = this._createClubRig();
     this._clubAt = 0;
     this._clubSwing = null;     // { t, hit }
+    this._skillSig = '';        // 技能槽签名缓存（供 _hasSkillKind 判断手里该拿什么）
+    this._skillKinds = null;
 
     // ---- 加特林：技能槽切换开火模式，按住左键持续扫射，会过热 ----
     this._gatlingOn = false;
@@ -316,6 +320,7 @@ export class Game {
     this._bullets = [];             // 在飞的子弹（只做视觉，命中是瞬时判定）
     this._bulletGeo = new THREE.SphereGeometry(0.08, 8, 6);
     this._bulletMat = new THREE.MeshBasicMaterial({ color: 0xffd76a });
+    this._gatlingRig = this._createGatlingRig(); // 开启加特林时握在手上（枪管会转）
     this._gatlingBar = this._createGatlingBar();
 
     // ---- 黑洞：扔出去不断变大，10 秒后把范围内的人吸过去 ----
@@ -1297,6 +1302,43 @@ export class Game {
     return rig;
   }
 
+  // 加特林模型：同样挂在相机下，开启加特林时一直握在手上，开火时枪管旋转
+  _createGatlingRig() {
+    const rig = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3c424c, roughness: 0.6, metalness: 0.35 });
+    const tubeMat = new THREE.MeshStandardMaterial({ color: 0x22262c, roughness: 0.45, metalness: 0.5 });
+
+    // 枪身
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.17, 0.34), bodyMat);
+    body.position.z = -0.2;
+    rig.add(body);
+    // 侧挂弹鼓
+    const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.13, 14), bodyMat);
+    drum.rotation.z = Math.PI / 2;
+    drum.position.set(-0.03, -0.14, -0.12);
+    rig.add(drum);
+    // 枪管组：6 根管子绕一圈指向正前方（-Z），整组绕 Z 自转就是转管效果
+    const barrels = new THREE.Group();
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.019, 0.5, 8), tubeMat);
+      tube.rotation.x = Math.PI / 2; // 圆柱默认沿 Y，转到沿 Z
+      tube.position.set(Math.cos(a) * 0.048, Math.sin(a) * 0.048, -0.56);
+      barrels.add(tube);
+    }
+    rig.add(barrels);
+    // 握把
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.15, 0.07), bodyMat);
+    grip.position.set(0, -0.15, 0.01);
+    rig.add(grip);
+
+    rig.position.set(0.26, -0.34, -0.5);
+    rig.visible = false;
+    this.camera.add(rig);
+    this._gatlingBarrels = barrels;
+    return rig;
+  }
+
   // 挥棍：播横扫动画，动画推进到 CLUB_HIT_AT 时结算命中
   _swingClub() {
     const now = performance.now();
@@ -1306,22 +1348,45 @@ export class Game {
     this._clubRig.visible = true;
   }
 
+  // 每帧：驱动挥棍动画，并决定棍子是否握在手上（不再只在挥的那一下显示）
   _updateClub(dt) {
-    if (!this._clubSwing) return;
     const sw = this._clubSwing;
-    sw.t += dt;
-    const k = Math.min(1, sw.t / Config.CLUB_SWING_TIME);
-    const e = 1 - (1 - k) * (1 - k); // 缓出，收尾更利落
-    this._clubRig.rotation.y = 0.95 - 1.9 * e; // 从右后方扫到左前方
-    this._clubRig.rotation.z = -0.25 + 0.5 * e;
-    if (!sw.hit && sw.t >= Config.CLUB_HIT_AT) {
-      sw.hit = true;
-      this._clubHitCheck();
+    if (sw) {
+      sw.t += dt;
+      const k = Math.min(1, sw.t / Config.CLUB_SWING_TIME);
+      const e = 1 - (1 - k) * (1 - k); // 缓出，收尾更利落
+      this._clubRig.rotation.y = 0.95 - 1.9 * e; // 从右后方扫到左前方
+      this._clubRig.rotation.z = -0.25 + 0.5 * e;
+      if (!sw.hit && sw.t >= Config.CLUB_HIT_AT) {
+        sw.hit = true;
+        this._clubHitCheck();
+      }
+      if (k >= 1) this._clubSwing = null;
+    } else {
+      // 待机握持姿势：保持挥动动画的起手位（斜扛在右前方），别每帧飘
+      this._clubRig.rotation.set(0, 0.95, -0.25);
     }
-    if (k >= 1) {
-      this._clubSwing = null;
-      this._clubRig.visible = false;
+    // 技能槽里装备了棍子就一直握在手上；第三人称、死亡、或已换成加特林时收起
+    this._clubRig.visible =
+      this._hasSkillKind('club') && !this.thirdPerson && !this._dead && !this._gatlingOn;
+  }
+
+  // 技能槽里是否装备了某种效果的道具（决定手里握什么武器）。
+  // 用技能槽的 JSON 作签名做一层缓存，避免每帧读 localStorage。
+  _hasSkillKind(kind) {
+    const map = this._skillMap || {};
+    const sig = JSON.stringify(map);
+    if (sig !== this._skillSig) {
+      this._skillSig = sig;
+      const kinds = new Set();
+      for (const key of Object.keys(map)) {
+        const raw = this._loadItemEffect(map[key]);
+        const k = (raw && typeof raw === 'object') ? raw.k : String(raw || '');
+        if (k) kinds.add(k);
+      }
+      this._skillKinds = kinds;
     }
+    return !!(this._skillKinds && this._skillKinds.has(kind));
   }
 
   // 命中结算：正前方 CLUB_ARC_DEG 张角内、CLUB_RANGE 内的其他玩家全部被击飞
@@ -1874,6 +1939,16 @@ export class Game {
     }
 
     this._updateGatlingUI();
+
+    // 手里握着加特林：开启期间一直显示（第三人称/死亡时收起）；
+    // 开火且没过热时枪管转起来，停火就停在当前角度
+    if (this._gatlingRig) {
+      const held = this._gatlingOn && !this.thirdPerson && !this._dead;
+      this._gatlingRig.visible = held;
+      if (held && this._gatlingHeld && !this._gatlingOverheated && this._gatlingBarrels) {
+        this._gatlingBarrels.rotation.z += dt * 22;
+      }
+    }
   }
 
   _createGatlingBar() {

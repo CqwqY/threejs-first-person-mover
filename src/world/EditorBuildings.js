@@ -3,6 +3,7 @@
 // 数据格式：{ scenery:[{key,x,y,z,rotY,scale:{x,y,z}}...], placed:[{name,url,x,y,z,rotY,scale:{x,y,z},collider:{...}}...] }
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { instantiate } from './AssetLoader.js';
 import { editorMapData } from './editorMapData.js';
 import { API_BASE } from '../config.js';
@@ -237,4 +238,108 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
 
 function enableShadows(obj) {
   obj.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+}
+
+// ---- 编辑器光源（点光源 / 面光源）----
+// 数据字段：{ id, type:'point'|'area', x, y, z, color, intensity, distance, decay, width, height, rotY, rotX }
+// 其中 distance/decay 仅 point 使用，width/height/rotY/rotX 仅 area 使用。
+// RectAreaLight 的 LTC 查找表只初始化一次即可，用模块级标志位保证幂等（重复 init 会重复生成纹理）。
+let _rectAreaLibReady = false;
+function ensureRectAreaLib() {
+  if (_rectAreaLibReady) return;
+  RectAreaLightUniformsLib.init();
+  _rectAreaLibReady = true;
+}
+
+// 各字段缺省值（与编辑器约定保持一致）
+const LIGHT_DEFAULTS = { color: '#ffffff', intensity: 1, distance: 12, decay: 2, width: 4, height: 3, rotY: 0, rotX: -90 };
+
+// 数值容错：非有限数取默认值
+function finiteOr(v, dflt) {
+  return (typeof v === 'number' && Number.isFinite(v)) ? v : dflt;
+}
+
+// 颜色容错：仅接受 #rrggbb / #rgb / 有限数值，否则用默认白
+function colorOf(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return new THREE.Color(v);
+  if (typeof v === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v.trim())) return new THREE.Color(v.trim());
+  return new THREE.Color(LIGHT_DEFAULTS.color);
+}
+
+// 释放光源：Light 本身不占 GPU 资源，但仍按需清理其子树可能携带的几何/材质，避免残留。
+function disposeLight(obj) {
+  obj.traverse((o) => {
+    if (o.geometry && o.geometry.dispose) o.geometry.dispose();
+    if (o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) if (m && m.dispose) m.dispose();
+    }
+  });
+}
+
+// buildEditorLights(scene, dataOverride)：把编辑器保存的光源渲染进场景。
+// dataOverride 可选：传运行时拉取的后端数据时以其为准，缺省则用打包的 editorMapData（旧存档没有 lights 字段 → 按空数组处理）。
+// 去重策略（关键）：本函数会被调用两次（先打包数据、再远端数据）。所有光源都挂在一个 Group 下，
+// 并把该 Group 记在 scene.userData.__editorLights 上，每次调用先整体移除并释放这个 Group 再重建，
+// 因此不会重复叠加。（注意不能逐个 scene.remove(light)：光源的父节点是 Group 不是 scene，那样删不掉。）
+// 返回本次创建的光源 Group（已 add 进 scene）。
+export function buildEditorLights(scene, dataOverride) {
+  // 先清掉上一次创建的那一整组光源
+  const prev = scene.userData ? scene.userData.__editorLights : null;
+  if (prev) {
+    scene.remove(prev);
+    disposeLight(prev);
+  }
+
+  const group = new THREE.Group();
+  group.name = 'editor-lights';
+
+  const data = dataOverride || editorMapData || {};
+  const lights = (!Array.isArray(data) && data && Array.isArray(data.lights)) ? data.lights : [];
+
+  for (const it of lights) {
+    if (!it || typeof it !== 'object') continue;
+
+    // 坐标必须是有限数，否则跳过该条
+    const x = it.x, y = it.y, z = it.z;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+
+    const color = colorOf(it.color);
+    const intensity = finiteOr(it.intensity, LIGHT_DEFAULTS.intensity);
+
+    if (it.type === 'point') {
+      const light = new THREE.PointLight(
+        color,
+        intensity,
+        finiteOr(it.distance, LIGHT_DEFAULTS.distance),
+        finiteOr(it.decay, LIGHT_DEFAULTS.decay)
+      );
+      light.position.set(x, y, z);
+      group.add(light);
+    } else if (it.type === 'area') {
+      ensureRectAreaLib(); // 面光源使用前必须初始化一次 LTC 查找表
+      const light = new THREE.RectAreaLight(
+        color,
+        intensity,
+        finiteOr(it.width, LIGHT_DEFAULTS.width),
+        finiteOr(it.height, LIGHT_DEFAULTS.height)
+      );
+      light.position.set(x, y, z);
+      // RectAreaLight 沿本地 -Z 发光：rotX 为俯仰（度，负值朝下），默认 -90 即垂直向下。
+      // 用 YXZ 顺序（先偏航 rotY 再俯仰 rotX），与相机朝向约定一致。
+      light.rotation.order = 'YXZ';
+      light.rotation.set(
+        THREE.MathUtils.degToRad(finiteOr(it.rotX, LIGHT_DEFAULTS.rotX)),
+        THREE.MathUtils.degToRad(finiteOr(it.rotY, LIGHT_DEFAULTS.rotY)),
+        0
+      );
+      group.add(light);
+    } else {
+      continue; // 未知类型跳过
+    }
+  }
+
+  scene.add(group);
+  scene.userData.__editorLights = group;
+  return group;
 }
