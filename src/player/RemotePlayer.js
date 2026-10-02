@@ -1,7 +1,7 @@
 // 职责：代表一个远程玩家，组合 PlayerState（数据）与 PlayerModel（外观），并对状态做插值渲染。
 import { Config } from '../config.js';
 import { PlayerState, lerpAngle } from './PlayerState.js';
-import { createPlayerModel, updateNameTag, setModelScale, setHeldText, setHealthBar } from './PlayerModel.js';
+import { createPlayerModel, updateNameTag, setModelScale, setHeldItem, setHealthBar } from './PlayerModel.js';
 import { SnapshotBuffer } from '../net/SnapshotBuffer.js';
 
 // 位置趋近：把「正常移动」与「异常跳变」区分开，异常部分按有限速度平滑，
@@ -52,7 +52,7 @@ export class RemotePlayer {
   syncModel() {
     const s = this.state.size || 1;
     setModelScale(this.model, s);
-    setHeldText(this.model, this.state.hold || '');
+    setHeldItem(this.model, this.state.wep || '', this.state.hold || '');
     setHealthBar(this.model, this.state.health, Config.HEALTH_MAX); // 头顶血量条
     this.model.position.set(this.state.x, this.state.y - Config.PLAYER_HEIGHT * s, this.state.z);
     this.model.rotation.set(0, this.state.yaw, 0);
@@ -114,6 +114,7 @@ export class RemotePlayer {
           this.state.size = latest.size === undefined ? 1 : latest.size;
           if (latest.health !== undefined) this.state.health = latest.health;
           if (latest.hold !== undefined) this.state.hold = latest.hold;
+          if (latest.wep !== undefined) this.state.wep = latest.wep;
           if (latest.ride !== undefined) this.state.ride = latest.ride;
           if (latest.veh !== undefined) this.state.veh = latest.veh;
         }

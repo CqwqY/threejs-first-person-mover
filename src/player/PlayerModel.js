@@ -235,15 +235,29 @@ export function setHealthBar(group, hp, max) {
   bar.tex.needsUpdate = true;
 }
 
-// 设置手持物：一段显示在手上的 3D 文字（别人与第三人称可见）；text 为空则清空手持
-export function setHeldText(group, text) {
+// 统一的「手持物」入口：手部锚点上一次只挂一样东西。
+// - wep 非空（'club' / 'gatling' / 'ctrlgun'）时优先挂对应武器模型；
+// - wep 为空时才按 text 挂一段文字 Sprite（老逻辑）。
+// 用 heldKey 缓存键避免每帧重建；只在 wep / text 变化时重建。
+export function setHeldItem(group, wep, text) {
   const hand = group.userData.handAnchor;
   if (!hand) return;
-  const cur = group.userData.heldText || '';
-  if (cur === text) return; // 文字没变不重建，避免每帧建画布
-  group.userData.heldText = text;
+  const w = (wep === 'club' || wep === 'gatling' || wep === 'ctrlgun') ? wep : '';
+  group.userData.heldWep = w; // 记下当前武器，供 setHeldText 内部转调时复用
+  const key = w ? ('wep:' + w) : ('text:' + (text || ''));
+  if (group.userData.heldKey === key) return; // 没变不重建，避免每帧建模型/画布
+  group.userData.heldKey = key;
   hand.clear();
+  if (w) {
+    hand.add(_createHeldWeapon(w));
+    return;
+  }
   if (!text) return;
+  hand.add(_createHeldTextSprite(text));
+}
+
+// 手持物文字：一段显示在手上的 3D 文字 Sprite（别人与第三人称可见）
+function _createHeldTextSprite(text) {
   const canvas = document.createElement('canvas');
   canvas.width = 128;
   canvas.height = 64;
@@ -264,7 +278,73 @@ export function setHeldText(group, text) {
   }));
   sp.scale.set(0.6, 0.3, 1);
   sp.renderOrder = 13; // 手持物压在最上层，不与名牌/血条互相穿插
-  hand.add(sp);
+  return sp;
+}
+
+// 按种类生成一个握在手上的小武器模型（挂到手部锚点，朝模型正前方 -Z 伸出）
+function _createHeldWeapon(kind) {
+  const rig = new THREE.Group();
+  if (kind === 'club') {
+    // 棍子：细长木棍 + 深色头部
+    const shaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.035, 0.04, 0.75, 8),
+      new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.85 })
+    );
+    shaft.rotation.x = Math.PI / 2; // 圆柱默认沿 Y，转到沿 Z（朝前伸出）
+    shaft.position.z = -0.36;
+    rig.add(shaft);
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(0.11, 0.11, 0.24),
+      new THREE.MeshStandardMaterial({ color: 0x4a4a52, roughness: 0.55 })
+    );
+    head.position.z = -0.78;
+    rig.add(head);
+  } else if (kind === 'gatling') {
+    // 加特林：枪身 + 握把 + 一圈枪管
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3c424c, roughness: 0.6, metalness: 0.35 });
+    const tubeMat = new THREE.MeshStandardMaterial({ color: 0x22262c, roughness: 0.45, metalness: 0.5 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.13, 0.26), bodyMat);
+    body.position.z = -0.14;
+    rig.add(body);
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.12, 0.06), bodyMat);
+    grip.position.set(0, -0.12, 0);
+    rig.add(grip);
+    const barrels = new THREE.Group();
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.34, 8), tubeMat);
+      tube.rotation.x = Math.PI / 2; // 圆柱默认沿 Y，转到沿 Z
+      tube.position.set(Math.cos(a) * 0.034, Math.sin(a) * 0.034, -0.42);
+      barrels.add(tube);
+    }
+    rig.add(barrels);
+  } else if (kind === 'ctrlgun') {
+    // 控制枪：科幻手枪/发射器（枪身 + 较长细枪管 + 前端发光环），青蓝色调
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x31506b, roughness: 0.5, metalness: 0.45 });
+    const gripMat = new THREE.MeshStandardMaterial({ color: 0x22303f, roughness: 0.7 });
+    const glowMat = new THREE.MeshStandardMaterial({
+      color: 0x36d6ff, emissive: 0x36d6ff, emissiveIntensity: 1.2, roughness: 0.3, metalness: 0.2,
+    });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.11, 0.2), bodyMat);
+    body.position.z = -0.12;
+    rig.add(body);
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.13, 0.05), gripMat);
+    grip.position.set(0, -0.11, -0.02);
+    rig.add(grip);
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.4, 10), bodyMat);
+    barrel.rotation.x = Math.PI / 2; // 圆柱默认沿 Y，转到沿 Z（朝前伸出）
+    barrel.position.z = -0.4;
+    rig.add(barrel);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.013, 10, 20), glowMat);
+    ring.position.z = -0.58; // 前端发光环
+    rig.add(ring);
+  }
+  return rig;
+}
+
+// 兼容旧入口：设置手持物文字（内部转调 setHeldItem，武器优先于文字）
+export function setHeldText(group, text) {
+  setHeldItem(group, group.userData.heldWep || '', text);
 }
 
 // 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）；color 控制昵称文字颜色（默认白）

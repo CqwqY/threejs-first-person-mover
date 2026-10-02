@@ -135,9 +135,17 @@ export function createEditor() {
       duplicateRec(state.selected, true);
     }
     controls.enabled = !e.value;
+    // 拖动结束：光源的位置/朝向已回写；缩放必须在这里结算（逐帧结算会被放大成指数级）
+    if (!e.value) {
+      const light = selectedLight();
+      if (light) { readLightScale(light); syncLightPanel(); }
+    }
   });
   tCtl.addEventListener('objectChange', () => {
-    if (state.selected) { readTransformFromObject(state.selected); }
+    if (state.selected) { readTransformFromObject(state.selected); return; }
+    // gizmo 附着在光源上时：把灯光的 position / rotation 回写到光源记录
+    const light = selectedLight();
+    if (light) readLightFromObject(light);
   });
   tCtl.enabled = false;
 
@@ -945,6 +953,9 @@ export function createEditor() {
   const GIZMO_MODE = { move: 'translate', rot: 'rotate', scale: 'scale' };
 
   function select(rec) {
+    // 光源与普通物件选中互斥：选中普通物件（或清空选中）时一并取消光源选中。
+    // 选中光源走 selectLight()，它会先调用本函数清空普通物件选中，再挂 gizmo。
+    state.selectedLightId = null;
     state.selected = rec || null;
     const gm = GIZMO_MODE[state.mode];
     if (rec && gm) {
@@ -957,6 +968,7 @@ export function createEditor() {
     }
     syncPropsUI();
     outlinerUpdate();
+    syncLightPanel(); // 光源列表高亮随之刷新（清空选中时同样生效）
   }
 
   // ---------- 交互（点击选中；gizmo 拖动由 TransformControls 接管） ----------
@@ -978,7 +990,8 @@ export function createEditor() {
     if (state.mode === 'ruler') return;
     if (state.mode === 'place') return;
     const hitObj = pickObject(e.clientX, e.clientY);
-    select(hitObj ? hitObj.rec : null);
+    if (hitObj && hitObj.isLight) selectLight(hitObj.rec);
+    else select(hitObj ? hitObj.rec : null);
     if (hitObj && (state.mode === 'move' || state.mode === 'rot' || state.mode === 'scale')) {
       controls.enabled = false; // 选中时短暂停用视角，避免点击同时旋转相机
       orbitLocked = true;
@@ -1019,6 +1032,13 @@ export function createEditor() {
       rec.obj.traverse((o) => { if (o.isMesh || o.isLineSegments) arr.push(o); });
       const its = raycaster.intersectObjects(arr, false);
       if (its.length) meshes.push({ d: its[0].distance, rec });
+    });
+    // 光源：把灯光辅助器（点光源 PointLightHelper / 面光源 RectAreaLightHelper）纳入拾取，
+    // 命中即标记 isLight，供上层区分「选中光源」还是「选中普通物件」。
+    state.lights.forEach((rec) => {
+      if (!rec.helper) return;
+      const its = raycaster.intersectObject(rec.helper, true);
+      if (its.length) meshes.push({ d: its[0].distance, rec, isLight: true });
     });
     if (!meshes.length) return null;
     meshes.sort((a, b) => a.d - b.d);
@@ -1385,6 +1405,50 @@ export function createEditor() {
     if (rec.helper && typeof rec.helper.update === 'function') rec.helper.update();
   }
 
+  // gizmo 拖动光源时从灯光对象回写数据记录：位置直接取 obj.position（x/y/z）；
+  // 面光源处于旋转模式时，把 YXZ 欧拉角的 y（偏航）/ x（俯仰）由弧度换算回「度」写入 rotY/rotX。
+  // 回写后再调用 applyLightTransforms，让灯光/辅助器与面板保持一致。
+  function readLightFromObject(rec) {
+    if (!rec || !rec.obj) return;
+    const o = rec.obj;
+    rec.x = o.position.x;
+    rec.y = o.position.y;
+    rec.z = o.position.z;
+    // 注意：缩放不在逐帧的 objectChange 里结算 —— TransformControls 在缩放模式下
+    // 给出的 scale 是「相对本次拖拽起点」的值，若每次事件都乘进尺寸会指数级放大。
+    // 因此缩放只在拖拽结束（dragging-changed）时结算一次，见 readLightScale()。
+    if (rec.type === 'area') {
+      rec.rotY = o.rotation.y * (180 / Math.PI);
+      rec.rotX = o.rotation.x * (180 / Math.PI);
+    }
+    applyLightTransforms(rec);
+    syncLightUI();
+    markDirty();
+  }
+
+  // 拖拽结束时结算缩放：把灯光对象上的 scale 转成真实尺寸字段后复位为 1
+  // （灯光自身的 scale 不参与渲染，尺寸只由 width/height 或 distance 表达）
+  function readLightScale(rec) {
+    if (!rec || !rec.obj) return;
+    const o = rec.obj;
+    const sx = o.scale.x;
+    const sy = o.scale.y;
+    const sz = o.scale.z;
+    if (Math.abs(sx - 1) < 1e-4 && Math.abs(sy - 1) < 1e-4 && Math.abs(sz - 1) < 1e-4) return;
+    if (rec.type === 'area') {
+      // 面光源：X 轴 → 宽，Y 轴 → 高（Z 无意义，忽略）
+      rec.width = Math.max(0.05, (rec.width ?? 4) * sx);
+      rec.height = Math.max(0.05, (rec.height ?? 3) * sy);
+    } else {
+      // 点光源：取变化最大的一轴，缩放 → 照射半径
+      rec.distance = Math.max(0.5, (rec.distance ?? 12) * Math.max(sx, sy, sz));
+    }
+    o.scale.set(1, 1, 1);
+    applyLightTransforms(rec);
+    syncLightUI();
+    markDirty();
+  }
+
   // 新建光源：默认落在相机注视点上方 3 米处；面光源默认俯仰 -90°（朝下照）
   function addLight(type) {
     const rec = {
@@ -1398,14 +1462,15 @@ export function createEditor() {
     };
     buildLightObject(rec);
     state.lights.push(rec);
-    state.selectedLightId = rec.id;
+    selectLight(rec); // 新建即选中，并把 3D 变换轴挂到该光源上
     markDirty();
-    syncLightPanel();
   }
 
   // 删除光源：从场景移除灯光与辅助器并释放资源
   function removeLight(rec) {
     if (!rec) return;
+    // 该光源正被 gizmo 附着时先摘掉，避免变换轴挂在已移除的对象上
+    if (rec.obj && tCtl.object === rec.obj) { tCtl.detach(); tCtl.enabled = false; }
     if (rec.helper) {
       if (rec.type === 'area' && rec.obj) rec.obj.remove(rec.helper);
       else scene.remove(rec.helper);
@@ -1423,6 +1488,24 @@ export function createEditor() {
 
   function selectedLight() {
     return state.lights.find((l) => l.id === state.selectedLightId) || null;
+  }
+
+  // 光源的 gizmo 模式：默认为移动；面光源在「旋转」模式下用旋转轴调朝向，点光源旋转无意义仍用移动。
+  function lightGizmoMode(rec) {
+    return (state.mode === 'rot' && rec && rec.type === 'area') ? 'rotate' : 'translate';
+  }
+
+  // 选中光源：先清空普通物件选中（会 detach gizmo、收起变换/碰撞体面板），
+  // 再把 3D 变换轴重新挂到光源对象上——保证光源与普通物件二者互斥，gizmo 不会同时挂两个对象。
+  function selectLight(rec) {
+    select(null);
+    state.selectedLightId = rec ? rec.id : null;
+    if (rec && rec.obj) {
+      tCtl.attach(rec.obj);
+      tCtl.setMode(lightGizmoMode(rec));
+      tCtl.enabled = true;
+    }
+    syncLightPanel();
   }
 
   // 光源列表：每行显示类型 + 编号，点击选中，选中行高亮
@@ -1448,7 +1531,7 @@ export function createEditor() {
       idEl.className = 'oid';
       idEl.textContent = rec.id;
       li.appendChild(idEl);
-      li.onclick = () => { state.selectedLightId = rec.id; syncLightPanel(); };
+      li.onclick = () => selectLight(rec);
       wrap.appendChild(li);
     });
   }
@@ -2011,8 +2094,14 @@ export function createEditor() {
     } else {
       state.placingEmpty = false; // 离开放置：退出空碰撞体放置
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
-      // 已有选中对象时，按新模式挂上对应的 3D 轴
-      if (state.selected && GIZMO_MODE[m]) {
+      // 光源与普通物件互斥：优先处理被选中的光源（用现有 3D 轴驱动）
+      const light = selectedLight();
+      if (light && light.obj) {
+        tCtl.attach(light.obj);
+        tCtl.setMode(lightGizmoMode(light));
+        tCtl.enabled = true;
+      } else if (state.selected && GIZMO_MODE[m]) {
+        // 已有选中对象时，按新模式挂上对应的 3D 轴
         tCtl.attach(state.selected.obj);
         tCtl.setMode(GIZMO_MODE[m]);
         tCtl.enabled = true;

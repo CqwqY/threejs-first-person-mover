@@ -20,6 +20,7 @@ export class PlayerState {
     this.size = 1; // 体型倍率（1 = 正常）；由 NPC 效果改变，需同步给其他玩家
     this.health = 500; // 当前血量（上限 500，由 NPC/AI 接口改动，需同步）
     this.hold = ''; // 手持物的文字（3D 显示在手上，空串 = 手上没东西）
+    this.wep = '';  // 手持武器：'' = 空，'club' = 棍子，'gatling' = 加特林
     this.ride = 0;  // 载具座位：0 = 没骑，1 = 驾驶，2 = 后座
     this.veh = '';  // 所乘载具的标识（Config.VEHICLE_ID），用于把前后座配成一对
   }
@@ -36,6 +37,7 @@ export class PlayerState {
       size: this.size,
       health: this.health,
       hold: this.hold,
+      wep: this.wep,
       ride: this.ride,
       veh: this.veh,
     };
@@ -53,6 +55,7 @@ export class PlayerState {
     if (data.size !== undefined) this.size = data.size;
     if (data.health !== undefined) this.health = data.health;
     if (data.hold !== undefined) this.hold = data.hold;
+    if (data.wep !== undefined) this.wep = data.wep;
     if (data.ride !== undefined) this.ride = data.ride;
     if (data.veh !== undefined) this.veh = data.veh;
     return this;
@@ -69,6 +72,7 @@ export class PlayerState {
     this.size += (ts - this.size) * alpha;
     if (target.health !== undefined) this.health = target.health;
     if (target.hold !== undefined) this.hold = target.hold;
+    if (target.wep !== undefined) this.wep = target.wep;
     if (target.ride !== undefined) this.ride = target.ride;
     if (target.veh !== undefined) this.veh = target.veh;
     return this;

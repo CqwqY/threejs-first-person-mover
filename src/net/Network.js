@@ -104,6 +104,13 @@ export class Network {
     this.send({ t: 'knock', target, kx, ky, kz });
   }
 
+  // 控制枪：控制器把「吊住点」同步给被控者，或单方面宣布松开；
+  // 被控者挣脱时也用同一条消息（target 指向控制器）回报，让控制器知道该收枪。
+  sendCtrl(target, on, x, y, z) {
+    if (!target) return;
+    this.send({ t: 'ctrl', target, on: on ? 1 : 0, x, y, z });
+  }
+
   // 投掷物出手广播：让其他玩家看到「有一颗东西飞过去」
   sendProj(info) {
     if (!info) return;
@@ -178,6 +185,7 @@ export class Network {
     if ((st.size || 1) !== (p.size || 1)) return true;
     if ((st.health | 0) !== (p.health | 0)) return true;
     if ((st.hold || '') !== (p.hold || '')) return true;
+    if ((st.wep || '') !== (p.wep || '')) return true;
     if ((st.ride | 0) !== (p.ride | 0)) return true;
     if ((st.veh || '') !== (p.veh || '')) return true;
     return false;
@@ -186,7 +194,7 @@ export class Network {
   _copyState(st) {
     return {
       x: st.x || 0, y: st.y || 0, z: st.z || 0, yaw: st.yaw || 0,
-      size: st.size, health: st.health, hold: st.hold, ride: st.ride, veh: st.veh,
+      size: st.size, health: st.health, hold: st.hold, wep: st.wep, ride: st.ride, veh: st.veh,
     };
   }
 }

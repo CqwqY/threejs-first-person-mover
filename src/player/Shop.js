@@ -36,6 +36,13 @@ export const SHOP_ITEMS = [
     desc: '按技能槽开火模式后，按住鼠标左键持续扫射。单发 5 点伤害，打久了会过热。',
     effect: { k: 'gatling' },
   },
+  {
+    id: 'ctrlgun',
+    name: '控制枪',
+    price: 180,
+    desc: '发射激光抓住别人，移动视角就能把他拖着走；对方可以按空格挣脱。',
+    effect: { k: 'control' },
+  },
 ];
 
 function walletKey(profile) {

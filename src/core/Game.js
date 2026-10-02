@@ -19,7 +19,7 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale, setHeldText, setNameTagsVisible, setHealthBarsVisible } from '../player/PlayerModel.js';
+import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
@@ -320,6 +320,12 @@ export class Game {
     this._bullets = [];             // 在飞的子弹（只做视觉，命中是瞬时判定）
     this._bulletGeo = new THREE.SphereGeometry(0.08, 8, 6);
     this._bulletMat = new THREE.MeshBasicMaterial({ color: 0xffd76a });
+
+    // ---- 控制枪：抓住一个玩家吊在视线前方，移动视角拖着走；对方按空格挣脱 ----
+    this._ctrl = null;              // 控制者侧：{ id, until, acc, lastAx, lastAy, lastAz }
+    this._ctrlBy = null;            // 被控侧：{ from, until, ax, ay, az }
+    this._ctrlImmuneUntil = 0;      // 挣脱后的免疫截止时刻（performance.now 毫秒）
+    this._ctrlBeam = null;          // 控制激光线（控制者侧可见）
     this._gatlingRig = this._createGatlingRig(); // 开启加特林时握在手上（枪管会转）
     this._gatlingBar = this._createGatlingBar();
 
@@ -578,6 +584,11 @@ export class Game {
       case 'knock': {
         // 被别人的棍子扫到：由本机给自己施加击飞（冲量来自挥棍的人）
         this._applyKnock(msg);
+        break;
+      }
+      case 'ctrl': {
+        // 控制枪：别人抓住我 / 松开我
+        this._applyCtrlMsg(msg);
         break;
       }
       case 'bh': {
@@ -1389,6 +1400,17 @@ export class Game {
     return !!(this._skillKinds && this._skillKinds.has(kind));
   }
 
+  // 当前该上报给他人的手持武器种类：与第一人称手里武器的显示逻辑保持一致。
+  // 注意：这里只按「装备状态」判断，不因切第三人称/死亡而回报空值，
+  // 否则别人会看到武器忽隐忽现。
+  _heldWeaponKind() {
+    if (this._gatlingOn) return 'gatling';
+    if (this._ctrl) return 'ctrlgun';
+    if (this._hasSkillKind('club')) return 'club';
+    if (this._hasSkillKind('control')) return 'ctrlgun';
+    return '';
+  }
+
   // 命中结算：正前方 CLUB_ARC_DEG 张角内、CLUB_RANGE 内的其他玩家全部被击飞
   _clubHitCheck() {
     const s = this.localState;
@@ -1798,6 +1820,191 @@ export class Game {
   // ---------- 加特林 ----------
 
   // 按技能槽切换开火模式：开启后按住左键（手机按住「攻击」）持续扫射
+  // ---------- 控制枪 ----------
+  // 视线正前方 CTRL_DIST 处的「吊住点」：被控者会被拉到这个位置
+  _ctrlAnchor() {
+    const s = this.localState;
+    const cp = Math.cos(s.pitch);
+    const sp = Math.sin(s.pitch);
+    return {
+      x: s.x + (-Math.sin(s.yaw) * cp) * Config.CTRL_DIST,
+      y: s.y + sp * Config.CTRL_DIST,
+      z: s.z + (-Math.cos(s.yaw) * cp) * Config.CTRL_DIST,
+    };
+  }
+
+  // 开火：射线抓最近的目标；已经在控制中则松手（同一个技能键切换）
+  _fireCtrlGun() {
+    if (this._ctrl) { this._releaseCtrl('已松开'); return; }
+    const s = this.localState;
+    const cp = Math.cos(s.pitch);
+    const sp = Math.sin(s.pitch);
+    const dx = -Math.sin(s.yaw) * cp;
+    const dy = sp;
+    const dz = -Math.cos(s.yaw) * cp;
+
+    // 与其他玩家一样用「射线到躯干中心的最近距离」判定，取最近的一个
+    let hitId = null;
+    let hitT = Infinity;
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === s.id) continue;
+      const st = rp.state;
+      const cy = st.y - Config.PLAYER_HEIGHT / 2;
+      const t = (st.x - s.x) * dx + (cy - s.y) * dy + (st.z - s.z) * dz;
+      if (t < 0 || t > Config.CTRL_RANGE || t >= hitT) continue;
+      const px = s.x + dx * t;
+      const py = s.y + dy * t;
+      const pz = s.z + dz * t;
+      if (Math.hypot(px - st.x, py - cy, pz - st.z) > Config.CTRL_HIT_RADIUS + Config.PLAYER_RADIUS) continue;
+      hitId = id;
+      hitT = t;
+    }
+    if (!hitId) { this._toast('控制枪没抓到人：对准别人再开火'); return; }
+
+    const a = this._ctrlAnchor();
+    this._ctrl = {
+      id: hitId,
+      until: performance.now() + Config.CTRL_MAX_TIME * 1000,
+      acc: 0,
+      sent: false,
+    };
+    this.network.sendCtrl(hitId, true, a.x, a.y, a.z);
+    this._toast('抓住了！移动视角就能拖动对方（对方按空格挣脱）');
+  }
+
+  // 松开：主动收枪 / 超时 / 目标离线。toastText 为空则不提示
+  _releaseCtrl(toastText) {
+    if (!this._ctrl) return;
+    const id = this._ctrl.id;
+    this._ctrl = null;
+    this.network.sendCtrl(id, false, 0, 0, 0);
+    this._setCtrlBeam(false);
+    if (toastText) this._toast(toastText);
+  }
+
+  // 收到控制消息（被控侧）
+  _applyCtrlMsg(msg) {
+    if (!msg.on) {
+      // 被控侧：对方松手
+      if (this._ctrlBy) this._endControlled();
+      // 控制侧：目标拒收（免疫期）或已自行挣脱 → 立刻收枪，
+      // 否则会继续同步锚点直到超时
+      if (this._ctrl && this._ctrl.id === msg.from) this._releaseCtrl('对方挣脱了');
+      return;
+    }
+    const nowMs = performance.now();
+    // 挣脱后的免疫期内拒绝，并回报对方让他收枪
+    if (nowMs < this._ctrlImmuneUntil) {
+      this.network.sendCtrl(msg.from, false, 0, 0, 0);
+      return;
+    }
+    this._ctrlBy = {
+      from: msg.from,
+      until: nowMs + Config.CTRL_MAX_TIME * 1000,
+      ax: Number(msg.x) || 0,
+      ay: Number(msg.y) || 0,
+      az: Number(msg.z) || 0,
+    };
+    this._toast('被控制枪抓住了！按空格挣脱');
+  }
+
+  // 挣脱：通知控制者并进入短时免疫
+  _breakCtrl() {
+    if (!this._ctrlBy) return;
+    const from = this._ctrlBy.from;
+    this._endControlled();
+    this._ctrlImmuneUntil = performance.now() + Config.CTRL_BREAK_COOLDOWN * 1000;
+    this.network.sendCtrl(from, false, 0, 0, 0);
+    this._toast('挣脱成功！');
+  }
+
+  // 结束被控状态：清掉速度覆盖，否则会带着控制时的速度继续飞
+  _endControlled() {
+    if (!this._ctrlBy) return;
+    this._ctrlBy = null;
+    if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.velocityHold = null;
+  }
+
+  // 每帧：控制者按 CTRL_RATE 同步锚点；被控者被拉向锚点，按空格可挣脱
+  _updateCtrl(dt) {
+    // ---- 被控侧：先抢在物理消费跳跃之前取走这次空格，用作挣脱 ----
+    if (this._ctrlBy && this.input && typeof this.input.consumeJump === 'function') {
+      if (this.input.consumeJump()) this._breakCtrl();
+    }
+
+    // ---- 控制者侧 ----
+    if (this._ctrl) {
+      const now = performance.now();
+      const target = this.playerManager.players.get(this._ctrl.id);
+      if (!target) {
+        this._releaseCtrl(null); // 目标已离线：静默收枪
+      } else if (now >= this._ctrl.until) {
+        this._releaseCtrl('控制超时，已松开');
+      } else {
+        this._ctrl.acc += dt;
+        if (!this._ctrl.sent || this._ctrl.acc >= 1 / Config.CTRL_RATE) {
+          this._ctrl.acc = 0;
+          this._ctrl.sent = true;
+          const a = this._ctrlAnchor();
+          this.network.sendCtrl(this._ctrl.id, true, a.x, a.y, a.z);
+        }
+        this._setCtrlBeam(true, target.state);
+      }
+    }
+
+    // ---- 被控侧：朝锚点移动（用 velocityHold 覆盖输入与重力）----
+    if (this._ctrlBy) {
+      if (performance.now() >= this._ctrlBy.until) {
+        this._endControlled();
+      } else {
+        const c = this._ctrlBy;
+        const s = this.localState;
+        const dx = c.ax - s.x;
+        const dy = c.ay - s.y;
+        const dz = c.az - s.z;
+        const d = Math.hypot(dx, dy, dz);
+        const phys = this.localPlayer.physics;
+        const hold = Math.max(dt, 0.05); // 每帧续上，等于持续速度
+        if (d > 0.08) {
+          // 接近锚点时按比例减速，避免在锚点附近来回抖
+          const k = Math.min(1, d / 0.6);
+          const vx = (dx / d) * Config.CTRL_FOLLOW * k;
+          const vz = (dz / d) * Config.CTRL_FOLLOW * k;
+          const vy = THREE.MathUtils.clamp((dy / d) * Config.CTRL_FOLLOW, -Config.CTRL_LIFT, Config.CTRL_LIFT);
+          phys.velocityHold = { x: vx, y: vy, z: vz, t: hold };
+        } else {
+          phys.velocityHold = { x: 0, y: 0, z: 0, t: hold }; // 到位后悬停（由 hold 抵消重力）
+        }
+      }
+    }
+  }
+
+  // 控制激光线：从自己视角前方连到被控者躯干
+  _setCtrlBeam(on, targetState) {
+    if (!on || !targetState) {
+      if (this._ctrlBeam) this._ctrlBeam.visible = false;
+      return;
+    }
+    if (!this._ctrlBeam) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0x36d6ff, transparent: true, opacity: 0.85, depthTest: false,
+      });
+      this._ctrlBeam = new THREE.Line(geo, mat);
+      this._ctrlBeam.renderOrder = 900;
+      this._ctrlBeam.frustumCulled = false;
+      this.scene.add(this._ctrlBeam);
+    }
+    const s = this.localState;
+    const p = this._ctrlBeam.geometry.attributes.position;
+    p.setXYZ(0, s.x, s.y - 0.25, s.z);
+    p.setXYZ(1, targetState.x, targetState.y - Config.PLAYER_HEIGHT / 2, targetState.z);
+    p.needsUpdate = true;
+    this._ctrlBeam.geometry.computeBoundingSphere();
+    this._ctrlBeam.visible = true;
+  }
+
   _toggleGatling() {
     this._gatlingOn = !this._gatlingOn;
     this._gatlingHeld = false;
@@ -2668,6 +2875,11 @@ export class Game {
           label: '捉迷藏',
           run: () => this._useHideToy(),
         };
+      case 'control':
+        return {
+          label: '控制',
+          run: () => this._fireCtrlGun(),
+        };
       case 'gatling':
         return {
           label: '加特林',
@@ -2873,7 +3085,7 @@ export class Game {
     const size = this.localPlayer.physics.sizeScale;
     local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT * size, s.z);
     setModelScale(local.model, size);
-    setHeldText(local.model, s.hold || '');
+    setHeldItem(local.model, s.wep || '', s.hold || '');
 
     // 本帧实际移动速度：让骨头动画知道走得多快（「移动时疯狂旋转」已临时注释）
     const dx = s.x - this._tpPrevX;
@@ -2918,6 +3130,10 @@ export class Game {
 
     // 昼夜循环：先更新太阳角度与光照，后面阴影定位要用到最新的 _sunOffset
     this._updateDayNight(dt);
+
+    // 控制枪：抢在玩家更新之前处理，这样挣脱输入能先消费掉空格、
+    // 且被控侧的 velocityHold 能在本次物理里生效
+    this._updateCtrl(dt);
 
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     this.localPlayer.update(dt);
@@ -2983,6 +3199,8 @@ export class Game {
 
     // 上报本地状态（内部按 20Hz 节流）；带上当前体型倍率，供其他玩家看到放大/缩小
     this.localState.size = this.localPlayer.physics.sizeScale;
+    // 上报当前手持武器（棍子/加特林），让其他玩家把武器挂到我们模型的手部锚点上
+    this.localState.wep = this._heldWeaponKind();
     // 后座乘客的位置之后全由驾驶员统一代报（避免两份位置互相打架、相对车身乱抖）；
     // 只在刚上车的短窗口内自报几次，让服务器知道「有人坐上后座」，驾驶员才好接手代报。
     if (this.localState.ride !== 2) {

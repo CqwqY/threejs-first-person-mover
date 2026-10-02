@@ -250,6 +250,12 @@ function clampHold(v) {
   return String(v || '').replace(/<[^>]*>/g, '').trim().slice(0, 8);
 }
 
+// 手持武器：白名单，只接受 '' / 'club' / 'gatling' / 'ctrlgun'，其余一律按空处理
+function clampWep(v) {
+  const s = String(v || '');
+  return (s === 'club' || s === 'gatling' || s === 'ctrlgun') ? s : '';
+}
+
 // 载具座位：只接受 0/1/2，其余一律按"没骑"处理
 function clampRide(v) {
   const n = Number(v);
@@ -283,6 +289,7 @@ function worldPlayers() {
     size: st.size,
     health: st.health,
     hold: st.hold,
+    wep: st.wep,
     ride: st.ride,
     veh: st.veh,
     nick: st.nick || ('玩家' + st.num),
@@ -350,6 +357,25 @@ wss.on('connection', (ws) => {
       if (!target || target === id) return;
       const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.min(40, Math.max(-40, n)) : 0; };
       const out = { t: 'knock', from: id, kx: num(msg.kx), ky: num(msg.ky), kz: num(msg.kz) };
+      const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client.__id === target && client.readyState === WebSocket.OPEN) { client.send(raw); break; }
+      }
+      return;
+    }
+
+    // 控制枪：控制器把「吊住点」同步给被控者（或单方面宣布松开）；被控者挣脱时用同一条消息回报。
+    // 服务器不做判定，只钳制数值后转发给目标客户端，附带 from 让双方知道对方是谁。
+    if (msg.t === 'ctrl') {
+      const target = String(msg.target || '');
+      if (!target || target === id) return;
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const out = {
+        t: 'ctrl', from: id, on: msg.on ? 1 : 0,
+        x: num(msg.x, 0, -1000, 1000),
+        y: num(msg.y, 0, -100, 500),
+        z: num(msg.z, 0, -1000, 1000),
+      };
       const raw = JSON.stringify(out);
       for (const client of wss.clients) {
         if (client.__id === target && client.readyState === WebSocket.OPEN) { client.send(raw); break; }
@@ -495,6 +521,7 @@ wss.on('connection', (ws) => {
       size: clampSize(msg.size),
       health: clampHealth(msg.health),
       hold: clampHold(msg.hold),
+      wep: clampWep(msg.wep),
       ride: clampRide(msg.ride),
       veh: String(msg.veh || '').slice(0, 16),
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
