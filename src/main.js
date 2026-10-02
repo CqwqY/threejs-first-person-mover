@@ -20,8 +20,16 @@ async function main() {
   game.start();
   // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过
   initMobileControls(game.input);
-  // 手机触屏：按键布局自适应 + 「调整/检查」入口（可拖动摆放跳跃键/技能槽/血条/对话选项卡）
-  initMobileLayout();
+  // 手机触屏：按键布局自适应 + 拖拽摆放。动作注入给「设置」弹窗的「画面元素」区块
+  // （非触屏时返回 null，桌面端因此不会出现那组按钮，弹窗里也不会留空区块）
+  const layoutApi = initMobileLayout();
+  if (layoutApi && game.settingsPanel && game.settingsPanel.setLayoutActions) {
+    game.settingsPanel.setLayoutActions({
+      onAdjust: () => layoutApi.toggleEdit(),
+      onCheck: () => layoutApi.check(),
+      onReset: () => layoutApi.reset(),
+    });
+  }
   // 背景音乐：低音量循环；浏览器拦截自动播放时，首次手势后再开始
   initBgm();
 

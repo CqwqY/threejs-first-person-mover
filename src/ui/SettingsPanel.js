@@ -88,14 +88,20 @@ function fmt(v) {
 
 // createSettingsPanel(binds)：
 //   binds = { [FieldId]: (value) => void }
-// 返回 { open, close, toggle, root, get() }。
-// open/close/toggle 控制浮层显隐；get() 返回当前设置对象。
-// opts：{ storeKey?, fields? } —— storeKey 指定独立的持久化键；fields 限制只渲染哪些设置项。
+// 返回 { open, close, toggle, isOpen, root, get(), setLayoutActions() }。
+// open/close/toggle 控制显隐；get() 返回当前设置对象；setLayoutActions 注入手机端布局动作。
+// opts：
+//   · storeKey —— 指定独立的持久化键
+//   · fields   —— 限制只渲染哪些设置项
+//   · modal    —— true 时是居中弹窗（游戏端）；默认 false 仍是右上浮层（编辑器要边调边看场景）
+//   · title    —— 面板标题，默认「画面设置」
 export function createSettingsPanel(binds, opts = {}) {
   ensureTheme();
   const storeKey = opts.storeKey || STORE_KEY;
   const include = Array.isArray(opts.fields) ? opts.fields : null;
   const isGame = storeKey === GAME_STORE_KEY;
+  const modal = !!opts.modal;
+  const title = opts.title || '画面设置';
   // 游戏端只渲染 include 指定的项；编辑器（默认）则排除 editorOnly 与 gameOnly 项，
   // 避免「画质」这种仅客户端生效的聚合项出现在编辑器里（编辑器没传对应 bind）
   const fields = include
@@ -109,24 +115,42 @@ export function createSettingsPanel(binds, opts = {}) {
   }
 
   const root = document.createElement('div');
-  root.className = 'gx-win hidden';
-  // 外层保留原有的浮层定位/滚动结构（安全区、宽度、最大高度、可滚动），仅承载蓝色的 kui 面板
-  root.style.cssText =
-    'position:fixed;z-index:9999;display:none;' +
-    'right:calc(env(safe-area-inset-right, 0px) + 12px);' +
-    'top:calc(env(safe-area-inset-top, 0px) + 56px);' +
-    'width:min(280px, calc(100vw - 24px));' +
-    'max-height:calc(var(--app-vh, 100vh) - 76px);' +
-    'overflow-y:auto;-webkit-overflow-scrolling:touch;';
-  root.innerHTML =
-    '<div class="kui-panel"><div class="kui-panel__body">' +
-    '<div class="gx-win-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">' +
-    '<b class="kui-title">画面设置</b>' +
-    '<button class="gx-win-close kui-iconbtn" type="button">&times;</button>' +
-    '</div></div></div>';
+  root.className = 'gx-win' + (modal ? ' gx-win--modal' : '') + ' hidden';
+  // 两种形态共用一个 root：
+  //   · modal（游戏端）：root 是全屏遮罩，卡片居中；点遮罩空白处或按 Esc 关闭
+  //   · 浮层（编辑器，默认）：root 自己定位在右上角并滚动，方便边调参数边看场景
+  root.style.cssText = modal
+    ? 'position:fixed;inset:0;z-index:9999;display:none;box-sizing:border-box;' +
+      'background:rgba(11,21,34,.5);align-items:center;justify-content:center;padding:16px;'
+    : 'position:fixed;z-index:9999;display:none;' +
+      'right:calc(env(safe-area-inset-right, 0px) + 12px);' +
+      'top:calc(env(safe-area-inset-top, 0px) + 56px);' +
+      'width:min(280px, calc(100vw - 24px));' +
+      'max-height:calc(var(--app-vh, 100vh) - 76px);' +
+      'overflow-y:auto;-webkit-overflow-scrolling:touch;';
+
+  // 卡片：modal 时自己滚动（遮罩只负责居中，内容再长也不会顶出屏幕）
+  const card = document.createElement('div');
+  card.className = 'kui-panel gx-card';
+  if (modal) {
+    card.style.cssText =
+      'width:min(340px, 100%);max-height:calc(var(--app-vh, 100vh) - 32px);' +
+      'overflow-y:auto;-webkit-overflow-scrolling:touch;';
+  }
+  root.appendChild(card);
+
+  const head = document.createElement('div');
+  head.className = 'kui-panel__body gx-win-head';
+  head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;';
+  head.innerHTML =
+    '<b class="kui-title"></b>' +
+    '<button class="gx-win-close kui-iconbtn" type="button">&times;</button>';
+  head.querySelector('.kui-title').textContent = title;
+  card.appendChild(head);
 
   const body = document.createElement('div');
-  root.querySelector('.kui-panel__body').appendChild(body);
+  body.className = 'kui-panel__body';
+  card.appendChild(body);
 
   const inputs = {};
   const valueEls = {};
@@ -227,10 +251,74 @@ export function createSettingsPanel(binds, opts = {}) {
   });
   body.appendChild(reset);
 
-  root.querySelector('.gx-win-close').addEventListener('click', () => {
+  // ---- 「画面元素」区块（手机端）：拖拽摆放跳跃键 / 技能槽 / 血条 / 对话选项卡 ----
+  // 面板本身不认识布局模块，动作由 main.js 在 initMobileLayout() 之后注入；
+  // 没注入（桌面端 / 编辑器）就整块不显示，不会留下点了没反应的按钮。
+  const layoutBox = document.createElement('div');
+  layoutBox.className = 'kui-panel__body gx-layout';
+  layoutBox.style.cssText =
+    'display:none;border-top:1px solid var(--kui-blue-soft);margin-top:12px;padding-top:10px;';
+  layoutBox.innerHTML =
+    '<div class="gx-lbl" style="font-weight:600;margin-bottom:8px;">画面元素（手机）</div>' +
+    '<div class="gx-layout-actions" style="display:flex;gap:6px;flex-wrap:wrap;"></div>' +
+    '<div style="margin-top:8px;font-size:11px;line-height:1.6;color:var(--kui-ink-soft);">' +
+    '可拖拽摆放跳跃键、技能槽、血条、对话选项卡；横竖屏各存一套位置。' +
+    '</div>';
+  card.appendChild(layoutBox);
+
+  const actionsEl = layoutBox.querySelector('.gx-layout-actions');
+  const mkLayoutBtn = (text, cls) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'kui-btn ' + cls;
+    b.style.cssText = 'flex:1 1 auto;min-width:84px;font:inherit;';
+    b.textContent = text;
+    actionsEl.appendChild(b);
+    return b;
+  };
+  const btnAdjust = mkLayoutBtn('调整位置', 'kui-btn--primary');
+  const btnCheck = mkLayoutBtn('检查', 'kui-btn--grey');
+  const btnReset = mkLayoutBtn('重置位置', 'kui-btn--grey');
+
+  let layoutActions = null; // { onAdjust, onCheck, onReset }，由 main.js 注入
+
+  // 「调整位置」先收起面板再进拖拽模式：不然这个弹窗正好盖住要摆的那几个控件
+  btnAdjust.addEventListener('click', () => {
+    if (!layoutActions) return;
+    close();
+    layoutActions.onAdjust();
+  });
+  btnCheck.addEventListener('click', () => { if (layoutActions) layoutActions.onCheck(); });
+  btnReset.addEventListener('click', () => { if (layoutActions) layoutActions.onReset(); });
+
+  function setLayoutActions(api) {
+    layoutActions = api || null;
+    layoutBox.style.display = layoutActions ? '' : 'none';
+  }
+
+  // ---- 显隐 ----
+  // modal 要用 flex 才能居中；非 modal 回到默认块级（root 自己定位 + 滚动）
+  function open() {
+    root.classList.remove('hidden');
+    root.style.display = modal ? 'flex' : 'block';
+  }
+  function close() {
     root.classList.add('hidden');
     root.style.display = 'none';
-  });
+  }
+  const isOpen = () => !root.classList.contains('hidden');
+
+  root.querySelector('.gx-win-close').addEventListener('click', close);
+
+  if (modal) {
+    // 点遮罩空白处关闭；同时掐断冒泡，别让这一下穿透到游戏（会触发指针锁定）
+    root.addEventListener('pointerdown', (e) => e.stopPropagation());
+    root.addEventListener('click', (e) => { if (e.target === root) close(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isOpen()) close();
+    });
+  }
+
   document.body.appendChild(root);
 
   // 初始化时应用已保存的设置
@@ -239,18 +327,11 @@ export function createSettingsPanel(binds, opts = {}) {
   return {
     root,
     get: () => ({ ...settings }),
-    open: () => {
-      root.classList.remove('hidden');
-      root.style.display = '';
-    },
-    close: () => {
-      root.classList.add('hidden');
-      root.style.display = 'none';
-    },
-    toggle: () => {
-      root.classList.toggle('hidden');
-      root.style.display = root.classList.contains('hidden') ? 'none' : '';
-    },
+    open,
+    close,
+    isOpen,
+    setLayoutActions,
+    toggle: () => { if (isOpen()) close(); else open(); },
   };
 }
 

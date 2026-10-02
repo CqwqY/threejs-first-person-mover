@@ -91,14 +91,17 @@ function ensureCardLayout() {
     .idc-quit.hidden { display: none; }
 
     /* 手机端：校卡推到最左侧，把顶部中右段让给「背包/设置/对战匹配」那排按钮。
-       同时收窄小牌（藏掉时间与「校卡」提示），否则一排按钮在窄屏上会挤到屏幕外。 */
+       小牌要放下「昵称 + 时间」两块，所以昵称改成自适应（flex + min-width:0）截断，
+       时间固定宽度不被挤掉——旧写法把 .idc-time 一起 display:none，手机端就永远看不到时钟了。 */
     @media (pointer: coarse) {
       .idc { left: 12px; top: 12px; transform: none; }
-      .idc-card { width: 140px; }
+      /* 156px = padding 16 + 状态点 9 + 两处 gap 12 + 时间 ~36 + 昵称剩 ~83 */
+      .idc-card { width: 156px; }
       .idc.open .idc-card { width: min(268px, calc(100vw - 24px)); }
       .idc-mini { gap: 6px; padding: 0 8px; }
-      .idc-mini-name { max-width: 84px; font-size: 13px; }
-      .idc-time, .idc-hint { display: none; }
+      .idc-mini-name { flex: 1 1 auto; min-width: 0; max-width: none; font-size: 13px; }
+      .idc-time { flex: 0 0 auto; font-size: 13px; }
+      .idc-hint { display: none; } /* 只藏「校卡」两字，时间保留 */
     }
   `;
   document.head.appendChild(st);

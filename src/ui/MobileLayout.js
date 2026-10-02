@@ -1,8 +1,12 @@
 // 职责：手机端按键布局的「自适应 + 自定义 + 位置检查」。
 // - 自适应：用 clamp()/dvh/安全区统一收口触屏控件尺寸与触摸区，小屏不挤、横屏不塌。
-// - 自定义：点「调整」进入编辑模式，每个可动控件上浮出一个黄色拖拽把手，拖到任意位置；
+// - 自定义：由设置面板的「调整位置」进入编辑模式，每个可动控件上浮出一个黄色拖拽把手，拖到任意位置；
 //   位置以「中心点比例」按横竖屏分别保存，旋转后仍在对应角落。
 // - 位置检查：只读检查（不改动任何锚点），逐个判定控件是否完整落在可见区内。
+//
+// 入口变化：以前这里自带一个左上角「布局」侧栏（调整/检查/重置），它常年占着屏幕左上角；
+// 现在整套动作收进「设置」弹窗的「画面元素」区块，本模块只导出动作，由 main.js 注入给设置面板
+// （见 SettingsPanel 的 setLayoutActions）。编辑期间屏幕顶部会浮出一条「完成」提示条负责收口。
 import {
   LAYOUT_ITEMS, installViewportWatcher, applyLayout, writeLayout, currentMode,
   relayout, resetLayout, setLayoutPaused, viewportSize, snapshotEl,
@@ -11,16 +15,18 @@ import { ensureTheme } from './theme.js';
 
 const MARGIN = 4;
 
+// 返回 { isEditing, toggleEdit, enter, exit, check, reset }；
+// 非触屏设备直接返回 null（调用方据此跳过接线）。
 export function initMobileLayout() {
   ensureTheme(); // 配色/字体统一取自主题变量，本模块不再自带一套颜色
   const coarse =
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
     'ontouchstart' in window;
-  if (!coarse) return;
+  if (!coarse) return null;
 
-  // 纯布局样式（一次性注入）：自适应尺寸、侧栏定位与 .open 显隐是行为依赖，必须留在这里。
-  // theme.js 不含这些类，且侧栏按钮是叠在世界上的小尺寸控件，套 .kui-btn 会被 min-width/border 撑大，
-  // 所以这里只保留布局，把硬编码颜色/字体换成主题变量。
+  // 纯布局样式（一次性注入）：自适应尺寸与编辑态顶栏是行为依赖，必须留在这里。
+  // theme.js 不含这些类，且这些控件是叠在世界上的小尺寸元素，套 .kui-btn 会被 min-width/border 撑大，
+  // 所以这里只保留布局，颜色/字体走主题变量。
   const style = document.createElement('style');
   style.textContent = `
     /* 用 vmin（短边）而非 vw：vw 在旋转后宽度翻倍，控件会突然变大 */
@@ -28,26 +34,15 @@ export function initMobileLayout() {
       font-size:clamp(13px,3.6vmin,16px)}
     .mc-joy{width:clamp(92px,26vmin,124px);height:clamp(92px,26vmin,124px)}
     .mc-knob{width:clamp(42px,11vmin,56px);height:clamp(42px,11vmin,56px)}
-    /* 侧栏：贴左上角（避开左下摇杆与左下血条），跟随安全区，默认收起只留一个小页签 */
-    .ml-bar{position:fixed;z-index:80;display:flex;flex-direction:column;gap:6px;
-      left:calc(env(safe-area-inset-left, 0px) + 8px);
-      top:calc(env(safe-area-inset-top, 0px) + 52px);
-      user-select:none;-webkit-user-select:none;
-      font:clamp(11px,2.8vmin,12px)/1.2 var(--kui-font)}
-    /* 半透明深色底 + 主题描边：保持原本的小尺寸与留白 */
-    .ml-tab{background:color-mix(in srgb, var(--kui-ink) 72%, transparent);color:var(--kui-paper);
-      border:1px solid color-mix(in srgb, var(--kui-blue-soft) 55%, transparent);
-      border-radius:var(--kui-radius);padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
-      user-select:none;-webkit-user-select:none;letter-spacing:1px}
-    /* 收起/展开状态：由 setPanelOpen 切 .open 驱动，这两条规则必须保留 */
-    .ml-panel{display:none;flex-direction:column;gap:6px}
-    .ml-panel.open{display:flex}
-    .ml-btn{background:color-mix(in srgb, var(--kui-ink) 72%, transparent);color:var(--kui-paper);
-      border:1px solid color-mix(in srgb, var(--kui-blue-soft) 55%, transparent);
-      border-radius:var(--kui-radius);padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
+    /* 编辑模式顶部条：提示文案 + 「完成」。z-index 高过顶部那排按钮与校卡，编辑期间由它统一收口。
+       做成横贯全宽的一条，就不必去隐藏/挪动任何既有 UI。 */
+    .ml-edit-bar{position:fixed;left:0;right:0;top:0;z-index:9700;display:flex;align-items:center;gap:8px;
+      box-sizing:border-box;padding:calc(env(safe-area-inset-top, 0px) + 6px) 10px 6px;
+      background:color-mix(in srgb, var(--kui-ink) 88%, transparent);color:var(--kui-paper);
+      font:clamp(11px,2.8vmin,12px)/1.4 var(--kui-font);
       user-select:none;-webkit-user-select:none}
-    .ml-btn.on{background:var(--kui-blue);border-color:var(--kui-blue-soft)}
-    /* 编辑模式的拖拽把手保留黄色：toast 文案写的就是「拖动黄色把手」，主题里没有黄色变量 */
+    .ml-edit-bar > span{flex:1 1 auto;min-width:0}
+    /* 编辑模式的拖拽把手保留黄色：提示文案写的就是「拖动黄色把手」，主题里没有黄色变量 */
     .ml-handle{position:fixed;z-index:81;border:2px dashed #ffd479;border-radius:var(--kui-radius);
       box-sizing:border-box;background:rgba(255,212,121,.10);touch-action:none;cursor:move}
     .ml-tag{position:absolute;left:0;top:-20px;font:11px/1.4 var(--kui-font);
@@ -62,7 +57,7 @@ export function initMobileLayout() {
     if (!toastEl) {
       toastEl = document.createElement('div');
       toastEl.style.cssText =
-        'position:fixed;left:50%;top:12%;transform:translateX(-50%);z-index:82;max-width:82vw;' +
+        'position:fixed;left:50%;top:12%;transform:translateX(-50%);z-index:9701;max-width:82vw;' +
         'background:color-mix(in srgb, var(--kui-ink) 88%, transparent);color:var(--kui-paper);' +
         'padding:8px 14px;border-radius:var(--kui-radius);' +
         'font:12px/1.5 var(--kui-font);pointer-events:none;text-align:center;';
@@ -74,41 +69,8 @@ export function initMobileLayout() {
     toastTimer = setTimeout(() => { toastEl.style.display = 'none'; }, 2600);
   }
 
-  // ---- 侧栏：小页签 + 可收起的按钮组（避免长占屏幕） ----
-  const bar = document.createElement('div');
-  bar.className = 'ml-bar';
-  const tab = document.createElement('div');
-  tab.className = 'ml-tab';
-  tab.textContent = '布局';
-  const panel = document.createElement('div');
-  panel.className = 'ml-panel';
-  bar.appendChild(tab);
-  bar.appendChild(panel);
-  const mkBtn = (text) => {
-    const b = document.createElement('div');
-    b.className = 'ml-btn';
-    b.textContent = text;
-    panel.appendChild(b);
-    return b;
-  };
-  const toggle = mkBtn('调整');
-  const check = mkBtn('检查');
-  const reset = mkBtn('重置');
-  document.body.appendChild(bar);
-
-  let panelOpen = false;
-  const setPanelOpen = (v) => {
-    panelOpen = !!v;
-    panel.classList.toggle('open', panelOpen);
-    tab.classList.toggle('on', panelOpen);
-  };
-  tab.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setPanelOpen(!panelOpen);
-  });
-
   let editing = false;
+  let editBar = null;
   const handles = [];
 
   // 夹进屏幕，避免拖丢
@@ -148,7 +110,7 @@ export function initMobileLayout() {
     const ok = visibleOf(rec.el);
     rec.ok = ok;
     rec.tag.textContent = rec.it.label + (ok ? ' 可见' : ' 超出屏幕');
-    // 绿/红直接取主题的成功色与危险色（toast 文案说的「红色表示超出屏幕」依然成立）
+    // 绿/红直接取主题的成功色与危险色（提示文案说的「红色表示超出屏幕」依然成立）
     rec.tag.style.background = ok ? 'var(--kui-ok)' : 'var(--kui-danger)';
   }
   function syncAll() { for (const rec of handles) syncOne(rec); }
@@ -209,21 +171,39 @@ export function initMobileLayout() {
     }
   }
 
+  function buildEditBar() {
+    const bar = document.createElement('div');
+    bar.className = 'ml-edit-bar';
+    const tip = document.createElement('span');
+    tip.textContent = '拖动黄色把手摆放按键；红色表示超出屏幕';
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.className = 'kui-btn kui-btn--primary';
+    done.style.cssText = 'flex:0 0 auto;font:inherit;padding:4px 12px;';
+    done.textContent = '完成';
+    done.addEventListener('click', () => exit());
+    bar.appendChild(tip);
+    bar.appendChild(done);
+    // 顶栏本身别把手指动作漏给游戏（右侧视角拖动区覆盖整个右半屏）
+    bar.addEventListener('pointerdown', (e) => e.stopPropagation());
+    document.body.appendChild(bar);
+    return bar;
+  }
+
   function enter() {
+    if (editing) return;
     editing = true;
     setLayoutPaused(true); // 编辑期间暂停自动重排，避免拖到一半被挪走
-    setPanelOpen(true);    // 展开侧栏，保证「完成」可见
-    toggle.classList.add('on');
-    toggle.textContent = '完成';
+    editBar = buildEditBar();
     buildHandles();
     toast('拖动黄色把手摆放按键；红色表示超出屏幕');
   }
 
   function exit() {
+    if (!editing) return;
     editing = false;
     setLayoutPaused(false);
-    toggle.classList.remove('on');
-    toggle.textContent = '调整';
+    if (editBar) { editBar.remove(); editBar = null; }
     for (const rec of handles) {
       rec.h.remove();
       if (rec.hidden) rec.el.style.display = 'none'; // 只还原显示状态，不动位置
@@ -232,16 +212,8 @@ export function initMobileLayout() {
     relayout(); // 退出时补跑一次重排
   }
 
-  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
-  // 按下即响应：多点触控下（另一只手推着摇杆）click 可能不派发
-  toggle.addEventListener('pointerdown', (e) => {
-    stop(e);
-    if (editing) exit(); else enter();
-  });
-
   // 检查：只读，不改动任何锚点（旧实现会 enter() 从而把自适应锚点改写成 px）
-  check.addEventListener('pointerdown', (e) => {
-    stop(e);
+  function check() {
     const rows = [];
     for (const it of LAYOUT_ITEMS) {
       const el = document.querySelector(it.sel);
@@ -251,14 +223,13 @@ export function initMobileLayout() {
     }
     if (editing) syncAll();
     toast(rows.length ? ('超出屏幕：' + rows.join('、')) : '全部控件都在可见范围内');
-  });
+  }
 
-  reset.addEventListener('pointerdown', (e) => {
-    stop(e);
+  function reset() {
     if (editing) exit();
     resetLayout();
     toast('布局已重置为默认位置');
-  });
+  }
 
   // 视口变化（旋转 / 地址栏收起 / 键盘）→ 重排；编辑中只刷新把手
   installViewportWatcher(() => {
@@ -267,4 +238,14 @@ export function initMobileLayout() {
 
   // 启动时先按当前方向摆一次
   applyLayout(currentMode());
+
+  return {
+    isEditing: () => editing,
+    enter,
+    exit,
+    // 设置面板的「调整位置」用它进/出编辑模式，返回值告诉调用方当前是否在编辑
+    toggleEdit: () => { if (editing) exit(); else enter(); return editing; },
+    check,
+    reset,
+  };
 }

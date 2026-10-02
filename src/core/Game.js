@@ -216,7 +216,14 @@ export class Game {
     // ---- 窗口尺寸自适应 ----
     window.addEventListener('resize', () => this._onResize());
 
-    // ---- 画面设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
+    // 触屏判定：设置面板要不要带「画面元素」区块、顶部按钮排布、载具按键提示都要用，
+    // 所以在这里就算一次（后面 _vehKeyHint / _coarsePointer 直接复用，别再各判一份）
+    const coarsePointer =
+      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
+      'ontouchstart' in window;
+    this._coarsePointer = coarsePointer; // 提前落定：顶部按钮排布 / 准星 / 攻击键都要读它
+
+    // ---- 设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
     this.settingsPanel = createSettingsPanel(
       {
         viewFar: (v) => {
@@ -255,6 +262,8 @@ export class Game {
       {
         fields: ['quality', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
+        modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
+        title: '设置',
       }
     );
     // 设置入口统一在顶部校卡右侧的「设置」按钮，不再额外挂悬浮齿轮（旧按钮定位与顶部重复）
@@ -280,10 +289,7 @@ export class Game {
     this.vehicle = createVehicle(this.scene);
     this._vehDriver = null; // 后座时记住驾驶员的玩家 id
     this._vehPaxResend = 0; // 刚坐上后座时的上报重发窗口（秒）：让服务器尽快知道有乘客，好让驾驶员开始代报
-    // 触屏不显示按键提示，桌面端补上 "(F)"
-    const coarsePointer =
-      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-      'ontouchstart' in window;
+    // 触屏不显示按键提示，桌面端补上 "(F)"（coarsePointer 在上面设置面板前已判好）
     this._vehKeyHint = coarsePointer ? '' : (' (' + Config.VEHICLE_KEY.slice(-1) + ')');
     this._vehHint = this._createVehicleHint();
     window.addEventListener('keydown', (e) => {
@@ -330,7 +336,6 @@ export class Game {
     this._portalHint = this._createPortalHint();
     // 准星：屏幕正中的瞄准点。PC 上只在指针锁定时显示（没锁定＝玩家在点 UI 或还没进画面），
     // 手机没有指针锁定，常显。
-    this._coarsePointer = coarsePointer;
     this._crosshair = this._createCrosshair();
     this._crosshairShown = null;  // 三态：null = 还没写过 DOM，true/false = 当前显隐
     this._aimHot = false;         // 准星当前是否压住了可攻击目标（疯狂抓钩的柱顶光点）
@@ -591,7 +596,7 @@ export class Game {
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
   _createHealthBar() {
-    const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+    const coarse = !!this._coarsePointer; // 触屏判定统一在构造函数里算一次
     const box = document.createElement('div');
     box.className = 'hp-box'; // 供手机端「按键布局调整」定位与检查
     // 手机端默认位置要避开左下角的摇杆（摇杆占 left 20 / bottom 26 起、118px 见方），
@@ -1507,7 +1512,7 @@ export class Game {
 
   // 顶部的学币小牌，常驻显示
   _createCoinBadge() {
-    const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+    const coarse = !!this._coarsePointer; // 触屏判定统一在构造函数里算一次
     const el = document.createElement('div');
     el.className = 'kui-panel';
     // 手机端校卡占了左上角（left 12 / top 12），学币牌挪到它正下方；
@@ -2925,13 +2930,13 @@ export class Game {
 
   // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
   _createTopButtons() {
-    const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+    const coarse = !!this._coarsePointer;
     if (coarse) {
-      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+140px，这里从它右边开始，靠右对齐
+      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐
       const row = document.createElement('div');
       row.style.cssText =
-        'position:fixed;z-index:9500;left:156px;right:8px;top:12px;display:flex;gap:6px;' +
-        'justify-content:flex-end;align-items:center;';
+        'position:fixed;z-index:9500;left:172px;right:8px;top:12px;display:flex;gap:6px;' +
+        'justify-content:flex-end;align-items:center;flex-wrap:nowrap;';
       document.body.appendChild(row);
       const mk = (text, onClick) => {
         const b = document.createElement('div');
