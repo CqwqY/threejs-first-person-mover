@@ -123,18 +123,28 @@ export function initMobileLayout() {
   function visibleOf(el) {
     const r = el.getBoundingClientRect();
     const { width: vw, height: vh } = viewportSize();
+    // 零尺寸锚点（手机端技能弧的圆形容器没有面积）没有矩形可判，只要圆心在屏幕内就算可见
+    if (r.width === 0 || r.height === 0) {
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      return cx >= MARGIN && cy >= MARGIN && cx <= vw - MARGIN && cy <= vh - MARGIN;
+    }
     return r.width > 0 && r.height > 0
       && r.left >= MARGIN - 1 && r.top >= MARGIN - 1
       && r.right <= vw - MARGIN + 1 && r.bottom <= vh - MARGIN + 1;
   }
 
-  // 把手跟随元素矩形；同时刷新「可见/超界」徽标
+  const MIN_HANDLE = 46; // 把手最小边长：零尺寸控件（技能弧圆心）也要有能抓住的一块
+
+  // 把手跟随元素矩形（始终以元素中心对齐）；同时刷新「可见/超界」徽标
   function syncOne(rec) {
     const r = rec.el.getBoundingClientRect();
-    rec.h.style.left = r.left + 'px';
-    rec.h.style.top = r.top + 'px';
-    rec.h.style.width = r.width + 'px';
-    rec.h.style.height = r.height + 'px';
+    const w = Math.max(MIN_HANDLE, r.width);
+    const h = Math.max(MIN_HANDLE, r.height);
+    rec.h.style.left = (r.left + r.width / 2 - w / 2) + 'px';
+    rec.h.style.top = (r.top + r.height / 2 - h / 2) + 'px';
+    rec.h.style.width = w + 'px';
+    rec.h.style.height = h + 'px';
     const ok = visibleOf(rec.el);
     rec.ok = ok;
     rec.tag.textContent = rec.it.label + (ok ? ' 可见' : ' 超出屏幕');

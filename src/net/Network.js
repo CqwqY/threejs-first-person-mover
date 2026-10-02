@@ -161,6 +161,23 @@ export class Network {
     this.send({ t: 'pickup', id: String(id).slice(0, 40) });
   }
 
+  // 金币生成广播（房主发出）：全场用同一坐标复现同一枚金币
+  sendCoinSpawn(info) {
+    if (!info || !info.id) return;
+    const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+    this.send({
+      t: 'coin_spawn',
+      id: String(info.id).slice(0, 40),
+      x: num(info.x, 0), y: num(info.y, 0), z: num(info.z, 0),
+    });
+  }
+
+  // 吃掉金币广播：让同场其他人把这枚金币移除
+  sendCoinTaken(id) {
+    if (!id) return;
+    this.send({ t: 'coin', id: String(id).slice(0, 40) });
+  }
+
   // 爆炸广播：让其他玩家在同样的位置播爆炸特效
   sendBoom(info) {
     if (!info) return;

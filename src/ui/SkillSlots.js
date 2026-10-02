@@ -1,10 +1,11 @@
 // 职责：技能槽 UI。阿花放进背包的物品在这里变成可触发技能：
-//   手机：竖直一列，排在跳跃键上方；尺寸随屏幕自适应；空槽不显示；
+//   手机：沿「跳跃键上方」的圆弧排布（圆心跟随跳跃键，槽位数量决定半径）；空槽不显示；
 //         触摸优先级高于右侧转视角区（z-index 更高、slot 自行捕获指针）。
 //   PC  ：横向一排，靠屏右下角。
 // 固定 SLOT_COUNT 个槽位，每个槽绑定一个触发键（PC 数字键 1..N），点击槽位或按下对应键触发。
 // 物品可被「指定」到某个具体槽位（背包里选槽位后点使用即可）。
 import { ensureTheme } from './theme.js';
+import { onRelayout, viewportSize, readLayout, currentMode } from './layout.js';
 
 export const SKILL_KEYS = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8'];
 export const SLOT_COUNT = SKILL_KEYS.length;
@@ -28,13 +29,15 @@ export function createSkillSlots(opts = {}) {
   box.style.display = 'flex';
   box.style.pointerEvents = 'none';
   if (coarse) {
-    // 手机：竖直一列，排在跳跃键上方；尺寸随屏幕自适应
-    box.style.right = 'calc(env(safe-area-inset-right, 0px) + 14px)';
-    box.style.bottom = '118px';
+    // 手机：容器是「零尺寸锚点」，圆心即它的左上角；各槽位按圆弧绝对定位在孩子上。
+    // 这样圆心能跟着跳跃键走（跳跃键被「按键布局」拖走时技能弧也会跟着挪）。
+    box.style.width = '0px';
+    box.style.height = '0px';
+    box.style.right = 'calc(env(safe-area-inset-right, 0px) + 56px)';
+    box.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 60px)';
     box.style.flexDirection = 'column';
     box.style.alignItems = 'center';
-    box.style.gap = 'clamp(5px, 2vmin, 9px)';
-    box.style.maxHeight = 'calc(var(--app-vh, 100vh) - 140px)';
+    box.style.gap = '0px';
   } else {
     // PC：横向一排，靠屏右下角
     box.style.right = '18px';
@@ -77,6 +80,7 @@ export function createSkillSlots(opts = {}) {
     slot.labelEl.textContent = slot.act ? (slot.name || '技能') : '空';
     slot.labelEl.style.color = slot.act ? 'var(--kui-ink)' : 'var(--kui-ink-soft)';
     slot.el.style.display = (coarse && !slot.act) ? 'none' : '';
+    if (coarse) layoutArc();
   }
   // boxHidden：由外部（Game）控制整体隐藏——某些模式（对战 / 灵魂出窍）不显示技能栏
   let boxHidden = false;
@@ -85,9 +89,69 @@ export function createSkillSlots(opts = {}) {
     const any = slots.some((s) => s.act);
     box.style.display = (!coarse || any) ? 'flex' : 'none';
   }
-  function refreshBox() { applyBoxDisplay(); }
+  function refreshBox() { applyBoxDisplay(); if (coarse) layoutArc(); }
+
+  // ---- 手机端圆弧布局 ----
+  // 圆心：用过「按键布局」拖动技能槽 → 用保存的比例位置；没拖过 → 跟着跳跃键
+  // （跳跃键被拖走时整条弧一起走）。这里自己算圆心再写 box 的 left/top，
+  // 而不是读 box 当前位置，否则「第一次写完 left/top」会把自己误判成「已被拖动过」。
+  let savedPos = null;
+  function readSavedPos() {
+    try {
+      const conf = readLayout(currentMode()) || {};
+      const p = conf.skill;
+      savedPos = (p && Number.isFinite(p.cx) && Number.isFinite(p.cy)) ? p : null;
+    } catch (e) { savedPos = null; }
+  }
+  function arcCenter() {
+    if (savedPos) {
+      const { width, height } = viewportSize();
+      return { cx: savedPos.cx * width, cy: savedPos.cy * height };
+    }
+    const jump = document.querySelector('.mc-jump');
+    if (jump) {
+      const r = jump.getBoundingClientRect();
+      if (r.width) return { cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+    }
+    const { width, height } = viewportSize();
+    return { cx: width - 56, cy: height - 60 }; // 与 .mc-jump 的默认定位一致
+  }
+
+  // 变换里带上 translate(-50%,-50%)，否则长方形槽位会以左上角对齐圆弧点
+  function placeSlot(s) {
+    s.el.style.left = s.arcX + 'px';
+    s.el.style.top = s.arcY + 'px';
+    s.el.style.transform = 'translate(-50%,-50%)' + (s.pressed ? ' scale(0.92)' : '');
+  }
+
+  // 只给「有技能」的槽位排位置：从左下方绕到右上方的一段圆弧（都落在跳跃键上方）
+  function layoutArc() {
+    if (!coarse) return;
+    const anchor = arcCenter();
+    box.style.left = anchor.cx + 'px';
+    box.style.top = anchor.cy + 'px';
+    box.style.right = 'auto';
+    box.style.bottom = 'auto';
+    const visible = slots.filter((s) => s.act);
+    const n = visible.length;
+    if (!n) return;
+    // 半径随数量增长，保证相邻槽位不叠在一起；上限避免跑到屏幕外
+    // （槽位最大 58px，弧长约 108°，所以 n 个槽位需要 R ≈ (n-1)*30 才不会明显重叠）
+    const R = Math.min(200, Math.max(104, (n - 1) * 30));
+    const a0 = 178 * Math.PI / 180; // 起点：正左（略高于水平线，别掉到跳跃键中线以下）
+    const a1 = 70 * Math.PI / 180;  // 终点：右上
+    for (let i = 0; i < n; i++) {
+      const a = n === 1 ? Math.PI / 2 : (a0 + (a1 - a0) * (i / (n - 1)));
+      const s = visible[i];
+      s.arcX = Math.cos(a) * R;
+      s.arcY = -Math.sin(a) * R; // 屏幕 y 向下 → 取负才是「上方」
+      placeSlot(s);
+    }
+  }
+  onRelayout(() => { if (coarse) { readSavedPos(); layoutArc(); } });
 
   // 预建全部槽位
+  if (coarse) readSavedPos(); // 先读出「按键布局」里是否存过技能槽位置，再排圆弧
   for (let i = 0; i < SLOT_COUNT; i++) {
     const keyName = SKILL_KEYS[i];
     const el = document.createElement('div');
@@ -109,6 +173,10 @@ export function createSkillSlots(opts = {}) {
       el.style.width = 'clamp(42px, 12vmin, 58px)';
       el.style.height = 'clamp(42px, 12vmin, 58px)';
       el.style.fontSize = 'clamp(10px, 2.8vmin, 12px)';
+      el.style.position = 'absolute'; // 圆弧定位：坐标相对零尺寸容器（＝圆心）
+      el.style.left = '0px';
+      el.style.top = '0px';
+      el.style.transform = 'translate(-50%,-50%)';
     } else {
       el.style.minWidth = '56px';
       el.style.height = '56px';
@@ -144,6 +212,13 @@ export function createSkillSlots(opts = {}) {
     let consumed = false;// 本次手势是否已作为丢弃消费掉
     let timer = 0;
     const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+    // 长按反馈：手机端的槽位是靠 transform 定位到圆弧上的，所以缩放必须叠加在
+    // translate(-50%,-50%) 之上（直接写 scale 会把槽位弹回容器左上角）。
+    const setPressed = (v) => {
+      slot.pressed = !!v;
+      if (coarse) placeSlot(slot);
+      else el.style.transform = v ? 'scale(0.92)' : '';
+    };
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -156,7 +231,7 @@ export function createSkillSlots(opts = {}) {
       timer = setTimeout(() => {
         timer = 0;
         armed = true;
-        el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
+        setPressed(true); // 长按反馈：轻微收缩，提示「可上滑丢弃」
       }, gestureMs);
     });
     el.addEventListener('pointermove', (e) => {
@@ -165,13 +240,13 @@ export function createSkillSlots(opts = {}) {
         consumed = true;
         armed = false;
         clearTimer();
-        el.style.transform = '';
+        setPressed(false);
         dropSlot(slot);
       }
     });
     const endPress = (canceled) => {
       clearTimer();
-      el.style.transform = '';
+      setPressed(false);
       const wasArmed = armed;
       armed = false;
       if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能

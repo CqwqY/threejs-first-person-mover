@@ -197,6 +197,25 @@ export const Config = {
   DROP_GESTURE_DY: 42,            // 手机长按后上滑：触发丢弃的位移阈值（像素）
   DROP_PICKUP_RANGE: 2.8,         // 离掉落物多少米内出现「拾取」按钮（水平距离）
   DROP_PICKUP_HEIGHT: 2.6,        // 拾取的高度余量：物品比这还高/低就够不到（米）
+  // 抓钩（技能槽物品「抓钩」，也是「疯狂抓钩」模式的基础移动手段）
+  GRAPPLE_RANGE: 46,              // 钩爪最远能抓到的距离（米）
+  GRAPPLE_SPEED: 25,              // 被拽过去的速度（米/秒）
+  GRAPPLE_MAX_TIME: 2.4,          // 单次抓钩最长持续（秒），到时自动松手
+  GRAPPLE_STOP_DIST: 1.9,         // 离锚点这么近就松手（米）
+  GRAPPLE_COOLDOWN: 0.5,          // 松手后多久才能再抓（秒）
+  GRAPPLE_THROW: 26,              // 钩中人时把对方甩出去的水平速度（米/秒）
+  GRAPPLE_THROW_UP: 9,            // 钩中人时附加的向上速度（米/秒）
+  GRAPPLE_CATCH_ARC: 18,          // 钩人的判定张角（度，以准星为中轴）
+  GRAPPLE_CATCH_DY: 2.8,          // 钩人允许的高度差（米）
+  // 疯狂抓钩：柱子场地 + 金币 + 底部岩浆（踩到地面＝掉进岩浆）
+  GRAPPLE_ARENA_HALF: 22,         // 柱子场地半边长（米），实际 44×44
+  GRAPPLE_PILLAR_COUNT: 16,       // 柱子数量
+  GRAPPLE_COIN_MAX: 40,           // 同屏金币上限
+  GRAPPLE_COIN_INTERVAL: 2.2,     // 房主生成金币的间隔（秒）
+  GRAPPLE_COIN_PER_WAVE: 2,       // 每波生成数量
+  GRAPPLE_COIN_RADIUS: 1.2,       // 吃金币的判定半径（米）
+  GRAPPLE_COIN_LIFETIME: 30,      // 金币存在时长（秒）
+  GRAPPLE_MAGMA_DAMAGE: 9999,     // 掉进岩浆的伤害（直接判负退房）
   BOSS_SHIELD_DURATION: 1.5,      // 护盾持续时间（秒）
   BOSS_SHIELD_COOLDOWN: 2.8,      // 护盾冷却（秒，从开启时算）
   BOSS_SHIELD_DAMAGE: 100,        // 护盾成功挡下激光时老师掉的血

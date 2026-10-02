@@ -81,15 +81,17 @@ export function createShopPanel({ onBuy, onRedeem }) {
 
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;';
+      // 已拥有的商品也能再买：价格常显，按钮改为「再买一个」
+      const affordable = st.coins >= item.price;
       const price = document.createElement('div');
-      price.textContent = owned ? '已拥有' : (item.price + ' 学币');
+      price.textContent = item.price + ' 学币' + (owned ? '（已拥有）' : '');
       price.style.cssText = 'font-weight:700;color:' + (owned ? 'var(--kui-ink-soft)' : 'var(--kui-ink)') + ';';
 
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'kui-btn kui-btn--primary';
-      btn.textContent = owned ? '已拥有' : '购买';
-      btn.disabled = owned;
+      btn.textContent = owned ? '再买一个' : '购买';
+      btn.disabled = !affordable;
       btn.addEventListener('click', () => { onBuy(item.id); });
 
       row.appendChild(price);

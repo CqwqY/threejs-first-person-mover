@@ -43,6 +43,13 @@ export const SHOP_ITEMS = [
     desc: '发射激光抓住别人，移动视角就能把他拖着走；对方可以按空格挣脱。',
     effect: { k: 'control' },
   },
+  {
+    id: 'grapple',
+    name: '抓钩',
+    price: 160,
+    desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去；空中再按一次即可松手。',
+    effect: { k: 'grapple' },
+  },
 ];
 
 function walletKey(profile) {
@@ -84,17 +91,19 @@ export function isOwned(profile, itemId) {
   return loadWallet(profile).owned.includes(String(itemId));
 }
 
-// 购买：已有 / 学币不够都会拒绝。成功返回 { ok:true, coins }，失败返回 { ok:false, reason }。
+// 购买：学币不够才拒绝；已拥有的商品可以重复购买（多买几个用来丢/送人）。
+// owned 只记录「曾经买过」，用于界面标记与首购提示，不用于拦截。
+// 成功返回 { ok:true, coins, item, repeat }，失败返回 { ok:false, reason }。
 export function buyItem(profile, itemId) {
   const item = SHOP_ITEMS.find((it) => it.id === itemId);
   if (!item) return { ok: false, reason: '没有这件商品' };
   const w = loadWallet(profile);
-  if (w.owned.includes(item.id)) return { ok: false, reason: '已经买过了' };
+  const repeat = w.owned.includes(item.id);
   if (w.coins < item.price) return { ok: false, reason: '学币不够（还差 ' + (item.price - w.coins) + '）' };
   w.coins -= item.price;
-  w.owned.push(item.id);
+  if (!repeat) w.owned.push(item.id);
   saveWallet(profile, w);
-  return { ok: true, coins: w.coins, item };
+  return { ok: true, coins: w.coins, item, repeat };
 }
 
 // 击败老师之类的奖励入口统一走这里，方便以后调数值

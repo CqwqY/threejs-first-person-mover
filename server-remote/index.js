@@ -56,6 +56,22 @@ function arenaSpawnForIndex(i, total) {
   return { x, z, yaw };
 }
 
+// 疯狂抓钩的出生点：6 个起始平台（半径 15 的六边形，顶面 6m），多个玩家同台错开。
+// 这几个数字必须与客户端 src/world/GrappleArena.js 的 GRAPPLE_SPAWN_* 保持一致（那边建场景，
+// 服务端只发坐标，没有共享模块，只能靠注释对齐）。
+function grappleSpawnForIndex(i) {
+  const k = i % 6;
+  const ang = (k / 6) * Math.PI * 2;
+  const x = Math.cos(ang) * 15;
+  const z = Math.sin(ang) * 15;
+  return { x, z, y: 6, yaw: Math.atan2(x, z) }; // 面朝中心（与大厅同一约定）
+}
+
+// 按模式取出生点
+function spawnForMode(mode, i, total) {
+  return mode === 'grapple' ? grappleSpawnForIndex(i) : arenaSpawnForIndex(i, total);
+}
+
 // 把一批已入队的玩家塞进一个新房间，并各自通知 match_found
 function createRoom(mode, members) {
   const roomId = 'r_' + (nextRoomId++);
@@ -64,7 +80,7 @@ function createRoom(mode, members) {
   const spawns = [];
   for (const ws of members) {
     ws.__room = roomId;
-    const sp = arenaSpawnForIndex(room.spawns.size, members.length);
+    const sp = spawnForMode(mode, room.spawns.size, members.length);
     room.spawns.set(ws.__id, sp);
     const prof = ws.__profile;
     const nick = prof ? (prof.nickname || prof.username || ('玩家' + ws.__num)) : ('玩家' + ws.__num);
@@ -79,19 +95,26 @@ function createRoom(mode, members) {
   console.log(`[relay] 房间 ${roomId} 创建（模式 ${mode}，成员 ${members.length}）`);
 }
 
-// 触发一次匹配尝试：够人直接开；只有一个人且等够了也开（练习场）
+// 触发一次匹配尝试：按模式分别凑人（陨石与抓钩不混房）；够人直接开；独苗等够时间也开练习场
+const SUPPORTED_MODES = new Set(['meteor', 'grapple']);
 function tryMatch() {
-  if (queue.length >= MATCH_MIN) {
-    const batch = queue.splice(0, Math.min(MATCH_MAX, queue.length));
-    createRoom('meteor', batch);
-    return;
-  }
-  if (queue.length === 1) {
-    const ws = queue[0];
-    const waited = Date.now() - (ws.__matchAt || Date.now());
-    if (waited >= MATCH_SOLO_TIMEOUT) {
-      queue.shift();
-      createRoom('meteor', [ws]); // 单人练习场
+  for (const mode of SUPPORTED_MODES) {
+    const waiting = queue.filter((ws) => (ws.__matchMode || 'meteor') === mode);
+    if (waiting.length >= MATCH_MIN) {
+      const batch = waiting.slice(0, MATCH_MAX);
+      for (const ws of batch) { const i = queue.indexOf(ws); if (i >= 0) queue.splice(i, 1); }
+      createRoom(mode, batch);
+      return;
+    }
+    if (waiting.length === 1) {
+      const ws = waiting[0];
+      const waited = Date.now() - (ws.__matchAt || Date.now());
+      if (waited >= MATCH_SOLO_TIMEOUT) {
+        const i = queue.indexOf(ws);
+        if (i >= 0) queue.splice(i, 1);
+        createRoom(mode, [ws]); // 单人练习场
+        return;
+      }
     }
   }
 }
@@ -441,10 +464,10 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // 匹配：请求进入对战房间（mode 指定玩法，当前只支持 'meteor' 躲避陨石混战）
+    // 匹配：请求进入对战房间（mode 指定玩法：'meteor' 躲避陨石混战 / 'grapple' 疯狂抓钩）
     if (msg.t === 'match') {
       const mode = String(msg.mode || 'meteor');
-      if (mode !== 'meteor') return;       // 暂只支持陨石混战
+      if (!SUPPORTED_MODES.has(mode)) return; // 未支持的玩法直接忽略
       if (ws.__room) return;               // 已在房间内，忽略
       if (queue.includes(ws)) return;      // 已在队列，忽略重复
       ws.__matchAt = Date.now();
@@ -656,6 +679,29 @@ wss.on('connection', (ws) => {
       const id = String(msg.id || '').slice(0, 40);
       if (!id) return;
       roomBroadcast(ws.__room, { t: 'pickup', id }, ws);
+      return;
+    }
+
+    // 金币生成（疯狂抓钩）：房主发出，转发给同房其他人用同一坐标复现同一枚
+    if (msg.t === 'coin_spawn') {
+      const id = String(msg.id || '').slice(0, 40);
+      if (!id) return;
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      roomBroadcast(ws.__room, {
+        t: 'coin_spawn',
+        id,
+        x: num(msg.x, 0, -1000, 1000),
+        y: num(msg.y, 0, -50, 300),
+        z: num(msg.z, 0, -1000, 1000),
+      }, ws);
+      return;
+    }
+
+    // 金币被吃掉：通知同房其他人移除同一枚
+    if (msg.t === 'coin') {
+      const id = String(msg.id || '').slice(0, 40);
+      if (!id) return;
+      roomBroadcast(ws.__room, { t: 'coin', id }, ws);
       return;
     }
 

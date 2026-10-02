@@ -15,6 +15,7 @@ import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { buildArena } from '../world/CombatArena.js';
+import { buildGrappleArena } from '../world/GrappleArena.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
@@ -48,6 +49,15 @@ const BOSS_PHASE_NAMES = ['', '一阶段', '二阶段', '三阶段'];
 
 // 圆锥几何默认朝 +Y，制导导弹用它转到飞行方向
 const UP_Y = new THREE.Vector3(0, 1, 0);
+
+// 每帧复用的临时向量（抓钩绳索起点），避免在热路径里新建对象
+const _gpA = new THREE.Vector3();
+
+// 对战玩法表：新增模式时这里加一条，服务端也要放行同名 mode
+const COMBAT_MODES = {
+  meteor: { name: '躲避陨石混战', tip: '陨石不断砸落，中被砸 200 血；也能用左键能量球打人' },
+  grapple: { name: '疯狂抓钩', tip: '左键甩抓钩在柱子间飞行吃金币，掉进底部岩浆就出局' },
+};
 
 export class Game {
   // 与服务器一致的昼夜周期（秒）：联机时以服务器权威时间为准，这里用于两次快照之间的外推
@@ -431,6 +441,17 @@ export class Game {
     this._pickupTarget = null;  // 当前可拾取的掉落物（离得最近那一件），null 表示够不到
     this._pickupLabel = null;   // 按钮上正在显示哪件物品（避免每帧重写 textContent）
     this._pickupShown = false;  // 「拾取」按钮显隐去抖（避免每帧写 style）
+    // 抓钩（技能槽物品 / 疯狂抓钩模式）：锚点 + 绳索视觉
+    this._grapple = null;       // { x,y,z 锚点, fx,fy,fz 钩爪当前坐标, flying, t 剩余时间 }
+    this._grappleCd = 0;        // 抓钩冷却（秒）
+    this._grappleHold = null;   // 我们写进 physics.velocityHold 的那个对象（松手时只清自己那份）
+    this._grappleRope = null;   // 绳索（Line）
+    this._grappleHook = null;   // 钩爪（Cone）
+    // 疯狂抓钩模式：金币与岩浆
+    this._coins = [];           // 在空中的金币 { id, x,y,z, mesh, life }
+    this._coinSeq = 0;          // 本机生成金币的自增序号（拼出全场唯一 id）
+    this._coinTimer = 0;        // 房主生成金币的倒计时
+    this._coinCount = 0;        // 本场吃到的金币数（HUD 显示）
     this._dropGeo = null;       // 丢弃物共用几何（立方体，避免每件都新建）
     this._dropLabelTex = new Map(); // 物品名 → Canvas 贴图（缓存，同名共用）
     this._dropLabelMat = new Map(); // 物品名 → Sprite 材质（缓存，同名共用）
@@ -438,11 +459,16 @@ export class Game {
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
   _createHealthBar() {
+    const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
     const box = document.createElement('div');
     box.className = 'hp-box'; // 供手机端「按键布局调整」定位与检查
-    box.style.cssText =
-      'position:fixed;left:18px;bottom:22px;z-index:53;width:min(240px,42vw);' +
-      'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;';
+    // 手机端默认位置要避开左下角的摇杆（摇杆占 left 20 / bottom 26 起、118px 见方），
+    // 所以血条挪到摇杆正上方；PC 维持左下角原样。
+    box.style.cssText = coarse
+      ? 'position:fixed;left:14px;bottom:calc(env(safe-area-inset-bottom, 0px) + 156px);z-index:53;width:min(210px,46vw);' +
+        'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;'
+      : 'position:fixed;left:18px;bottom:22px;z-index:53;width:min(240px,42vw);' +
+        'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;';
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.6);';
     const label = document.createElement('span');
@@ -778,6 +804,18 @@ export class Game {
       case 'pickup': {
         // 别人把地上的东西捡走了：本地移除同一件，避免「已经没了还留在地上」
         this._pickupRemote(msg.id);
+        break;
+      }
+      case 'coin_spawn': {
+        // 房主生成的金币：用同一坐标在本地复现
+        if (this._combat && this._combat.mode === 'grapple') {
+          this._spawnCoin({ id: msg.id, x: Number(msg.x), y: Number(msg.y), z: Number(msg.z) });
+        }
+        break;
+      }
+      case 'coin': {
+        // 别人吃掉了金币
+        this._removeCoinById(msg.id);
         break;
       }
       default:
@@ -1173,9 +1211,14 @@ export class Game {
 
   // 顶部的学币小牌，常驻显示
   _createCoinBadge() {
+    const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
     const el = document.createElement('div');
     el.className = 'kui-panel';
-    el.style.cssText = 'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;user-select:none;';
+    // 手机端校卡占了左上角（left 12 / top 12），学币牌挪到它正下方；
+    // z-index 压到校卡（900）之下，这样校卡展开时会把学币牌盖住，不会叠字。
+    el.style.cssText = coarse
+      ? 'position:fixed;z-index:890;left:12px;top:58px;pointer-events:none;user-select:none;'
+      : 'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;user-select:none;';
     const body = document.createElement('div');
     body.className = 'kui-panel__body';
     body.style.cssText = 'font:13px var(--kui-font);';
@@ -1206,12 +1249,12 @@ export class Game {
     const r = buyItem(this._profile, id);
     if (!r.ok) { this._toast(r.reason); return; }
     const item = r.item;
-    addToBag(getBagKey(this._profile), item.name, 1);
+    const n = addToBag(getBagKey(this._profile), item.name, 1);
     this._storeItemEffect(item.name, item.effect);
     this._equipItemSkill(item.name);
     this._refreshCoins();
     this.shop.render();
-    this._toast('买下「' + item.name + '」，还剩 ' + r.coins + ' 学币');
+    this._toast('买下「' + item.name + '」（背包 ' + n + ' 个），还剩 ' + r.coins + ' 学币');
   }
 
   // 兑换码：成功后刷新顶部余额并让商店重绘
@@ -1542,6 +1585,8 @@ export class Game {
   // 复用通用投掷物系统（_explode 已支持对半径内的其他玩家 sendHit），因此天然是 PvP。
   _combatAttack() {
     if (this._dead) return;
+    // 疯狂抓钩：左键 / 攻击按钮直接就是抓钩（这个模式里技能栏是隐藏的，所以不能靠技能槽）
+    if (this._combat && this._combat.mode === 'grapple') { this._fireGrapple(); return; }
     const now = performance.now();
     if (now - this._combatAt < Config.COMBAT_BALL_COOLDOWN * 1000) return;
     this._combatAt = now;
@@ -2548,8 +2593,33 @@ export class Game {
     this._chatTab = el;
   }
 
-  // 顶部校卡两侧按钮：左侧「背包」、右侧「设置」+ 一个展示物品的背包浮层
+  // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
   _createTopButtons() {
+    const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+    if (coarse) {
+      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+140px，这里从它右边开始，靠右对齐
+      const row = document.createElement('div');
+      row.style.cssText =
+        'position:fixed;z-index:9500;left:156px;right:8px;top:12px;display:flex;gap:6px;' +
+        'justify-content:flex-end;align-items:center;';
+      document.body.appendChild(row);
+      const mk = (text, onClick) => {
+        const b = document.createElement('div');
+        b.className = 'kui-btn kui-btn--grey';
+        b.textContent = text;
+        b.style.cssText = 'cursor:pointer;user-select:none;-webkit-user-select:none;' +
+          'padding:6px 8px;font-size:12px;white-space:nowrap;';
+        b.addEventListener('click', onClick);
+        row.appendChild(b);
+        return b;
+      };
+      this._topRow = row;
+      this._btnBag = mk('背包', () => this._toggleBag());
+      this._btnSettings = mk('设置', () => this.settingsPanel.toggle());
+      this._btnCombat = mk('对战匹配', () => this._toggleCombat());
+      this._buildBag();
+      return;
+    }
     const mkBtn = (text, posCss, onClick) => {
       const b = document.createElement('div');
       b.className = 'kui-btn kui-btn--grey';
@@ -3193,6 +3263,11 @@ export class Game {
           label: '控制',
           run: () => this._toggleCtrlGun(),
         };
+      case 'grapple':
+        return {
+          label: '抓钩',
+          run: () => this._fireGrapple(),
+        };
       case 'gatling':
         return {
           label: '加特林',
@@ -3533,9 +3608,57 @@ export class Game {
       this._exitCombat(this._lobbySpawn); // 本地即时退出；服务端 match_left 到达后为幂等空操作
       return;
     }
-    this.network.sendMatch(this._matchMode);
+    this._showModePicker(); // 先选玩法，再进匹配
+  }
+
+  // 玩法选择：点「对战匹配」后先选一种模式
+  _showModePicker() {
+    if (!this._modePicker) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(8,14,24,.55);font-family:var(--kui-font);color:var(--kui-paper);';
+      const card = document.createElement('div');
+      card.className = 'kui-panel';
+      card.style.cssText = 'min-width:300px;max-width:88vw;padding:22px 22px;text-align:center;';
+      card.innerHTML =
+        '<div class="kui-title" style="font-size:18px;margin-bottom:4px;">选择对战玩法</div>' +
+        '<div style="color:var(--kui-ink-soft);margin-bottom:16px;font-size:12px;">2 人即开，单人等 12 秒也会开练习场</div>';
+      const mk = (mode, cls) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'kui-btn ' + cls;
+        b.style.cssText = 'width:100%;margin-bottom:10px;text-align:left;line-height:1.5;padding:10px 14px;';
+        b.innerHTML = '<b>' + COMBAT_MODES[mode].name + '</b><br><span style="font-size:12px;opacity:.85;">'
+          + COMBAT_MODES[mode].tip + '</span>';
+        b.addEventListener('click', () => {
+          el.style.display = 'none';
+          this._startMatch(mode);
+        });
+        return b;
+      };
+      card.appendChild(mk('meteor', 'kui-btn--primary'));
+      card.appendChild(mk('grapple', 'kui-btn--green'));
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'kui-btn kui-btn--grey';
+      cancel.style.cssText = 'width:100%;';
+      cancel.textContent = '先不玩';
+      cancel.addEventListener('click', () => { el.style.display = 'none'; });
+      card.appendChild(cancel);
+      el.appendChild(card);
+      document.body.appendChild(el);
+      this._modePicker = el;
+    }
+    this._modePicker.style.display = 'flex';
+  }
+
+  // 真正发起匹配
+  _startMatch(mode) {
+    this._matchMode = mode;
+    this.network.sendMatch(mode);
     this._showMatchOverlay();
-    this._toast('正在匹配「躲避陨石混战」…');
+    this._toast('正在匹配「' + COMBAT_MODES[mode].name + '」…');
   }
 
   // 「匹配中…」浮层（带取消按钮）
@@ -3548,13 +3671,16 @@ export class Game {
       el.innerHTML =
         '<div class="kui-panel" style="min-width:280px;padding:26px 28px;text-align:center;">' +
         '<div class="kui-title" style="font-size:18px;margin-bottom:10px;">匹配中…</div>' +
-        '<div style="color:var(--kui-ink-soft);margin-bottom:18px;font-size:13px;">正在为你寻找「躲避陨石混战」对手</div>' +
+        '<div id="__matchTip" style="color:var(--kui-ink-soft);margin-bottom:18px;font-size:13px;">正在为你寻找对手</div>' +
         '<button type="button" id="__cancelMatch" class="kui-btn kui-btn--grey" style="width:100%;">取消匹配</button></div>';
       document.body.appendChild(el);
       const btn = el.querySelector('#__cancelMatch');
       if (btn) btn.addEventListener('click', () => { this.network.sendCancelMatch(); el.style.display = 'none'; });
       this._combatOverlay = el;
     }
+    const name = (COMBAT_MODES[this._matchMode] || COMBAT_MODES.meteor).name;
+    const tip = this._combatOverlay.querySelector('#__matchTip');
+    if (tip) tip.textContent = '正在为你寻找「' + name + '」对手';
     this._combatOverlay.style.display = 'flex';
   }
 
@@ -3568,8 +3694,9 @@ export class Game {
         'font:13px/1.4 var(--kui-font);color:var(--kui-paper);' +
         'background:rgba(11,21,34,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 12px;';
       el.innerHTML =
-        '<span style="font-weight:700;color:#ffd76a;">躲避陨石混战</span>' +
+        '<span id="__cMode" style="font-weight:700;color:#ffd76a;">对战</span>' +
         '<span id="__cAlive">同场 -</span>' +
+        '<span id="__cCoin" style="display:none;color:#ffd76a;">金币 0</span>' +
         '<span id="__cTime">时间 00:00</span>' +
         '<button type="button" id="__cLeave" class="kui-btn kui-btn--grey" style="padding:3px 10px;">退出对战</button>';
       document.body.appendChild(el);
@@ -3594,7 +3721,9 @@ export class Game {
     if (!this._combat || !this._combatHud) return;
     const a = this._combatHud.querySelector('#__cAlive');
     const t = this._combatHud.querySelector('#__cTime');
+    const cn = this._combatHud.querySelector('#__cCoin');
     if (a) a.textContent = '同场 ' + (this._combat.alive || 0);
+    if (cn && this._combat.mode === 'grapple') cn.textContent = '金币 ' + this._coinCount;
     const s = Math.max(0, Math.floor((performance.now() - this._combat.roundStart) / 1000));
     const mm = String(Math.floor(s / 60)).padStart(2, '0');
     const ss = String(s % 60).padStart(2, '0');
@@ -3627,15 +3756,16 @@ export class Game {
     if (this._chatTab) this._chatTab.style.display = 'none';
 
     this._mainColliders = this.colliders.slice(); // 快照主世界碰撞体内容（退出时还原）
-    this._arena = buildArena(this.scene);
+    // 按模式换场景：陨石混战 = 平地竞技场；疯狂抓钩 = 柱子林 + 底部岩浆
+    this._arena = (mode === 'grapple') ? buildGrappleArena(this.scene) : buildArena(this.scene);
     this.colliders.length = 0; // 原地改写：LocalPlayer 持有的数组引用保持不变
     for (const c of this._arena.colliders) this.colliders.push(c);
 
-    // 玩家落到竞技场出生点
+    // 玩家落到出生点（抓钩模式出生在平台顶面，spawn.y 是脚底高度）
     this.localState.x = sp.x;
     this.localState.z = sp.z;
     this.localState.yaw = sp.yaw || 0;
-    this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    this.localState.y = (Number.isFinite(sp.y) ? sp.y : 0) + Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
     this.localState.health = Config.HEALTH_MAX;
     this.localPlayer.physics.velocity.set(0, 0, 0);
     this._dead = false;
@@ -3646,11 +3776,20 @@ export class Game {
     for (const m of this._meteors) this._disposeMeteor(m); // 防御：清掉可能的上场残留
     this._meteors.length = 0;
     this._meteorTimer = 0; // 房主首波立刻开始
+    this._coinCount = 0;   // 抓钩模式的吃币计数
+    this._coinTimer = 0;   // 房主首波金币立刻开始
+    this._endGrapple();
     this._showCombatHUD();
+    // HUD 模式名 + 金币位（只有抓钩模式显示金币）
+    const modeEl = this._combatHud.querySelector('#__cMode');
+    const coinEl = this._combatHud.querySelector('#__cCoin');
+    const meta = COMBAT_MODES[mode] || COMBAT_MODES.meteor;
+    if (modeEl) modeEl.textContent = meta.name;
+    if (coinEl) coinEl.style.display = mode === 'grapple' ? '' : 'none';
     if (this._btnCombat) this._btnCombat.textContent = '退出对战';
     this._updateBossUI(); // 刷新攻击按钮（对战中常驻）
     this._updateSkillBarVisibility(); // 竞技场里不显示技能栏
-    this._toast('已匹配！进入「躲避陨石混战」');
+    this._toast('已匹配！进入「' + meta.name + '」');
   }
 
   // 退出对战：拆掉竞技场、还原城市景物与主世界碰撞体、玩家回大厅出生点
@@ -3689,6 +3828,8 @@ export class Game {
     this._combat = null;
     this._room = null;
     this._clearDrops(); // 竞技场里丢的东西不跟着回大厅
+    this._clearCoins();
+    this._endGrapple();
     this._hideCombatHUD();
     if (this._btnCombat) this._btnCombat.textContent = '对战匹配';
     this._updateBossUI(); // 交回给主世界逻辑控制攻击按钮显隐
@@ -3707,6 +3848,230 @@ export class Game {
     for (const m of this._missiles) { if (m && m.mesh) this.scene.remove(m.mesh); }
     this._missiles.length = 0;
     this._clearDrops(); // 掉落物属于当前场景，切换场景时清掉
+    this._endGrapple(); // 抓钩状态/绳索不跨场景
+    this._clearCoins(); // 金币属于当前对战场景
+  }
+
+  // ============ 抓钩：朝准星甩出钩爪，勾住就拽自己过去 ============
+
+  // 再按一次 = 松手；未抓住时按 = 甩钩
+  _fireGrapple() {
+    if (this._grapple) { this._endGrapple(); return; } // 已经抓着 → 松开
+    if (this._dead || this._soul) return;
+    if (this.localState.ride) { this._toast('骑车时用不了抓钩'); return; }
+    if (this._grappleCd > 0) return;
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
+    const origin = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.6);
+    // 先判「钩到人」：勾中别人就不拽自己，而是把他朝视线方向甩出去
+    // （疯狂抓钩模式的乐趣就在这——把人从柱子上甩进岩浆）
+    const victim = this._grappleCatchTarget(s, dir);
+    if (victim) {
+      const kx = dir.x * Config.GRAPPLE_THROW;
+      const kz = dir.z * Config.GRAPPLE_THROW;
+      const ky = Config.GRAPPLE_THROW_UP;
+      this.network.sendKnock(victim.id, kx, ky, kz);
+      if (victim.rp && typeof victim.rp.applyKnockPreview === 'function') victim.rp.applyKnockPreview(kx, ky, kz);
+      this._grappleCd = Config.GRAPPLE_COOLDOWN;
+      this._toast('抓钩勾中了人，把他甩了出去');
+      return;
+    }
+    const hit = this._rayHitWorld(origin, dir, Config.GRAPPLE_RANGE);
+    this._grappleCd = Config.GRAPPLE_COOLDOWN;
+    if (!hit) { this._toast('抓钩没勾到东西'); return; }
+    // 锚点沿射线回退一点，避免把自己拽进墙里
+    const p = hit.point.addScaledVector(dir, -(Config.PLAYER_RADIUS + 0.35));
+    this._grapple = {
+      x: p.x, y: p.y, z: p.z,
+      fx: origin.x, fy: origin.y, fz: origin.z, // 钩爪从手边飞出去
+      flying: true,
+      t: Config.GRAPPLE_MAX_TIME,
+    };
+    this._ensureGrappleViz();
+    this._grappleRope.visible = true;
+    this._grappleHook.visible = true;
+  }
+
+  // 钩人判定：准星中轴 GRAPPLE_CATCH_ARC 度内、GRAPPLE_RANGE 内最近的那个玩家
+  _grappleCatchTarget(s, dir) {
+    if (!this.playerManager || !this.playerManager.players) return null;
+    const cosHalf = Math.cos((Config.GRAPPLE_CATCH_ARC * Math.PI) / 180 / 2);
+    let best = null;
+    let bestD = Infinity;
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === s.id || !rp || !rp.state) continue;
+      const st = rp.state;
+      const dx = st.x - s.x;
+      const dy = st.y - s.y;
+      const dz = st.z - s.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < 0.6 || d > Config.GRAPPLE_RANGE) continue;
+      if (Math.abs(dy) > Config.GRAPPLE_CATCH_DY) continue;
+      if ((dx * dir.x + dy * dir.y + dz * dir.z) / d < cosHalf) continue;
+      if (d < bestD) { bestD = d; best = { id, rp }; }
+    }
+    return best;
+  }
+
+  _endGrapple() {
+    // 只清掉自己写进去的那份速度覆盖（控制枪可能也在用 velocityHold）
+    if (this._grappleHold && this.localPlayer.physics.velocityHold === this._grappleHold) {
+      this.localPlayer.physics.velocityHold = null;
+    }
+    this._grappleHold = null;
+    this._grapple = null;
+    if (this._grappleRope) this._grappleRope.visible = false;
+    if (this._grappleHook) this._grappleHook.visible = false;
+    this._grappleCd = Config.GRAPPLE_COOLDOWN;
+  }
+
+  // 每帧推进：钩爪飞出 → 按锚点方向拽人 → 到位/超时/松手结束
+  _updateGrapple(dt) {
+    if (this._grappleCd > 0) this._grappleCd = Math.max(0, this._grappleCd - dt);
+    const g = this._grapple;
+    if (!g) return;
+    if (this._dead || this._soul || this.localState.ride) { this._endGrapple(); return; }
+    g.t -= dt;
+    const s = this.localState;
+    if (g.flying) {
+      // 钩爪以固定速度飞向锚点（视觉上「甩出去」而不是瞬间贴住）
+      const to = new THREE.Vector3(g.x - g.fx, g.y - g.fy, g.z - g.fz);
+      const step = Config.GRAPPLE_SPEED * 3 * dt;
+      if (to.length() <= step) {
+        g.fx = g.x; g.fy = g.y; g.fz = g.z;
+        g.flying = false;
+      } else {
+        to.normalize();
+        g.fx += to.x * step; g.fy += to.y * step; g.fz += to.z * step;
+      }
+    } else {
+      const dx = g.x - s.x;
+      const dy = g.y - s.y;
+      const dz = g.z - s.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist <= Config.GRAPPLE_STOP_DIST || g.t <= 0) { this._endGrapple(); return; }
+      // 用 velocityHold 每帧覆盖速度：重力与输入都被覆盖，拽得干脆且仍会被墙挡住
+      const k = Config.GRAPPLE_SPEED / Math.max(0.001, dist);
+      const hold = { x: dx * k, y: dy * k, z: dz * k, t: 0.3 };
+      this.localPlayer.physics.velocityHold = hold;
+      this._grappleHold = hold;
+    }
+    this._drawGrapple();
+  }
+
+  // 绳索两端：相机（手边）→ 钩爪当前坐标
+  _drawGrapple() {
+    const g = this._grapple;
+    if (!g || !this._grappleRope || !this._grappleHook) return;
+    this.camera.getWorldPosition(_gpA);
+    const pos = this._grappleRope.geometry.attributes.position;
+    pos.setXYZ(0, _gpA.x, _gpA.y, _gpA.z);
+    pos.setXYZ(1, g.fx, g.fy, g.fz);
+    pos.needsUpdate = true;
+    this._grappleRope.geometry.computeBoundingSphere();
+    this._grappleHook.position.set(g.fx, g.fy, g.fz);
+  }
+
+  _ensureGrappleViz() {
+    if (!this._grappleRope) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      this._grappleRope = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.95, depthWrite: false })
+      );
+      this._grappleRope.frustumCulled = false; // 两端每帧变，包围球不可靠
+      this._grappleRope.visible = false;
+      this.scene.add(this._grappleRope);
+    }
+    if (!this._grappleHook) {
+      this._grappleHook = new THREE.Mesh(
+        new THREE.ConeGeometry(0.2, 0.5, 8),
+        new THREE.MeshStandardMaterial({ color: 0xc9d3e6, emissive: 0x2a3644, metalness: 0.7, roughness: 0.3 })
+      );
+      this._grappleHook.rotation.x = Math.PI / 2; // 锥尖朝前
+      this._grappleHook.visible = false;
+      this.scene.add(this._grappleHook);
+    }
+  }
+
+  // 射线打世界碰撞体，取最近命中：返回 { point, collider } 或 null。
+  // 只认盒（含 rotY）与凸包的包围盒；trimesh 跳过（太贵，抓钩不需要那么精）。
+  _rayHitWorld(origin, dir, maxDist) {
+    let best = maxDist;
+    let hitAny = false;
+    for (const c of this.colliders) {
+      const box = this._colliderAABB(c);
+      if (!box) continue;
+      const t = this._rayAabb(origin, dir, box);
+      if (t == null || t >= best) continue;
+      best = t;
+      hitAny = true;
+    }
+    if (!hitAny) return null;
+    return { point: origin.clone().addScaledVector(dir, best) };
+  }
+
+  // 取碰撞体的世界 AABB：盒直接给；凸包按顶点算一次并缓存（惰性，之后 O(1)）
+  _colliderAABB(c) {
+    if (!c) return null;
+    if (c.type === 'trimesh') return null;
+    if (Number.isFinite(c.hx) && Number.isFinite(c.hy) && Number.isFinite(c.hz)) {
+      // 带 rotY 的盒：绕中心旋转，取旋转后的外接 AABB（够用且不做旋转矩阵运算）
+      if (Number.isFinite(c.rotY) && c.rotY !== 0) {
+        const cs = Math.abs(Math.cos(c.rotY));
+        const sn = Math.abs(Math.sin(c.rotY));
+        const hx = c.hx * cs + c.hz * sn;
+        const hz = c.hx * sn + c.hz * cs;
+        return { cx: c.cx, cy: c.cy, cz: c.cz, hx, hy: c.hy, hz };
+      }
+      return { cx: c.cx, cy: c.cy, cz: c.cz, hx: c.hx, hy: c.hy, hz: c.hz };
+    }
+    if (c.type === 'convex' && c.vertices) {
+      if (c._gAABB !== undefined) return c._gAABB;
+      const v = c.vertices;
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let i = 0; i + 2 < v.length; i += 3) {
+        if (v[i] < minX) minX = v[i];
+        if (v[i] > maxX) maxX = v[i];
+        if (v[i + 1] < minY) minY = v[i + 1];
+        if (v[i + 1] > maxY) maxY = v[i + 1];
+        if (v[i + 2] < minZ) minZ = v[i + 2];
+        if (v[i + 2] > maxZ) maxZ = v[i + 2];
+      }
+      c._gAABB = Number.isFinite(minX)
+        ? { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, cz: (minZ + maxZ) / 2,
+            hx: (maxX - minX) / 2, hy: (maxY - minY) / 2, hz: (maxZ - minZ) / 2 }
+        : null;
+      return c._gAABB;
+    }
+    return null;
+  }
+
+  // 射线 × AABB 的 slab 求交：返回最近正向交点距离；不命中返回 null
+  _rayAabb(o, d, b) {
+    let tmin = 0;
+    let tmax = Infinity;
+    const lo = [b.cx - b.hx, b.cy - b.hy, b.cz - b.hz];
+    const hi = [b.cx + b.hx, b.cy + b.hy, b.cz + b.hz];
+    const oo = [o.x, o.y, o.z];
+    const dd = [d.x, d.y, d.z];
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(dd[i]) < 1e-8) {
+        if (oo[i] < lo[i] || oo[i] > hi[i]) return null; // 平行且在板外
+        continue;
+      }
+      let t1 = (lo[i] - oo[i]) / dd[i];
+      let t2 = (hi[i] - oo[i]) / dd[i];
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+    return tmin;
   }
 
   // ============ 丢弃物品：带物理地抛在地上，且全员可见 ============
@@ -3814,9 +4179,10 @@ export class Game {
     if (!this._drops.length) return;
     const R = Config.DROP_RADIUS;
     const G = -24;
-    // 边界：对战中用竞技场半边长，大厅用世界地面范围
-    const bx = (this._combat ? Config.COMBAT_ARENA_HALF : Config.GROUND_WIDTH / 2) - R;
-    const bz = (this._combat ? Config.COMBAT_ARENA_HALF : Config.GROUND_DEPTH / 2) - R;
+    // 边界：对战中用当前竞技场半边长，大厅用世界地面范围
+    const H = this._arenaHalf();
+    const bx = (this._combat ? H : Config.GROUND_WIDTH / 2) - R;
+    const bz = (this._combat ? H : Config.GROUND_DEPTH / 2) - R;
     const t = this.clock.elapsedTime;
     for (let i = this._drops.length - 1; i >= 0; i--) {
       const d = this._drops[i];
@@ -3958,6 +4324,132 @@ export class Game {
     }
   }
 
+  // ============ 疯狂抓钩：金币（房主生成、全员可见、被吃即同步消失）+ 底部岩浆 ============
+
+  // 当前场景的边界半边长（掉落物回弹、越界判断用）
+  _arenaHalf() {
+    if (this._combat && this._combat.mode === 'grapple') return Config.GRAPPLE_ARENA_HALF;
+    return Config.COMBAT_ARENA_HALF;
+  }
+
+  // 金币的几何/材质全场共用一套（生成频率高，不能每枚新建）
+  _ensureCoinAssets() {
+    if (!this._coinGeo) this._coinGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.08, 16);
+    if (!this._coinMat) {
+      this._coinMat = new THREE.MeshStandardMaterial({
+        color: 0xffd24a, emissive: 0xffa726, emissiveIntensity: 0.95, metalness: 0.75, roughness: 0.26,
+      });
+    }
+  }
+
+  _disposeCoinAssets() {
+    for (const k of ['_coinGeo', '_coinMat']) {
+      const r = this[k];
+      if (r && typeof r.dispose === 'function') r.dispose();
+      this[k] = null;
+    }
+  }
+
+  // 生成一枚金币（房主本地 / 收到广播的远端共用）
+  _spawnCoin(o) {
+    if (!o) return;
+    const id = String(o.id || '');
+    const x = Number(o.x);
+    const y = Number(o.y);
+    const z = Number(o.z);
+    if (!id || ![x, y, z].every(Number.isFinite)) return;
+    if (this._coins.some((c) => c.id === id)) return; // 幂等：重复广播不重复生成
+    if (this._coins.length >= Config.GRAPPLE_COIN_MAX) this._removeCoin(this._coins.shift());
+    this._ensureCoinAssets();
+    const mesh = new THREE.Mesh(this._coinGeo, this._coinMat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this._coins.push({ id, x, y, z, mesh, life: Config.GRAPPLE_COIN_LIFETIME });
+  }
+
+  // 金币几何/材质是共用的，这里只把它从场景摘下来
+  _removeCoin(c) {
+    if (c && c.mesh) this.scene.remove(c.mesh);
+  }
+
+  _clearCoins() {
+    for (const c of this._coins) this._removeCoin(c);
+    this._coins.length = 0;
+    this._disposeCoinAssets();
+  }
+
+  // 房主生成一波金币：落在随机柱子顶上方一点（位置广播给全场，各端用同一坐标复现）
+  _spawnCoinWave() {
+    const tops = this._arena && this._arena.tops;
+    if (!tops || !tops.length) return;
+    for (let i = 0; i < Config.GRAPPLE_COIN_PER_WAVE; i++) {
+      const t = tops[Math.floor(Math.random() * tops.length)];
+      const id = (this.localState.id || 'local') + 'c' + (++this._coinSeq);
+      const o = { id, x: t.x, y: t.y + 1.9, z: t.z };
+      this._spawnCoin(o);
+      this.network.sendCoinSpawn(o);
+    }
+  }
+
+  // 每帧：房主补币 / 岩浆判负 / 金币旋转与拾取
+  _updateCoinMode(dt) {
+    const c = this._combat;
+    if (!c || c.mode !== 'grapple') return;
+
+    if (c.isOwner) {
+      this._coinTimer -= dt;
+      if (this._coinTimer <= 0) {
+        this._coinTimer = Config.GRAPPLE_COIN_INTERVAL;
+        this._spawnCoinWave();
+      }
+    }
+
+    // 岩浆：物理地面就在 y=0，脚一踩到地面（而不是柱顶）就说明落进岩浆了
+    if (!this._dead) {
+      const feet = this.localState.y - Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+      if (feet <= 0.08) {
+        this._endGrapple();
+        this._toast('掉进岩浆了！');
+        this._changeHealth(-Config.GRAPPLE_MAGMA_DAMAGE);
+        return; // 本帧后续不用再判金币了
+      }
+    }
+
+    if (!this._coins.length) return;
+    const s = this.localState;
+    const body = s.y - Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale * 0.5; // 身体中点
+    const t = this.clock.elapsedTime;
+    for (let i = this._coins.length - 1; i >= 0; i--) {
+      const cn = this._coins[i];
+      cn.life -= dt;
+      if (cn.mesh) {
+        cn.mesh.rotation.y += dt * 2.4;
+        cn.mesh.position.y = cn.y + Math.sin(t * 2 + i) * 0.12; // 轻轻上下浮动
+      }
+      if (cn.life <= 0) { this._removeCoin(cn); this._coins.splice(i, 1); continue; }
+      if (this._dead) continue;
+      const d = Math.hypot(s.x - cn.x, body - cn.y, s.z - cn.z);
+      if (d <= Config.GRAPPLE_COIN_RADIUS + Config.PLAYER_RADIUS) {
+        this._removeCoin(cn);
+        this._coins.splice(i, 1);
+        this._coinCount++;
+        this.network.sendCoinTaken(cn.id); // 让其他人也看到这枚被吃掉了
+        this._toast('吃到金币！×' + this._coinCount);
+      }
+    }
+  }
+
+  // 别人吃掉了金币：本地移除同一枚
+  _removeCoinById(id) {
+    if (!id) return;
+    const i = this._coins.findIndex((c) => c.id === id);
+    if (i >= 0) {
+      this._removeCoin(this._coins[i]);
+      this._coins.splice(i, 1);
+    }
+  }
+
   _loop() {
     this._raf = requestAnimationFrame(() => this._loop());
 
@@ -4010,6 +4502,10 @@ export class Game {
     this._updateDrops(dt);
     // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）
     this._updatePickupHint();
+    // 抓钩：钩爪飞行 + 拽人（必须放在玩家物理更新之后，用最新的自身坐标算方向）
+    this._updateGrapple(dt);
+    // 疯狂抓钩：房主生成金币、全场吃金币、掉进岩浆判负
+    this._updateCoinMode(dt);
     // 爆炸特效：推进动画
     this._updateFX(dt);
 

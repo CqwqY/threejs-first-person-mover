@@ -89,6 +89,17 @@ function ensureCardLayout() {
     /* 退出登录：外观交给主题的 .kui-btn--danger，这里只管占位与显隐 */
     .idc-quit { margin-top: auto; width: 100%; }
     .idc-quit.hidden { display: none; }
+
+    /* 手机端：校卡推到最左侧，把顶部中右段让给「背包/设置/对战匹配」那排按钮。
+       同时收窄小牌（藏掉时间与「校卡」提示），否则一排按钮在窄屏上会挤到屏幕外。 */
+    @media (pointer: coarse) {
+      .idc { left: 12px; top: 12px; transform: none; }
+      .idc-card { width: 140px; }
+      .idc.open .idc-card { width: min(268px, calc(100vw - 24px)); }
+      .idc-mini { gap: 6px; padding: 0 8px; }
+      .idc-mini-name { max-width: 84px; font-size: 13px; }
+      .idc-time, .idc-hint { display: none; }
+    }
   `;
   document.head.appendChild(st);
 }
