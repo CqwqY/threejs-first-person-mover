@@ -380,6 +380,34 @@ function clampWep(v) {
   return (s === 'club' || s === 'gatling' || s === 'ctrlgun') ? s : '';
 }
 
+// ---- 聊天 ----
+const CHAT_MAX_LEN = 80;     // 单条发言硬上限（客户端另有更短的 60 字限制）
+const CHAT_BURST = 5;        // 滑动窗口内最多放行几条
+const CHAT_WINDOW = 2000;    // 窗口长度（毫秒）
+
+// 聊天文本清洗：剥 HTML 标签与控制字符、把换行/连续空白压成单个空格、限长。
+// 客户端用 textContent 渲染，这里再做一遍是为了不让脏数据进日志/快照。
+function cleanChat(v) {
+  return String(v || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, CHAT_MAX_LEN);
+}
+
+// 简易限流：2 秒内最多 5 条（够连续聊几句，又不至于被刷屏）。
+// 不做「单条最小间隔」——那样会让连发时第二条被静默丢掉，发起者自己看到了、别人没看到。
+function chatAllowed(ws) {
+  const now = Date.now();
+  if (!ws.__chatWin || now - ws.__chatWin > CHAT_WINDOW) {
+    ws.__chatWin = now;
+    ws.__chatHits = 0;
+  }
+  ws.__chatHits = (ws.__chatHits || 0) + 1;
+  return ws.__chatHits <= CHAT_BURST;
+}
+
 // 载具座位：只接受 0/1/2，其余一律按"没骑"处理
 function clampRide(v) {
   const n = Number(v);
@@ -489,6 +517,23 @@ wss.on('connection', (ws) => {
     // 退出对战房间：回到大厅
     if (msg.t === 'leave_room') {
       leaveRoom(ws);
+      return;
+    }
+
+    // 聊天：把发言转发给「同房间 / 同大厅」的其他人（房间隔离，对战里的人聊不到大厅）。
+    // 昵称与颜色一律取服务器自己记的 profile，客户端无法伪造身份；发起者不在广播范围内，
+    // 他自己那条由本地立即回显，省一个来回。
+    if (msg.t === 'chat') {
+      const text = cleanChat(msg.text);
+      if (!text) return;
+      if (!chatAllowed(ws)) return; // 刷屏限流
+      const pub = ws.__profile;
+      const st = states.get(id);
+      const nick = pub
+        ? (pub.nickname || pub.username || ('玩家' + num))
+        : ((st && st.nick) || ('玩家' + num));
+      const color = pub ? (pub.nicknameColor || '#ffffff') : ((st && st.color) || '#ffffff');
+      roomBroadcast(ws.__room, { t: 'chat', id, nick, color, text }, ws);
       return;
     }
 

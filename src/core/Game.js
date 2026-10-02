@@ -7,6 +7,7 @@ import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
+import { createChatBox } from '../ui/ChatBox.js';
 import { createAiNpc } from '../world/AiNpc.js';
 import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
@@ -18,7 +19,7 @@ import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { raycastWorld, moveSphereWorld } from '../world/collision/worldQuery.js';
-import { Input } from '../core/Input.js';
+import { Input, isEditableTarget } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
@@ -255,9 +256,24 @@ export class Game {
     this._vehHint = this._createVehicleHint();
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.VEHICLE_KEY) return;
-      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (isEditableTarget(document.activeElement)) return;
       if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
       this._toggleVehicle();
+    });
+
+    // ---- 玩家聊天：PC 按 T 开输入框，手机点左下角的「聊」按钮 ----
+    this.chat = createChatBox({ logMax: Config.CHAT_LOG_MAX, lineLife: Config.CHAT_LINE_LIFE, fade: Config.CHAT_LINE_FADE });
+    this.chat.setOnSend((text) => this._sendChat(text));
+    this.chat.setOnOpen(() => {
+      document.exitPointerLock && document.exitPointerLock(); // 打字时别让鼠标继续转视角
+      if (this.input) this.input.clearKeys();                 // 丢掉打开前按住的键，免得边打字边走路
+    });
+    this.chat.add({ sys: true, text: coarsePointer ? '点左下角「聊」可以和大家说话' : ('按 ' + Config.CHAT_KEY.slice(-1) + ' 键可以和大家说话') });
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.CHAT_KEY) return;
+      if (isEditableTarget(document.activeElement)) return; // 正在打字：这一下算输入内容，不开关面板
+      e.preventDefault();
+      this.chat.open();
     });
 
     // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能；恢复上次指定的槽位
@@ -327,7 +343,7 @@ export class Game {
     // PC：靠近掉落物时按 E 拾取（鼠标被指针锁定，点不到 DOM 按钮）
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.PICKUP_KEY) return;
-      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (isEditableTarget(document.activeElement)) return;
       if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
       if (!this._pickupTarget) return;
       e.preventDefault();
@@ -387,7 +403,7 @@ export class Game {
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.BOSS_SHIELD_KEY) return;
-      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (isEditableTarget(document.activeElement)) return;
       if (this.aiChat && this.aiChat.isOpen()) return;
       this._activateShield();
     });
@@ -395,7 +411,7 @@ export class Game {
     // 灵魂出窍：P 键切换（肉身留在原地，视角脱离身体自由飞行）
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.SOUL_KEY) return;
-      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (isEditableTarget(document.activeElement)) return;
       if (this.aiChat && this.aiChat.isOpen()) return;
       this._toggleSoul();
     });
@@ -687,6 +703,17 @@ export class Game {
         this.playerManager.removePlayer(msg.id);
         break;
       }
+      case 'chat': {
+        // 别人的发言（同房间 / 同大厅）：昵称与颜色取服务端下发的那份，文本按纯文本显示
+        if (this.chat) {
+          this.chat.add({
+            nick: msg.nick || '玩家',
+            color: msg.color || '#ffffff',
+            text: String(msg.text || ''),
+          });
+        }
+        break;
+      }
       case 'snapshot': {
         // 周期快照：同步远程玩家（本地由 applySnapshot 内部跳过）+ 世界时刻
         if (typeof msg.time === 'number') {
@@ -867,6 +894,21 @@ export class Game {
   }
   _setChatLock(locked) {
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.controlLock = !!locked;
+  }
+
+  // ---- 玩家聊天 ----
+
+  // 发送一句：文本先清洗限长再上行；本地立刻回显（服务端只转发给别人，不会回来造成两条）。
+  // 昵称/颜色取本地登录资料，与服务端在别人那里补的是同一份。
+  _sendChat(text) {
+    const s = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, Config.CHAT_MAX_LEN);
+    if (!s || !this.chat) return;
+    const nick = this._profile
+      ? (this._profile.nickname || this._profile.username || ('玩家' + this.localState.num))
+      : ('玩家' + this.localState.num);
+    const color = this._profile ? (this._profile.nicknameColor || '#ffffff') : '#ffffff';
+    this.chat.add({ nick, color, text: s, me: true });
+    this.network.sendChat(s);
   }
 
   // ---- 电动车：上车 / 下车 / 每帧摆放 ----

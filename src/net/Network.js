@@ -161,6 +161,14 @@ export class Network {
     this.send({ t: 'pickup', id: String(id).slice(0, 40) });
   }
 
+  // 聊天发言：只发文本，昵称/颜色由服务端按登录资料补齐（客户端无法冒充别人）。
+  // 同房间（或同大厅）的其他人会收到 {t:'chat', id, nick, color, text}。
+  sendChat(text) {
+    const s = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (!s) return;
+    this.send({ t: 'chat', text: s });
+  }
+
   // 金币生成广播（房主发出）：全场用同一坐标复现同一枚金币
   sendCoinSpawn(info) {
     if (!info || !info.id) return;

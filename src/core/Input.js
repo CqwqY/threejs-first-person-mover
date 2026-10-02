@@ -53,6 +53,8 @@ export class Input {
 
   // 记录按住 / 按下的键；空格额外标记为一次跳跃请求
   _onKeyDown(e) {
+    // 正在文本输入（聊天 / 对话栏）时不接管按键，否则打字会顺带走路
+    if (isEditableTarget(e.target)) return;
     const key = e.code;
     this._keys.add(key);
     if (key === 'Space') {
@@ -64,6 +66,12 @@ export class Input {
 
   _onKeyUp(e) {
     this._keys.delete(e.code);
+  }
+
+  // 清空「当前按住的键」：打开文本输入框时调用。
+  // 否则「按住 W → 按 T 开聊天」会让 W 一直留在集合里，角色边打字边往前走。
+  clearKeys() {
+    this._keys.clear();
   }
 
   // 指针锁定状态变化：同步 locked 标志
@@ -129,4 +137,13 @@ export class Input {
   strafeLeft = () => this.isDown('KeyA');
   strafeRight = () => this.isDown('KeyD');
   sprinting = () => this.isDown('ShiftLeft') || this.isDown('ShiftRight');
+}
+
+// 事件目标是否是可编辑的文本框（聊天 / 对话栏正在输入）。
+// 这种时候游戏热键一律让路，否则打字会顺带走路、跳跃、开盾。
+// 只认「输入类」元素：HTML 里按钮/div 聚焦时 tagName 是 BUTTON/DIV，那些仍然要能响应热键。
+export function isEditableTarget(t) {
+  if (!t || !t.tagName) return false;
+  const tag = String(t.tagName).toUpperCase();
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable === true;
 }

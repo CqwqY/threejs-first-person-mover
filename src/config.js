@@ -316,6 +316,13 @@ export const Config = {
   COMBAT_BALL_RADIUS: 2.4,      // 能量球爆炸半径（米）
   COMBAT_BALL_SPEED: 26,        // 出手速度（米/秒）
   COMBAT_BALL_COOLDOWN: 0.45,   // 攻击间隔（秒）
+
+  // ---- 玩家聊天（PC 按 T / 手机左下角按钮）----
+  CHAT_KEY: 'KeyT',             // PC 打开聊天输入的按键（须与 server 无关，纯本地）
+  CHAT_MAX_LEN: 60,             // 单条发言最大字数（服务端另有一份 80 字硬上限）
+  CHAT_LOG_MAX: 40,             // 屏幕上最多保留多少条消息（超出丢最旧的）
+  CHAT_LINE_LIFE: 14,           // 一条消息停留多少秒后淡出（秒）；打开输入框时不消失
+  CHAT_LINE_FADE: 0.6,          // 淡出动画时长（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
