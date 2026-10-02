@@ -48,7 +48,7 @@ function roomBroadcast(room, msg, exceptWs) {
 // 竞技场出生点：以原点为中心环形分布，面朝中心。
 // 相机前方 = (-sin yaw, -cos yaw)，要让它指向中心需 yaw = atan2(x, z)（与大厅 spawnForNum 同一约定）。
 function arenaSpawnForIndex(i, total) {
-  const r = 24;
+  const r = 12; // 须与客户端 Config.COMBAT_SPAWN_RADIUS / COMBAT_ARENA_HALF(16) 匹配
   const ang = (i / Math.max(1, total)) * Math.PI * 2;
   const x = Math.cos(ang) * r;
   const z = Math.sin(ang) * r;

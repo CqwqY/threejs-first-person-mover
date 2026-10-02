@@ -387,8 +387,13 @@ export class Game {
     this._lobbySpawn = null;    // 进入对战前记下的大厅出生点，退出时还原
     this._mainColliders = [];   // 进入对战时快照的主世界碰撞体（退出还原）
     this._arena = null;         // 当前竞技场实例 { group, colliders, dispose() }
-    this._meteors = [];         // 在飞的陨石 { x, y, z, vy, r, mesh }
+    this._meteors = [];         // 在飞的陨石 { x, y, z, vy, r, mesh, marker }
     this._meteorTimer = 0;      // 房主生成陨石的倒计时
+    // 陨石共用资源：几何/材质/落点警戒圈（按半径缩放复用，避免每颗都新建导致 GC 抖动）
+    this._meteorGeo = null;
+    this._meteorMat = null;
+    this._warnGeo = null;
+    this._warnMat = null;
     this._combatAt = 0;         // 对战基础攻击（能量球）冷却计时
     this._matchMode = 'meteor';
     this._combatOverlay = null; // 「匹配中…」浮层
@@ -3388,6 +3393,7 @@ export class Game {
     this._updateHealthBar();
     this._clearTransients(); // 清掉主世界留下的投掷物/黑洞/特效，避免带进竞技场
 
+    for (const m of this._meteors) this._disposeMeteor(m); // 防御：清掉可能的上场残留
     this._meteors.length = 0;
     this._meteorTimer = 0; // 房主首波立刻开始
     this._showCombatHUD();
@@ -3399,8 +3405,9 @@ export class Game {
   // 退出对战：拆掉竞技场、还原城市景物与主世界碰撞体、玩家回大厅出生点
   _exitCombat(lobbySpawn) {
     if (!this._combat && !this._arena) return; // 幂等：已退出则直接返回
-    for (const m of this._meteors) { this.scene.remove(m.mesh); this._disposeMeteor(m); }
+    for (const m of this._meteors) this._disposeMeteor(m);
     this._meteors.length = 0;
+    this._disposeMeteorAssets();
     if (this._arena) { this._arena.dispose(); this._arena = null; }
 
     // 还原城市景物与 NPC
@@ -3477,7 +3484,6 @@ export class Game {
         this._changeHealth(-Config.METEOR_DAMAGE);
         this._toast('被陨石砸中！-' + Config.METEOR_DAMAGE);
       }
-      this.scene.remove(m.mesh);
       this._disposeMeteor(m);
       this._meteors.splice(i, 1);
     }
@@ -3507,22 +3513,51 @@ export class Game {
     const r = Number(o.r) || 1.5;
     if (![x, z, vy].every(Number.isFinite)) return;
     if (this._meteors.length >= Config.METEOR_MAX_ALIVE) return;
-    const mesh = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(r, 0),
-      new THREE.MeshStandardMaterial({
-        color: 0x8a4a22, emissive: 0xff5a22, emissiveIntensity: 0.6, roughness: 0.7, flatShading: true,
-      })
-    );
+
+    // 共用单位几何/材质，按半径缩放：密集陨石下显著减少几何/材质分配
+    if (!this._meteorGeo) this._meteorGeo = new THREE.IcosahedronGeometry(1, 0);
+    if (!this._meteorMat) {
+      this._meteorMat = new THREE.MeshStandardMaterial({
+        color: 0x8a4a22, emissive: 0xff5a22, emissiveIntensity: 0.75, roughness: 0.7, flatShading: true,
+      });
+    }
+    const mesh = new THREE.Mesh(this._meteorGeo, this._meteorMat);
+    mesh.scale.setScalar(r);
     mesh.position.set(x, Config.METEOR_SPAWN_Y, z);
-    mesh.castShadow = true;
+    mesh.castShadow = false; // 同屏数量多，关掉投影省一点开销
     this.scene.add(mesh);
-    this._meteors.push({ x, y: Config.METEOR_SPAWN_Y, z, vy, r, mesh });
+
+    // 落点警戒圈：贴地发光环，半径=实际伤害范围，方便玩家预判躲避
+    if (!this._warnGeo) this._warnGeo = new THREE.RingGeometry(0.8, 1, 28);
+    if (!this._warnMat) {
+      this._warnMat = new THREE.MeshBasicMaterial({
+        color: 0xff6a2a, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false,
+      });
+    }
+    const warnR = r + Config.METEOR_IMPACT_PAD + Config.PLAYER_RADIUS;
+    const marker = new THREE.Mesh(this._warnGeo, this._warnMat);
+    marker.rotation.x = -Math.PI / 2;
+    marker.scale.setScalar(warnR);
+    marker.position.set(x, 0.06, z);
+    this.scene.add(marker);
+
+    this._meteors.push({ x, y: Config.METEOR_SPAWN_Y, z, vy, r, mesh, marker });
   }
 
+  // 把一颗陨石从场景摘除（几何/材质与其他陨石共用，不在这里释放）
   _disposeMeteor(m) {
-    if (!m || !m.mesh) return;
-    if (m.mesh.geometry) m.mesh.geometry.dispose();
-    if (m.mesh.material) m.mesh.material.dispose();
+    if (!m) return;
+    if (m.mesh) this.scene.remove(m.mesh);
+    if (m.marker) this.scene.remove(m.marker);
+  }
+
+  // 退出对战时释放共用的陨石资源（几何/材质/警戒圈）
+  _disposeMeteorAssets() {
+    for (const key of ['_meteorGeo', '_meteorMat', '_warnGeo', '_warnMat']) {
+      const res = this[key];
+      if (res && typeof res.dispose === 'function') res.dispose();
+      this[key] = null;
+    }
   }
 
   _loop() {
