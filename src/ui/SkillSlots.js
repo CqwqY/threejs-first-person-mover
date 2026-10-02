@@ -1,8 +1,11 @@
 // 职责：技能槽 UI。阿花放进背包的物品在这里变成可触发技能：
-//   手机：沿「跳跃键上方」的圆弧排布（圆心跟随跳跃键，槽位数量决定半径）；空槽不显示；
-//         触摸优先级高于右侧转视角区（z-index 更高、slot 自行捕获指针）。
-//   PC  ：横向一排，靠屏右下角。
-// 固定 SLOT_COUNT 个槽位，每个槽绑定一个触发键（PC 数字键 1..N），点击槽位或按下对应键触发。
+//   手机：屏幕上只留「当前技能」一个按钮（默认排在跳跃键上方，可用「按键布局」拖动）。
+//         · 轻点           = 用当前技能
+//         · 向外拖动       = 展开轮盘选技能（扇区高亮，松手即切换并释放）
+//         · 长按后上滑     = 丢弃当前技能（保留原来的丢弃手势）
+//         按钮上那行小字「2/5」表示当前是第几个 / 共几个技能。
+//   PC  ：横向一排，靠屏右下角，数字键 1..N 直接触发。
+// 固定 SLOT_COUNT 个槽位，每个槽绑定一个触发键（PC 数字键 1..N）。
 // 物品可被「指定」到某个具体槽位（背包里选槽位后点使用即可）。
 import { ensureTheme } from './theme.js';
 import { onRelayout, viewportSize, readLayout, currentMode } from './layout.js';
@@ -11,9 +14,15 @@ export const SKILL_KEYS = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Di
 export const SLOT_COUNT = SKILL_KEYS.length;
 const COOLDOWN = 800; // 相邻两次触发的最小间隔（毫秒）
 
+const CUR_KEY = 'fpm_skill_cur';   // 手机端记住上次选中的槽位
+const SWIPE_OUT = 24;              // 拖出多远才展开轮盘（px）
+const FAN_HI = 160;                // 轮盘扇区角度范围（度）：160° = 左上方
+const FAN_LO = 20;                 //                      20° = 右上方
+const DEAD_RATIO = 0.42;           // 半径内侧死区：落在里面 = 取消选择
+
 export function createSkillSlots(opts = {}) {
   ensureTheme();
-  // 丢弃手势相关：PC 按住修饰键 + 数字键；手机长按技能槽后上滑
+  // 丢弃手势相关：PC 按住修饰键 + 数字键；手机长按技能按钮后上滑
   const dropModifier = opts.dropModifier || 'KeyY';
   const gestureMs = Number.isFinite(opts.gestureMs) ? opts.gestureMs : 320;
   const gestureDy = Number.isFinite(opts.gestureDy) ? opts.gestureDy : 42;
@@ -21,35 +30,70 @@ export function createSkillSlots(opts = {}) {
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
     'ontouchstart' in window;
 
+  // ---------------------------------------------------------------------------
+  // 容器
+  //   手机：box 本身就是那颗「当前技能」按钮（有尺寸 → 「按键布局」里能正常抓取/存位置）
+  //   PC  ：box 是横排容器，8 个槽位是它的孩子
+  // ---------------------------------------------------------------------------
   const box = document.createElement('div');
-  box.className = 'sk-box ' + (coarse ? 'sk-box--mobile' : 'sk-box--desk');
-  // 容器不拦截触摸：只有具体槽位可点，缝隙仍可用来转视角
+  box.className = 'sk-box ' + (coarse ? 'sk-box--mobile kui-iconbtn' : 'sk-box--desk');
   box.style.position = 'fixed';
   box.style.zIndex = '60';
   box.style.display = 'flex';
-  box.style.pointerEvents = 'none';
   if (coarse) {
-    // 手机：容器是「零尺寸锚点」，圆心即它的左上角；各槽位按圆弧绝对定位在孩子上。
-    // 这样圆心能跟着跳跃键走（跳跃键被「按键布局」拖走时技能弧也会跟着挪）。
-    box.style.width = '0px';
-    box.style.height = '0px';
-    box.style.right = 'calc(env(safe-area-inset-right, 0px) + 56px)';
-    box.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 60px)';
     box.style.flexDirection = 'column';
     box.style.alignItems = 'center';
-    box.style.gap = '0px';
+    box.style.justifyContent = 'center';
+    box.style.gap = '1px';
+    box.style.width = 'clamp(50px, 14vmin, 66px)';
+    box.style.height = 'clamp(50px, 14vmin, 66px)';
+    box.style.pointerEvents = 'auto'; // 只有这一颗按钮吃触摸，其余地方仍可转视角
+    box.style.touchAction = 'none';
+    box.style.userSelect = 'none';
+    box.style.setProperty('-webkit-user-select', 'none');
+    box.style.cursor = 'pointer';
+    box.style.textAlign = 'center';
+    box.style.fontFamily = 'var(--kui-font)';
+    // 默认锚点：跳跃键上方（JS 会按跳跃键的实际位置重算并覆盖，这里只兜底第一帧）
+    box.style.right = 'calc(env(safe-area-inset-right, 0px) + 56px)';
+    box.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 150px)';
   } else {
     // PC：横向一排，靠屏右下角
     box.style.right = '18px';
     box.style.bottom = '22px';
+    box.style.pointerEvents = 'none';
     box.style.flexDirection = 'row';
     box.style.alignItems = 'center';
     box.style.gap = '8px';
   }
   document.body.appendChild(box);
 
-  const slots = [];
+  // 按钮上的两行字（手机专用）
+  let btnLabel = null;
+  let btnCount = null;
+  if (coarse) {
+    btnLabel = document.createElement('div');
+    btnLabel.className = 'sk-label';
+    btnLabel.style.cssText =
+      'font-weight:600;font-size:clamp(9px,2.6vmin,11px);max-width:92%;' +
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    btnCount = document.createElement('div');
+    btnCount.className = 'sk-key kui-num';
+    btnCount.style.cssText = 'font-size:clamp(8px,2.2vmin,10px);color:var(--kui-ink-soft);';
+    box.appendChild(btnLabel);
+    box.appendChild(btnCount);
+  }
 
+  // 轮盘容器（手机专用）：挂在 body 上，圆心对齐按钮中心。
+  // 挂在 body 而不是按钮里，是为了不被按钮的边框/尺寸裁切，也不参与按钮的点击。
+  const wheel = coarse ? document.createElement('div') : null;
+  if (wheel) {
+    wheel.className = 'sk-wheel';
+    wheel.style.cssText = 'position:fixed;z-index:61;display:none;pointer-events:none;';
+    document.body.appendChild(wheel);
+  }
+
+  const slots = [];
   let dropHandler = null; // 由 Game 注入：丢弃第 index 个槽位的物品
   let yHeld = false;      // PC：丢弃修饰键是否按住（按住 + 数字键 = 丢弃）
 
@@ -67,34 +111,77 @@ export function createSkillSlots(opts = {}) {
 
   function fire(slot) {
     if (boxHidden) return; // 整体隐藏时（对战 / 灵魂出窍）技能不可触发，而不只是看不见
+    if (!slot || !slot.act) return;
     const now = performance.now();
-    if (now < slot.cdUntil || !slot.act) return;
+    if (now < slot.cdUntil) return;
     slot.cdUntil = now + COOLDOWN;
-    slot.el.style.opacity = '0.55';
-    setTimeout(() => { slot.el.style.opacity = '1'; }, COOLDOWN);
+    // 手机端槽位藏在轮盘里，反馈要打在看得见的按钮上
+    const visual = coarse ? box : slot.el;
+    visual.style.transition = 'opacity .12s ease';
+    visual.style.opacity = '0.55';
+    setTimeout(() => { visual.style.opacity = '1'; }, COOLDOWN);
     slot.act();
   }
 
-  // 空槽显示「空」，有技能显示技能名；手机上空槽直接隐藏，容器内没有可用技能时整个容器隐藏
+  // ---- 手机端：当前技能 / 轮盘状态 ----
+  let cur = 0;        // 当前槽位索引
+  let fanSign = 1;    // 轮盘展开方向：1 = 朝上，-1 = 朝下（按钮贴近屏幕顶部时翻转）
+  let wheelR = 88;    // 轮盘半径
+  let wheelScale = 1; // 轮盘项缩放（技能多时缩小，免得叠在一起）
+
+  function readCur() {
+    const n = parseInt(localStorage.getItem(CUR_KEY) || '', 10);
+    return Number.isFinite(n) && n >= 0 && n < SLOT_COUNT ? n : 0;
+  }
+  function saveCur() {
+    try { localStorage.setItem(CUR_KEY, String(cur)); } catch (e) { /* 存不了就只本次会话有效 */ }
+  }
+  function equipped() { return slots.filter((s) => s.act); }
+  function ensureCur() {
+    if (!slots[cur] || !slots[cur].act) {
+      const i = slots.findIndex((s) => s.act);
+      cur = i < 0 ? 0 : i;
+    }
+  }
+  cur = coarse ? readCur() : 0;
+
+  // 刷新按钮上的「技能名 + 第几个/共几个」
+  function paintBtn() {
+    if (!coarse) return;
+    const list = equipped();
+    ensureCur();
+    const s = slots[cur];
+    btnLabel.textContent = (s && s.act) ? (s.name || '技能') : '技能';
+    const pos = list.indexOf(s);
+    const multi = list.length > 1 && pos >= 0;
+    btnCount.textContent = multi ? (pos + 1) + '/' + list.length : '';
+    btnCount.style.display = multi ? 'block' : 'none';
+  }
+
+  // 空槽显示「空」，有技能显示技能名；手机上空槽藏在轮盘里，容器内没有可用技能时整个按钮隐藏
   function paint(slot) {
     slot.labelEl.textContent = slot.act ? (slot.name || '技能') : '空';
     slot.labelEl.style.color = slot.act ? 'var(--kui-ink)' : 'var(--kui-ink-soft)';
     slot.el.style.display = (coarse && !slot.act) ? 'none' : '';
-    if (coarse) layoutArc();
+    if (coarse) { paintBtn(); layoutWheel(); }
   }
+
   // boxHidden：由外部（Game）控制整体隐藏——某些模式（对战 / 灵魂出窍）不显示技能栏
   let boxHidden = false;
   function applyBoxDisplay() {
-    if (boxHidden) { box.style.display = 'none'; return; }
+    if (boxHidden) {
+      box.style.display = 'none';
+      if (wheel) wheel.style.display = 'none';
+      return;
+    }
     const any = slots.some((s) => s.act);
     box.style.display = (!coarse || any) ? 'flex' : 'none';
   }
-  function refreshBox() { applyBoxDisplay(); if (coarse) layoutArc(); }
+  function refreshBox() { applyBoxDisplay(); if (coarse) { readSavedPos(); layoutMobile(); } }
 
-  // ---- 手机端圆弧布局 ----
-  // 圆心：用过「按键布局」拖动技能槽 → 用保存的比例位置；没拖过 → 跟着跳跃键
-  // （跳跃键被拖走时整条弧一起走）。这里自己算圆心再写 box 的 left/top，
-  // 而不是读 box 当前位置，否则「第一次写完 left/top」会把自己误判成「已被拖动过」。
+  // ---- 手机端定位 ----
+  // 位置来源：① 「按键布局」里存过的比例位置（＝按钮中心）；② 没存过 → 跟着跳跃键：
+  // 按钮排在跳跃键正上方，间距按跳跃键的实际直径算，所以大小屏都不会叠在一起。
   let savedPos = null;
   function readSavedPos() {
     try {
@@ -103,65 +190,93 @@ export function createSkillSlots(opts = {}) {
       savedPos = (p && Number.isFinite(p.cx) && Number.isFinite(p.cy)) ? p : null;
     } catch (e) { savedPos = null; }
   }
-  function arcCenter() {
-    if (savedPos) {
-      const { width, height } = viewportSize();
-      return { cx: savedPos.cx * width, cy: savedPos.cy * height };
-    }
-    const jump = document.querySelector('.mc-jump');
-    if (jump) {
-      const r = jump.getBoundingClientRect();
-      if (r.width) return { cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
-    }
-    const { width, height } = viewportSize();
-    return { cx: width - 56, cy: height - 60 }; // 与 .mc-jump 的默认定位一致
+
+  function jumpRect() {
+    const j = document.querySelector('.mc-jump');
+    if (!j) return null;
+    const r = j.getBoundingClientRect();
+    return r.width ? r : null;
   }
 
-  // 变换里带上 translate(-50%,-50%)，否则长方形槽位会以左上角对齐圆弧点
-  function placeSlot(s) {
-    s.el.style.left = s.arcX + 'px';
-    s.el.style.top = s.arcY + 'px';
-    s.el.style.transform = 'translate(-50%,-50%)' + (s.pressed ? ' scale(0.92)' : '');
-  }
-
-  // 只给「有技能」的槽位排位置：从左下方绕到右上方的一段圆弧（都落在跳跃键上方）
-  function layoutArc() {
+  function layoutMobile() {
     if (!coarse) return;
-    const anchor = arcCenter();
-    box.style.left = anchor.cx + 'px';
-    box.style.top = anchor.cy + 'px';
+    const { width: vw, height: vh } = viewportSize();
+    const W = box.offsetWidth || 56;
+    const H = box.offsetHeight || 56;
+    const jr = jumpRect();
+    // 按钮中心与跳跃键中心的间距 = 跳跃键半径 + 按钮半径 + 一点缝
+    const gap = Math.round(Math.min(14, Math.max(8, H * 0.16)));
+    const R = Math.min(110, Math.max(64, (jr ? jr.height / 2 : 39) + H / 2 + gap));
+
+    let cx = null;
+    let cy = null;
+    if (savedPos) { cx = savedPos.cx * vw; cy = savedPos.cy * vh; }
+    if (cx === null) {
+      if (jr) { cx = jr.left + jr.width / 2; cy = jr.top + jr.height / 2 - R; }
+      else { cx = vw - 56; cy = vh - 60 - R; }
+    } else if (jr) {
+      // 旧数据可能存的是「圆弧圆心」（＝跳跃键中心），那会让按钮压在跳跃键上 → 视为失效，走默认位
+      const d = Math.hypot(cx - (jr.left + jr.width / 2), cy - (jr.top + jr.height / 2));
+      if (d < jr.height / 2 + H / 2) { cx = jr.left + jr.width / 2; cy = jr.top + jr.height / 2 - R; }
+    }
+    // 夹进屏幕，避免按钮（及其外面的轮盘）被挤出可视区
+    cx = Math.max(4 + W / 2, Math.min(vw - 4 - W / 2, cx));
+    cy = Math.max(4 + H / 2, Math.min(vh - 4 - H / 2, cy));
+    box.style.left = (cx - W / 2) + 'px';
+    box.style.top = (cy - H / 2) + 'px';
     box.style.right = 'auto';
     box.style.bottom = 'auto';
-    const visible = slots.filter((s) => s.act);
-    const n = visible.length;
-    if (!n) return;
-    // 半径随数量增长，保证相邻槽位不叠在一起；上限避免跑到屏幕外
-    // （槽位最大 58px，弧长约 108°，所以 n 个槽位需要 R ≈ (n-1)*30 才不会明显重叠）
-    const R = Math.min(200, Math.max(104, (n - 1) * 30));
-    const a0 = 178 * Math.PI / 180; // 起点：正左（略高于水平线，别掉到跳跃键中线以下）
-    const a1 = 70 * Math.PI / 180;  // 终点：右上
+    wheel.style.left = cx + 'px';
+    wheel.style.top = cy + 'px';
+    layoutWheel();
+  }
+
+  function boxCenter() {
+    const r = box.getBoundingClientRect();
+    return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, W: r.width, H: r.height };
+  }
+
+  // 把「有技能」的槽位摆到按钮周围的扇形上。
+  // 角度用屏幕坐标：sx = cos(a)*R，sy = -sin(a)*R（取负才是「屏幕上方」）。
+  // 槽位多、弧上挤不下时按比例缩小（轮盘保持小巧，不靠放大半径去腾地方）。
+  function layoutWheel() {
+    if (!coarse) return;
+    const { width: vw, height: vh } = viewportSize();
+    const c = boxCenter();
+    const vmin = Math.min(vw, vh);
+    wheelR = Math.round(Math.min(112, Math.max(74, vmin * 0.19)));
+    // 按钮太靠上 → 上方排不下，整个扇形翻到下方（选择逻辑用 fanSign 镜像，不受影响）
+    fanSign = (c.cy - 8 < wheelR + c.H * 0.9) ? -1 : 1;
+    const list = equipped();
+    const n = list.length;
+    // 相邻槽位的弦长 vs 槽位尺寸 → 该缩多小。上限 1（不放大），下限 0.58（再小就看不清了）
+    const slotPx = Math.min(56, Math.max(42, vmin * 0.12)); // 与 CSS clamp(42px,12vmin,56px) 对齐
+    const span = (FAN_HI - FAN_LO) * Math.PI / 180;
+    const chord = n > 1 ? 2 * wheelR * Math.sin(span / (2 * (n - 1))) : Infinity;
+    wheelScale = n > 1 ? Math.max(0.58, Math.min(1, chord / (slotPx * 1.06))) : 1;
     for (let i = 0; i < n; i++) {
-      const a = n === 1 ? Math.PI / 2 : (a0 + (a1 - a0) * (i / (n - 1)));
-      const s = visible[i];
-      s.arcX = Math.cos(a) * R;
-      s.arcY = -Math.sin(a) * R; // 屏幕 y 向下 → 取负才是「上方」
-      placeSlot(s);
+      const deg = n === 1 ? 90 : (FAN_HI - (FAN_HI - FAN_LO) * (i / (n - 1)));
+      const a = deg * Math.PI / 180;
+      const s = list[i];
+      s.el.style.left = (Math.cos(a) * wheelR) + 'px';
+      s.el.style.top = (-fanSign * Math.sin(a) * wheelR) + 'px';
+      s.el.style.transform = 'translate(-50%,-50%) scale(' + wheelScale.toFixed(3) + ')';
     }
   }
-  onRelayout(() => { if (coarse) { readSavedPos(); layoutArc(); } });
 
+  onRelayout(() => { if (coarse) { readSavedPos(); layoutMobile(); } });
+
+  // ---------------------------------------------------------------------------
   // 预建全部槽位
-  if (coarse) readSavedPos(); // 先读出「按键布局」里是否存过技能槽位置，再排圆弧
+  // ---------------------------------------------------------------------------
+  if (coarse) readSavedPos();
   for (let i = 0; i < SLOT_COUNT; i++) {
     const keyName = SKILL_KEYS[i];
     const el = document.createElement('div');
     el.className = 'sk-slot kui-iconbtn';
-    // 触摸优先：槽位自身捕获指针，容器缝隙仍可转视角
-    el.style.pointerEvents = 'auto';
     el.style.touchAction = 'none';
     el.style.userSelect = 'none';
     el.style.setProperty('-webkit-user-select', 'none');
-    el.style.cursor = 'pointer';
     el.style.flexDirection = 'column';
     el.style.alignItems = 'center';
     el.style.justifyContent = 'center';
@@ -170,14 +285,17 @@ export function createSkillSlots(opts = {}) {
     el.style.fontFamily = 'var(--kui-font)';
     if (coarse) {
       // 尺寸用 vmin（短边）而不是 vw——vw 在旋转后宽度翻倍会让控件突然变大
-      el.style.width = 'clamp(42px, 12vmin, 58px)';
-      el.style.height = 'clamp(42px, 12vmin, 58px)';
-      el.style.fontSize = 'clamp(10px, 2.8vmin, 12px)';
-      el.style.position = 'absolute'; // 圆弧定位：坐标相对零尺寸容器（＝圆心）
+      el.style.position = 'absolute'; // 相对轮盘容器（其左上角＝按钮中心）定位
       el.style.left = '0px';
       el.style.top = '0px';
       el.style.transform = 'translate(-50%,-50%)';
+      el.style.pointerEvents = 'none'; // 选择由按钮的手势统一处理，轮盘项本身不吃触摸
+      el.style.width = 'clamp(42px, 12vmin, 56px)';
+      el.style.height = 'clamp(42px, 12vmin, 56px)';
+      el.style.fontSize = 'clamp(10px, 2.8vmin, 12px)';
     } else {
+      el.style.pointerEvents = 'auto';
+      el.style.cursor = 'pointer';
       el.style.minWidth = '56px';
       el.style.height = '56px';
       el.style.fontSize = '12px';
@@ -199,66 +317,189 @@ export function createSkillSlots(opts = {}) {
     el.appendChild(keyEl);
 
     const slot = { el, labelEl: label, act: null, name: '', cdUntil: 0, keyName };
-    // 触摸优先：自行捕获指针并阻止冒泡，确保点击技能槽不会同时被转视角区吃掉。
-    // 直接按下即触发（不等 click）：多点触控时另一只手正按住摇杆，合成的 click 常常不派发，
-    // 会导致「边走边点技能」没反应。
-    // 手势：轻点 = 触发技能；长按（≥gestureMs）后上滑（≥gestureDy）= 丢弃该槽物品。
-    // 因此这里改为「按下记录、抬起才触发」：只有这样才能把轻点与长按上滑区分开。
-    // 指针已被该元素捕获，多点触控下 pointerup 仍会派发到本元素（不同于合成 click），
-    // 所以「另一只手按着摇杆时边走边点技能」依然可用。
-    let pressT = 0;      // 本次按下的时间戳
-    let pressY = 0;      // 本次按下的纵坐标
-    let armed = false;   // 是否已进入「长按」状态
-    let consumed = false;// 本次手势是否已作为丢弃消费掉
-    let timer = 0;
-    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
-    // 长按反馈：手机端的槽位是靠 transform 定位到圆弧上的，所以缩放必须叠加在
-    // translate(-50%,-50%) 之上（直接写 scale 会把槽位弹回容器左上角）。
-    const setPressed = (v) => {
-      slot.pressed = !!v;
-      if (coarse) placeSlot(slot);
-      else el.style.transform = v ? 'scale(0.92)' : '';
-    };
-    el.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
-      pressT = performance.now();
-      pressY = e.clientY;
-      armed = false;
-      consumed = false;
-      clearTimer();
-      timer = setTimeout(() => {
-        timer = 0;
-        armed = true;
-        setPressed(true); // 长按反馈：轻微收缩，提示「可上滑丢弃」
-      }, gestureMs);
-    });
-    el.addEventListener('pointermove', (e) => {
-      if (!armed || consumed) return;
-      if (pressY - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃
-        consumed = true;
+
+    if (coarse) {
+      wheel.appendChild(el);
+    } else {
+      // PC：触摸优先那套手势直接作用在每个槽位上
+      // 按下即触发（不等 click）：多点触控时另一只手正按住摇杆，合成的 click 常常不派发，
+      // 会导致「边走边点技能」没反应。手势：轻点 = 触发技能；长按（≥gestureMs）后上滑 = 丢弃。
+      // 因此改成「按下记录、抬起才触发」：只有这样才能把轻点与长按上滑区分开。
+      let pressT = 0;      // 本次按下的时间戳
+      let pressY = 0;      // 本次按下的纵坐标
+      let armed = false;   // 是否已进入「长按」状态
+      let consumed = false;// 本次手势是否已作为丢弃消费掉
+      let timer = 0;
+      const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+      el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+        pressT = performance.now();
+        pressY = e.clientY;
         armed = false;
+        consumed = false;
         clearTimer();
-        setPressed(false);
-        dropSlot(slot);
-      }
-    });
-    const endPress = (canceled) => {
-      clearTimer();
-      setPressed(false);
-      const wasArmed = armed;
-      armed = false;
-      if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能
-      if (performance.now() - pressT < gestureMs) fire(slot); // 轻点 → 触发技能
-    };
-    el.addEventListener('pointerup', () => endPress(false));
-    el.addEventListener('pointercancel', () => endPress(true));
-    box.appendChild(el);
+        timer = setTimeout(() => {
+          timer = 0;
+          armed = true;
+          el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
+        }, gestureMs);
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (!armed || consumed) return;
+        if (pressY - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃
+          consumed = true;
+          armed = false;
+          clearTimer();
+          el.style.transform = '';
+          dropSlot(slot);
+        }
+      });
+      const endPress = (canceled) => {
+        clearTimer();
+        el.style.transform = '';
+        const wasArmed = armed;
+        armed = false;
+        if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能
+        if (performance.now() - pressT < gestureMs) fire(slot); // 轻点 → 触发技能
+      };
+      el.addEventListener('pointerup', () => endPress(false));
+      el.addEventListener('pointercancel', () => endPress(true));
+      box.appendChild(el);
+    }
     slots.push(slot);
     paint(slot);
   }
   refreshBox();
+
+  // ---------------------------------------------------------------------------
+  // 手机端手势：轻点 = 用当前技能 / 拖出 = 轮盘选 / 长按上滑 = 丢弃
+  // ---------------------------------------------------------------------------
+  if (coarse) {
+    let pid = null;
+    let mode = '';   // pending | wheel | drop | consumed | none
+    let pressT = 0;
+    let sx = 0;
+    let sy = 0;
+    let timer = 0;
+    let hitIdx = -1;
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+
+    const setPressed = (v) => { box.style.transform = v ? 'scale(0.92)' : ''; };
+
+    // 手指方向 → 扇区角度（度）。fanSign 把「朝下展开」的轮盘镜像回来，
+    // 所以调用方只需像上半圆那样判断 ang ≥ 5 即可。
+    const fingerAngle = (dx, dy) => Math.atan2(-dy * fanSign, dx) * 180 / Math.PI;
+
+    const highlight = (idx) => {
+      const list = equipped();
+      for (let i = 0; i < list.length; i++) {
+        const on = i === idx;
+        const el = list[i].el;
+        const base = 'translate(-50%,-50%) scale(' + wheelScale.toFixed(3) + ')';
+        el.style.transform = on ? base + ' scale(1.14)' : base;
+        el.style.boxShadow = on ? '0 0 0 2px var(--kui-blue-soft)' : '';
+        el.style.filter = on ? 'brightness(1.2)' : '';
+      }
+    };
+
+    const openWheel = () => {
+      layoutWheel();
+      highlight(-1);
+      wheel.style.display = 'block';
+      box.style.filter = 'brightness(1.15)';
+      setPressed(true);
+    };
+
+    const closeWheel = () => {
+      wheel.style.display = 'none';
+      highlight(-1);
+      box.style.filter = '';
+      setPressed(false);
+    };
+
+    box.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try { box.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      pid = e.pointerId;
+      mode = 'pending';
+      hitIdx = -1;
+      pressT = performance.now();
+      sx = e.clientX;
+      sy = e.clientY;
+      clearTimer();
+      timer = setTimeout(() => {
+        timer = 0;
+        if (mode !== 'pending') return;
+        mode = 'drop';   // 长按 → 进入丢弃态（再上滑才真丢）
+        setPressed(true);
+      }, gestureMs);
+    });
+
+    box.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== pid) return;
+      const dx = e.clientX - sx;
+      const dy = e.clientY - sy;
+      const d = Math.hypot(dx, dy);
+      if (mode === 'pending') {
+        if (d < SWIPE_OUT) return;
+        clearTimer();
+        if (fingerAngle(dx, dy) < 5) { mode = 'none'; return; } // 朝轮盘没有的方向拖 → 不展开
+        mode = 'wheel';
+        openWheel();
+      }
+      if (mode === 'wheel') {
+        const n = equipped().length;
+        const ang = fingerAngle(dx, dy);
+        hitIdx = (n === 0 || d < wheelR * DEAD_RATIO || ang < 5) ? -1 : sectorIndex(ang, n);
+        highlight(hitIdx);
+      } else if (mode === 'drop') {
+        if (sy - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃当前技能
+          mode = 'consumed';
+          clearTimer();
+          closeWheel();
+          dropSlot(slots[cur]);
+        }
+      }
+    });
+
+    const finish = (canceled) => {
+      if (pid === null) return;
+      pid = null;
+      clearTimer();
+      const m = mode;
+      mode = '';
+      if (!canceled) {
+        if (m === 'pending') {
+          if (performance.now() - pressT < gestureMs) fire(slots[cur]); // 轻点
+        } else if (m === 'wheel') {
+          const list = equipped();
+          const s = hitIdx >= 0 ? list[hitIdx] : null; // 死区外松手才切换
+          if (s) {
+            const idx = slots.indexOf(s);
+            if (idx >= 0) { cur = idx; saveCur(); }
+            paintBtn();
+            fire(s);
+          }
+        }
+      }
+      hitIdx = -1;
+      closeWheel();
+    };
+
+    box.addEventListener('pointerup', () => finish(false));
+    box.addEventListener('pointercancel', () => finish(true));
+  }
+
+  // 扇区角度 → 第几个（0 = 最左）。两端会夹住，所以略微偏出也在可选范围内。
+  function sectorIndex(ang, n) {
+    if (n <= 1) return 0;
+    const t = (FAN_HI - ang) / (FAN_HI - FAN_LO);
+    const tc = Math.max(0, Math.min(1, t));
+    return Math.round(tc * (n - 1));
+  }
 
   // 指定装备到第 index 槽（0 起）。返回 true 表示成功。
   function assign(index, opts) {
@@ -314,6 +555,7 @@ export function createSkillSlots(opts = {}) {
     window.removeEventListener('keydown', keyHandler);
     window.removeEventListener('keyup', keyUpHandler);
     window.removeEventListener('blur', blurHandler);
+    if (wheel) wheel.remove();
     box.remove();
   }
 

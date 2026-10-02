@@ -17,6 +17,7 @@ import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSce
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
+import { raycastWorld, moveSphereWorld } from '../world/collision/worldQuery.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
@@ -1857,13 +1858,37 @@ export class Game {
 
       if (!h.settled) {
         h.vel.y += Config.GRAVITY * Config.BLACKHOLE_GRAVITY * dt;
-        h.group.position.addScaledVector(h.vel, dt);
-        if (h.group.position.y <= 0.9) {
-          h.group.position.y = 0.9;
+        const pos = h.group.position;
+        const sx = h.vel.x * dt;
+        const sy = h.vel.y * dt;
+        const sz = h.vel.z * dt;
+        const len = Math.hypot(sx, sy, sz);
+        let landed = false;
+        // 飞行途中扫掠一次：撞到墙 / 楼板 / 掩体就贴面停下（原先只判 y≤0.9，会直接穿进建筑里）
+        if (len > 1e-6) {
+          const rad = Config.BLACKHOLE_RADIUS_MIN;
+          const hit = raycastWorld(
+            this.colliders,
+            pos.x, pos.y, pos.z,
+            sx / len, sy / len, sz / len,
+            len + rad,
+            { floor: false }, // 地面仍走下面的 y≤0.9，保持原来「贴地 0.9 停住」的手感
+          );
+          if (hit) {
+            const back = rad * 0.9; // 沿射线回退一个半径，球体贴面而不是嵌进去
+            pos.set(hit.x - (sx / len) * back, Math.max(hit.y - (sy / len) * back, 0.9), hit.z - (sz / len) * back);
+            landed = true;
+          }
+        }
+        if (!landed) {
+          pos.addScaledVector(h.vel, dt);
+          if (pos.y <= 0.9) { pos.y = 0.9; landed = true; }
+        }
+        if (landed) {
           h.vel = null;
           h.settled = true;
           // 飞行只有投掷者自己模拟；落地那一刻把落点广播出去，其他人照着摆
-          if (!h.net) this.network.sendBlackHole(h.group.position.x, h.group.position.z);
+          if (!h.net) this.network.sendBlackHole(pos.x, pos.z);
         }
         continue;
       }
@@ -3997,81 +4022,22 @@ export class Game {
     }
   }
 
-  // 射线打世界碰撞体，取最近命中：返回 { point, collider } 或 null。
-  // 只认盒（含 rotY）与凸包的包围盒；trimesh 跳过（太贵，抓钩不需要那么精）。
+  // 射线打世界碰撞体，取最近命中：返回 { point, normal } 或 null。
+  // 交给 worldQuery：盒按 OBB（含 rotY）、凸包按真实三角形、trimesh 走 BVH——复杂建筑不再被穿透，
+  // 另外把「隐式地面」也算进去（世界里地面不是碰撞体，但抓钩应该能勾住地面）。
   _rayHitWorld(origin, dir, maxDist) {
-    let best = maxDist;
-    let hitAny = false;
-    for (const c of this.colliders) {
-      const box = this._colliderAABB(c);
-      if (!box) continue;
-      const t = this._rayAabb(origin, dir, box);
-      if (t == null || t >= best) continue;
-      best = t;
-      hitAny = true;
-    }
-    if (!hitAny) return null;
-    return { point: origin.clone().addScaledVector(dir, best) };
-  }
-
-  // 取碰撞体的世界 AABB：盒直接给；凸包按顶点算一次并缓存（惰性，之后 O(1)）
-  _colliderAABB(c) {
-    if (!c) return null;
-    if (c.type === 'trimesh') return null;
-    if (Number.isFinite(c.hx) && Number.isFinite(c.hy) && Number.isFinite(c.hz)) {
-      // 带 rotY 的盒：绕中心旋转，取旋转后的外接 AABB（够用且不做旋转矩阵运算）
-      if (Number.isFinite(c.rotY) && c.rotY !== 0) {
-        const cs = Math.abs(Math.cos(c.rotY));
-        const sn = Math.abs(Math.sin(c.rotY));
-        const hx = c.hx * cs + c.hz * sn;
-        const hz = c.hx * sn + c.hz * cs;
-        return { cx: c.cx, cy: c.cy, cz: c.cz, hx, hy: c.hy, hz };
-      }
-      return { cx: c.cx, cy: c.cy, cz: c.cz, hx: c.hx, hy: c.hy, hz: c.hz };
-    }
-    if (c.type === 'convex' && c.vertices) {
-      if (c._gAABB !== undefined) return c._gAABB;
-      const v = c.vertices;
-      let minX = Infinity, minY = Infinity, minZ = Infinity;
-      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-      for (let i = 0; i + 2 < v.length; i += 3) {
-        if (v[i] < minX) minX = v[i];
-        if (v[i] > maxX) maxX = v[i];
-        if (v[i + 1] < minY) minY = v[i + 1];
-        if (v[i + 1] > maxY) maxY = v[i + 1];
-        if (v[i + 2] < minZ) minZ = v[i + 2];
-        if (v[i + 2] > maxZ) maxZ = v[i + 2];
-      }
-      c._gAABB = Number.isFinite(minX)
-        ? { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, cz: (minZ + maxZ) / 2,
-            hx: (maxX - minX) / 2, hy: (maxY - minY) / 2, hz: (maxZ - minZ) / 2 }
-        : null;
-      return c._gAABB;
-    }
-    return null;
-  }
-
-  // 射线 × AABB 的 slab 求交：返回最近正向交点距离；不命中返回 null
-  _rayAabb(o, d, b) {
-    let tmin = 0;
-    let tmax = Infinity;
-    const lo = [b.cx - b.hx, b.cy - b.hy, b.cz - b.hz];
-    const hi = [b.cx + b.hx, b.cy + b.hy, b.cz + b.hz];
-    const oo = [o.x, o.y, o.z];
-    const dd = [d.x, d.y, d.z];
-    for (let i = 0; i < 3; i++) {
-      if (Math.abs(dd[i]) < 1e-8) {
-        if (oo[i] < lo[i] || oo[i] > hi[i]) return null; // 平行且在板外
-        continue;
-      }
-      let t1 = (lo[i] - oo[i]) / dd[i];
-      let t2 = (hi[i] - oo[i]) / dd[i];
-      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
-      if (t1 > tmin) tmin = t1;
-      if (t2 < tmax) tmax = t2;
-      if (tmin > tmax) return null;
-    }
-    return tmin;
+    const hit = raycastWorld(
+      this.colliders,
+      origin.x, origin.y, origin.z,
+      dir.x, dir.y, dir.z,
+      maxDist,
+      { floorY: 0 },
+    );
+    if (!hit) return null;
+    return {
+      point: new THREE.Vector3(hit.x, hit.y, hit.z),
+      normal: new THREE.Vector3(hit.nx, hit.ny, hit.nz),
+    };
   }
 
   // ============ 丢弃物品：带物理地抛在地上，且全员可见 ============
@@ -4190,24 +4156,18 @@ export class Game {
       if (d.life <= 0) { this._removeDrop(d); this._drops.splice(i, 1); continue; }
 
       if (!d.resting) {
-        d.vy += G * dt;
-        d.x += d.vx * dt;
-        d.y += d.vy * dt;
-        d.z += d.vz * dt;
-        // 地面：速度还快就弹一下，慢下来则贴地并进入摩擦减速
-        if (d.y <= R) {
-          d.y = R;
-          if (Math.abs(d.vy) > 1.6) d.vy = -d.vy * 0.34;
-          else d.vy = 0;
-          d.vx *= 0.72;
-          d.vz *= 0.72;
-          if (d.vy === 0 && Math.abs(d.vx) < 0.18 && Math.abs(d.vz) < 0.18) { d.vx = 0; d.vz = 0; d.resting = true; }
-        }
-        // 边界回弹
+        // 世界碰撞交给 worldQuery：地面（隐式平面 y=0）+ 盒/OBB/凸包/trimesh 全部生效，
+        // 所以丢出去的物品会落在楼板、掩体、柱子顶上，也会被墙弹回来（不再穿墙掉进虚空）。
+        const grounded = moveSphereWorld(this.colliders, d, dt, R, { gravity: G, floorY: 0 });
+        // 世界边界回弹（竞技场用当前场地半边长）
         if (d.x > bx) { d.x = bx; d.vx = -Math.abs(d.vx) * 0.45; }
         else if (d.x < -bx) { d.x = -bx; d.vx = Math.abs(d.vx) * 0.45; }
         if (d.z > bz) { d.z = bz; d.vz = -Math.abs(d.vz) * 0.45; }
         else if (d.z < -bz) { d.z = -bz; d.vz = Math.abs(d.vz) * 0.45; }
+        // 站稳了（踩到可站立面且几乎不动）→ 进入静止态，不再做碰撞解算
+        if (grounded && d.vy === 0 && Math.abs(d.vx) < 0.18 && Math.abs(d.vz) < 0.18) {
+          d.vx = 0; d.vz = 0; d.resting = true;
+        }
         // 翻滚：水平速度越快转得越快
         const sp = Math.hypot(d.vx, d.vz);
         d.mesh.rotation.x += sp * dt * 0.9;
