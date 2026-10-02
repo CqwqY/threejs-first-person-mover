@@ -183,6 +183,8 @@ export const Config = {
   BOSS_BOLT_SPREAD_MAX: 11,       // 随机落点离老师的最远距离（米）
   // 三阶段：手动开启的间歇性护盾
   BOSS_SHIELD_KEY: 'KeyQ',        // 开启护盾的键
+  SOUL_KEY: 'KeyP',               // 灵魂出窍切换键（肉身留在原地，视角自由飞行）
+  SOUL_SPEED: 18,                 // 灵魂飞行速度（米/秒），按住 Shift 三倍
   BOSS_SHIELD_DURATION: 1.5,      // 护盾持续时间（秒）
   BOSS_SHIELD_COOLDOWN: 2.8,      // 护盾冷却（秒，从开启时算）
   BOSS_SHIELD_DAMAGE: 100,        // 护盾成功挡下激光时老师掉的血
@@ -271,7 +273,7 @@ export const Config = {
   METEOR_SPEED_MAX: 40,
   METEOR_RADIUS_MIN: 1.4,       // 陨石命中半径（米）
   METEOR_RADIUS_MAX: 3.2,
-  METEOR_DAMAGE: 80,            // 被陨石砸中的伤害（500 血约挨 6 下）
+  METEOR_DAMAGE: 200,           // 被陨石砸中的伤害（一砸 200，500 血约 3 下）
   METEOR_IMPACT_PAD: 0.8,       // 落点判定额外余量（米）
   METEOR_SPAWN_Y: 60,           // 陨石初始高度
   METEOR_MAX_ALIVE: 80,         // 同屏陨石上限

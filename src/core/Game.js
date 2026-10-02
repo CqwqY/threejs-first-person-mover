@@ -356,6 +356,14 @@ export class Game {
       this._activateShield();
     });
 
+    // 灵魂出窍：P 键切换（肉身留在原地，视角脱离身体自由飞行）
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.SOUL_KEY) return;
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (this.aiChat && this.aiChat.isOpen()) return;
+      this._toggleSoul();
+    });
+
     // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
     // 开了加特林就改成「按住持续扫射」
     this.renderer.domElement.addEventListener('mousedown', (e) => {
@@ -398,6 +406,9 @@ export class Game {
     this._matchMode = 'meteor';
     this._combatOverlay = null; // 「匹配中…」浮层
     this._combatHud = null;     // 对战状态条
+    this._pendingCombatExit = false; // 对战中被击倒 → 下一帧统一退房（避免在伤害循环里改状态）
+    this._failEl = null;        // 屏幕中央「失败」字样（非弹窗）
+    this._soul = null;          // P 键灵魂出窍：{ x, y, z, yaw, pitch }，null 表示未出窍
   }
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
@@ -450,10 +461,18 @@ export class Game {
     if (next <= 0 && !this._dead) this._die();
   }
 
-  // 死亡：锁住操控，短暂延迟后满血重生到出生点
+  // 死亡：锁住操控，短暂延迟后满血重生到出生点；若在对战中则直接判负退房
   _die() {
     this._dead = true;
     this._setChatLock(true);
+    if (this._soul) this._soul = null; // 死亡先收回灵魂，避免相机卡在自由飞行
+    if (this._combat) {
+      // 对战中被击倒：屏幕中央弹「失败」，并标记退房（真正的退房放到主循环统一执行，
+      // 以免在陨石/投掷物的伤害循环里改动 this._combat / this._meteors 导致遍历错乱）
+      this._showFailText('失败');
+      this._pendingCombatExit = true;
+      return;
+    }
     this._toast('你被击倒了，即将在出生点重生');
     setTimeout(() => this._respawn(), Config.RESPAWN_DELAY * 1000);
   }
@@ -1379,6 +1398,7 @@ export class Game {
   // 主攻击入口：对战中丢能量球（打人），否则走 Boss 战的粉笔头。
   // 左键与手机「攻击」按钮都走这里，保证两端口径一致。
   _primaryAttack() {
+    if (this._soul) return; // 灵魂出窍时肉身不可攻击
     if (this._combat) { this._combatAttack(); return; }
     this._attackBoss();
   }
@@ -3232,6 +3252,93 @@ export class Game {
     }
   }
 
+  // 屏幕中央弹字（不是弹窗）：用于对战失败等强反馈，淡入后自动淡出
+  _showFailText(text) {
+    if (this._failEl) { this._failEl.remove(); this._failEl = null; }
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;left:50%;top:44%;transform:translate(-50%,-50%) scale(.7);' +
+      'z-index:9600;pointer-events:none;white-space:nowrap;' +
+      'font:900 76px/1 var(--kui-font, system-ui, sans-serif);letter-spacing:10px;' +
+      'color:#ff4d4d;text-shadow:0 0 26px rgba(255,60,60,.75),0 6px 22px rgba(0,0,0,.65);' +
+      'opacity:0;transition:opacity .3s ease,transform .3s cubic-bezier(.2,1.4,.4,1);';
+    el.textContent = text;
+    document.body.appendChild(el);
+    this._failEl = el;
+    requestAnimationFrame(() => {
+      el.style.opacity = '1';
+      el.style.transform = 'translate(-50%,-50%) scale(1)';
+    });
+    setTimeout(() => {
+      el.style.opacity = '0';
+      el.style.transform = 'translate(-50%,-50%) scale(1.2)';
+      setTimeout(() => { if (this._failEl === el) { el.remove(); this._failEl = null; } }, 400);
+    }, 1500);
+  }
+
+  // ============ P 键灵魂出窍：肉身留在原地，视角脱离身体自由飞行 ============
+  _toggleSoul() {
+    if (this._soul) {
+      this._soul = null;
+      this.input.consumeJump(); // 清掉出窍期间累积的跳跃请求，归位后不要莫名跳一下
+      this._toast('灵魂归位');
+      return;
+    }
+    // 起飞点/朝向 = 当前相机（第一人称下即头部位置与视线）
+    this._soul = {
+      x: this.camera.position.x,
+      y: this.camera.position.y,
+      z: this.camera.position.z,
+      yaw: this.localState.yaw,
+      pitch: this.localState.pitch,
+    };
+    this._toast('灵魂出窍：WASD 飞行 / 空格上升 / Ctrl 下降 / Shift 加速 / P 归位');
+  }
+
+  // 灵魂自由飞行：本模式下 localPlayer.update 被跳过，鼠标增量与键位全归灵魂相机使用
+  _updateSoul(dt) {
+    const s = this._soul;
+    if (!s) return;
+    const { x, y } = this.input.takeMouseDelta();
+    s.yaw -= x * Config.MOUSE_SENSITIVITY;
+    s.pitch -= y * Config.MOUSE_SENSITIVITY;
+    const lim = THREE.MathUtils.degToRad(Config.MAX_PITCH_DEG);
+    s.pitch = THREE.MathUtils.clamp(s.pitch, -lim, lim);
+
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const fwd = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP);
+    const right = new THREE.Vector3(Math.cos(s.yaw), 0, -Math.sin(s.yaw));
+    const move = new THREE.Vector3();
+    if (this.input.forwarded()) move.add(fwd);
+    if (this.input.backwarded()) move.sub(fwd);
+    if (this.input.strafeRight()) move.add(right);
+    if (this.input.strafeLeft()) move.sub(right);
+    if (this.input.isDown('Space')) move.y += 1;
+    if (this.input.isDown('ControlLeft') || this.input.isDown('ControlRight')) move.y -= 1;
+    if (move.lengthSq() > 0) {
+      move.normalize().multiplyScalar(Config.SOUL_SPEED * (this.input.sprinting() ? 3 : 1) * dt);
+      s.x += move.x; s.y += move.y; s.z += move.z;
+    }
+    if (s.y < 0.2) s.y = 0.2; // 别钻到地面以下
+
+    this.camera.position.set(s.x, s.y, s.z);
+    this.camera.rotation.set(s.pitch, s.yaw, 0);
+  }
+
+  // 灵魂出窍时把本地「肉身」显示在被冻结的位置（让玩家看到自己的身体留在原地）
+  _updateSoulBody() {
+    const local = this.playerManager.getLocalPlayer();
+    if (!local) return;
+    this.playerManager.setLocalVisible(!this._morphs.has(this.localState.id));
+    const s = this.localState;
+    const size = this.localPlayer.physics.sizeScale;
+    local.model.position.set(s.x, s.y - Config.PLAYER_HEIGHT * size, s.z);
+    local.model.rotation.set(0, s.yaw, 0);
+    setModelScale(local.model, size);
+    setHeldItem(local.model, s.wep || '', s.hold || '');
+  }
+
   // 第三人称：本地模型跟随自身位置朝向并播放行走动画，相机位于玩家后上方看向角色
   _thirdPerson(dt) {
     const local = this.playerManager.getLocalPlayer();
@@ -3574,7 +3681,8 @@ export class Game {
     this._updateCtrl(dt);
 
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
-    this.localPlayer.update(dt);
+    // 灵魂出窍时冻结肉身：跳过本地玩家更新，鼠标/键位交给灵魂相机
+    if (!this._soul) this.localPlayer.update(dt);
     this.playerManager.update(dt);
 
     // 主世界（城市）专属系统：对战中整组跳过，避免城市 NPC/Boss/载具与竞技场互串
@@ -3613,8 +3721,20 @@ export class Game {
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
 
-    // 第三人称：第一人称时保证本地隐藏；第三人称时显示自己并让相机跟随
-    if (this.thirdPerson) {
+    // 对战中被击倒：统一在这里退房（已离开伤害结算循环，改动 this._combat/碰撞体 安全）
+    if (this._pendingCombatExit) {
+      this._pendingCombatExit = false;
+      this.network.sendLeaveRoom();
+      this._exitCombat(this._lobbySpawn);
+      this._setChatLock(false);
+    }
+
+    // 视角优先级：灵魂出窍（自由飞行） > 第三人称 > 第一人称
+    if (this._soul) {
+      this._updateSoul(dt);       // 自由飞行并驱动相机
+      this._updateSoulBody();     // 肉身显示在被冻结的位置
+      this.localPlayer.bobEnabled = false;
+    } else if (this.thirdPerson) {
       // 捉迷藏变成方块时，第三人称下显示方块而不是人形
       this.playerManager.setLocalVisible(!this._morphs.has(this.localState.id));
       this.localPlayer.bobEnabled = false; // 第三人称不做头部晃动
