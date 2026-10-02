@@ -13,6 +13,11 @@ import { ConvexMeshDecomposition } from 'vhacd-js';
 import { instantiate } from '../world/AssetLoader.js';
 import { generateSimple } from '../world/collision/simpleGen.js';
 import { API_BASE } from '../config.js';
+// 场地边界（空气墙）：与游戏运行时共用同一份数据/几何，见 world/Boundary.js
+import {
+  defaultBoundary, normalizeBoundary, boundaryWallSpecs, boundarySpan,
+  BOUNDARY_THICKNESS, BOUNDARY_MIN_SPAN,
+} from '../world/Boundary.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
@@ -190,6 +195,10 @@ export function createEditor() {
     placingEmpty: false, // 空碰撞体放置中：幽灵仅圆环，点击在落点生成空碰撞体
     copyMode: false,  // 复制模式：拖动 3D 轴时先复制一份，本次拖动作用于副本
     raf: 0,
+    // 场地边界（空气墙）：在「边界」模式里编辑，随场景一起保存为 boundary 字段
+    boundary: defaultBoundary(),
+    boundaryFocus: true, // 边界模式：只显示边界（把模型/景物/光源藏起来，看得更清）
+    boundaryDrag: null,  // 正在拖的边界手柄 { kind:'edge'|'corner', side?/keys? }
   };
   // 物体 id：全局唯一的纯数字 id，随场景一起保存/还原。
   // 编号顺序：景物先按 buildScenery 顺序占 1..N（key 固定 → id 固定），摆放物体接续往后排。
@@ -251,6 +260,20 @@ export function createEditor() {
     cHz: document.getElementById('cHz'),
     cOy: document.getElementById('cOy'),
     colliderPanel: document.getElementById('colliderPanel'),
+    btnBound: document.getElementById('tBound'),
+    boundaryPanel: document.getElementById('boundaryPanel'),
+    bInfo: document.getElementById('bInfo'),
+    bHint: document.getElementById('bHint'),
+    bMinX: document.getElementById('bMinX'),
+    bMaxX: document.getElementById('bMaxX'),
+    bMinZ: document.getElementById('bMinZ'),
+    bMaxZ: document.getElementById('bMaxZ'),
+    bHeight: document.getElementById('bHeight'),
+    bShow: document.getElementById('bShow'),
+    bFocus: document.getElementById('bFocus'),
+    bFrame: document.getElementById('bFrame'),
+    bFit: document.getElementById('bFit'),
+    bShrink: document.getElementById('bShrink'),
     btnEmptyCollider: document.getElementById('btnEmptyCollider'),
     cStep: document.getElementById('cStep'),
     cMax: document.getElementById('cMax'),
@@ -357,6 +380,291 @@ export function createEditor() {
     const s = parseFloat(StepUI.snapStep.value) || 1;
     return Math.round(v / s) * s;
   }
+
+  // ---------- 场地边界（空气墙）----------
+  // 边界 = 一圈看不见但挡人的墙，本质是「一个矩形」（四边独立，可以不对称于原点）。
+  // 游戏运行时读的是同一份数据（world/Boundary.js）：
+  //   · 真正挡人的是 PlayerPhysics 的四边夹取；「画出实墙」只是把它画出来，方便定位
+  //   · 保存场景时写进 boundary 字段，游戏刷新即生效；没保存过就沿用地面范围 = 行为不变
+  // 编辑入口：工具栏「边界」→ 俯视全览 → 拖青绿板（移动该边）/ 拖橙色角球（同时改两边）/ 右侧面板填数值
+  const boundaryGroup = new THREE.Group();
+  boundaryGroup.name = 'editor-boundary';
+  boundaryGroup.visible = false;
+  scene.add(boundaryGroup);
+
+  // 地面参考轮廓（只读）：提示「地面到底多大」，方便把墙贴上去
+  {
+    const d = defaultBoundary();
+    const pts = [
+      new THREE.Vector3(d.minX, 0.02, d.minZ), new THREE.Vector3(d.maxX, 0.02, d.minZ),
+      new THREE.Vector3(d.maxX, 0.02, d.maxZ), new THREE.Vector3(d.minX, 0.02, d.maxZ),
+      new THREE.Vector3(d.minX, 0.02, d.minZ),
+    ];
+    const ref = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineDashedMaterial({ color: 0x7d8894, dashSize: 5, gapSize: 4, depthTest: false })
+    );
+    ref.computeLineDistances();
+    ref.renderOrder = 998;
+    boundaryGroup.add(ref);
+  }
+
+  const B_EDGE_COLOR = 0x35d0a5;   // 边界板（青绿）
+  const B_CORNER_COLOR = 0xffa23d; // 角点手柄（橙）
+  const B_HL_COLOR = 0x4ea1ff;     // 命中/拖拽高亮（蓝）
+
+  // 四块板：单位盒 + scale，改尺寸只改 scale，不重建几何（拖拽时每帧都会走这条路）
+  const bPlates = boundaryWallSpecs(defaultBoundary(), BOUNDARY_THICKNESS).map((sp) => {
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial({ color: B_EDGE_COLOR, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthTest: false, depthWrite: false })
+    );
+    m.userData.boundaryEdge = sp.side;
+    m.renderOrder = 996;
+    boundaryGroup.add(m);
+    return m;
+  });
+
+  // 拾取条：俯视全览时场地有 300 多米宽、而墙只有半米厚 —— 屏幕上不到 1 像素，根本点不中。
+  // 所以每面墙再叠一根「看不见但加厚」的条，专门用来接鼠标；高亮仍然做在 bPlates 上。
+  // 不透明度 0 的 mesh 不参与显示，但射线照样能打到（材质不参与 raycast 判定）。
+  const bPickerMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false });
+  const bPickers = boundaryWallSpecs(defaultBoundary(), BOUNDARY_THICKNESS).map((sp) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), bPickerMat);
+    m.userData.boundaryEdge = sp.side;
+    boundaryGroup.add(m);
+    return m;
+  });
+
+  // 四个角球：拖它同时改相邻两边
+  const bCorners = [
+    { keys: ['minX', 'minZ'], mesh: null },
+    { keys: ['maxX', 'minZ'], mesh: null },
+    { keys: ['maxX', 'maxZ'], mesh: null },
+    { keys: ['minX', 'maxZ'], mesh: null },
+  ];
+  for (const c of bCorners) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 16, 12),
+      new THREE.MeshBasicMaterial({ color: B_CORNER_COLOR, depthTest: false })
+    );
+    m.userData.boundaryCorner = c.keys;
+    m.renderOrder = 999;
+    boundaryGroup.add(m);
+    c.mesh = m;
+  }
+
+  // 边界轮廓线（贴地画一圈；y 抬一点避免和地面打架）
+  const _bPts = new Float32Array(15);
+  const bOutline = new THREE.Line(
+    new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(_bPts, 3)),
+    new THREE.LineBasicMaterial({ color: B_EDGE_COLOR, depthTest: false })
+  );
+  bOutline.renderOrder = 997;
+  boundaryGroup.add(bOutline);
+
+  // 面板数值回填：正在输入的框不要覆盖（否则打字打到一半会被改写）
+  function setFieldValue(el, v) {
+    if (!el || document.activeElement === el) return;
+    el.value = Number(v.toFixed(2));
+  }
+
+  function syncBoundaryPanel() {
+    const b = state.boundary;
+    if (!StepUI.bInfo) return;
+    const sp = boundarySpan(b);
+    const d = defaultBoundary();
+    const sameAsGround = Math.abs(b.minX - d.minX) < 0.01 && Math.abs(b.maxX - d.maxX) < 0.01
+      && Math.abs(b.minZ - d.minZ) < 0.01 && Math.abs(b.maxZ - d.maxZ) < 0.01;
+    StepUI.bInfo.textContent =
+      '范围 ' + sp.w.toFixed(1) + ' × ' + sp.d.toFixed(1) + ' 米'
+      + (sameAsGround ? '（正好是地面边缘）' : '（地面是 ' + (d.maxX - d.minX) + ' × ' + (d.maxZ - d.minZ) + '）')
+      + ' · 边界外走不出去，也丢不出去（掉落物会回弹）';
+    setFieldValue(StepUI.bMinX, b.minX);
+    setFieldValue(StepUI.bMaxX, b.maxX);
+    setFieldValue(StepUI.bMinZ, b.minZ);
+    setFieldValue(StepUI.bMaxZ, b.maxZ);
+    setFieldValue(StepUI.bHeight, b.wallHeight);
+    if (StepUI.bShow) StepUI.bShow.checked = !!b.showWalls;
+    if (StepUI.bFocus) StepUI.bFocus.checked = !!state.boundaryFocus;
+    if (StepUI.bHint) {
+      StepUI.bHint.textContent = b.showWalls
+        ? '「画出实墙」已开：游戏里会沿边界画一圈半透明墙，看得见边界在哪。'
+        : '当前是纯空气墙：游戏里看不见，但走到边界就会被挡住。想看墙在哪就勾「画出实墙」。';
+    }
+  }
+
+  // 边界变化后刷新可视化 + 面板（拖拽 / 手填 / 按钮都汇聚到这里）
+  function refreshBoundaryViz() {
+    const b = state.boundary;
+    const h = b.wallHeight;
+    const specs = boundaryWallSpecs(b, BOUNDARY_THICKNESS);
+    // 场地尺度：拾取条粗细与角球大小都跟着它走，大场地才点得中、小场地才不糊住
+    const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ, 10);
+    const pickT = Math.max(2, span / 120);
+    const cr = Math.min(Math.max(span / 45, 0.9), 10);
+    bPlates.forEach((m, i) => {
+      const sp = specs[i];
+      m.position.set(sp.cx, h / 2, sp.cz);
+      m.scale.set(sp.hx * 2, h, sp.hz * 2);
+    });
+    bPickers.forEach((m, i) => {
+      const sp = specs[i];
+      const alongX = sp.side === '+x' || sp.side === '-x'; // 这两面墙的厚度沿 x，长度沿 z
+      m.position.set(sp.cx, h / 2, sp.cz);
+      m.scale.set(alongX ? pickT : sp.hx * 2, h, alongX ? sp.hz * 2 : pickT);
+    });
+    for (const c of bCorners) {
+      c.mesh.position.set(b[c.keys[0]], Math.max(cr * 0.9, 1.2), b[c.keys[1]]);
+      c.mesh.scale.setScalar(cr);
+    }
+    const y = 0.05;
+    _bPts.set([
+      b.minX, y, b.minZ, b.maxX, y, b.minZ, b.maxX, y, b.maxZ, b.minX, y, b.maxZ, b.minX, y, b.minZ,
+    ]);
+    bOutline.geometry.attributes.position.needsUpdate = true;
+    bOutline.geometry.computeBoundingSphere();
+    syncBoundaryPanel();
+  }
+
+  // 改边界：先过 normalizeBoundary（非法值夹回、跨度太小往外撑），再刷新可视化
+  function setBoundary(next, opts) {
+    const norm = normalizeBoundary({ ...state.boundary, ...next });
+    if (norm) state.boundary = norm;
+    refreshBoundaryViz();
+    if (!(opts && opts.silent)) markDirty();
+  }
+
+  // 「只看边界」：把模型/景物/光源藏起来，拖板子时不会被建筑挡视线
+  function applyBoundaryFocus(on) {
+    state.boundaryFocus = !!on;
+    const vis = !state.boundaryFocus;
+    for (const rec of state.placed) if (rec.obj) rec.obj.visible = vis;
+    for (const rec of state.scenery) if (rec.obj) rec.obj.visible = vis;
+    for (const rec of state.lights) {
+      if (rec.obj) rec.obj.visible = vis;
+      if (rec.helper) rec.helper.visible = vis;
+    }
+    if (StepUI.bFocus) StepUI.bFocus.checked = state.boundaryFocus;
+  }
+
+  // 退出边界模式：所有东西无条件恢复可见（它们原本都是可见的）
+  function restoreAllVisible() {
+    state.boundaryFocus = false;
+    for (const rec of state.placed) if (rec.obj) rec.obj.visible = true;
+    for (const rec of state.scenery) if (rec.obj) rec.obj.visible = true;
+    for (const rec of state.lights) {
+      if (rec.obj) rec.obj.visible = true;
+      if (rec.helper) rec.helper.visible = true;
+    }
+  }
+
+  // 俯视全览：正上方往下看，整块场地刚好进画面（fov 55° → 距离取 1.15 倍跨度）
+  let boundaryCamBackup = null;
+  function frameBoundaryTop() {
+    const b = state.boundary;
+    const cx = (b.minX + b.maxX) / 2;
+    const cz = (b.minZ + b.maxZ) / 2;
+    const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ, 20);
+    camera.position.set(cx, span * 1.15, cz + 0.001); // +0.001 避免正上方时 OrbitControls 的 up 退化
+    controls.target.set(cx, 0, cz);
+    controls.update();
+  }
+
+  function pickBoundaryHandle(clientX, clientY) {
+    controlOffset(clientX, clientY);
+    raycaster.setFromCamera(ndc, camera);
+    const corners = raycaster.intersectObjects(bCorners.map((c) => c.mesh), false);
+    if (corners.length) return { kind: 'corner', keys: corners[0].object.userData.boundaryCorner };
+    const plates = raycaster.intersectObjects(bPickers, false); // 命中加厚的隐形拾取条
+    if (plates.length) return { kind: 'edge', side: plates[0].object.userData.boundaryEdge };
+    return null;
+  }
+
+  function setBoundaryHover(hitData) {
+    const side = hitData && hitData.kind === 'edge' ? hitData.side : null;
+    const keys = hitData && hitData.kind === 'corner' ? hitData.keys : null;
+    for (const m of bPlates) {
+      const hot = m.userData.boundaryEdge === side;
+      m.material.color.setHex(hot ? B_HL_COLOR : B_EDGE_COLOR);
+      m.material.opacity = hot ? 0.34 : 0.18;
+    }
+    for (const c of bCorners) {
+      const hot = !!keys && c.keys[0] === keys[0] && c.keys[1] === keys[1];
+      c.mesh.material.color.setHex(hot ? B_HL_COLOR : B_CORNER_COLOR);
+    }
+  }
+
+  function onBoundaryDown(e) {
+    if (e.button !== 0) return;
+    const h = pickBoundaryHandle(e.clientX, e.clientY);
+    if (!h) return;
+    state.boundaryDrag = h;
+    controls.enabled = false; // 拖边界时别同时把视角也转了
+    setBoundaryHover(h);
+  }
+
+  function onBoundaryMove(e) {
+    if (!state.boundaryDrag) {
+      const h = pickBoundaryHandle(e.clientX, e.clientY);
+      setBoundaryHover(h);
+      renderer.domElement.style.cursor = h ? 'grab' : 'default'; // 告诉用户「这里能拖」
+      return;
+    }
+    renderer.domElement.style.cursor = 'grabbing';
+    const p = groundPos(e.clientX, e.clientY, hit);
+    if (!p) return;
+    const b = state.boundary;
+    const d = state.boundaryDrag;
+    const next = {};
+    if (d.kind === 'edge') {
+      const v = snapVal(d.side === '+x' || d.side === '-x' ? p.x : p.z);
+      if (d.side === '+x') next.maxX = Math.max(v, b.minX + BOUNDARY_MIN_SPAN);
+      else if (d.side === '-x') next.minX = Math.min(v, b.maxX - BOUNDARY_MIN_SPAN);
+      else if (d.side === '+z') next.maxZ = Math.max(v, b.minZ + BOUNDARY_MIN_SPAN);
+      else next.minZ = Math.min(v, b.maxZ - BOUNDARY_MIN_SPAN);
+    } else {
+      const x = snapVal(p.x);
+      const z = snapVal(p.z);
+      if (d.keys[0] === 'minX') next.minX = Math.min(x, b.maxX - BOUNDARY_MIN_SPAN);
+      else next.maxX = Math.max(x, b.minX + BOUNDARY_MIN_SPAN);
+      if (d.keys[1] === 'minZ') next.minZ = Math.min(z, b.maxZ - BOUNDARY_MIN_SPAN);
+      else next.maxZ = Math.max(z, b.minZ + BOUNDARY_MIN_SPAN);
+    }
+    setBoundary(next);
+    setBoundaryHover(d);
+  }
+
+  function onBoundaryUp() {
+    if (!state.boundaryDrag) return;
+    state.boundaryDrag = null;
+    controls.enabled = true;
+    renderer.domElement.style.cursor = 'default';
+    markDirty();
+  }
+
+  // 面板事件：四个边数值 / 墙高 / 两个勾选 / 三个按钮
+  [['bMinX', 'minX'], ['bMaxX', 'maxX'], ['bMinZ', 'minZ'], ['bMaxZ', 'maxZ']].forEach(([id, key]) => {
+    const el = StepUI[id];
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const v = parseFloat(el.value);
+      if (Number.isFinite(v)) setBoundary({ [key]: v });
+    });
+  });
+  if (StepUI.bHeight) StepUI.bHeight.addEventListener('input', () => {
+    const v = parseFloat(StepUI.bHeight.value);
+    if (Number.isFinite(v)) setBoundary({ wallHeight: v });
+  });
+  if (StepUI.bShow) StepUI.bShow.onchange = () => setBoundary({ showWalls: StepUI.bShow.checked });
+  if (StepUI.bFocus) StepUI.bFocus.onchange = () => applyBoundaryFocus(StepUI.bFocus.checked);
+  if (StepUI.bFrame) StepUI.bFrame.onclick = () => frameBoundaryTop();
+  if (StepUI.bFit) StepUI.bFit.onclick = () => setBoundary(defaultBoundary()); // 贴合地面边缘
+  if (StepUI.bShrink) StepUI.bShrink.onclick = () => {
+    const b = state.boundary;
+    setBoundary({ minX: b.minX + 5, maxX: b.maxX - 5, minZ: b.minZ + 5, maxZ: b.maxZ - 5 });
+  };
+  refreshBoundaryViz();
 
   // ---------- 放置 ----------
   function place() {
@@ -1004,6 +1312,8 @@ export function createEditor() {
       return;
     }
     if (e.button !== 0) return;
+    // 边界模式：点/拖边界板与角球由自己处理，不走「点选模型」那套
+    if (state.mode === 'bound') { onBoundaryDown(e); return; }
     downPt = { x: e.clientX, y: e.clientY };
     dragged = false;
     if (tCtl.axis) return; // 正在拖 3D 轴，交给 TransformControls
@@ -1022,6 +1332,8 @@ export function createEditor() {
     if (downPt && Math.hypot(e.clientX - downPt.x, e.clientY - downPt.y) > 4) dragged = true;
     // 测距模式：鼠标移动实时预览第二点到第一点的距离
     if (state.mode === 'ruler') { onRulerMove(e.clientX, e.clientY); return; }
+    // 边界模式：拖动中改边界；没在拖则只做悬停高亮
+    if (state.mode === 'bound') { onBoundaryMove(e); return; }
     // 幽灵跟随（放置模式）
     if (state.mode === 'place' && state.ghost) {
       const p = groundPos(e.clientX, e.clientY, hit);
@@ -1036,6 +1348,8 @@ export function createEditor() {
   });
 
   renderer.domElement.addEventListener('pointerup', (e) => {
+    // 边界拖动结束：无论如何都要收尾（否则视角控件会一直停在禁用状态）
+    if (state.mode === 'bound') onBoundaryUp();
     if (e.button !== 0) return;
     if (orbitLocked) { controls.enabled = true; orbitLocked = false; }
     downPt = null;
@@ -1669,6 +1983,9 @@ export function createEditor() {
   // ---------- 持久化（编辑器自有场景文件，游戏读取） ----------
   function serialize() {
     return {
+      // 场地边界（空气墙）：游戏运行时读这份数据决定玩家能走到哪；
+      // 不写这个字段时游戏用地面范围兜底，所以旧存档一样能跑。
+      boundary: { ...state.boundary },
       // 游戏景物：保存每个可编辑景物（地形/道路/墙体/树/建筑…）的变换，key 为统一下标
       scenery: state.scenery.map((rec) => {
         const s = normScale(rec.scale ?? rec.obj.scale);
@@ -1824,8 +2141,13 @@ export function createEditor() {
       state.lights.push(rec);
     }
 
+    // 4) 读回场地边界（空气墙）。旧存档没这个字段 → 保持默认（地面范围），行为不变。
+    const bnd = normalizeBoundary(data && data.boundary);
+    if (bnd) state.boundary = bnd;
+
     outlinerUpdate();
     syncLightPanel();
+    refreshBoundaryViz(); // 边界可视化与面板数值跟着存档刷新
   }
 
   // 「保存场景」：把当前用户摆放清单 POST 到服务器写入编辑器场景文件
@@ -2148,23 +2470,51 @@ export function createEditor() {
 
   function setMode(m) {
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
       StepUI.hint.textContent = 'Shift+左键：第一点 · Shift+右键：第二点 · 未按 Shift 拖拽转视角';
-    } else if (StepUI.hint.textContent.includes('Shift')) {
+    } else if (m === 'bound') {
+      StepUI.hint.textContent = '拖青绿板 = 移动这条边 · 拖橙色角球 = 同时改相邻两边 · 右侧面板可填精确数值 · 右键拖拽转视角';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板')) {
       StepUI.hint.textContent = '';
+    }
+
+    // 边界模式：显示边界可视化 + 俯视全览 + 只留边界；离开时全部还原
+    const isBound = m === 'bound';
+    boundaryGroup.visible = isBound;
+    if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
+    if (isBound) {
+      state.boundaryDrag = null;
+      applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
+      refreshBoundaryViz();
+      // 重复点「边界」不要把已经俯视的机位当成原机位存下来（否则退出后回不到原来的视角）
+      if (!boundaryCamBackup) boundaryCamBackup = { pos: camera.position.clone(), target: controls.target.clone() };
+      frameBoundaryTop();
+    } else {
+      if (boundaryCamBackup) {
+        camera.position.copy(boundaryCamBackup.pos);
+        controls.target.copy(boundaryCamBackup.target);
+        controls.update();
+        boundaryCamBackup = null;
+      }
+      restoreAllVisible();
     }
 
     if (m === 'place') {
       tCtl.detach(); tCtl.enabled = false;
       resetGhost();
       if (!state.placingEmpty) StepUI.hint.textContent = '';
+    } else if (isBound) {
+      // 边界模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
+      state.placingEmpty = false;
+      if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
+      tCtl.detach(); tCtl.enabled = false;
     } else {
       state.placingEmpty = false; // 离开放置：退出空碰撞体放置
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
@@ -2190,6 +2540,7 @@ export function createEditor() {
   StepUI.btnRot.onclick = () => setMode('rot');
   StepUI.btnScale.onclick = () => setMode('scale');
   StepUI.btnRuler.onclick = () => setMode('ruler');
+  if (StepUI.btnBound) StepUI.btnBound.onclick = () => setMode('bound'); // 边界编辑模式（空气墙）
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');
 

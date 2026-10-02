@@ -15,6 +15,7 @@ import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
+import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
@@ -35,13 +36,15 @@ import { ensureTheme } from '../ui/theme.js';
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
 // target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
 // 异步烘焙出的 trimesh 都 push 进这个引用，否则异步结果会落进一个没人读的临时数组。
-async function _fetchRemoteScene(scene, roots, target) {
+// game 用于把场景里保存的 boundary（编辑器「边界」模式调出来的空气墙）应用到物理与场景上。
+async function _fetchRemoteScene(game, scene, roots, target) {
   const data = await fetchRemoteScene();
   if (!data) return; // 拉取失败：保持打包的 editorMapData 兜底
   try {
     target.length = 0;
     buildEditorBuildings(scene, roots, data, target);
     buildEditorLights(scene, data); // 远端光源覆盖打包数据；函数内部会先清掉上一次的光源，不会重复叠加
+    game._applyBoundary(data.boundary); // 边界（空气墙）：没有该字段时保持默认，行为与改动前一致
   } catch (e) {
     console.warn('[Game] 应用远程场景失败，回退打包数据:', e);
   }
@@ -141,7 +144,7 @@ export class Game {
     // 在线同步：运行时从后端拉取最新场景（编辑器保存的那份），拉到则替换打包数据重建。
     // 拉取失败会自动回退到上面打包的 editorMapData，保证离线时也有内容。
     // 注意：LocalPlayer 持有 this.colliders 的同一条数组引用，因此原地改写而不是整体替换。
-    _fetchRemoteScene(this.scene, roots, this.colliders);
+    _fetchRemoteScene(this, this.scene, roots, this.colliders);
 
     // ---- 输入 ----
     this.input = new Input();
@@ -156,6 +159,13 @@ export class Game {
 
     // 本地玩家逻辑
     this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState, this.colliders);
+
+    // ---- 场地边界（空气墙）----
+    // boundary 由编辑器「边界」模式调、随场景 JSON 一起保存；这里默认用地面范围，
+    // 拉到远程场景后 _applyBoundary 会覆盖它。注意必须在 localPlayer 建好之后同步一次。
+    this.boundary = defaultBoundary();
+    this._boundaryWalls = null;
+    this._syncBoundary();
 
     // ---- 网络连接 ----
     this.network = new Network(Config.RELAY_URL, this._token);
@@ -3935,6 +3945,7 @@ export class Game {
     if (this.vehicle) this.vehicle.group.visible = false;
     if (this.boss && this.boss.group) this.boss.group.visible = false;
     if (this.boss && this.boss.portalGroup) this.boss.portalGroup.visible = false;
+    this._syncBoundary(); // 边界让位：竞技场自带一圈墙，大厅边界在这局里不生效
     if (this._portalHint) this._portalHint.style.display = 'none';
     if (this._merchantHint) this._merchantHint.style.display = 'none';
     if (this._vehHint) this._vehHint.style.display = 'none';
@@ -4014,6 +4025,7 @@ export class Game {
 
     this._combat = null;
     this._room = null;
+    this._syncBoundary(); // 回到主世界：重新启用编辑器调出来的边界，并恢复可见墙
     this._clearDrops(); // 竞技场里丢的东西不跟着回大厅
     this._clearCoins();
     this._endGrapple();
@@ -4398,10 +4410,13 @@ export class Game {
     if (!this._drops.length) return;
     const R = Config.DROP_RADIUS;
     const G = -24;
-    // 边界：对战中用当前竞技场半边长，大厅用世界地面范围
+    // 边界：对战中用当前竞技场半边长（居中）；大厅用编辑器调出来的边界（四边可不对称）
     const H = this._arenaHalf();
-    const bx = (this._combat ? H : Config.GROUND_WIDTH / 2) - R;
-    const bz = (this._combat ? H : Config.GROUND_DEPTH / 2) - R;
+    const b = this.boundary;
+    const loX = this._combat ? -H + R : b.minX + R;
+    const hiX = this._combat ? H - R : b.maxX - R;
+    const loZ = this._combat ? -H + R : b.minZ + R;
+    const hiZ = this._combat ? H - R : b.maxZ - R;
     const t = this.clock.elapsedTime;
     for (let i = this._drops.length - 1; i >= 0; i--) {
       const d = this._drops[i];
@@ -4412,11 +4427,11 @@ export class Game {
         // 世界碰撞交给 worldQuery：地面（隐式平面 y=0）+ 盒/OBB/凸包/trimesh 全部生效，
         // 所以丢出去的物品会落在楼板、掩体、柱子顶上，也会被墙弹回来（不再穿墙掉进虚空）。
         const grounded = moveSphereWorld(this.colliders, d, dt, R, { gravity: G, floorY: 0 });
-        // 世界边界回弹（竞技场用当前场地半边长）
-        if (d.x > bx) { d.x = bx; d.vx = -Math.abs(d.vx) * 0.45; }
-        else if (d.x < -bx) { d.x = -bx; d.vx = Math.abs(d.vx) * 0.45; }
-        if (d.z > bz) { d.z = bz; d.vz = -Math.abs(d.vz) * 0.45; }
-        else if (d.z < -bz) { d.z = -bz; d.vz = Math.abs(d.vz) * 0.45; }
+        // 世界边界回弹（对中用竞技场半边长，大厅用编辑器边界：四边各自判定）
+        if (d.x > hiX) { d.x = hiX; d.vx = -Math.abs(d.vx) * 0.45; }
+        else if (d.x < loX) { d.x = loX; d.vx = Math.abs(d.vx) * 0.45; }
+        if (d.z > hiZ) { d.z = hiZ; d.vz = -Math.abs(d.vz) * 0.45; }
+        else if (d.z < loZ) { d.z = loZ; d.vz = Math.abs(d.vz) * 0.45; }
         // 站稳了（踩到可站立面且几乎不动）→ 进入静止态，不再做碰撞解算
         if (grounded && d.vy === 0 && Math.abs(d.vx) < 0.18 && Math.abs(d.vz) < 0.18) {
           d.vx = 0; d.vz = 0; d.resting = true;
@@ -4535,6 +4550,67 @@ export class Game {
       if (res && typeof res.dispose === 'function') res.dispose();
       this[key] = null;
     }
+  }
+
+  // ============ 场地边界（空气墙）============
+  // 数据来自编辑器「边界」模式（随场景 JSON 保存为 boundary 字段）；没保存过就用地面范围，
+  // 因此不调边界时行为和改动前完全一致。四边独立，边界不必对称于原点。
+
+  // 收到一份边界数据就应用它；null/不认识一律保持现状（默认边界）
+  _applyBoundary(raw) {
+    const b = normalizeBoundary(raw);
+    if (!b) return;
+    this.boundary = b;
+    this._syncBoundary();
+    console.log('[Game] 已应用场景边界 ' + (b.maxX - b.minX).toFixed(1) + '×' + (b.maxZ - b.minZ).toFixed(1)
+      + ' 米，可见墙=' + (b.showWalls ? '开' : '关'), b);
+  }
+
+  // 边界要同步到两处：① 物理夹取（真正挡人的是它）② 可选的可视半透明墙。
+  // 对战模式用的是独立竞技场，边界必须临时让位，否则场地变小后会把玩家夹在竞技场外。
+  _syncBoundary() {
+    const b = this.boundary;
+    const active = this._combat ? null : b;
+    if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.bound = active;
+    this._rebuildBoundaryWalls(active);
+  }
+
+  // 可见墙：只有 showWalls 打开才建；几何来自 Boundary.boundaryWallSpecs（与编辑器预览同一份）。
+  // 材质全场共用一份，避免反复创建。
+  _boundaryWallMaterial() {
+    if (!this._boundaryWallMat) {
+      this._boundaryWallMat = new THREE.MeshStandardMaterial({
+        color: Config.WALL_COLOR,
+        transparent: true,
+        opacity: Config.WALL_OPACITY,
+        side: THREE.DoubleSide,
+        depthWrite: false, // 半透明墙不写深度，免得挡住后面的东西出现硬边
+      });
+    }
+    return this._boundaryWallMat;
+  }
+
+  _rebuildBoundaryWalls(b) {
+    if (!this._boundaryWalls) {
+      this._boundaryWalls = new THREE.Group();
+      this._boundaryWalls.name = 'boundary-walls';
+      this.scene.add(this._boundaryWalls);
+    }
+    const g = this._boundaryWalls;
+    while (g.children.length) {
+      const ch = g.children.pop();
+      if (ch.geometry) ch.geometry.dispose(); // 材质共用，等整组销毁时再释放
+    }
+    if (!b || !b.showWalls) { g.visible = false; return; }
+    const mat = this._boundaryWallMaterial();
+    const h = b.wallHeight;
+    for (const sp of boundaryWallSpecs(b, BOUNDARY_THICKNESS)) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(sp.hx * 2, h, sp.hz * 2), mat);
+      mesh.position.set(sp.cx, h / 2, sp.cz); // 底面贴地
+      mesh.rotation.y = sp.rotY;
+      g.add(mesh);
+    }
+    g.visible = true;
   }
 
   // ============ 疯狂抓钩：金币（房主生成、全员可见、被吃即同步消失）+ 底部岩浆 ============

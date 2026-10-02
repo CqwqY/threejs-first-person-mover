@@ -1,13 +1,17 @@
-// 职责：创建四周挡墙，把玩家限制在地面范围内。仅处理的墙体坐标与材质。
+// 职责：创建四周可看见的挡墙（半透明板）。几何统一来自 world/Boundary.js —— 与编辑器「边界」模式
+// 的预览、以及游戏运行时的边界夹取用的是同一份规格，不会出现「编辑器里看着对、游戏里差一截」。
+// 注意：**不要再用 Config.GROUND_SIZE**。那是遗留的 50×50 方形，而地面实际是
+// GROUND_WIDTH(160) × GROUND_DEPTH(310)，照它建墙会在场地中间凭空多出一圈小墙。
 import * as THREE from 'three';
 import { Config } from '../config.js';
+import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from './Boundary.js';
 
-export function createWalls() {
+// boundary 可选：编辑器保存的边界（{minX,maxX,minZ,maxZ,wallHeight,showWalls}）。
+// 缺省/非法则用地面范围（defaultBoundary），等同于「沿地面边缘围一圈」。
+export function createWalls(boundary) {
+  const b = normalizeBoundary(boundary) || defaultBoundary();
   const group = new THREE.Group();
-
-  const size = Config.GROUND_SIZE;
-  const half = size / 2;
-  const height = Config.WALL_HEIGHT;
+  group.name = 'boundary-walls';
 
   // 半透明材质：既挡人又能看清周围
   const material = new THREE.MeshStandardMaterial({
@@ -15,23 +19,16 @@ export function createWalls() {
     transparent: true,
     opacity: Config.WALL_OPACITY,
     side: THREE.DoubleSide,
+    depthWrite: false,
   });
 
-  // 生成四面围墙的工具函数
-  const addWall = (width, height, cx, cz, rotY) => {
-    const geometry = new THREE.BoxGeometry(width, height, 0.5);
-    const wall = new THREE.Mesh(geometry, material);
-    wall.position.set(cx, height / 2, cz);
-    wall.rotation.y = rotY;
+  const h = b.wallHeight;
+  for (const sp of boundaryWallSpecs(b, BOUNDARY_THICKNESS)) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(sp.hx * 2, h, sp.hz * 2), material);
+    wall.position.set(sp.cx, h / 2, sp.cz); // 底面贴地
+    wall.rotation.y = sp.rotY;
     group.add(wall);
-  };
-
-  // 北墙 / 南墙（沿 x 方向延伸）
-  addWall(size + 1, height, 0, -half, 0);
-  addWall(size + 1, height, 0, half, 0);
-  // 东墙 / 西墙（沿 z 方向延伸）
-  addWall(size + 1, height, -half, 0, Math.PI / 2);
-  addWall(size + 1, height, half, 0, Math.PI / 2);
+  }
 
   return group;
 }

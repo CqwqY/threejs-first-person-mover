@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { resolveMove } from '../world/collision/characterSolver.js';
+import { clampToBoundary } from '../world/Boundary.js';
 
 export class PlayerPhysics {
   constructor() {
@@ -31,6 +32,9 @@ export class PlayerPhysics {
     // 无视世界碰撞：被抓钩拽着飞的这段时间不再理会柱身/墙（否则会半路被挡下或被侧向弹出去）。
     // 只在「疯狂抓钩」模式由 Game 临时开启，松手/死亡/切场景都会关掉。
     this.noClip = false;
+    // 场地边界（空气墙）：null = 用 Config.GROUND_* 推导的默认矩形。
+    // 由 Game 在拉到编辑器保存的 boundary 后注入，四边独立，可不对称于原点。
+    this.bound = null;
   }
 
   // 移动模式对应的基础速度系数：走路 1、奔跑 1.6、游泳 0.6、飞行 1.2
@@ -179,12 +183,18 @@ export class PlayerPhysics {
       this.velocity.y = 0;
     }
 
-    // ---- 7. 边界限制：把玩家挡在矩形地面内（宽 x / 长 z） ----
+    // ---- 7. 边界限制（空气墙）：把玩家挡在矩形场地内 ----
+    // bound 由 Game 注入（编辑器保存的边界，四边可不对称）；没注入时退回 Config.GROUND_* 的居中矩形，
+    // 与改动前的行为完全一致（±GROUND_WIDTH/2、±GROUND_DEPTH/2）。
     const rScale = Config.PLAYER_RADIUS * this.sizeScale;
-    const limitX = Config.GROUND_WIDTH / 2 - rScale;
-    const limitZ = Config.GROUND_DEPTH / 2 - rScale;
-    state.x = THREE.MathUtils.clamp(state.x, -limitX, limitX);
-    state.z = THREE.MathUtils.clamp(state.z, -limitZ, limitZ);
+    if (this.bound) {
+      clampToBoundary(state, this.bound, rScale);
+    } else {
+      const limitX = Config.GROUND_WIDTH / 2 - rScale;
+      const limitZ = Config.GROUND_DEPTH / 2 - rScale;
+      state.x = THREE.MathUtils.clamp(state.x, -limitX, limitX);
+      state.z = THREE.MathUtils.clamp(state.z, -limitZ, limitZ);
+    }
   }
 
   // 玩家 AABB：竖直占据 [state.y - HEIGHT, state.y]（state.y 是玩家顶部 / 相机高度），
