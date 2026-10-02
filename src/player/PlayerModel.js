@@ -249,7 +249,7 @@ export function setHeldItem(group, wep, text) {
   group.userData.heldKey = key;
   hand.clear();
   if (w) {
-    hand.add(_createHeldWeapon(w));
+    hand.add(createHeldWeapon(w));
     return;
   }
   if (!text) return;
@@ -282,7 +282,7 @@ function _createHeldTextSprite(text) {
 }
 
 // 按种类生成一个握在手上的小武器模型（挂到手部锚点，朝模型正前方 -Z 伸出）
-function _createHeldWeapon(kind) {
+export function createHeldWeapon(kind) {
   const rig = new THREE.Group();
   if (kind === 'club') {
     // 棍子：细长木棍 + 深色头部

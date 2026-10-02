@@ -19,7 +19,7 @@ import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible } from '../player/PlayerModel.js';
+import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
@@ -326,6 +326,8 @@ export class Game {
     this._ctrlBy = null;            // 被控侧：{ from, until, ax, ay, az }
     this._ctrlImmuneUntil = 0;      // 挣脱后的免疫截止时刻（performance.now 毫秒）
     this._ctrlBeam = null;          // 控制激光线（控制者侧可见）
+    this._ctrlRig = this._createCtrlRig();   // 第一人称手持模型（挂在相机下）
+    this._ctrlFireAt = 0;           // 最近一次开火时刻，用于后坐动画
     this._gatlingRig = this._createGatlingRig(); // 开启加特林时握在手上（枪管会转）
     this._gatlingBar = this._createGatlingBar();
 
@@ -1350,6 +1352,18 @@ export class Game {
     return rig;
   }
 
+  // 控制枪：第一人称握在手上（与棍子/加特林一样挂在相机下，第三人称交给人物模型）
+  _createCtrlRig() {
+    const rig = new THREE.Group();
+    rig.add(createHeldWeapon('ctrlgun'));
+    // 手持位置与加特林一致（右下、略前）；模型本体较小，整体放大一点更清楚
+    rig.position.set(0.26, -0.34, -0.5);
+    rig.scale.setScalar(1.5);
+    rig.visible = false;
+    this.camera.add(rig);
+    return rig;
+  }
+
   // 挥棍：播横扫动画，动画推进到 CLUB_HIT_AT 时结算命中
   _swingClub() {
     const now = performance.now();
@@ -1835,6 +1849,7 @@ export class Game {
 
   // 开火：射线抓最近的目标；已经在控制中则松手（同一个技能键切换）
   _fireCtrlGun() {
+    this._ctrlFireAt = performance.now(); // 后坐动画计时
     if (this._ctrl) { this._releaseCtrl('已松开'); return; }
     const s = this.localState;
     const cp = Math.cos(s.pitch);
@@ -1927,6 +1942,17 @@ export class Game {
 
   // 每帧：控制者按 CTRL_RATE 同步锚点；被控者被拉向锚点，按空格可挣脱
   _updateCtrl(dt) {
+    // 第一人称手持：装备了控制枪就一直握着（第三人称/死亡/加特林开启时收起）
+    if (this._ctrlRig) {
+      const held = (!!this._ctrl || this._hasSkillKind('control'))
+        && !this.thirdPerson && !this._dead && !this._gatlingOn;
+      this._ctrlRig.visible = held;
+      if (held) {
+        // 开火后坐：150ms 内往回收一点再回位
+        const k = Math.max(0, 1 - (performance.now() - this._ctrlFireAt) / 150);
+        this._ctrlRig.position.z = -0.5 + 0.07 * k;
+      }
+    }
     // ---- 被控侧：先抢在物理消费跳跃之前取走这次空格，用作挣脱 ----
     if (this._ctrlBy && this.input && typeof this.input.consumeJump === 'function') {
       if (this.input.consumeJump()) this._breakCtrl();
