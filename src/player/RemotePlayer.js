@@ -1,7 +1,21 @@
 // 职责：代表一个远程玩家，组合 PlayerState（数据）与 PlayerModel（外观），并对状态做插值渲染。
 import { Config } from '../config.js';
-import { PlayerState } from './PlayerState.js';
+import { PlayerState, lerpAngle } from './PlayerState.js';
 import { createPlayerModel, updateNameTag, setModelScale, setHeldText, setHealthBar } from './PlayerModel.js';
+import { SnapshotBuffer } from '../net/SnapshotBuffer.js';
+
+// 位置趋近：把「正常移动」与「异常跳变」区分开，异常部分按有限速度平滑，
+// 避免丢包外推超前后被真实快照拉回时一帧瞬移（观感上像瞬移/抽搐）。
+// - 单帧位移不超过 SNAP_MAX_SPEED 对应值：视为正常移动（含载具 16m/s），直接跟随、零额外延迟
+// - 超过的部分（断流恢复的追赶、外推回弹）：按 SNAP_CORRECT_SPEED 逐帧抹平
+const SNAP_MAX_SPEED = 22;     // 米/秒：正常水平速度上限（载具 16，留出加速余量）
+const SNAP_CORRECT_SPEED = 12; // 米/秒：异常跳变的修正速度
+
+function _approach(cur, target, dt) {
+  const d = target - cur;
+  if (d >= 0) return cur + Math.min(d, SNAP_MAX_SPEED * dt);
+  return cur - Math.min(-d, SNAP_CORRECT_SPEED * dt);
+}
 
 export class RemotePlayer {
   // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色
@@ -25,6 +39,10 @@ export class RemotePlayer {
     this.model = createPlayerModel(label, gender, color || '#ffffff');
     this.model.visible = true;
 
+    // 快照缓冲：时间轴插值 + 外推 + 自适应延迟（INTERP_MODE = 'off' 时退回旧的指数平滑）
+    this.buf = new SnapshotBuffer();
+    this.buf.push(stateData);
+
     // 初始对齐，避免首帧瞬移
     this.syncModel();
   }
@@ -40,9 +58,19 @@ export class RemotePlayer {
     this.model.rotation.set(0, this.state.yaw, 0);
   }
 
-  // 收到新快照时更新目标状态
+  // 收到新快照时：入缓冲（带本地接收时间戳），同时仍更新 target 作为旧逻辑兜底
   applyState(stateData) {
     this.target.fromJSON(stateData);
+    this.buf.push(stateData);
+  }
+
+  // 击飞预演：挥棍者本地给被扫玩家补一段与真实物理同向的弧线（速度 + 重力），
+  // 当帧就能看到撞飞方向，不用等网络插值慢慢赶，观感跟手。
+  applyKnockPreview(kx, ky, kz) {
+    this._knockVx = kx;
+    this._knockVy = ky;
+    this._knockVz = kz;
+    this._knockT = Config.CLUB_KNOCK_HOLD;
   }
 
   // 刷新头顶名牌文字/颜色（登录资料晚于 welcome 到达时用）
@@ -51,25 +79,74 @@ export class RemotePlayer {
     updateNameTag(this.model, text, color || '#ffffff');
   }
 
-  // 每帧：把 state 向 target 插值，再把模型位置/朝向同步到 state，并按移动速度驱动骨骼动画
+  // 每帧：从快照缓冲按时间轴采样插值（缓冲耗尽则外推），写入 state，再同步模型与动画
   update(dt) {
-    // 简单线性插值（指数平滑）：alpha = 1 - exp(-15*dt)。
-    // dt 越大 alpha 越大，收敛越快；dt 越小越平滑，用于平滑跟随远程玩家轨迹。
     const prevX = this.state.x;
     const prevZ = this.state.z;
-    const alpha = 1 - Math.exp(-15 * dt);
-    this.state.lerpTo(this.target, alpha);
+
+    if (Config.INTERP_MODE === 'off') {
+      // 旧逻辑：指数平滑追最新快照（保留作为一键回退的对比基线）
+      const alpha = 1 - Math.exp(-15 * dt);
+      this.state.lerpTo(this.target, alpha);
+    } else {
+      // 新逻辑：按「当前时间 - 自适应延迟」在缓冲里取插值两端，缓冲耗尽时按最后速度外推
+      const now = performance.now();
+      this.buf.suggestDelayMs(now);
+      const s = this.buf.sample(now);
+      if (s) {
+        const { a, b, alpha } = s;
+        // 采样出的「基准位置」
+        const bx = a.x + (b.x - a.x) * alpha;
+        const by = a.y + (b.y - a.y) * alpha;
+        const bz = a.z + (b.z - a.z) * alpha;
+        // 水平方向：正常前进直接跟随（保持低延迟、无额外拖影）；只有基准位置向后跳
+        // （典型是丢包外推超前后被真实快照拉回）才按有限速度平滑修正，避免一帧瞬移。
+        this.state.x = _approach(this.state.x, bx, dt);
+        this.state.z = _approach(this.state.z, bz, dt);
+        // 垂直方向不做限速：下落速度可能远超水平，限速会造成明显拖影
+        this.state.y = by;
+        this.state.yaw = lerpAngle(a.yaw, b.yaw, alpha); // 最短弧，跨 ±π 不绕整圈
+        // 服务器快照不含 pitch（远端俯仰不参与同步），只在确实带值时更新，别写成 undefined
+        if (a.pitch !== undefined) this.state.pitch = a.pitch;
+        // 体型/血量/手持/载具这类非连续字段直接取最新快照，不做插值
+        const latest = this.buf.latest();
+        if (latest) {
+          this.state.size = latest.size === undefined ? 1 : latest.size;
+          if (latest.health !== undefined) this.state.health = latest.health;
+          if (latest.hold !== undefined) this.state.hold = latest.hold;
+          if (latest.ride !== undefined) this.state.ride = latest.ride;
+          if (latest.veh !== undefined) this.state.veh = latest.veh;
+        }
+      } else {
+        // 缓冲还没填满：退回旧逻辑，避免首次出现时模型留在原点
+        const alpha = 1 - Math.exp(-15 * dt);
+        this.state.lerpTo(this.target, alpha);
+      }
+    }
+
+    // 击飞预演：把被扫飞的弧线本地推一段，期间累加重力，别让角色掉进地里。
+    if ((this._knockT || 0) > 0) {
+      this._knockT -= dt;
+      this.state.x += this._knockVx * dt;
+      this.state.y += this._knockVy * dt;
+      this.state.z += this._knockVz * dt;
+      this._knockVy += Config.GRAVITY * dt;
+      const minY = Config.PLAYER_HEIGHT * (this.state.size || 1);
+      if (this.state.y < minY) this.state.y = minY;
+    }
 
     this.syncModel();
 
     // 用插值速度驱动骨骼动画（「移动时疯狂旋转」已临时注释，重开时：
     //   恢复 import 里的 advanceSpin，并把本行 rotation.y 改为 state.yaw + advanceSpin(...)）
-    const speed = dt > 0 ? Math.hypot(this.state.x - prevX, this.state.z - prevZ) / dt : 0;
+    // 速度做一次低通滤波，避免插值切换/外推修正瞬间抖动传到动画上
+    const rawSpeed = dt > 0 ? Math.hypot(this.state.x - prevX, this.state.z - prevZ) / dt : 0;
+    this._speed = (this._speed || 0) + (rawSpeed - (this._speed || 0)) * Math.min(1, dt * 8);
 
     const rig = this.model.userData.rig;
     if (rig) {
       this._animT = (this._animT || 0) + dt;
-      rig.update(this._animT, speed);
+      rig.update(this._animT, this._speed);
     }
   }
 }

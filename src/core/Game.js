@@ -224,6 +224,7 @@ export class Game {
     // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
     this.vehicle = createVehicle(this.scene);
     this._vehDriver = null; // 后座时记住驾驶员的玩家 id
+    this._vehPaxResend = 0; // 刚坐上后座时的上报重发窗口（秒）：让服务器尽快知道有乘客，好让驾驶员开始代报
     // 触屏不显示按键提示，桌面端补上 "(F)"
     const coarsePointer =
       (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
@@ -741,6 +742,9 @@ export class Game {
       this._vehDriver = driverId || null;
       phys.controlLock = true; // 后座不参与操控
       phys.velocity.set(0, 0, 0);
+      // 后座位置之后全由驾驶员代报；但服务器必须先知道「我坐上了后座」，
+      // 驾驶员才会开始代报，所以这里开一个短重发窗口，防单包丢失导致双方互相等待。
+      this._vehPaxResend = 0.6;
       this._toast('已上车（后座）');
     }
   }
@@ -769,6 +773,22 @@ export class Game {
       if (d) this.vehicle.setPose(d.x, d.y - Config.PLAYER_HEIGHT * (d.size || 1), d.z, d.yaw);
     } else {
       this.vehicle.park();
+    }
+
+    // 1.5) 驾驶员：后座乘客由他统一上报，乘客自己不再单独广播。
+    // 用驾驶员本地权威坐标算出发放位置，让乘客在所有屏幕上都稳稳挂在车后方。
+    if (st.ride === 1 && seats.passenger) {
+      const back = Config.VEHICLE_SEAT_BACK;
+      const driver = this._playerStateById(seats.driver);
+      if (driver) {
+        this.network.sendVehPax(
+          seats.passenger,
+          driver.x + Math.sin(driver.yaw) * back,
+          driver.y,
+          driver.z + Math.cos(driver.yaw) * back,
+          driver.yaw
+        );
+      }
     }
 
     // 2) 后座：把本地玩家钉在驾驶位后方；驾驶员不在了就自动下车
@@ -1323,12 +1343,12 @@ export class Game {
       if (d < 1e-4 || d > Config.CLUB_RANGE) continue;
       if (Math.abs(st.y - s.y) > 2.2) continue; // 高度差太大（楼顶/空中）扫不到
       if ((dx * fx + dz * fz) / d < cosHalf) continue;
-      this.network.sendKnock(
-        id,
-        (dx / d) * Config.CLUB_KNOCK,
-        Config.CLUB_KNOCK_UP,
-        (dz / d) * Config.CLUB_KNOCK
-      );
+      const kx = (dx / d) * Config.CLUB_KNOCK;
+      const kz = (dz / d) * Config.CLUB_KNOCK;
+      this.network.sendKnock(id, kx, Config.CLUB_KNOCK_UP, kz);
+      // 在挥棍者本地给被扫玩家补一段相同的击飞弧线：不用等网络插值慢慢跟，
+      // 让「被撞飞」当帧就能看到方向，观感跟手。
+      rp.applyKnockPreview(kx, Config.CLUB_KNOCK_UP, kz);
       n++;
     }
     this._toast(n > 0 ? ('棍子扫飞了 ' + n + ' 个玩家') : '棍子挥空了');
@@ -2892,7 +2912,14 @@ export class Game {
 
     // 上报本地状态（内部按 20Hz 节流）；带上当前体型倍率，供其他玩家看到放大/缩小
     this.localState.size = this.localPlayer.physics.sizeScale;
-    this.network.sendState(this.localState.toJSON());
+    // 后座乘客的位置之后全由驾驶员统一代报（避免两份位置互相打架、相对车身乱抖）；
+    // 只在刚上车的短窗口内自报几次，让服务器知道「有人坐上后座」，驾驶员才好接手代报。
+    if (this.localState.ride !== 2) {
+      this.network.sendState(this.localState.toJSON());
+    } else if (this._vehPaxResend > 0) {
+      this._vehPaxResend -= dt;
+      this.network.sendState(this.localState.toJSON());
+    }
 
     // 渲染当前帧
     this.renderer.render(this.scene, this.camera);

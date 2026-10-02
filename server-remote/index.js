@@ -467,6 +467,24 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 驾驶员代报后座乘客：把乘客钉到驾驶位后方。乘客自己不再单独上报，
+    // 用驾驶员的权威坐标统一校准，避免双方各自插值导致乘客相对车身乱抖。
+    if (msg.t === 'veh') {
+      const pax = String(msg.pax || '');
+      if (!pax || pax === id) return;
+      const cur = states.get(pax);
+      if (!cur) return; // 乘客尚未上过线（还没首次上报过），忽略
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      cur.x = num(msg.x, cur.x, -1000, 1000);
+      cur.y = num(msg.y, cur.y, -500, 500);
+      cur.z = num(msg.z, cur.z, -1000, 1000);
+      cur.yaw = num(msg.yaw, cur.yaw, -20, 20);
+      cur.ride = 2; // 被代报期间恒为后座
+      cur.veh = cur.veh || String(msg.veh || '').slice(0, 16);
+      states.set(pax, cur);
+      return;
+    }
+
     if (msg.t !== 'state') return;
 
     const isFresh = !states.has(id); // 是否第一次上报（用于 join 广播）

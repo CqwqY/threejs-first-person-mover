@@ -124,6 +124,13 @@ export const Config = {
   NIGHT_SKY_TILE_X: 2.5,
   NIGHT_SKY_TILE_Y: 1.93,
 
+  // ---- 远端玩家插值（多人延迟观感优化）----
+  INTERP_MODE: 'buffer',      // 'buffer' = 快照缓冲 + 时间轴插值；'off' = 旧的指数平滑（一键回退对比）
+  INTERP_DELAY_BASE: 100,     // 基准对抗延迟（ms），约等于 20Hz 的 2 个快照间隔
+  INTERP_DELAY_MIN: 60,       // 网络良好时压到的下限（ms）
+  INTERP_DELAY_MAX: 250,      // 抖动很大时放宽到的上限（ms）
+  EXTRAPOLATE_MAX: 250,       // 缓冲耗尽后允许外推的最长时间（ms），超过就停住等新快照
+
   // ---- 传送门与「老师」Boss ----
   PORTAL_POS: { x: 11, z: 142 },  // 传送门所在坐标
   PORTAL_PROXIMITY: 4,            // 离传送门多近内出现「召唤老师」按钮（米）

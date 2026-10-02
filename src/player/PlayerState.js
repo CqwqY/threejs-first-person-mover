@@ -1,5 +1,13 @@
 // 职责：纯数据容器，描述一个玩家在空间中的可序列化状态，供本地物理读写与网络快照传输。
 // 仅使用普通对象字段，不引用任何 Three.js / 场景对象，方便 JSON 序列化与跨客户端传输。
+// 角度最短弧插值：把 b-a 归一化到 [-π, π] 再插，避免跨 ±π 时反绕一整圈。
+export function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
 export class PlayerState {
   constructor(id = '', x = 0, y = 0, z = 0, yaw = 0, pitch = 0, onGround = false) {
     this.id = id;
@@ -56,7 +64,7 @@ export class PlayerState {
     this.x += (target.x - this.x) * alpha;
     this.y += (target.y - this.y) * alpha;
     this.z += (target.z - this.z) * alpha;
-    this.yaw += (target.yaw - this.yaw) * alpha;
+    this.yaw = lerpAngle(this.yaw, target.yaw, alpha);
     const ts = target.size === undefined ? 1 : target.size;
     this.size += (ts - this.size) * alpha;
     if (target.health !== undefined) this.health = target.health;

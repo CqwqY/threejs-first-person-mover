@@ -16,6 +16,7 @@ export class Network {
 
     // 状态上报节流
     this._pendingState = null; // 待发送的最新状态
+    this._pendingVeh = null;   // 待发送的后座乘客位置（仅驾驶员上报）
     this._sendInterval = null; // 20Hz 发送定时器
     this._sendRate = 20; // 上报频率（Hz）
   }
@@ -121,16 +122,85 @@ export class Network {
     this.send({ t: 'boss', ...info });
   }
 
+  // 驾驶员上报后座乘客位置：只有驾驶员发，乘客自己不再单独上报，
+  // 否则两个冲量在不同客户端独立推进，乘客会相对车身乱抖。
+  sendVehPax(pax, x, y, z, yaw) {
+    if (!pax) return;
+    this._pendingVeh = { pax, x, y, z, yaw };
+    this._ensureSendLoop();
+  }
+
   // 节流上报状态：在 20Hz 周期内只发送最新的一次 {t:"state", ...state}
   sendState(state) {
     this._pendingState = state;
-    if (this._sendInterval) return; // 定时器已启动
-
-    this._sendInterval = setInterval(() => {
-      if (this._pendingState) {
-        this.send({ t: 'state', ...this._pendingState });
-        this._pendingState = null;
-      }
-    }, 1000 / this._sendRate);
+    this._ensureSendLoop();
   }
+
+  // 启动统一的 20Hz 发送器：同一拍内把「自身状态」与「后座乘客」一起发出去
+  _ensureSendLoop() {
+    if (this._sendInterval) return; // 定时器已启动
+    this._sendInterval = setInterval(() => this._flush(), 1000 / this._sendRate);
+  }
+
+  // 每拍结算一次：
+  // - 状态有明显变化（位移 >2cm 或 朝向 >1°，或血量/手持/载具/体型变了）→ 按 20Hz 全速发
+  // - 长时间没变化 → 降到 5Hz（每 4 拍发一次）保活，大幅减少静止玩家的上行包
+  _flush() {
+    const st = this._pendingState;
+    if (st) {
+      if (this._stateChanged(st)) {
+        this.send({ t: 'state', ...st });
+        this._lastSent = this._copyState(st);
+        this._staticTicks = 0;
+      } else {
+        this._staticTicks = (this._staticTicks || 0) + 1;
+        if (this._staticTicks >= SEND_STATIC_DIV) {
+          this.send({ t: 'state', ...st });
+          this._staticTicks = 0;
+        }
+      }
+      this._pendingState = null;
+    }
+    if (this._pendingVeh) {
+      this.send({ t: 'veh', ...this._pendingVeh });
+      this._pendingVeh = null;
+    }
+  }
+
+  // 与上一次实际发出的状态比较，判断是否值得占用一个上行包
+  _stateChanged(st) {
+    const p = this._lastSent;
+    if (!p) return true;
+    if (Math.abs((st.x || 0) - p.x) > SEND_MOVE_EPS) return true;
+    if (Math.abs((st.y || 0) - p.y) > SEND_MOVE_EPS) return true;
+    if (Math.abs((st.z || 0) - p.z) > SEND_MOVE_EPS) return true;
+    if (_angleDiff(st.yaw, p.yaw) > SEND_YAW_EPS) return true;
+    if ((st.size || 1) !== (p.size || 1)) return true;
+    if ((st.health | 0) !== (p.health | 0)) return true;
+    if ((st.hold || '') !== (p.hold || '')) return true;
+    if ((st.ride | 0) !== (p.ride | 0)) return true;
+    if ((st.veh || '') !== (p.veh || '')) return true;
+    return false;
+  }
+
+  _copyState(st) {
+    return {
+      x: st.x || 0, y: st.y || 0, z: st.z || 0, yaw: st.yaw || 0,
+      size: st.size, health: st.health, hold: st.hold, ride: st.ride, veh: st.veh,
+    };
+  }
+}
+
+// 静止降频：没变化时每 N 拍补发一次（20Hz / 4 = 5Hz），既省带宽又不至于被服务器判为掉线
+const SEND_STATIC_DIV = 4;
+// 变化阈值：位移超过 2cm 或 朝向超过 1° 才算「动了」
+const SEND_MOVE_EPS = 0.02;
+const SEND_YAW_EPS = Math.PI / 180;
+
+// 两角度的最短弧差（绝对值，0~π）
+function _angleDiff(a, b) {
+  let d = (a || 0) - (b || 0);
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return Math.abs(d);
 }
