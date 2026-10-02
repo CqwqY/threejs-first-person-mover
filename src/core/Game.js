@@ -13,7 +13,8 @@ import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode } from '../player/Shop.js';
-import { buildEditorBuildings, buildEditorLights, fetchRemoteScene } from '../world/EditorBuildings.js';
+import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
+import { buildArena } from '../world/CombatArena.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { Input } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
@@ -84,6 +85,7 @@ export class Game {
 
     // ---- 静态世界（地面/道路/墙体 + 道具），返回统一的可编辑根列表 ----
     const roots = buildScenery(this.scene);
+    this._cityRoots = roots; // 进入对战时整组隐藏（换成竞技场），退出再整组恢复
     // 灯光单独挂载（不作为可编辑景物）；阴影聚焦目标随玩家移动
     const lights = createLights();
     this.scene.add(lights.group);
@@ -361,7 +363,7 @@ export class Game {
       if (document.pointerLockElement !== this.renderer.domElement) return;
       if (this._gatlingOn) { this._gatlingHeld = true; return; }
       if (this._ctrlOn) { this._fireCtrlGun(); return; }
-      this._attackBoss();
+      this._primaryAttack();
     });
     window.addEventListener('mouseup', (e) => {
       if (e.button !== 0) return;
@@ -378,6 +380,19 @@ export class Game {
     this._projectiles = []; // 在飞的投掷物
     this._projSeq = 0;      // 投掷物自增 id，用于和别人同步「哪一颗爆炸了」
     this._fx = [];          // 在播的爆炸特效
+
+    // ---- 对战模式：匹配 + 单独竞技场（第一个模式「躲避陨石混战」）----
+    this._combat = null;        // { room, mode, isOwner, members, spawn, roundStart, alive }
+    this._room = null;          // 当前房间 id（大厅为 null）
+    this._lobbySpawn = null;    // 进入对战前记下的大厅出生点，退出时还原
+    this._mainColliders = [];   // 进入对战时快照的主世界碰撞体（退出还原）
+    this._arena = null;         // 当前竞技场实例 { group, colliders, dispose() }
+    this._meteors = [];         // 在飞的陨石 { x, y, z, vy, r, mesh }
+    this._meteorTimer = 0;      // 房主生成陨石的倒计时
+    this._combatAt = 0;         // 对战基础攻击（能量球）冷却计时
+    this._matchMode = 'meteor';
+    this._combatOverlay = null; // 「匹配中…」浮层
+    this._combatHud = null;     // 对战状态条
   }
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
@@ -561,6 +576,7 @@ export class Game {
           this._placed = true;
         }
         this._spawn = msg.spawn; // 记住出生点，死亡重生时用
+        this._lobbySpawn = msg.spawn; // 大厅出生点单独记一份，退出对战回主世界时用
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         this.playerManager.setLocal(msg.id);
         // 本地名牌：登录了用昵称，否则游客样式
@@ -593,6 +609,8 @@ export class Game {
           this._netDayAt = performance.now();
         }
         this.playerManager.applySnapshot(msg.players);
+        // 对战中：快照已按房间过滤，人数即「本局存活人数」，供对战状态条显示
+        if (this._combat) this._combat.alive = (msg.players || []).length;
         break;
       }
       case 'hit': {
@@ -657,6 +675,44 @@ export class Game {
         const bz = Number(msg.z);
         if ([bx, by, bz].every(Number.isFinite)) {
           this._playExplosion(new THREE.Vector3(bx, by, bz), Number(msg.radius) || 3, Number(msg.damage) || 0);
+        }
+        break;
+      }
+      case 'match_queued': {
+        // 已进入匹配队列：显示「匹配中…」浮层
+        this._showMatchOverlay();
+        break;
+      }
+      case 'match_canceled': {
+        // 服务端确认取消匹配
+        if (this._combatOverlay) this._combatOverlay.style.display = 'none';
+        this._toast('已取消匹配');
+        break;
+      }
+      case 'match_found': {
+        // 匹配成功：进入独立竞技场，开启「躲避陨石混战」
+        this._room = msg.room;
+        if (this._combatOverlay) this._combatOverlay.style.display = 'none';
+        const members = new Map();
+        for (const mm of (msg.members || [])) members.set(mm.id, mm);
+        const isOwner = msg.owner === this.localState.id;
+        this._enterCombat(msg.mode || 'meteor', msg.spawn || this._spawn, isOwner, members);
+        break;
+      }
+      case 'match_left': {
+        // 服务端确认离开房间：回到主世界（大厅）。已本地退出时该方法内部会直接返回
+        this._exitCombat(msg.spawn || this._lobbySpawn);
+        break;
+      }
+      case 'room_owner': {
+        // 房主转移（原房主离开）：由新房主负责驱动陨石生成
+        if (this._combat) this._combat.isOwner = (msg.owner === this.localState.id);
+        break;
+      }
+      case 'meteor': {
+        // 别人的陨石：复刻同一颗，保证全场落点一致
+        if (this._combat) {
+          this._spawnMeteor({ x: Number(msg.x), z: Number(msg.z), vy: Number(msg.vy), r: Number(msg.r) });
         }
         break;
       }
@@ -906,7 +962,7 @@ export class Game {
       // 开了加特林就改成按住持续扫射（松手停火）
       if (this._gatlingOn) { this._gatlingHeld = true; return; }
       if (this._ctrlOn) { this._fireCtrlGun(); return; }
-      this._attackBoss();
+      this._primaryAttack();
     });
     el.addEventListener('pointerup', () => { this._gatlingHeld = false; });
     el.addEventListener('pointercancel', () => { this._gatlingHeld = false; });
@@ -1228,9 +1284,11 @@ export class Game {
     const phase = this.boss.phase;
     const P = Config.PORTAL_POS;
     const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
-    const showPortal = mode === 'idle' && near;
-    const showAtk = (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn;
-    const showShield = mode === 'alive' && phase >= 3 && !this._dead;
+    // 对战中：Boss/传送门 UI 全隐藏，攻击按钮常驻（用来丢能量球打人）
+    const inCombat = !!this._combat;
+    const showPortal = !inCombat && mode === 'idle' && near;
+    const showAtk = inCombat || (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn;
+    const showShield = !inCombat && mode === 'alive' && phase >= 3 && !this._dead;
     const shieldReady = performance.now() >= this._shieldReadyAt;
     const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
     const hp = mode === 'alive' ? Math.max(0, Math.round(this.boss.hp)) : 0;
@@ -1313,6 +1371,30 @@ export class Game {
   }
 
   // Boss 战基础攻击：朝视线方向投出粉笔头（只对 Boss 结算伤害，不误伤玩家）
+  // 主攻击入口：对战中丢能量球（打人），否则走 Boss 战的粉笔头。
+  // 左键与手机「攻击」按钮都走这里，保证两端口径一致。
+  _primaryAttack() {
+    if (this._combat) { this._combatAttack(); return; }
+    this._attackBoss();
+  }
+
+  // 对战基础攻击：朝视线方向丢一颗能量球，命中玩家按 COMBAT_BALL_RADIUS 结算范围伤害。
+  // 复用通用投掷物系统（_explode 已支持对半径内的其他玩家 sendHit），因此天然是 PvP。
+  _combatAttack() {
+    if (this._dead) return;
+    const now = performance.now();
+    if (now - this._combatAt < Config.COMBAT_BALL_COOLDOWN * 1000) return;
+    this._combatAt = now;
+    this._throwProjectile({
+      damage: Config.COMBAT_BALL_DAMAGE,
+      radius: Config.COMBAT_BALL_RADIUS,
+      speed: Config.COMBAT_BALL_SPEED,
+      color: 0x59c2ff,
+      gravity: 0.5,
+      players: true, // 命中其他玩家结算伤害（混战）
+    });
+  }
+
   _attackBoss() {
     if (!this.boss || this.boss.mode !== 'alive' || this._dead) return;
     const now = performance.now();
@@ -2321,6 +2403,8 @@ export class Game {
     // 校卡展开时最宽 268px，按钮让它贴着卡左右两侧（50% + 134 再留 10px 间距）
     this._btnBag = mkBtn('背包', 'right:calc(50% + 144px);top:14px;', () => this._toggleBag());
     this._btnSettings = mkBtn('设置', 'left:calc(50% + 144px);top:14px;', () => this.settingsPanel.toggle());
+    // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化）
+    this._btnCombat = mkBtn('对战匹配', 'right:14px;top:14px;', () => this._toggleCombat());
     this._buildBag();
   }
 
@@ -3191,6 +3275,256 @@ export class Game {
   }
 
   // 主循环：计算 dt -> 更新玩家 -> 渲染
+  // ============ 对战模式：匹配 + 独立竞技场「躲避陨石混战」 ============
+
+  // 顶部「对战匹配」按钮：未对战时发起匹配；对战中则退出房间
+  _toggleCombat() {
+    if (this._combat) {
+      this.network.sendLeaveRoom();
+      this._exitCombat(this._lobbySpawn); // 本地即时退出；服务端 match_left 到达后为幂等空操作
+      return;
+    }
+    this.network.sendMatch(this._matchMode);
+    this._showMatchOverlay();
+    this._toast('正在匹配「躲避陨石混战」…');
+  }
+
+  // 「匹配中…」浮层（带取消按钮）
+  _showMatchOverlay() {
+    if (!this._combatOverlay) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(8,14,24,.55);font-family:var(--kui-font);color:var(--kui-paper);';
+      el.innerHTML =
+        '<div class="kui-panel" style="min-width:280px;padding:26px 28px;text-align:center;">' +
+        '<div class="kui-title" style="font-size:18px;margin-bottom:10px;">匹配中…</div>' +
+        '<div style="color:var(--kui-ink-soft);margin-bottom:18px;font-size:13px;">正在为你寻找「躲避陨石混战」对手</div>' +
+        '<button type="button" id="__cancelMatch" class="kui-btn kui-btn--grey" style="width:100%;">取消匹配</button></div>';
+      document.body.appendChild(el);
+      const btn = el.querySelector('#__cancelMatch');
+      if (btn) btn.addEventListener('click', () => { this.network.sendCancelMatch(); el.style.display = 'none'; });
+      this._combatOverlay = el;
+    }
+    this._combatOverlay.style.display = 'flex';
+  }
+
+  // 对战状态条：模式名 + 存活人数 + 计时 + 退出按钮
+  _showCombatHUD() {
+    if (!this._combatHud) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;top:56px;right:14px;z-index:9400;' +
+        'display:flex;gap:12px;align-items:center;' +
+        'font:13px/1.4 var(--kui-font);color:var(--kui-paper);' +
+        'background:rgba(11,21,34,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 12px;';
+      el.innerHTML =
+        '<span style="font-weight:700;color:#ffd76a;">躲避陨石混战</span>' +
+        '<span id="__cAlive">同场 -</span>' +
+        '<span id="__cTime">时间 00:00</span>' +
+        '<button type="button" id="__cLeave" class="kui-btn kui-btn--grey" style="padding:3px 10px;">退出对战</button>';
+      document.body.appendChild(el);
+      const leaveBtn = el.querySelector('#__cLeave');
+      if (leaveBtn) leaveBtn.addEventListener('click', () => this._toggleCombat());
+      this._combatHud = el;
+    }
+    this._combatHud.style.display = 'flex';
+  }
+
+  _hideCombatHUD() {
+    if (this._combatHud) this._combatHud.style.display = 'none';
+  }
+
+  _updateCombatHUD() {
+    if (!this._combat || !this._combatHud) return;
+    const a = this._combatHud.querySelector('#__cAlive');
+    const t = this._combatHud.querySelector('#__cTime');
+    if (a) a.textContent = '同场 ' + (this._combat.alive || 0);
+    const s = Math.max(0, Math.floor((performance.now() - this._combat.roundStart) / 1000));
+    const mm = String(Math.floor(s / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    if (t) t.textContent = '时间 ' + mm + ':' + ss;
+  }
+
+  // 进入对战：隐藏城市景物、换上竞技场碰撞体、把玩家放到房间出生点、显示对战 HUD
+  _enterCombat(mode, spawn, isOwner, members) {
+    if (this._combat) this._exitCombat(this._lobbySpawn); // 防御：已在对战中先干净退出
+    this._lobbySpawn = this._spawn || this._lobbySpawn || { x: 2, z: 144, yaw: 0 };
+    const sp = spawn || { x: 0, z: 0, yaw: 0 };
+    this._combat = {
+      room: this._room, mode, isOwner: !!isOwner, members: members || new Map(),
+      spawn: sp, roundStart: performance.now(), alive: 0,
+    };
+    // 若正骑着电动车进对战，先下车（车不在竞技场里）
+    if (this.localState.ride) this._dismountVehicle();
+
+    // 隐藏主世界景物与城市 NPC；碰撞体先快照再原地替换为竞技场
+    if (this._cityRoots) for (const r of this._cityRoots) r.visible = false;
+    setEditorSceneVisible(false); // 编辑器建筑不在 roots 里，单独整组隐藏
+    if (this.aiNpc) this.aiNpc.group.visible = false;
+    if (this.merchant) this.merchant.group.visible = false;
+    if (this.vehicle) this.vehicle.group.visible = false;
+    if (this.boss && this.boss.group) this.boss.group.visible = false;
+    if (this.boss && this.boss.portalGroup) this.boss.portalGroup.visible = false;
+    if (this._portalHint) this._portalHint.style.display = 'none';
+    if (this._merchantHint) this._merchantHint.style.display = 'none';
+    if (this._vehHint) this._vehHint.style.display = 'none';
+    if (this._chatTab) this._chatTab.style.display = 'none';
+
+    this._mainColliders = this.colliders.slice(); // 快照主世界碰撞体内容（退出时还原）
+    this._arena = buildArena(this.scene);
+    this.colliders.length = 0; // 原地改写：LocalPlayer 持有的数组引用保持不变
+    for (const c of this._arena.colliders) this.colliders.push(c);
+
+    // 玩家落到竞技场出生点
+    this.localState.x = sp.x;
+    this.localState.z = sp.z;
+    this.localState.yaw = sp.yaw || 0;
+    this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    this.localState.health = Config.HEALTH_MAX;
+    this.localPlayer.physics.velocity.set(0, 0, 0);
+    this._dead = false;
+    this._spawn = sp;
+    this._updateHealthBar();
+    this._clearTransients(); // 清掉主世界留下的投掷物/黑洞/特效，避免带进竞技场
+
+    this._meteors.length = 0;
+    this._meteorTimer = 0; // 房主首波立刻开始
+    this._showCombatHUD();
+    if (this._btnCombat) this._btnCombat.textContent = '退出对战';
+    this._updateBossUI(); // 刷新攻击按钮（对战中常驻）
+    this._toast('已匹配！进入「躲避陨石混战」');
+  }
+
+  // 退出对战：拆掉竞技场、还原城市景物与主世界碰撞体、玩家回大厅出生点
+  _exitCombat(lobbySpawn) {
+    if (!this._combat && !this._arena) return; // 幂等：已退出则直接返回
+    for (const m of this._meteors) { this.scene.remove(m.mesh); this._disposeMeteor(m); }
+    this._meteors.length = 0;
+    if (this._arena) { this._arena.dispose(); this._arena = null; }
+
+    // 还原城市景物与 NPC
+    if (this._cityRoots) for (const r of this._cityRoots) r.visible = true;
+    setEditorSceneVisible(true);
+    if (this.aiNpc) this.aiNpc.group.visible = true;
+    if (this.merchant) this.merchant.group.visible = true;
+    if (this.vehicle) this.vehicle.group.visible = true;
+    if (this.boss && this.boss.group) this.boss.group.visible = true;
+    if (this.boss && this.boss.portalGroup) this.boss.portalGroup.visible = true;
+
+    // 还原主世界碰撞体（原地改回，保持 LocalPlayer 的数组引用不变）
+    this.colliders.length = 0;
+    for (const c of this._mainColliders) this.colliders.push(c);
+
+    // 玩家回大厅出生点
+    const sp = lobbySpawn || this._lobbySpawn || { x: 2, z: 144, yaw: 0 };
+    this.localState.x = sp.x;
+    this.localState.z = sp.z;
+    this.localState.yaw = sp.yaw || 0;
+    this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    this.localState.health = Config.HEALTH_MAX;
+    this.localPlayer.physics.velocity.set(0, 0, 0);
+    this._dead = false;
+    this._spawn = sp;
+    this._updateHealthBar();
+
+    this._combat = null;
+    this._room = null;
+    this._hideCombatHUD();
+    if (this._btnCombat) this._btnCombat.textContent = '对战匹配';
+    this._updateBossUI(); // 交回给主世界逻辑控制攻击按钮显隐
+    this._toast('已退出对战，返回主世界');
+  }
+
+  // 清掉在飞的投掷物 / 黑洞 / 爆炸特效 / 追踪导弹（切换场景时调用，避免跨场景残留）
+  _clearTransients() {
+    for (const p of this._projectiles) { if (p && p.mesh) this.scene.remove(p.mesh); }
+    this._projectiles.length = 0;
+    for (const h of this._holes) { const g = h && (h.group || h.mesh); if (g) this.scene.remove(g); }
+    this._holes.length = 0;
+    for (const f of this._fx) { if (f && f.group) this.scene.remove(f.group); }
+    this._fx.length = 0;
+    for (const m of this._missiles) { if (m && m.mesh) this.scene.remove(m.mesh); }
+    this._missiles.length = 0;
+  }
+
+  // 陨石模式每帧推进：房主按间隔生成，全场推进下落并结算落地伤害
+  _updateMeteorMode(dt) {
+    const c = this._combat;
+    if (!c || c.mode !== 'meteor') return;
+
+    if (c.isOwner) {
+      this._meteorTimer -= dt;
+      if (this._meteorTimer <= 0) {
+        this._meteorTimer = Config.METEOR_INTERVAL;
+        this._spawnMeteorWave();
+      }
+    }
+
+    const pr = Config.PLAYER_RADIUS;
+    for (let i = this._meteors.length - 1; i >= 0; i--) {
+      const m = this._meteors[i];
+      m.y += m.vy * dt; // vy 为负 → 下落
+      m.mesh.position.set(m.x, m.y, m.z);
+      m.mesh.rotation.x += dt * 2.4;
+      m.mesh.rotation.y += dt * 1.7;
+      if (m.y > 0) continue;
+      // 落地：播爆炸 + 只对本地玩家结算伤害（环境伤害各自判定，避免重复扣血）
+      this._playExplosion(new THREE.Vector3(m.x, 0.25, m.z), m.r + Config.METEOR_IMPACT_PAD, Config.METEOR_DAMAGE);
+      const dx = this.localState.x - m.x;
+      const dz = this.localState.z - m.z;
+      if (!this._dead && Math.hypot(dx, dz) <= m.r + Config.METEOR_IMPACT_PAD + pr) {
+        this._changeHealth(-Config.METEOR_DAMAGE);
+        this._toast('被陨石砸中！-' + Config.METEOR_DAMAGE);
+      }
+      this.scene.remove(m.mesh);
+      this._disposeMeteor(m);
+      this._meteors.splice(i, 1);
+    }
+
+    this._updateCombatHUD();
+  }
+
+  // 房主生成一波陨石：本地立即生成并广播，其他客户端收到 meteor 消息后复刻同一颗
+  _spawnMeteorWave() {
+    const half = Math.max(6, Config.COMBAT_ARENA_HALF - 4);
+    for (let k = 0; k < Config.METEOR_PER_WAVE; k++) {
+      const x = (Math.random() * 2 - 1) * half;
+      const z = (Math.random() * 2 - 1) * half;
+      const vy = -(Config.METEOR_SPEED_MIN + Math.random() * (Config.METEOR_SPEED_MAX - Config.METEOR_SPEED_MIN));
+      const r = Config.METEOR_RADIUS_MIN + Math.random() * (Config.METEOR_RADIUS_MAX - Config.METEOR_RADIUS_MIN);
+      this._spawnMeteor({ x, z, vy, r });
+      this.network.sendMeteor({ x, z, vy, r });
+    }
+  }
+
+  // 生成一颗陨石（本地/远端共用）：从高空落下，落地由 _updateMeteorMode 结算
+  _spawnMeteor(o) {
+    if (!o) return;
+    const x = Number(o.x);
+    const z = Number(o.z);
+    const vy = Number(o.vy);
+    const r = Number(o.r) || 1.5;
+    if (![x, z, vy].every(Number.isFinite)) return;
+    if (this._meteors.length >= Config.METEOR_MAX_ALIVE) return;
+    const mesh = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(r, 0),
+      new THREE.MeshStandardMaterial({
+        color: 0x8a4a22, emissive: 0xff5a22, emissiveIntensity: 0.6, roughness: 0.7, flatShading: true,
+      })
+    );
+    mesh.position.set(x, Config.METEOR_SPAWN_Y, z);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this._meteors.push({ x, y: Config.METEOR_SPAWN_Y, z, vy, r, mesh });
+  }
+
+  _disposeMeteor(m) {
+    if (!m || !m.mesh) return;
+    if (m.mesh.geometry) m.mesh.geometry.dispose();
+    if (m.mesh.material) m.mesh.material.dispose();
+  }
+
   _loop() {
     this._raf = requestAnimationFrame(() => this._loop());
 
@@ -3208,16 +3542,25 @@ export class Game {
     this.localPlayer.update(dt);
     this.playerManager.update(dt);
 
-    // 电动车：摆放车体、钉住后座、刷新上下车提示（必须在玩家更新之后）
-    this._updateVehicle(dt);
+    // 主世界（城市）专属系统：对战中整组跳过，避免城市 NPC/Boss/载具与竞技场互串
+    if (!this._combat) {
+      // 电动车：摆放车体、钉住后座、刷新上下车提示（必须在玩家更新之后）
+      this._updateVehicle(dt);
+      // AI 商人 NPC：靠近提示 + 可拾取道具的推进
+      this.aiNpc.update(dt, this.localState.x, this.localState.z);
+      this._updatePickups(dt);
+      // 商人小满：靠近显隐「找小满买东西」按钮
+      this._updateMerchant(dt);
+      // 传送门 / 老师 Boss：倒计时、追击、弹幕与 UI
+      this._updateBoss(dt);
+      // 超级激光的追踪导弹（只在 Boss 战里有意义）
+      this._updateMissiles(dt);
+    }
 
-    // AI 商人 NPC：靠近提示 + 可拾取道具的推进
-    this.aiNpc.update(dt, this.localState.x, this.localState.z);
-    this._updatePickups(dt);
+    // 对战模式：房主生成陨石 + 全场陨石下落/落地伤害（内部自带守卫，非对战时直接返回）
+    this._updateMeteorMode(dt);
 
-    // 商人小满：靠近显隐「找小满买东西」按钮
-    this._updateMerchant(dt);
-    // 棍子挥动动画与命中结算
+    // 棍子挥动动画与命中结算（对战中同样可用：混战武器）
     this._updateClub(dt);
     // 黑洞：长大与吸人
     this._updateHoles(dt);
@@ -3226,11 +3569,6 @@ export class Game {
     // 捉迷藏：方块跟人走、方向提示、抓到判定
     this._updateMorphs();
     this._updateHideReport(dt);
-
-    // 传送门 / 老师 Boss：倒计时、追击、弹幕与 UI
-    this._updateBoss(dt);
-    // 超级激光的追踪导弹
-    this._updateMissiles(dt);
 
     // 投掷物：推进飞行、命中/落地后结算范围伤害
     this._updateProjectiles(dt);

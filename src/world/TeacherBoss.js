@@ -813,5 +813,8 @@ export function createTeacherBoss(scene) {
     get maxHp() { return Config.BOSS_HP; },
     get countdown() { return countdown; },
     get pos() { return { x: px, z: pz }; },
+    // 供「进入对战独立场景」时整组隐藏/恢复（Boss 模型本体 + 传送门）
+    get group() { return bossGroup; },
+    get portalGroup() { return portal; },
   };
 }

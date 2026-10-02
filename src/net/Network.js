@@ -111,6 +111,28 @@ export class Network {
     this.send({ t: 'ctrl', target, on: on ? 1 : 0, x, y, z });
   }
 
+  // 匹配：请求进入对战房间（mode 指定玩法；当前只支持 'meteor' 躲避陨石混战）
+  sendMatch(mode) {
+    this.send({ t: 'match', mode: mode || 'meteor' });
+  }
+
+  // 取消匹配：还在队列里时退出
+  sendCancelMatch() {
+    this.send({ t: 'cancel_match' });
+  }
+
+  // 退出对战房间：回到大厅
+  sendLeaveRoom() {
+    this.send({ t: 'leave_room' });
+  }
+
+  // 陨石生成广播（房主发出，其他客户端据此复刻同一颗陨石，保证全场看到一致的落点）
+  sendMeteor(info) {
+    if (!info) return;
+    const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+    this.send({ t: 'meteor', x: num(info.x, 0), z: num(info.z, 0), vy: num(info.vy, -20), r: num(info.r, 1.5) });
+  }
+
   // 投掷物出手广播：让其他玩家看到「有一颗东西飞过去」
   sendProj(info) {
     if (!info) return;

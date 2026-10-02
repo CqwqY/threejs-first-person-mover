@@ -260,6 +260,25 @@ export const Config = {
   CTRL_MAX_TIME: 8,      // 单次控制最长持续（秒），到时自动松开
   CTRL_RATE: 20,         // 控制器向被控者同步锚点的频率（Hz）
   CTRL_BREAK_COOLDOWN: 1,// 挣脱后多久内免疫再次被抓（秒）
+
+  // ---- 对战模式：匹配 + 单独竞技场（第一个模式「躲避陨石混战」）----
+  COMBAT_ARENA_HALF: 30,        // 竞技场半边长（米），实际 60×60
+  COMBAT_WALL_HEIGHT: 4,        // 四周边界墙高度
+  COMBAT_SPAWN_RADIUS: 24,      // 出生点离中心的半径（米），环形分布
+  METEOR_INTERVAL: 1.1,         // 房主生成陨石的间隔（秒）
+  METEOR_PER_WAVE: 2,           // 每波陨石数量
+  METEOR_SPEED_MIN: 18,         // 下落速度（米/秒）
+  METEOR_SPEED_MAX: 30,
+  METEOR_RADIUS_MIN: 1.2,       // 陨石命中半径（米）
+  METEOR_RADIUS_MAX: 2.6,
+  METEOR_DAMAGE: 35,            // 被陨石砸中的伤害
+  METEOR_IMPACT_PAD: 0.6,       // 落点判定额外余量（米）
+  METEOR_SPAWN_Y: 60,           // 陨石初始高度
+  METEOR_MAX_ALIVE: 48,         // 同屏陨石上限
+  COMBAT_BALL_DAMAGE: 18,       // 对战里左键「能量球」的伤害（命中其他玩家结算）
+  COMBAT_BALL_RADIUS: 2.4,      // 能量球爆炸半径（米）
+  COMBAT_BALL_SPEED: 26,        // 出手速度（米/秒）
+  COMBAT_BALL_COOLDOWN: 0.45,   // 攻击间隔（秒）
 };
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。

@@ -17,6 +17,117 @@ const HEARTBEAT_INTERVAL = 30000; // 心跳间隔（毫秒），防止连接被�
 const SPAWN_RADIUS = 4; // 出生点离原点距离（米）
 const SPAWN_ANGLE_STEP = Math.PI / 2; // 每个玩家出生点在圆周上的夹角间隔（90°）
 
+// ---- 对战房间 / 匹配队列 ----
+// 每个连接都属于一个「房间」：大厅为 null，对战房为 'r_<n>'。
+// 所有玩法消息按房间定向广播，使对战玩家只看到同房的人，城市大厅玩家互不干扰。
+const rooms = new Map();            // roomId -> { mode, members:Set<ws>, owner, spawns:Map<id,{x,z,yaw}>, createdAt }
+let nextRoomId = 1;
+const MATCH_MIN = 2;                // 至少几人开战
+const MATCH_MAX = 8;                // 单房人数上限
+const MATCH_SOLO_TIMEOUT = 12000;   // 单人苦等不到人时，多久放单人也开（毫秒）
+const queue = [];                   // 等待匹配的 ws 列表（按入队顺序）
+
+// 返回某房间当前在线的成员连接列表（room=null 视为大厅）
+function membersOf(room) {
+  if (room == null) {
+    return [...wss.clients].filter((c) => c.readyState === WebSocket.OPEN && c.__room == null);
+  }
+  const r = rooms.get(room);
+  if (!r) return [];
+  return [...r.members].filter((c) => c.readyState === WebSocket.OPEN);
+}
+
+// 向某房间广播一条消息（可排除 exceptWs，比如排除发起者自己）
+function roomBroadcast(room, msg, exceptWs) {
+  const raw = JSON.stringify(msg);
+  for (const c of membersOf(room)) {
+    if (c !== exceptWs && c.readyState === WebSocket.OPEN) c.send(raw);
+  }
+}
+
+// 竞技场出生点：以原点为中心环形分布，面朝中心。
+// 相机前方 = (-sin yaw, -cos yaw)，要让它指向中心需 yaw = atan2(x, z)（与大厅 spawnForNum 同一约定）。
+function arenaSpawnForIndex(i, total) {
+  const r = 24;
+  const ang = (i / Math.max(1, total)) * Math.PI * 2;
+  const x = Math.cos(ang) * r;
+  const z = Math.sin(ang) * r;
+  const yaw = Math.atan2(x, z); // 看向中心 (0,0)
+  return { x, z, yaw };
+}
+
+// 把一批已入队的玩家塞进一个新房间，并各自通知 match_found
+function createRoom(mode, members) {
+  const roomId = 'r_' + (nextRoomId++);
+  const room = { mode, members: new Set(members), owner: members[0] || null, spawns: new Map(), createdAt: Date.now() };
+  rooms.set(roomId, room);
+  const spawns = [];
+  for (const ws of members) {
+    ws.__room = roomId;
+    const sp = arenaSpawnForIndex(room.spawns.size, members.length);
+    room.spawns.set(ws.__id, sp);
+    const prof = ws.__profile;
+    const nick = prof ? (prof.nickname || prof.username || ('玩家' + ws.__num)) : ('玩家' + ws.__num);
+    const color = prof ? (prof.nicknameColor || '#ffffff') : '#ffffff';
+    spawns.push({ id: ws.__id, num: ws.__num, spawn: sp, nick, color });
+    if (states.has(ws.__id)) { const s = states.get(ws.__id); s.room = roomId; }
+  }
+  const payload = { mode, room: roomId, owner: room.owner ? room.owner.__id : null, members: spawns };
+  for (const ws of members) {
+    ws.send(JSON.stringify({ t: 'match_found', ...payload, spawn: room.spawns.get(ws.__id) }));
+  }
+  console.log(`[relay] 房间 ${roomId} 创建（模式 ${mode}，成员 ${members.length}）`);
+}
+
+// 触发一次匹配尝试：够人直接开；只有一个人且等够了也开（练习场）
+function tryMatch() {
+  if (queue.length >= MATCH_MIN) {
+    const batch = queue.splice(0, Math.min(MATCH_MAX, queue.length));
+    createRoom('meteor', batch);
+    return;
+  }
+  if (queue.length === 1) {
+    const ws = queue[0];
+    const waited = Date.now() - (ws.__matchAt || Date.now());
+    if (waited >= MATCH_SOLO_TIMEOUT) {
+      queue.shift();
+      createRoom('meteor', [ws]); // 单人练习场
+    }
+  }
+}
+
+// 把连接从其所在的对战房移除：通知同房其他人、必要时转移房主或销毁空房，并清掉状态的房间标记。
+// 返回旧房 id（本来就不在房里则返回 null）。不含任何「回大厅」的广播，交由调用方决定。
+function removeFromRoom(ws) {
+  const room = ws.__room;
+  if (!room) return null;
+  const r = rooms.get(room);
+  if (r) {
+    r.members.delete(ws);
+    roomBroadcast(room, { t: 'leave', id: ws.__id }); // 同房其他人移除该玩家模型
+    if (r.owner === ws && r.members.size > 0) {
+      r.owner = [...r.members][0];
+      roomBroadcast(room, { t: 'room_owner', owner: r.owner.__id });
+    }
+    if (r.members.size === 0) rooms.delete(room);
+  }
+  ws.__room = null;
+  if (states.has(ws.__id)) { const s = states.get(ws.__id); s.room = null; }
+  return room;
+}
+
+// 玩家主动退房：回大厅——通知大厅看到他，并让客户端退出对战场景
+function leaveRoom(ws) {
+  const old = removeFromRoom(ws);
+  if (!old) {
+    ws.send(JSON.stringify({ t: 'match_left', spawn: spawnForNum(ws.__num) }));
+    return;
+  }
+  const st = states.get(ws.__id);
+  roomBroadcast(null, { t: 'join', id: ws.__id, state: st || { num: ws.__num } });
+  ws.send(JSON.stringify({ t: 'match_left', spawn: spawnForNum(ws.__num) }));
+}
+
 // ---- 数据目录（自包含：相对本文件所在目录） ----
 const SERVER_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(SERVER_ROOT, 'data');
@@ -210,16 +321,6 @@ function spawnForNum(num) {
   return { x: 2, z: 144, yaw };
 }
 
-// 向所有已连接客户端广播一条 JSON 消息
-function broadcast(msg) {
-  const raw = JSON.stringify(msg);
-  for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(raw);
-    }
-  }
-}
-
 const AUTH_DB = path.join(DATA_DIR, 'accounts.db');
 // 账号系统（SQLite，schema 由 auth.js 启动时自建），不碰地图/素材文件
 const auth = initAuth(AUTH_DB);
@@ -294,6 +395,7 @@ function worldPlayers() {
     veh: st.veh,
     nick: st.nick || ('玩家' + st.num),
     color: st.color || '#ffffff',
+    room: st.room || null,
   }));
 }
 
@@ -303,9 +405,12 @@ wss.on('connection', (ws) => {
   const num = allocNum(); // 复用最小空闲编号，避免重连把数字推到几十
   const spawn = spawnForNum(num);
   spawns.set(id, spawn);
+  ws.__room = null;   // 当前所在房间：大厅为 null，对战房为 'r_<n>'
+  ws.__num = num;     // 玩家序号（房间内出生点/名牌用）
+  ws.__matchAt = 0;   // 进入匹配队列的时间戳（单人超时判定用）
 
-  // welcome：告知新客户端自己的 id/序号/出生点，以及当前已有玩家
-  const existing = worldPlayers().filter((p) => p.id !== id);
+  // welcome：告知新客户端自己的 id/序号/出生点，以及当前已有玩家（只列同房间/大厅的人）
+  const existing = worldPlayers().filter((p) => p.id !== id && !p.room);
   ws.send(JSON.stringify({ t: 'welcome', id, num, spawn, players: existing }));
 
   ws.on('message', (data) => {
@@ -331,8 +436,36 @@ wss.on('connection', (ws) => {
       if (pub && states.has(id)) {
         const cur = states.get(id);
         states.set(id, { ...cur, nick: pub.nickname || pub.username || ('玩家' + cur.num), color: pub.nicknameColor || '#ffffff' });
-        broadcast({ t: 'join', id, state: states.get(id) });
+        roomBroadcast(ws.__room, { t: 'join', id, state: states.get(id) }, ws); // 只通知同房间的人
       }
+      return;
+    }
+
+    // 匹配：请求进入对战房间（mode 指定玩法，当前只支持 'meteor' 躲避陨石混战）
+    if (msg.t === 'match') {
+      const mode = String(msg.mode || 'meteor');
+      if (mode !== 'meteor') return;       // 暂只支持陨石混战
+      if (ws.__room) return;               // 已在房间内，忽略
+      if (queue.includes(ws)) return;      // 已在队列，忽略重复
+      ws.__matchAt = Date.now();
+      ws.__matchMode = mode;
+      queue.push(ws);
+      ws.send(JSON.stringify({ t: 'match_queued' }));
+      tryMatch();
+      return;
+    }
+
+    // 取消匹配：还在队列里时退出
+    if (msg.t === 'cancel_match') {
+      const i = queue.indexOf(ws);
+      if (i >= 0) queue.splice(i, 1);
+      ws.send(JSON.stringify({ t: 'match_canceled' }));
+      return;
+    }
+
+    // 退出对战房间：回到大厅
+    if (msg.t === 'leave_room') {
+      leaveRoom(ws);
       return;
     }
 
@@ -415,10 +548,7 @@ wss.on('connection', (ws) => {
         out.radius = num(msg.radius, 3, 1, 20);
         out.damage = num(msg.damage, 0, 0, 120);
       }
-      const raw = JSON.stringify(out);
-      for (const client of wss.clients) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
-      }
+      roomBroadcast(ws.__room, out, ws);
       return;
     }
 
@@ -454,20 +584,14 @@ wss.on('connection', (ws) => {
       } else if (ev === 'shift' || ev === 'phase') {
         out.ph = Math.round(num(msg.ph, 2, 1, 3));
       }
-      const raw = JSON.stringify(out);
-      for (const client of wss.clients) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
-      }
+      roomBroadcast(ws.__room, out, ws);
       return;
     }
 
     // 黑洞：投掷者已把飞行模拟完，这里只把落点转发给其他人
     if (msg.t === 'bh') {
       const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.min(1000, Math.max(-1000, n)) : 0; };
-      const raw = JSON.stringify({ t: 'bh', x: num(msg.x), z: num(msg.z) });
-      for (const client of wss.clients) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
-      }
+      roomBroadcast(ws.__room, { t: 'bh', x: num(msg.x), z: num(msg.z) }, ws);
       return;
     }
 
@@ -486,10 +610,22 @@ wss.on('connection', (ws) => {
         const c = String(msg.color || '').replace(/[^#0-9a-fA-F]/g, '').slice(0, 7);
         out.color = /^#[0-9a-fA-F]{6}$/.test(c) ? c : '#cccccc';
       }
-      const raw = JSON.stringify(out);
-      for (const client of wss.clients) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(raw);
-      }
+      roomBroadcast(ws.__room, out, ws);
+      return;
+    }
+
+    // 陨石生成（躲避陨石混战）：房主发出，转发给同房其他人复刻同一颗。
+    // 服务器不模拟陨石，只钳制数值后转发，保证全场落点一致。
+    if (msg.t === 'meteor') {
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const out = {
+        t: 'meteor',
+        x: num(msg.x, 0, -1000, 1000),
+        z: num(msg.z, 0, -1000, 1000),
+        vy: num(msg.vy, -20, -80, -1),
+        r: num(msg.r, 1.5, 0.5, 6),
+      };
+      roomBroadcast(ws.__room, out, ws);
       return;
     }
 
@@ -524,26 +660,28 @@ wss.on('connection', (ws) => {
       wep: clampWep(msg.wep),
       ride: clampRide(msg.ride),
       veh: String(msg.veh || '').slice(0, 16),
+      room: ws.__room, // 当前所在房间（大厅为 null），快照按房间分组用
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });
 
     if (isFresh) {
-      // 新玩家首次上报：把 join（含序号与状态）广播给其他人
-      for (const client of wss.clients) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ t: 'join', id, state: states.get(id) }));
-        }
-      }
+      // 新玩家首次上报：把 join（含序号与状态）广播给同房间其他人
+      roomBroadcast(ws.__room, { t: 'join', id, state: states.get(id) }, ws);
     }
   });
 
   ws.on('close', () => {
+    const i = queue.indexOf(ws);
+    if (i >= 0) queue.splice(i, 1); // 若还在匹配队列，移除
+    if (ws.__room) {
+      removeFromRoom(ws); // 对战中掉线：通知同房其他人（不往大厅广播 join）
+    } else {
+      roomBroadcast(null, { t: 'leave', id }); // 大厅掉线：通知大厅其他人移除该模型
+    }
     states.delete(id);
     spawns.delete(id);
     freeNum(num); // 释放编号，供后续玩家复用
-    // 通知所有人该玩家离开
-    broadcast({ t: 'leave', id });
   });
 
   // 心跳：标记存活，等待 pong 回应
@@ -570,12 +708,24 @@ setInterval(() => {
 let dayTime = 0.35;
 const DAY_SECONDS = 240; // 一昼夜对应的真实秒数（与客户端默认值一致，便于帧间外推）
 
-// 周期广播所有玩家状态（20Hz）
+// 周期广播所有玩家状态（20Hz）：按房间分组，使对战玩家只收到同房的快照
 setInterval(() => {
   const list = worldPlayers();
   if (list.length === 0) return; // 没人在线：跳过时间推进与广播
   dayTime = (dayTime + SNAPSHOT_INTERVAL / 1000 / DAY_SECONDS) % 1;
-  broadcast({ t: 'snapshot', players: list, time: dayTime });
+  // 按 room 分桶（null = 大厅）
+  const byRoom = new Map();
+  for (const p of list) {
+    const r = p.room || null;
+    if (!byRoom.has(r)) byRoom.set(r, []);
+    byRoom.get(r).push(p);
+  }
+  for (const [r, players] of byRoom) {
+    roomBroadcast(r, { t: 'snapshot', players, time: dayTime });
+  }
 }, SNAPSHOT_INTERVAL);
+
+// 匹配轮询：单人苦等超时也放单人也开（练习场），避免永远卡在队列里
+setInterval(tryMatch, 1000);
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);

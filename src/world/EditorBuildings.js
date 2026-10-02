@@ -19,6 +19,12 @@ function clearHolders(scene) {
   _addedHolders = [];
 }
 
+// 统一显隐「编辑器建筑」：进入对战独立竞技场时把城市建筑整组隐藏，退出时恢复。
+// 编辑器建筑是直接挂在 scene 下的 holder，不在 buildScenery 的 roots 里，必须单独切换。
+export function setEditorSceneVisible(visible) {
+  for (const h of _addedHolders) h.visible = !!visible;
+}
+
 // 运行时从远程后端拉取最新编辑器场景（在线同步）；失败返回 null 由调用方回退到打包数据
 export async function fetchRemoteScene() {
   try {
