@@ -36,9 +36,29 @@ function defaultCollider() {
 }
 // 编辑器读写自己的场景文件与模型上传；统一走远程后端（API_BASE），实现线上同步。
 // 保存/读取场景、素材清单、模型上传都指向同一台后端，编辑器改完线上游戏即可读到。
-const MAP_URL = API_BASE + '/api/scene';
-const SAVE_URL = API_BASE + '/api/scene';
-const UPLOAD_URL = API_BASE + '/api/upload';
+// API_BASE 正常是 https://game666.lshserver.dpdns.org；万一没配到，就退回同源（见 UPLOAD_URL 兜底）。
+const API_ROOT = String(API_BASE || '').replace(/\/+$/, '');
+const MAP_URL = API_ROOT + '/api/scene';
+const SAVE_URL = API_ROOT + '/api/scene';
+const UPLOAD_URL = API_ROOT + '/api/upload';
+// 同源兜底：编辑器也可能被本地 server（server/index.js）或 Vite dev 的代理托管，那时 /api/upload 直接可用
+const SAME_ORIGIN_UPLOAD = '/api/upload';
+// 后端与 vite 代理的单次上传上限都是 64MB。这里先拦一道，给一句人话，而不是让连接被服务端 reset。
+const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
+
+// 上传用的 ASCII 文件名。为什么必须转：
+// HTTP 头的值只能是 ISO-8859-1 字节，文件名里只要有一个中文（任何码位 >255 的字符），
+// fetch 会在**请求发出之前同步抛 TypeError**（Network 面板里一条记录都不会有），
+// 再被外层的 catch 吞掉，就报成「接口未返回可用地址」这种误导性提示。
+// 另外服务端静态路由只认 [a-zA-Z0-9._-]，中文名存进去也取不出来，所以文件一律用 ASCII 名，
+// 原始文件名只用于素材库显示。规则与服务端 sanitizeName 保持一致。
+function asciiFileName(name) {
+  const raw = String(name || '');
+  const m = raw.match(/\.(glb|gltf)$/i);
+  const ext = m ? '.' + m[1].toLowerCase() : '.glb';
+  const stem = raw.replace(/\.(glb|gltf)$/i, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+  return (stem || 'model') + ext;
+}
 
 // 素材库：内建素材（文件名来自 /assets），统一为 {label, url} 绝对路径
 const LIBRARY = [
@@ -1964,29 +1984,83 @@ export function createEditor() {
   }
 
   const fileIn = document.getElementById('fileIn');
+
+  // 状态栏提示（保存状态用的是同一个元素，这里复用它报上传进度）
+  function setUploadStatus(text, cls) {
+    if (!StepUI.status) return;
+    StepUI.status.textContent = text;
+    StepUI.status.className = 'save-status ' + (cls || '');
+  }
+
+  // 单次上传尝试：只负责「发请求 → 解析 → 校验」，不弹窗、不吞错误。
+  // 失败时把原因原样带回去（谁发不出去、服务端回了什么），这样才能报准，而不是笼统说「没返回地址」。
+  async function uploadModel(url, file, buf) {
+    let r;
+    try {
+      r = await fetch(url, {
+        method: 'POST',
+        headers: { 'x-filename': asciiFileName(file.name) },
+        body: buf,
+      });
+    } catch (e) {
+      // 走到这里说明请求根本没发出去：URL 非法、被 CSP 拦、跨源被浏览器拦……
+      // （以前文件名带中文时就是这里抛 TypeError，却被外层一个空 catch 吞掉，所以 Network 里干干净净。）
+      return { url: '', reason: '请求未发出（' + (e && e.message ? e.message : e) + '）' };
+    }
+    let text = '';
+    let body = null;
+    try {
+      text = await r.text();
+      body = JSON.parse(text);
+    } catch (e) { /* 不是 JSON：可能是网关/代理的错误页，下面按原文回显 */ }
+    if (r.ok && body && body.ok && body.url) return { url: body.url, reason: '' };
+    if (!r.ok) {
+      return { url: '', reason: 'HTTP ' + r.status + (r.statusText ? ' ' + r.statusText : '') + (text ? '：' + text.slice(0, 200) : '') };
+    }
+    return { url: '', reason: '返回体里没有 url 字段：' + (text ? text.slice(0, 200) : '(空响应)') };
+  }
+
   fileIn.addEventListener('change', async () => {
     const f = fileIn.files[0];
+    fileIn.value = ''; // 提前清空：同一个文件重选也能再次触发 change
     if (!f) return;
     const base = f.name.replace(/\.(glb|gltf)$/i, '');
+    const safeName = asciiFileName(f.name);
+
+    if (f.size > MAX_UPLOAD_BYTES) {
+      alert('模型太大：' + (f.size / 1048576).toFixed(1) + 'MB，超过后端单次上传上限 '
+        + (MAX_UPLOAD_BYTES / 1048576) + 'MB。请先精简模型（删掉用不到的高模 / 贴图）再导入。');
+      return;
+    }
     let ab;
     try { ab = await f.arrayBuffer(); } catch (e) { alert('读取文件失败：' + e); return; }
 
-    // 先把模型原样上传到 public/models 目录，得到统一绝对路径 /models/xxx.glb。
-    // 上传/入库不再依赖编辑器预加载能否成功，避免 preload 失败时静默跳过。
+    // 先把模型原样上传到后端 assets 目录，得到统一绝对路径。
+    // 线上后端优先；失败再退回同源（本地 server 或 Vite dev 代理），两条路都可能存在。
+    const targets = [...new Set([UPLOAD_URL, SAME_ORIGIN_UPLOAD])].filter((u) => /^https?:\/\//.test(u) || u.startsWith('/'));
+    setUploadStatus('上传中… ' + safeName, 'dirty');
     let assetUrl = '';
-    try {
-      const r = await fetch(UPLOAD_URL, {
-        method: 'POST',
-        headers: { 'x-filename': f.name },
-        body: ab,
-      });
-      const res = await r.json().catch(() => null);
-      if (r.ok && res && res.ok) assetUrl = res.url;
-    } catch (e) { assetUrl = ''; }
+    const reasons = [];
+    for (const u of targets) {
+      const t0 = performance.now();
+      const r = await uploadModel(u, f, ab);
+      if (r.url) {
+        assetUrl = r.url;
+        console.info('[编辑器] 模型已上传', {
+          目标: u, 用时ms: Math.round(performance.now() - t0), 大小MB: +(f.size / 1048576).toFixed(2), url: r.url,
+        });
+        break;
+      }
+      reasons.push(u + ' → ' + r.reason);
+      console.warn('[编辑器] 上传失败', u, r.reason);
+    }
 
     if (!assetUrl) {
-      const st = (typeof rDef !== 'undefined') ? rDef : 'n/a';
-      alert('导入失败：同源 /api/upload 未返回可用地址。hint：设备实测该接口正常，请确认地址栏为 http://localhost:5173/editor.html 且模型文件 < 64MB；若仍失败请按 F12 看 Network 里 api/upload 请求的状态码和响应，反馈给我');
+      setUploadStatus('导入失败（见弹窗）', 'err');
+      alert('导入失败：模型没能上传到后端。\n\n'
+        + reasons.join('\n') + '\n\n'
+        + '本次上传用的文件名是 ' + safeName + '（原始文件名「' + f.name + '」只用于素材库显示）。\n'
+        + '若上面写的是 HTTP 4xx/5xx，把那行原文发我；若写「请求未发出」，说明后端地址不可达或被浏览器拦了。');
       return;
     }
 
@@ -1996,13 +2070,13 @@ export function createEditor() {
       localStorage.setItem(IMPORT_KEY, JSON.stringify(state.imported));
     }
     selectAsset(assetUrl, base);
-    refreshLibrary(); // 新模型已写入 models 目录，刷新素材库让其出现在清单里
+    refreshLibrary(); // 新模型已写进后端，刷新素材库让其出现在清单里
+    setUploadStatus('已导入 ' + base, 'saved');
 
     // 尝试加载预览；失败只提示，不影响已入库
     instantiate(assetUrl).then(() => {}).catch(() => {
-      alert('模型已保存到 /models：' + assetUrl.split('/').pop() + '，但无法在此预览（可能不是有效 GLB）。刷新后可从素材库再选。');
+      alert('模型已上传（' + assetUrl.split('/').pop() + '），但无法在此预览（可能不是有效 GLB）。刷新后可从素材库再选。');
     });
-    fileIn.value = '';
   });
 
   // ---------- 模式切换 ----------
