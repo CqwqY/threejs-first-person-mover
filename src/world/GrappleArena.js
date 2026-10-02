@@ -9,10 +9,11 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 
-// 起始平台：半径 15 的六边形，顶面高度 6m。服务端 arenaSpawn 用的是同一组公式。
-export const GRAPPLE_SPAWN_RADIUS = 15;
-export const GRAPPLE_SPAWN_TOP_Y = 6;
-export const GRAPPLE_SPAWN_COUNT = 6;
+// 起始平台：半径 15 的六边形，顶面高度 6m。数值统一放在 config.js，服务端 arenaSpawn 用同一组公式。
+// 这里再导出一次，是为了让既有自检（aim-check / grapple-check）继续从本模块 import 而不必改。
+export const GRAPPLE_SPAWN_RADIUS = Config.GRAPPLE_SPAWN_RADIUS;
+export const GRAPPLE_SPAWN_TOP_Y = Config.GRAPPLE_SPAWN_TOP_Y;
+export const GRAPPLE_SPAWN_COUNT = Config.GRAPPLE_SPAWN_COUNT;
 export const GRAPPLE_PLATFORM_HALF = 3; // 平台的半边长（6×6 的方盒），柱子布局要避开它的占地
 
 // 固定种子随机数（整数运算 → 各端结果完全一致）

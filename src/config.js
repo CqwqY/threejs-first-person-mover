@@ -215,6 +215,11 @@ export const Config = {
   // 疯狂抓钩：柱子场地 + 金币 + 底部岩浆（踩到地面＝掉进岩浆）
   GRAPPLE_ARENA_HALF: 22,         // 柱子场地半边长（米），实际 44×44
   GRAPPLE_PILLAR_COUNT: 16,       // 柱子数量
+  // 起始平台（出生点）：环形均分。这三个数必须与 server-remote/index.js 的
+  // grappleSpawnForIndex 保持一致（那边只发坐标、不建场景，没有共享模块，靠自检逐点对拍）。
+  GRAPPLE_SPAWN_RADIUS: 15,       // 起始平台所在圆的半径（米）
+  GRAPPLE_SPAWN_TOP_Y: 6,         // 起始平台顶面高度（米）
+  GRAPPLE_SPAWN_COUNT: 6,         // 起始平台数量（环形均分）
   GRAPPLE_COIN_MAX: 40,           // 同屏金币上限
   GRAPPLE_COIN_INTERVAL: 2.2,     // 房主生成金币的间隔（秒）
   GRAPPLE_COIN_PER_WAVE: 2,       // 每波生成数量
@@ -303,6 +308,10 @@ export const Config = {
   COMBAT_ARENA_HALF: 16,        // 竞技场半边长（米），实际 32×32（紧凑，方便遭遇与躲避）
   COMBAT_WALL_HEIGHT: 4,        // 四周边界墙高度
   COMBAT_SPAWN_RADIUS: 12,      // 出生点离中心的半径（米），环形分布（须与 server arenaSpawnForIndex 的 r 一致）
+  COMBAT_ROUND_SECONDS: 120,    // 抓钩模式的单局时长（秒）。陨石混战不限时——活到最后才结束。
+  // 观战（对战中阵亡后，第三人称跟随存活玩家）
+  SPECTATE_DIST: 5.0,           // 观战相机离目标多远（米）
+  SPECTATE_LIFT: 1.6,           // 观战相机相对目标视点抬高多少（米）
   METEOR_INTERVAL: 0.6,         // 房主生成陨石的间隔（秒）→ 约 5 颗/秒
   METEOR_PER_WAVE: 3,           // 每波陨石数量
   METEOR_SPEED_MIN: 24,         // 下落速度（米/秒）

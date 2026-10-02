@@ -18,6 +18,7 @@ import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSce
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
+import { judge, spawnForMode, trainingScore, formatClock, bestKey, parseBest, isBetter, modeRule } from '../game/MatchRules.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { raycastWorld, moveSphereWorld } from '../world/collision/worldQuery.js';
 import { Input, isEditableTarget } from '../core/Input.js';
@@ -70,10 +71,21 @@ const UP_Y = new THREE.Vector3(0, 1, 0);
 const _gpA = new THREE.Vector3();
 const _gDir = new THREE.Vector3();
 
-// 对战玩法表：新增模式时这里加一条，服务端也要放行同名 mode
+// 对战玩法表：新增模式时这里加一条，服务端也要放行同名 mode。
+// tip 给「玩家匹配」用，soloTip 给「训练场」用；win 文案由 MatchRules.MODE_RULES 决定判定方式。
 const COMBAT_MODES = {
-  meteor: { name: '躲避陨石混战', tip: '陨石不断砸落，中被砸 200 血；也能用左键能量球打人' },
-  grapple: { name: '疯狂抓钩', tip: '把准星对上柱顶的光点按攻击，钩爪就带你飞过去；在柱子间吃金币，掉进岩浆出局' },
+  meteor: {
+    name: '躲避陨石混战',
+    tip: '陨石不断砸落，中被砸 200 血；也能用左键能量球打人',
+    soloTip: '自己练走位，退出时看存活时长与最高记录',
+    win: '活到最后的人获胜',
+  },
+  grapple: {
+    name: '疯狂抓钩',
+    tip: '把准星对上柱顶的光点按攻击，钩爪就带你飞过去；在柱子间吃金币，掉进岩浆出局',
+    soloTip: '限时 ' + Config.COMBAT_ROUND_SECONDS + ' 秒，自己练抓钩与吃金币',
+    win: '限时内吃到金币最多的人获胜',
+  },
 };
 
 export class Game {
@@ -484,8 +496,28 @@ export class Game {
     this._matchMode = 'meteor';
     this._combatOverlay = null; // 「匹配中…」浮层
     this._combatHud = null;     // 对战状态条
-    this._pendingCombatExit = false; // 对战中被击倒 → 下一帧统一退房（避免在伤害循环里改状态）
     this._failEl = null;        // 屏幕中央「失败」字样（非弹窗）
+
+    // ---- 训练场 / 输赢 / 观战 ----
+    // _matchStats：本局战绩表 id → { id, nick, color, alive, diedAt, coins, kills, gone }
+    //   · 存活状态来自同房快照里的 health（服务器会同步每个人的血量），阵亡时刻由本机时钟记；
+    //   · coins 只有靠服务端在 coin 广播里带 from 才统计得到别人（否则只有自己的准）；
+    //   · kills 靠阵亡者自己广播 {t:'die', by:最后一击的人}（只有阵亡这一侧知道是谁打死的）。
+    this._matchStats = new Map();
+    this._matchTotal = 0;       // 开局参与者数（判「活到最后」用固定分母，不能因为有人退房就变小）
+    this._roundOver = false;    // 本局是否已判出结果（判出后不再重复弹结算）
+    this._lastJudge = null;     // 最近一次名次判定结果（HUD 复用，避免同帧算两遍）
+    this._hudKey = null;        // 状态条文字去重键（避免每帧写 DOM）
+    this._resultPanel = null;   // 结算面板
+    this._spectate = null;      // 观战：{ order: [id...], idx }——order 里是本局其他人
+    this._spectateHud = null;   // 观战提示条（切换视角 / 提前退出）
+    this._lastHitBy = null;     // 最近一次打到我的人（阵亡时用来归因击杀）
+    this._lastHitAt = 0;
+    this._scoreReady = false;   // 服务端是否已广播过战绩（coin.from / died）→ 结算里决定是否提示降级
+    this._trainPending = null;  // 训练场：正在等服务端给单人房（超时则本机兜底）
+    this._trainTimer = 0;       // 上面那个等待的倒计时（秒）
+    this._trainLocal = false;   // 训练场本机兜底：隐藏大厅玩家 + 暂停自身状态上报
+    this._trainBest = { meteor: null, grapple: null }; // 本机训练场最高记录
     this._soul = null;          // P 键灵魂出窍：{ x, y, z, yaw, pitch }，null 表示未出窍
     this._drops = [];           // 丢在地上的物品 { id, item, x,y,z,vx,vy,vz, resting, life, mesh, label }
     this._dropSeq = 0;          // 本机丢弃物自增序号（拼出全场唯一的掉落物 id，供拾取同步）
@@ -612,18 +644,26 @@ export class Game {
     if (next <= 0 && !this._dead) this._die();
   }
 
-  // 死亡：锁住操控，短暂延迟后满血重生到出生点；若在对战中则直接判负退房
+  // 死亡：锁住操控；对战中记战绩并转观战（训练场则延迟复活），大厅里延迟重生回出生点
   _die() {
     this._dead = true;
     // 死了就立刻收掉「抓钩无视碰撞」，别让倒地后的这一帧还穿墙
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.noClip = false;
-    this._setChatLock(true);
+    this._setChatLock(true); // 名字叫「聊天锁」，实际锁的是移动（physics.controlLock）
     if (this._soul) this._soul = null; // 死亡先收回灵魂，避免相机卡在自由飞行
-    if (this._combat) {
-      // 对战中被击倒：屏幕中央弹「失败」，并标记退房（真正的退房放到主循环统一执行，
-      // 以免在陨石/投掷物的伤害循环里改动 this._combat / this._meteors 导致遍历错乱）
-      this._showFailText('失败');
-      this._pendingCombatExit = true;
+    const c = this._combat;
+    if (c) {
+      this._noteLocalDeath(); // 记阵亡时刻 + 广播（含击杀归因）
+      if (c.solo) {
+        // 训练场没有对手，死了就爬起来接着练（和主世界一致）
+        this._toast('你被击倒了，即将在训练场重生');
+        setTimeout(() => this._respawn(), Config.RESPAWN_DELAY * 1000);
+        return;
+      }
+      // 匹配：弹「阵亡」后转观战。**不退房** —— 要留在房里等这局分出胜负，
+      // 否则「活到最后者胜」永远等不到那个结果，输赢也就无从谈起。
+      this._showFailText('阵亡');
+      this._enterSpectate();
       return;
     }
     this._toast('你被击倒了，即将在出生点重生');
@@ -632,7 +672,7 @@ export class Game {
 
   // 重生：满血、清速度，回到服务器分配的出生点
   _respawn() {
-    const sp = this._spawn || { x: 0, z: 0, yaw: 0 };
+    const sp = this._spawn || { x: 0, y: 0, z: 0, yaw: 0 };
     if (this.localState.ride) this._dismountVehicle(); // 死亡时若在车上，先下车
     this.localState.health = Config.HEALTH_MAX;
     this.localState.x = sp.x;
@@ -641,6 +681,12 @@ export class Game {
     this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
     this.localPlayer.physics.velocity.set(0, 0, 0);
     this._dead = false;
+    // 训练场里复活后要重新算作「活着」，否则状态条会一直挂着 0 人
+    const c = this._combat;
+    if (c && c.solo) {
+      const me = this._matchStats.get(String(this.localState.id));
+      if (me) { me.alive = true; me.diedAt = null; }
+    }
     this._setChatLock(false);
     this._updateHealthBar();
     this._toast('已在出生点重生');
@@ -768,6 +814,8 @@ export class Game {
         break;
       }
       case 'join': {
+        // 训练场本机兜底（老服务端）：本机没进房间，别人进的是「大厅」，不该出现在竞技场里
+        if (this._trainLocal) break;
         // 有新玩家加入：注册并显示模型（名牌用服务端下发的昵称/颜色）
         this.playerManager.addPlayer(msg.id, msg.state, msg.state.nick || `玩家${msg.state.num}`, msg.state.color || '#ffffff');
         // 如果本机是 Boss 的 owner，补发一次当前状态，让新玩家立刻看到老师
@@ -777,6 +825,8 @@ export class Game {
       case 'leave': {
         // 玩家断开：移除模型
         this.playerManager.removePlayer(msg.id);
+        // 对战中有人退房 = 出局（按「出局」，不是按「阵亡」记，结算里会区分显示）
+        if (this._matchStats.has(String(msg.id))) this._markGone(msg.id);
         break;
       }
       case 'chat': {
@@ -796,18 +846,30 @@ export class Game {
           this._netDayTime = msg.time;   // 服务器权威时间
           this._netDayAt = performance.now();
         }
-        this.playerManager.applySnapshot(msg.players);
-        // 对战中：快照已按房间过滤，人数即「本局存活人数」，供对战状态条显示
+        // 训练场本机兜底（老服务端）：此时本机没进房间，快照是「大厅」的，套进来会让
+        // 大厅玩家凭空出现在竞技场里，所以直接跳过。
+        if (!this._trainLocal) this.playerManager.applySnapshot(msg.players);
+        // 对战中：人数即「同场人数」，供对战状态条显示
         if (this._combat) this._combat.alive = (msg.players || []).length;
+        // 战绩：别人（和观战前的自己）的血量到 0 就是阵亡，时刻按本机时钟记
+        if (this._combat) this._syncAliveFromSnapshot(msg.players || []);
         break;
       }
       case 'hit': {
-        // 别人用投掷物打中了我：扣血（伤害已由服务端钳制）
+        // 别人用投掷物打中了我：扣血（伤害已由服务端钳制），并记下是谁打的——
+        // 这是唯一能让阵亡者知道「谁补的最后一击」的来源，用于结算里的击杀归因。
         const dmg = Number(msg.damage) || 0;
         if (dmg > 0 && !this._dead) {
+          this._lastHitBy = msg.from ? String(msg.from) : null;
+          this._lastHitAt = performance.now();
           this._changeHealth(-dmg);
           this._toast('受到 ' + dmg + ' 点伤害');
         }
+        break;
+      }
+      case 'died': {
+        // 有人阵亡（由阵亡者自己的客户端上报）：记战绩 + 播一行提示（等价于「击杀播报」）
+        this._onRemoteDied(msg);
         break;
       }
       case 'fx': {
@@ -868,7 +930,8 @@ export class Game {
       }
       case 'match_queued': {
         // 已进入匹配队列：显示「匹配中…」浮层
-        this._showMatchOverlay();
+        const name = (COMBAT_MODES[this._matchMode] || COMBAT_MODES.meteor).name;
+        this._showMatchOverlay('匹配中…', '正在为你寻找「' + name + '」对手', true);
         break;
       }
       case 'match_canceled': {
@@ -878,13 +941,15 @@ export class Game {
         break;
       }
       case 'match_found': {
-        // 匹配成功：进入独立竞技场，开启「躲避陨石混战」
-        this._room = msg.room;
+        // 匹配成功 / 训练场开房成功：进入独立竞技场。
+        // 注意 room 必须通过 opts 传进 _enterCombat —— 它开头会先做一次防御性退场，
+        // 那次退场会把 this._room 清成 null，若在外面先 set 就被抹掉了（重开一局时必现）。
+        this._trainPending = null; // 训练场已确认（也可能本来就是普通匹配）
         if (this._combatOverlay) this._combatOverlay.style.display = 'none';
         const members = new Map();
         for (const mm of (msg.members || [])) members.set(mm.id, mm);
         const isOwner = msg.owner === this.localState.id;
-        this._enterCombat(msg.mode || 'meteor', msg.spawn || this._spawn, isOwner, members);
+        this._enterCombat(msg.mode || 'meteor', msg.spawn || this._spawn, isOwner, members, { room: msg.room });
         break;
       }
       case 'match_left': {
@@ -927,8 +992,13 @@ export class Game {
         break;
       }
       case 'coin': {
-        // 别人吃掉了金币
+        // 别人吃掉了金币：本地移除同一枚，并按 from 记到那个人的战绩里
         this._removeCoinById(msg.id);
+        if (msg.from) {
+          this._scoreReady = true; // 服务端已支持带 from 的 coin 广播 → 金币排名可用
+          const st = this._matchStats.get(String(msg.from));
+          if (st) st.coins++;
+        }
         break;
       }
       default:
@@ -1703,10 +1773,10 @@ export class Game {
     const phase = this.boss.phase;
     const P = Config.PORTAL_POS;
     const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
-    // 对战中：Boss/传送门 UI 全隐藏，攻击按钮常驻（用来丢能量球打人）
+    // 对战中：Boss/传送门 UI 全隐藏，攻击按钮常驻（用来丢能量球打人）；但阵亡后（观战）要收起
     const inCombat = !!this._combat;
     const showPortal = !inCombat && mode === 'idle' && near;
-    const showAtk = inCombat || (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn;
+    const showAtk = (inCombat && !this._dead) || (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn;
     const showShield = !inCombat && mode === 'alive' && phase >= 3 && !this._dead;
     const shieldReady = performance.now() >= this._shieldReadyAt;
     const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
@@ -3713,15 +3783,20 @@ export class Game {
     }
   }
 
-  // 屏幕中央弹字（不是弹窗）：用于对战失败等强反馈，淡入后自动淡出
-  _showFailText(text) {
+  // 屏幕中央弹字（不是弹窗）：用于对战阵亡/胜利等强反馈，淡入后自动淡出
+  _showFailText(text, color) {
     if (this._failEl) { this._failEl.remove(); this._failEl = null; }
     const el = document.createElement('div');
+    const c = color || '#ff4d4d';
+    // 光晕用同一个颜色，避免「金字红光晕」这种对不上的组合
+    const glow = /^#[0-9a-fA-F]{6}$/.test(c)
+      ? 'rgba(' + parseInt(c.slice(1, 3), 16) + ',' + parseInt(c.slice(3, 5), 16) + ',' + parseInt(c.slice(5, 7), 16) + ',.75)'
+      : 'rgba(255,60,60,.75)';
     el.style.cssText =
       'position:fixed;left:50%;top:44%;transform:translate(-50%,-50%) scale(.7);' +
       'z-index:9600;pointer-events:none;white-space:nowrap;' +
       'font:900 76px/1 var(--kui-font, system-ui, sans-serif);letter-spacing:10px;' +
-      'color:#ff4d4d;text-shadow:0 0 26px rgba(255,60,60,.75),0 6px 22px rgba(0,0,0,.65);' +
+      'color:' + c + ';text-shadow:0 0 26px ' + glow + ',0 6px 22px rgba(0,0,0,.65);' +
       'opacity:0;transition:opacity .3s ease,transform .3s cubic-bezier(.2,1.4,.4,1);';
     el.textContent = text;
     document.body.appendChild(el);
@@ -3852,17 +3927,32 @@ export class Game {
   // 主循环：计算 dt -> 更新玩家 -> 渲染
   // ============ 对战模式：匹配 + 独立竞技场「躲避陨石混战」 ============
 
-  // 顶部「对战匹配」按钮：未对战时发起匹配；对战中则退出房间
+  // 顶部「对战」按钮：未对战时选入口；对战中则退出
   _toggleCombat() {
-    if (this._combat) {
-      this.network.sendLeaveRoom();
-      this._exitCombat(this._lobbySpawn); // 本地即时退出；服务端 match_left 到达后为幂等空操作
+    const c = this._combat;
+    if (!c) {
+      this._showModePicker(); // 先选「训练场 / 玩家匹配」，再选玩法
       return;
     }
-    this._showModePicker(); // 先选玩法，再进匹配
+    // 训练场里主动退出：先把成绩面板拿出来（直接退掉的话这一局就白练了）
+    if (c.solo && !this._roundOver) {
+      this._endRound(this._scoreRows());
+      return;
+    }
+    this._leaveCombatNow('已退出，返回主世界');
   }
 
-  // 玩法选择：点「对战匹配」后先选一种模式
+  // 就地退出对战：发退房（本机兜底的训练场没有房间，不能发）+ 本地立即清理 + 解开移动锁
+  _leaveCombatNow(toast) {
+    const local = !!(this._combat && this._combat.local);
+    if (!local && this.network) this.network.sendLeaveRoom();
+    this._exitCombat(this._lobbySpawn); // 本地即时退出；服务端 match_left 到达后为幂等空操作
+    this._setChatLock(false);
+    if (toast) this._toast(toast);
+  }
+
+  // 入口选择：分两组——「训练场」点了立刻单人开打；「玩家匹配」照旧排队。
+  // 分组而不是并排四个按钮，是因为这两件事的成本完全不同（一个是秒进、一个要等人）。
   _showModePicker() {
     if (!this._modePicker) {
       const el = document.createElement('div');
@@ -3871,32 +3961,50 @@ export class Game {
         'background:rgba(8,14,24,.55);font-family:var(--kui-font);color:var(--kui-paper);';
       const card = document.createElement('div');
       card.className = 'kui-panel';
-      card.style.cssText = 'min-width:300px;max-width:88vw;padding:22px 22px;text-align:center;';
-      card.innerHTML =
-        '<div class="kui-title" style="font-size:18px;margin-bottom:4px;">选择对战玩法</div>' +
-        '<div style="color:var(--kui-ink-soft);margin-bottom:16px;font-size:12px;">2 人即开，单人等 12 秒也会开练习场</div>';
-      const mk = (mode, cls) => {
+      card.style.cssText = 'min-width:330px;max-width:90vw;max-height:88vh;overflow:auto;padding:20px 22px;text-align:center;';
+
+      const group = (title, sub) => {
+        const h = document.createElement('div');
+        h.style.cssText = 'text-align:left;margin:14px 0 8px;';
+        h.innerHTML = '<div style="font-weight:700;font-size:15px;">' + title + '</div>' +
+          '<div style="font-size:12px;color:var(--kui-ink-soft);margin-top:2px;">' + sub + '</div>';
+        return h;
+      };
+      const mk = (mode, cls, tipKey, onClick) => {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'kui-btn ' + cls;
-        b.style.cssText = 'width:100%;margin-bottom:10px;text-align:left;line-height:1.5;padding:10px 14px;';
+        b.style.cssText = 'width:100%;margin-bottom:8px;text-align:left;line-height:1.5;padding:9px 14px;';
         b.innerHTML = '<b>' + COMBAT_MODES[mode].name + '</b><br><span style="font-size:12px;opacity:.85;">'
-          + COMBAT_MODES[mode].tip + '</span>';
-        b.addEventListener('click', () => {
-          el.style.display = 'none';
-          this._startMatch(mode);
-        });
+          + COMBAT_MODES[mode][tipKey] + '</span>';
+        b.addEventListener('click', () => { el.style.display = 'none'; onClick(mode); });
         return b;
       };
-      card.appendChild(mk('meteor', 'kui-btn--primary'));
-      card.appendChild(mk('grapple', 'kui-btn--green'));
+
+      const title = document.createElement('div');
+      title.className = 'kui-title';
+      title.style.cssText = 'font-size:18px;margin-bottom:2px;';
+      title.textContent = '选择玩法';
+      card.appendChild(title);
+
+      // —— 训练场：单人、立刻开始、不计输赢（只记自己的成绩）——
+      card.appendChild(group('训练场', '单人立刻开始，不用等人；退出时看成绩与最高记录'));
+      card.appendChild(mk('meteor', 'kui-btn--primary', 'soloTip', (m) => this._startTraining(m)));
+      card.appendChild(mk('grapple', 'kui-btn--green', 'soloTip', (m) => this._startTraining(m)));
+
+      // —— 玩家匹配：照旧排队，2 人即开，分出胜负 ——
+      card.appendChild(group('玩家匹配', '2 人即开；胜负有判定：' + COMBAT_MODES.meteor.win + ' / ' + COMBAT_MODES.grapple.win));
+      card.appendChild(mk('meteor', 'kui-btn--primary', 'tip', (m) => this._startMatch(m)));
+      card.appendChild(mk('grapple', 'kui-btn--green', 'tip', (m) => this._startMatch(m)));
+
       const cancel = document.createElement('button');
       cancel.type = 'button';
       cancel.className = 'kui-btn kui-btn--grey';
-      cancel.style.cssText = 'width:100%;';
+      cancel.style.cssText = 'width:100%;margin-top:6px;';
       cancel.textContent = '先不玩';
       cancel.addEventListener('click', () => { el.style.display = 'none'; });
       card.appendChild(cancel);
+
       el.appendChild(card);
       document.body.appendChild(el);
       this._modePicker = el;
@@ -3904,16 +4012,39 @@ export class Game {
     this._modePicker.style.display = 'flex';
   }
 
-  // 真正发起匹配
+  // 真正发起匹配（玩家匹配组）
   _startMatch(mode) {
     this._matchMode = mode;
-    this.network.sendMatch(mode);
-    this._showMatchOverlay();
+    if (this.network) this.network.sendMatch(mode);
+    this._showMatchOverlay('匹配中…', '正在为你寻找「' + COMBAT_MODES[mode].name + '」对手', true);
     this._toast('正在匹配「' + COMBAT_MODES[mode].name + '」…');
   }
 
-  // 「匹配中…」浮层（带取消按钮）
-  _showMatchOverlay() {
+  // 训练场：请求服务端立刻开一个单人房（不排队、不等 12 秒）。
+  // 走服务端开房而不是直接本机离线开，是因为只有进了房，快照才会按房间隔离——
+  // 否则训练场里的坐标会广播进大厅（大厅的人看到你在竞技场里飘，反之亦然）。
+  _startTraining(mode) {
+    this._matchMode = mode;
+    this._trainPending = mode;
+    this._trainTimer = 2.5; // 服务端没响应（例如还是旧版）就本机兜底，别让人干等
+    if (this.network) this.network.sendTrain(mode);
+    this._showMatchOverlay('训练场', '正在进入「' + COMBAT_MODES[mode].name + '」训练场…', false);
+  }
+
+  // 服务端不支持训练场（旧版）时的本机兜底：本机离线开，同时隐藏大厅玩家、暂停自身上报
+  _startTrainingLocal(mode) {
+    this._trainPending = null;
+    this._trainLocal = true;
+    if (this.network) this.network.setStateMuted(true); // 别把自己的竞技场坐标报进大厅
+    this.playerManager.pruneTo([]);                     // 清掉大厅玩家模型（保留自己）
+    const sp = spawnForMode(mode, 0, 1);
+    if (this._combatOverlay) this._combatOverlay.style.display = 'none';
+    this._enterCombat(mode, sp, true, new Map(), { local: true });
+    this._toast('服务端未支持训练场，已按本机单人模式开始');
+  }
+
+  // 「匹配中… / 正在进入训练场…」浮层。cancelable=false 时不放取消按钮（训练场是秒开的，没有必要）
+  _showMatchOverlay(title, tip, cancelable) {
     if (!this._combatOverlay) {
       const el = document.createElement('div');
       el.style.cssText =
@@ -3921,21 +4052,28 @@ export class Game {
         'background:rgba(8,14,24,.55);font-family:var(--kui-font);color:var(--kui-paper);';
       el.innerHTML =
         '<div class="kui-panel" style="min-width:280px;padding:26px 28px;text-align:center;">' +
-        '<div class="kui-title" style="font-size:18px;margin-bottom:10px;">匹配中…</div>' +
+        '<div class="kui-title" id="__matchTitle" style="font-size:18px;margin-bottom:10px;">匹配中…</div>' +
         '<div id="__matchTip" style="color:var(--kui-ink-soft);margin-bottom:18px;font-size:13px;">正在为你寻找对手</div>' +
         '<button type="button" id="__cancelMatch" class="kui-btn kui-btn--grey" style="width:100%;">取消匹配</button></div>';
       document.body.appendChild(el);
       const btn = el.querySelector('#__cancelMatch');
-      if (btn) btn.addEventListener('click', () => { this.network.sendCancelMatch(); el.style.display = 'none'; });
+      if (btn) btn.addEventListener('click', () => {
+        if (this.network) this.network.sendCancelMatch();
+        this._trainPending = null;
+        el.style.display = 'none';
+      });
       this._combatOverlay = el;
     }
-    const name = (COMBAT_MODES[this._matchMode] || COMBAT_MODES.meteor).name;
-    const tip = this._combatOverlay.querySelector('#__matchTip');
-    if (tip) tip.textContent = '正在为你寻找「' + name + '」对手';
+    const t = this._combatOverlay.querySelector('#__matchTitle');
+    const p = this._combatOverlay.querySelector('#__matchTip');
+    const c = this._combatOverlay.querySelector('#__cancelMatch');
+    if (t) t.textContent = title || '匹配中…';
+    if (p) p.textContent = tip || '';
+    if (c) c.style.display = cancelable ? '' : 'none';
     this._combatOverlay.style.display = 'flex';
   }
 
-  // 对战状态条：模式名 + 存活人数 + 计时 + 退出按钮
+  // 对战状态条：入口类型 + 存活人数 + 名次 + 金币 + 计时 + 退出按钮
   _showCombatHUD() {
     if (!this._combatHud) {
       const el = document.createElement('div');
@@ -3946,16 +4084,18 @@ export class Game {
         'background:rgba(11,21,34,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 12px;';
       el.innerHTML =
         '<span id="__cMode" style="font-weight:700;color:#ffd76a;">对战</span>' +
-        '<span id="__cAlive">同场 -</span>' +
+        '<span id="__cAlive">存活 -</span>' +
+        '<span id="__cRank" style="display:none;">名次 -</span>' +
         '<span id="__cCoin" style="display:none;color:#ffd76a;">金币 0</span>' +
         '<span id="__cTime">时间 00:00</span>' +
-        '<button type="button" id="__cLeave" class="kui-btn kui-btn--grey" style="padding:3px 10px;">退出对战</button>';
+        '<button type="button" id="__cLeave" class="kui-btn kui-btn--grey" style="padding:3px 10px;">退出</button>';
       document.body.appendChild(el);
       const leaveBtn = el.querySelector('#__cLeave');
       if (leaveBtn) leaveBtn.addEventListener('click', () => this._toggleCombat());
       this._combatHud = el;
     }
     this._combatHud.style.display = 'flex';
+    this._hudKey = null; // 重新显示时强制刷一次文字（去重键作废）
   }
 
   _hideCombatHUD() {
@@ -3970,28 +4110,56 @@ export class Game {
     this._relayoutSkillBtn();
   }
 
-  _updateCombatHUD() {
+  _updateCombatHUD(res) {
     if (!this._combat || !this._combatHud) return;
-    const a = this._combatHud.querySelector('#__cAlive');
-    const t = this._combatHud.querySelector('#__cTime');
-    const cn = this._combatHud.querySelector('#__cCoin');
-    if (a) a.textContent = '同场 ' + (this._combat.alive || 0);
-    if (cn && this._combat.mode === 'grapple') cn.textContent = '金币 ' + this._coinCount;
-    const s = Math.max(0, Math.floor((performance.now() - this._combat.roundStart) / 1000));
-    const mm = String(Math.floor(s / 60)).padStart(2, '0');
-    const ss = String(s % 60).padStart(2, '0');
-    if (t) t.textContent = '时间 ' + mm + ':' + ss;
+    const c = this._combat;
+    const now = performance.now();
+    const alive = this._aliveCount();
+    const total = Math.max(this._matchTotal, alive);
+    // 名次要用一遍 judge（纯函数、≤8 人，很便宜）；调用方已经算过就直接复用
+    const score = res || this._lastJudge || this._scoreRows();
+    let rankTxt = '';
+    if (!c.solo) {
+      const mine = score.rows.find((x) => x.id === String(this.localState.id));
+      rankTxt = '名次 ' + (mine ? mine.rank : '-') + '/' + score.rows.length;
+    }
+    const timeTxt = modeRule(c.mode).timed
+      ? '剩余 ' + formatClock(Math.max(0, c.roundSeconds * 1000 - (now - c.roundStart)))
+      : '时间 ' + formatClock(now - c.roundStart);
+    const coinTxt = c.mode === 'grapple' ? '金币 ' + this._coinCount : '';
+    // 只在文字真的变了才写 DOM：这个方法每帧都会被调用，无条件写会一直触发布局
+    const key = alive + '/' + total + '|' + rankTxt + '|' + timeTxt + '|' + coinTxt + '|' + c.solo;
+    if (key === this._hudKey) return;
+    this._hudKey = key;
+    const q = (id) => this._combatHud.querySelector('#' + id);
+    const a = q('__cAlive'), t = q('__cTime'), cn = q('__cCoin'), rk = q('__cRank');
+    if (a) a.textContent = '存活 ' + alive + '/' + total;
+    if (t) t.textContent = timeTxt;
+    if (cn && c.mode === 'grapple') cn.textContent = coinTxt;
+    if (rk) {
+      rk.style.display = rankTxt ? '' : 'none';
+      if (rankTxt) rk.textContent = rankTxt;
+    }
   }
 
-  // 进入对战：隐藏城市景物、换上竞技场碰撞体、把玩家放到房间出生点、显示对战 HUD
-  _enterCombat(mode, spawn, isOwner, members) {
+  // 进入对战/训练场：隐藏城市景物、换上竞技场碰撞体、把玩家放到出生点、初始化战绩、显示状态条
+  // opts.local = true 表示「服务端不支持训练场」时的本机离线兜底（没有房间）
+  _enterCombat(mode, spawn, isOwner, members, opts) {
     if (this._combat) this._exitCombat(this._lobbySpawn); // 防御：已在对战中先干净退出
     this._lobbySpawn = this._spawn || this._lobbySpawn || { x: 2, z: 144, yaw: 0 };
     const sp = spawn || { x: 0, z: 0, yaw: 0 };
+    const roster = members || new Map();
+    const local = !!(opts && opts.local);
+    // 单人（训练场 / 匹配超时开的单人房）没有对手 → 不存在「赢」，只记自己的成绩
+    const solo = local || roster.size < 2;
+    // 房间 id 由调用方经 opts 传入：这里的防御性退场会把 this._room 清空
+    this._room = (opts && opts.room) || null;
     this._combat = {
-      room: this._room, mode, isOwner: !!isOwner, members: members || new Map(),
+      room: this._room, mode, isOwner: !!isOwner, members: roster,
       spawn: sp, roundStart: performance.now(), alive: 0,
+      solo, local, roundSeconds: Config.COMBAT_ROUND_SECONDS,
     };
+    this._resetMatchStats(mode, roster);
     // 若正骑着电动车进对战，先下车（车不在竞技场里）
     if (this.localState.ride) this._dismountVehicle();
 
@@ -4039,17 +4207,22 @@ export class Game {
     const modeEl = this._combatHud.querySelector('#__cMode');
     const coinEl = this._combatHud.querySelector('#__cCoin');
     const meta = COMBAT_MODES[mode] || COMBAT_MODES.meteor;
-    if (modeEl) modeEl.textContent = meta.name;
+    // 训练场用后缀区分，别让人以为自己在打匹配（输赢规则完全不同）
+    if (modeEl) modeEl.textContent = meta.name + (solo ? '（训练场）' : '');
     if (coinEl) coinEl.style.display = mode === 'grapple' ? '' : 'none';
     if (this._btnCombat) this._btnCombat.textContent = '退出对战';
     this._updateBossUI(); // 刷新攻击按钮（对战中常驻）
     this._updateSkillBarVisibility(); // 竞技场里不显示技能栏
-    this._toast('已匹配！进入「' + meta.name + '」');
+    this._updateCombatHUD();
+    this._toast(solo
+      ? '进入训练场「' + meta.name + '」（' + (modeRule(mode).timed ? '限时 ' + Config.COMBAT_ROUND_SECONDS + ' 秒' : '不计时') + '）'
+      : '已匹配！进入「' + meta.name + '」— ' + (meta.win || ''));
   }
 
-  // 退出对战：拆掉竞技场、还原城市景物与主世界碰撞体、玩家回大厅出生点
+  // 退出对战/训练场：拆掉竞技场、还原城市景物与主世界碰撞体、玩家回大厅出生点
   _exitCombat(lobbySpawn) {
     if (!this._combat && !this._arena) return; // 幂等：已退出则直接返回
+    const was = this._combat;
     for (const m of this._meteors) this._disposeMeteor(m);
     this._meteors.length = 0;
     this._disposeMeteorAssets();
@@ -4081,8 +4254,16 @@ export class Game {
     this._spawn = sp;
     this._updateHealthBar();
 
+    // 本机兜底的训练场：恢复大厅玩家显示与状态上报
+    if (was && was.local) {
+      this._trainLocal = false;
+      if (this.network) this.network.setStateMuted(false);
+    }
+    this._trainPending = null;
+    this._trainTimer = 0;
     this._combat = null;
     this._room = null;
+    this._endRoundCleanup();
     this._syncBoundary(); // 回到主世界：重新启用编辑器调出来的边界，并恢复可见墙
     this._clearDrops(); // 竞技场里丢的东西不跟着回大厅
     this._clearCoins();
@@ -4091,7 +4272,418 @@ export class Game {
     if (this._btnCombat) this._btnCombat.textContent = '对战匹配';
     this._updateBossUI(); // 交回给主世界逻辑控制攻击按钮显隐
     this._updateSkillBarVisibility(); // 回到主世界，恢复技能栏
-    this._toast('已退出对战，返回主世界');
+    this._toast('已退出，返回主世界');
+  }
+
+  // ============ 输赢：战绩表 / 判定 / 观战 / 结算 ============
+
+  // 昵称与颜色：必须与服务端在别人那里补的规则一致，否则同一个人在自己屏幕上和别人屏幕上不一样
+  _myNick() {
+    return this._profile
+      ? (this._profile.nickname || this._profile.username || ('玩家' + this.localState.num))
+      : ('玩家' + this.localState.num);
+  }
+
+  // 开一局：清空战绩表，把自己与房间成员都登记为「活着」
+  _resetMatchStats(mode, roster) {
+    const stats = new Map();
+    const add = (id, nick, color) => {
+      if (id == null) return;
+      stats.set(String(id), {
+        id: String(id), nick: nick || '玩家', color: color || '#ffffff',
+        alive: true, diedAt: null, coins: 0, kills: 0, gone: false,
+      });
+    };
+    add(this.localState.id, this._myNick(), this._profile && this._profile.nicknameColor);
+    for (const m of (roster ? roster.values() : [])) add(m.id, m.nick, m.color);
+    this._matchStats = stats;
+    // 「活到最后」的分母固定成开局人数：中途有人退房不能让分母变小，
+    // 否则 5 人局退到剩 2 人时会提前判出胜负。
+    this._matchTotal = stats.size;
+    this._roundOver = false;
+    this._scoreReady = false;
+    this._lastJudge = null; // 上一局的名次缓存作废
+    this._lastHitBy = null;
+    this._lastHitAt = 0;
+    this._exitSpectate();
+    this._hideResultPanel();
+  }
+
+  // 存活人数（退房的算「出局」，不算存活）
+  _aliveCount() {
+    let n = 0;
+    for (const s of this._matchStats.values()) if (s.alive && !s.gone) n++;
+    return n;
+  }
+
+  // 战绩表 → 交给 MatchRules 算名次与胜负（纯函数，已单独自检）
+  _scoreRows() {
+    const c = this._combat;
+    const now = performance.now();
+    const entries = [];
+    for (const s of this._matchStats.values()) {
+      entries.push({
+        id: s.id, nick: s.nick, color: s.color,
+        alive: !!s.alive && !s.gone, diedAt: s.diedAt,
+        coins: s.coins, kills: s.kills,
+      });
+    }
+    return judge({
+      mode: c ? c.mode : 'meteor',
+      startedAt: c ? c.roundStart : now,
+      now,
+      entries,
+      solo: !!(c && c.solo),
+      roundSeconds: c ? c.roundSeconds : Config.COMBAT_ROUND_SECONDS,
+    });
+  }
+
+  // 本机阵亡：记时刻 + 把击杀算给最近打到我的人 + 广播（本机兜底的训练场没有房间，不发）
+  _noteLocalDeath() {
+    const c = this._combat;
+    if (!c) return;
+    const now = performance.now();
+    const meId = String(this.localState.id);
+    const me = this._matchStats.get(meId);
+    if (me && me.alive) { me.alive = false; me.diedAt = now; }
+    // 只有「最后一击来自某个玩家」才算击杀；陨石/岩浆这类环境伤害没有击杀者。
+    // 5 秒窗口是防止「先被 A 打一下、很久之后才被环境伤害打死」也算成 A 的击杀。
+    const by = (this._lastHitBy && now - this._lastHitAt <= 5000) ? String(this._lastHitBy) : null;
+    const killer = by ? this._matchStats.get(by) : null;
+    if (killer && killer.id !== meId) killer.kills++;
+    this._lastHitBy = null;
+    if (!c.local && this.network) this.network.sendDie(by || '');
+  }
+
+  // 别人阵亡（由对方的客户端上报）：记战绩 + 播一行击杀播报
+  _onRemoteDied(msg) {
+    this._scoreReady = true; // 服务端已支持 die 中继 → 击杀统计可用
+    const id = String(msg.id || '');
+    if (!id) return;
+    const st = this._matchStats.get(id);
+    const by = msg.by ? this._matchStats.get(String(msg.by)) : null;
+    if (st) {
+      if (st.alive) { st.alive = false; st.diedAt = performance.now(); }
+      if (by) by.kills++;
+    }
+    if (st && this.chat) {
+      this.chat.add({ sys: true, text: by ? ('⚔ ' + by.nick + ' 击败了 ' + st.nick) : ('☠ ' + st.nick + ' 被击倒') });
+    }
+  }
+
+  // 有人退房 = 出局（不是阵亡，结算里会分开显示）
+  _markGone(id) {
+    const st = this._matchStats.get(String(id));
+    if (!st || st.gone) return;
+    st.gone = true;
+    st.alive = false;
+    if (!st.diedAt) st.diedAt = performance.now();
+  }
+
+  // 从同房快照里读别人的血量：血量到 0 就是阵亡。
+  // 这条是「人人可推导」的主路径（服务器本来就同步每个人的 health），
+  // die 广播只是补上「被谁打死的」这一条谁都推不出来的信息。
+  _syncAliveFromSnapshot(players) {
+    if (!this._matchStats.size) return;
+    const meId = String(this.localState.id);
+    const now = performance.now();
+    for (const p of players) {
+      if (!p) continue;
+      const id = String(p.id);
+      if (id === meId) continue; // 自己的死亡由 _die 处理（那边还要做击杀归因）
+      const st = this._matchStats.get(id);
+      if (!st) continue;
+      const hp = Number(p.health);
+      if (Number.isFinite(hp) && hp <= 0 && st.alive) { st.alive = false; st.diedAt = now; }
+    }
+  }
+
+  // 每帧检查本局是否该收场（判定逻辑全在 MatchRules.judge 里）
+  _updateMatch() {
+    const c = this._combat;
+    if (!c) return;
+    if (!this._roundOver) {
+      const res = this._scoreRows();
+      this._lastJudge = res;
+      if (res.over) this._endRound(res);
+    }
+    this._updateCombatHUD();
+  }
+
+  _endRound(res) {
+    const c = this._combat;
+    if (!c || this._roundOver) return;
+    this._roundOver = true;
+    c.overAt = performance.now();
+    // 收场清场：别让结算面板后面还在砸陨石/吃金币
+    for (const m of this._meteors) this._disposeMeteor(m);
+    this._meteors.length = 0;
+    this._clearCoins();
+    this._hideSpectateHud(); // 结算面板出来了，观战提示条让位（相机继续跟着，画面不至于僵住）
+    const meId = String(this.localState.id);
+    if (!c.solo && res.winnerId) {
+      const won = res.winnerId === meId;
+      this._showFailText(won ? '胜利' : '失败', won ? '#ffd76a' : '#ff4d4d');
+    }
+    this._showResultPanel(res);
+  }
+
+  // 离开这一局时的清理（结算面板、观战、战绩表）
+  _endRoundCleanup() {
+    this._roundOver = false;
+    this._matchStats.clear();
+    this._matchTotal = 0;
+    this._scoreReady = false;
+    this._lastHitBy = null;
+    this._lastHitAt = 0;
+    this._exitSpectate();
+    this._hideResultPanel();
+  }
+
+  // 转义用户可控文本（昵称来自登录资料，直接拼进 innerHTML 就是注入）
+  _esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ));
+  }
+
+  // 结算面板：名次 / 昵称 / 存活 / 击杀 / 金币（训练场则是本次成绩 + 本机最高记录）
+  _showResultPanel(res) {
+    const c = this._combat;
+    if (!c) return;
+    const meId = String(this.localState.id);
+    const solo = !!c.solo;
+    const rows = res.rows;
+
+    // —— 训练场：只关心自己的成绩 ——
+    let head = '';
+    if (solo) {
+      const mine = rows.find((r) => r.id === meId) || rows[0];
+      const isCoin = c.mode === 'grapple';
+      const score = trainingScore(c.mode, mine);
+      const fmt = (v) => (v == null ? '暂无' : (isCoin ? String(v) + ' 枚' : formatClock(v)));
+      const prev = this._trainBestOf(c.mode);
+      const isNew = isBetter(prev, score);
+      if (isNew) this._saveTrainBest(c.mode, score);
+      head = '<div class="kui-title" style="font-size:19px;margin-bottom:4px;">训练成绩</div>' +
+        '<div style="font-size:13px;color:var(--kui-ink-soft);margin-bottom:10px;">' +
+        (isCoin ? '限时内吃到的金币' : '本局坚持了多久') + '</div>' +
+        '<div style="font-size:15px;line-height:1.9;">' +
+        '本次：<b style="color:#ffd76a;font-size:20px;">' + fmt(score) + '</b><br>' +
+        '本机最高：<b>' + fmt(isNew ? score : prev) + '</b>' +
+        (isNew ? ' <span style="color:#2ecc71;font-weight:700;">新纪录！</span>' : '') +
+        '</div>';
+    } else {
+      const won = res.winnerId === meId;
+      const mine = rows.find((r) => r.id === meId);
+      const winner = rows.find((r) => r.id === res.winnerId);
+      const why = res.reason === 'lastAlive' ? '活到最后' : '时间到';
+      head = '<div class="kui-title" style="font-size:19px;margin-bottom:4px;">' +
+        (res.winnerId ? (won ? '胜利' : '失败') : '本局结束') + '</div>' +
+        '<div style="font-size:13px;color:var(--kui-ink-soft);margin-bottom:10px;">' +
+        (res.winnerId
+          ? (why + ' · ' + (winner ? this._esc(winner.nick) : '') + ' 获胜（' + (c.mode === 'grapple' ? '金币最多' : COMBAT_MODES[c.mode].win) + '）')
+          : (why + ' · 无人获胜')) + '</div>' +
+        '<div style="font-size:13px;">你的名次：<b style="color:#ffd76a;font-size:17px;">第 ' + (mine ? mine.rank : '-') + ' 名</b>' +
+        ' / 共 ' + rows.length + ' 人</div>';
+    }
+
+    // —— 名次表 ——
+    let table = '<div style="margin:12px 0 4px;border-top:1px solid rgba(255,255,255,.14);padding-top:10px;">' +
+      '<div style="display:grid;grid-template-columns:38px 1fr 62px 46px 52px;gap:2px 6px;font-size:12px;">' +
+      '<span style="color:var(--kui-ink-soft);">名次</span><span style="color:var(--kui-ink-soft);">玩家</span>' +
+      '<span style="color:var(--kui-ink-soft);text-align:right;">存活</span>' +
+      '<span style="color:var(--kui-ink-soft);text-align:right;">击杀</span>' +
+      '<span style="color:var(--kui-ink-soft);text-align:right;">金币</span>';
+    for (const r of rows) {
+      const st = this._matchStats.get(r.id);
+      const tag = r.id === meId ? ' <span style="color:#4ea1ff;">(你)</span>' : '';
+      const gone = st && st.gone ? ' <span style="color:var(--kui-ink-soft);">已退房</span>' : (r.alive ? '' : '');
+      table += '<span style="font-weight:700;color:' + (r.id === res.winnerId ? '#ffd76a' : '#fff') + ';">' + r.rank + '</span>' +
+        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:' + this._esc(r.color) + ';">' +
+        this._esc(r.nick) + tag + gone + '</span>' +
+        '<span style="text-align:right;">' + formatClock(r.survivalMs) + '</span>' +
+        '<span style="text-align:right;">' + r.kills + '</span>' +
+        '<span style="text-align:right;">' + r.coins + '</span>';
+    }
+    table += '</div>';
+    if (!solo && !this._scoreReady) {
+      table += '<div style="margin-top:8px;font-size:11px;color:var(--kui-ink-soft);">' +
+        '注：服务端未广播战绩，别人的击杀/金币仅供参考</div>';
+    }
+    table += '</div>';
+
+    const actions =
+      '<button type="button" id="__resAgain" class="kui-btn kui-btn--primary" style="flex:1;">再来一局</button>' +
+      '<button type="button" id="__resLobby" class="kui-btn kui-btn--grey" style="flex:1;">回大厅</button>';
+
+    if (!this._resultPanel) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;inset:0;z-index:9650;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(8,14,24,.62);font-family:var(--kui-font);color:var(--kui-paper);';
+      el.innerHTML = '<div class="kui-panel" style="min-width:340px;max-width:92vw;max-height:88vh;overflow:auto;padding:22px;text-align:center;">' +
+        '<div id="__resHead"></div><div id="__resTable"></div>' +
+        '<div style="display:flex;gap:10px;margin-top:14px;">' + actions + '</div></div>';
+      document.body.appendChild(el);
+      const again = el.querySelector('#__resAgain');
+      const lobby = el.querySelector('#__resLobby');
+      if (again) again.addEventListener('click', () => this._rematch());
+      if (lobby) lobby.addEventListener('click', () => {
+        this._hideResultPanel();
+        this._leaveCombatNow('已返回大厅');
+      });
+      this._resultPanel = el;
+    }
+    const h = this._resultPanel.querySelector('#__resHead');
+    const t = this._resultPanel.querySelector('#__resTable');
+    if (h) h.innerHTML = head;
+    if (t) t.innerHTML = table;
+    this._resultPanel.style.display = 'flex';
+    this._setChatLock(true); // 结算面板期间别让角色还在走
+  }
+
+  _hideResultPanel() {
+    if (this._resultPanel) this._resultPanel.style.display = 'none';
+  }
+
+  // 再来一局：训练场就直接重开；匹配要先退房再排队（服务端在房里会忽略 match）
+  _rematch() {
+    const c = this._combat;
+    if (!c) return;
+    const mode = c.mode, solo = c.solo, local = c.local;
+    this._hideResultPanel();
+    if (solo) {
+      if (local) {
+        this._exitCombat(this._lobbySpawn);
+        this._startTrainingLocal(mode);
+      } else {
+        this._startTraining(mode); // 服务端开新单人房；_enterCombat 会先干净退出旧局
+      }
+      return;
+    }
+    if (this.network) this.network.sendLeaveRoom();
+    this._exitCombat(this._lobbySpawn);
+    this._setChatLock(false);
+    this._startMatch(mode);
+  }
+
+  // ---- 观战：阵亡后留在房里等这局分出胜负（能聊天、不能动、可切换视角、可提前退出）----
+  _enterSpectate() {
+    const c = this._combat;
+    if (!c) return;
+    const meId = String(this.localState.id);
+    const others = [...this._matchStats.values()].filter((s) => s.id !== meId && !s.gone);
+    const alive = others.filter((s) => s.alive);
+    const list = (alive.length ? alive : others).map((s) => s.id);
+    this._spectate = { order: list, idx: 0, shownId: null };
+    this._showSpectateHud();
+    this._updateSpectateHud();
+    this._updateSkillBarVisibility();
+  }
+
+  _exitSpectate() {
+    this._spectate = null;
+    this._hideSpectateHud();
+  }
+
+  // 切到下一个「还在场」的目标；没有可看的人就返回 false
+  _spectateNext() {
+    const sp = this._spectate;
+    if (!sp || !sp.order.length) return false;
+    for (let k = 1; k <= sp.order.length; k++) {
+      const i = (sp.idx + k) % sp.order.length;
+      const id = sp.order[i];
+      const st = this._matchStats.get(id);
+      if (st && !st.gone && this.playerManager.getPlayer(id)) { sp.idx = i; return true; }
+    }
+    return false;
+  }
+
+  // 观战相机：站在目标身后看目标（与第三人称同一套公式，只是「自己」换成了目标）
+  _updateSpectate() {
+    const sp = this._spectate;
+    if (!sp) return;
+    let id = sp.order[sp.idx];
+    let target = id ? this.playerManager.getPlayer(id) : null;
+    const st = id ? this._matchStats.get(id) : null;
+    if (!target || !st || st.gone) {
+      if (this._spectateNext()) {
+        id = sp.order[sp.idx];
+        target = this.playerManager.getPlayer(id);
+      }
+    }
+    if (!target) return;
+    const p = target.model.position;
+    const eye = new THREE.Vector3(p.x, p.y + Config.PLAYER_HEIGHT * 0.9, p.z);
+    const yaw = this.localState.yaw;
+    const pitch = this.localState.pitch;
+    const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+    const viewDir = new THREE.Vector3(-Math.sin(yaw) * cosP, sinP, -Math.cos(yaw) * cosP);
+    const camPos = eye.clone().addScaledVector(viewDir, -Config.SPECTATE_DIST)
+      .add(new THREE.Vector3(0, Config.SPECTATE_LIFT, 0));
+    if (camPos.y < 0.4) camPos.y = 0.4; // 别钻到地面以下
+    this.camera.position.copy(camPos);
+    this.camera.rotation.set(pitch, yaw, 0); // 与第三人称同一约定：鼠标照样能转视角
+    this._updateSpectateHud();
+  }
+
+  _showSpectateHud() {
+    if (!this._spectateHud) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;left:50%;bottom:96px;transform:translateX(-50%);z-index:9400;' +
+        'display:flex;gap:10px;align-items:center;' +
+        'font:13px/1.4 var(--kui-font);color:var(--kui-paper);' +
+        'background:rgba(11,21,34,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 12px;';
+      el.innerHTML =
+        '<span style="font-weight:700;color:#ff9d6a;">观战中</span>' +
+        '<span id="__spTarget">-</span>' +
+        '<button type="button" id="__spNext" class="kui-btn kui-btn--grey" style="padding:3px 10px;">切换视角</button>' +
+        '<button type="button" id="__spQuit" class="kui-btn kui-btn--grey" style="padding:3px 10px;">提前退出</button>';
+      document.body.appendChild(el);
+      const n = el.querySelector('#__spNext');
+      const q = el.querySelector('#__spQuit');
+      if (n) n.addEventListener('click', () => { if (!this._spectateNext()) this._toast('没有别的视角了'); this._updateSpectateHud(); });
+      if (q) q.addEventListener('click', () => {
+        this._hideSpectateHud();
+        this._leaveCombatNow('已中途退出对战');
+      });
+      this._spectateHud = el;
+    }
+    this._spectateHud.style.display = 'flex';
+  }
+
+  _hideSpectateHud() {
+    if (this._spectateHud) this._spectateHud.style.display = 'none';
+  }
+
+  // 提示条只在「看着的人变了」时才写 DOM（每帧写会抖）
+  _updateSpectateHud() {
+    const sp = this._spectate;
+    if (!sp || !this._spectateHud) return;
+    const id = sp.order[sp.idx];
+    if (id === sp.shownId) return;
+    sp.shownId = id;
+    const el = this._spectateHud.querySelector('#__spTarget');
+    const st = id ? this._matchStats.get(id) : null;
+    if (el) el.textContent = st ? ('正在看 ' + st.nick + (st.alive ? '' : '（已阵亡）')) : '暂无存活玩家';
+  }
+
+  // ---- 训练场最高记录（本机 localStorage；隐私模式下只留内存）----
+  _trainBestOf(mode) {
+    const v = this._trainBest[mode];
+    if (v !== undefined && v !== null) return v;
+    let raw = null;
+    try { raw = localStorage.getItem(bestKey(mode)); } catch (e) { raw = null; }
+    const parsed = parseBest(raw);
+    this._trainBest[mode] = parsed;
+    return parsed;
+  }
+
+  _saveTrainBest(mode, score) {
+    this._trainBest[mode] = score;
+    try { localStorage.setItem(bestKey(mode), String(score)); } catch (e) { /* 隐私模式：只留内存 */ }
   }
 
   // 清掉在飞的投掷物 / 黑洞 / 爆炸特效 / 追踪导弹（切换场景时调用，避免跨场景残留）
@@ -4509,6 +5101,7 @@ export class Game {
   _updateMeteorMode(dt) {
     const c = this._combat;
     if (!c || c.mode !== 'meteor') return;
+    if (this._roundOver) return; // 本局已判出结果：别再砸人了（结算面板后面还在死人很奇怪）
 
     if (c.isOwner) {
       this._meteorTimer -= dt;
@@ -4537,8 +5130,7 @@ export class Game {
       this._disposeMeteor(m);
       this._meteors.splice(i, 1);
     }
-
-    this._updateCombatHUD();
+    // 状态条由 _updateMatch 每帧统一刷新，这里不再重复写
   }
 
   // 房主生成一波陨石：本地立即生成并广播，其他客户端收到 meteor 消息后复刻同一颗
@@ -4743,6 +5335,7 @@ export class Game {
   _updateCoinMode(dt) {
     const c = this._combat;
     if (!c || c.mode !== 'grapple') return;
+    if (this._roundOver) return; // 本局已判出结果：停手（金币已清空）
 
     if (c.isOwner) {
       this._coinTimer -= dt;
@@ -4781,6 +5374,9 @@ export class Game {
         this._removeCoin(cn);
         this._coins.splice(i, 1);
         this._coinCount++;
+        // 自己吃到的金币，别的客户端会通过 coin 广播里带的 from 记到我头上，自己这边得自己记
+        const mine = this._matchStats.get(String(this.localState.id));
+        if (mine) mine.coins++;
         this.network.sendCoinTaken(cn.id); // 让其他人也看到这枚被吃掉了
         this._toast('吃到金币！×' + this._coinCount);
       }
@@ -4866,18 +5462,29 @@ export class Game {
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
     if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
 
-    // 对战中被击倒：统一在这里退房（已离开伤害结算循环，改动 this._combat/碰撞体 安全）
-    if (this._pendingCombatExit) {
-      this._pendingCombatExit = false;
-      this.network.sendLeaveRoom();
-      this._exitCombat(this._lobbySpawn);
-      this._setChatLock(false);
+    // 训练场：等服务端开房；超时就退回本机单人（老服务端也能用，别让人干等）
+    if (this._trainPending) {
+      this._trainTimer -= dt;
+      if (this._trainTimer <= 0) {
+        const mode = this._trainPending;
+        this._toast('服务端没有响应，改为本机单人训练场');
+        this._startTrainingLocal(mode);
+      }
     }
 
-    // 视角优先级：灵魂出窍（自由飞行） > 第三人称 > 第一人称
+    // 输赢判定：每帧看一次（人数/血量/时间任一变化都可能让这局结束）
+    if (this._combat) this._updateMatch();
+
+    // 观战相机：死亡后没退房，视角跟着还在场的玩家走（放在相机分支里统一处理）
+
+    // 视角优先级：灵魂出窍（自由飞行） > 观战（跟目标） > 第三人称 > 第一人称
     if (this._soul) {
       this._updateSoul(dt);       // 自由飞行并驱动相机
       this._updateSoulBody();     // 肉身显示在被冻结的位置
+      this.localPlayer.bobEnabled = false;
+    } else if (this._spectate) {
+      // 观战：自己的肉身留在原地（已经死了），相机跟着目标玩家走
+      this._updateSpectate();
       this.localPlayer.bobEnabled = false;
     } else if (this.thirdPerson) {
       // 捉迷藏变成方块时，第三人称下显示方块而不是人形

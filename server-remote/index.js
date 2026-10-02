@@ -506,6 +506,20 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 训练场：单人立刻开一个独立房间——不排队、不等别人，但**照样走房间**。
+    // 为什么不干脆在本机离线开：进房后 __room 才有值，快照才会按房间隔离。
+    // 否则训练场的玩家坐标会被广播进大厅（大厅里的人看到你在竞技场里飘），反之亦然。
+    if (msg.t === 'train') {
+      const mode = String(msg.mode || 'meteor');
+      if (!SUPPORTED_MODES.has(mode)) return; // 未支持的玩法直接忽略
+      const qi = queue.indexOf(ws);
+      if (qi >= 0) queue.splice(qi, 1);       // 若还在匹配队列，先退出
+      if (ws.__room) removeFromRoom(ws);      // 若还在别的房里，先干净退出
+      ws.__matchMode = mode;
+      createRoom(mode, [ws]);                 // 单人房：房主就是自己
+      return;
+    }
+
     // 取消匹配：还在队列里时退出
     if (msg.t === 'cancel_match') {
       const i = queue.indexOf(ws);
@@ -742,11 +756,22 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // 金币被吃掉：通知同房其他人移除同一枚
+    // 金币被吃掉：通知同房其他人移除同一枚。
+    // 必须带上 from —— 抓钩模式的胜负是「谁吃到的金币最多」，而各客户端只有自己的计数，
+    // 少了 from 就没法在结算里排出别人的名次（各端只能按 id 猜，或用位置距离去猜，都不靠谱）。
     if (msg.t === 'coin') {
       const id = String(msg.id || '').slice(0, 40);
       if (!id) return;
-      roomBroadcast(ws.__room, { t: 'coin', id }, ws);
+      roomBroadcast(ws.__room, { t: 'coin', id, from: ws.__id }, ws);
+      return;
+    }
+
+    // 阵亡广播：由**阵亡者自己的客户端**上报（他知道最后一击是谁给的），服务器只转发给同房其他人。
+    // 用途是击杀统计：谁的客户端都不掌握「我这一下把对方打死了」，只有阵亡这一侧知道。
+    if (msg.t === 'die') {
+      // by 允许为空（陨石/岩浆等环境伤害没有击杀者）
+      const by = String(msg.by || '').slice(0, 64);
+      roomBroadcast(ws.__room, { t: 'died', id: ws.__id, by }, ws);
       return;
     }
 

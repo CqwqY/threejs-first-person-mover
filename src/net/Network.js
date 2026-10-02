@@ -19,6 +19,7 @@ export class Network {
     this._pendingVeh = null;   // 待发送的后座乘客位置（仅驾驶员上报）
     this._sendInterval = null; // 20Hz 发送定时器
     this._sendRate = 20; // 上报频率（Hz）
+    this._stateMuted = false; // true = 暂停上报自身位置（训练场本机兜底用）
   }
 
   // 建立连接并绑定事件
@@ -111,9 +112,27 @@ export class Network {
     this.send({ t: 'ctrl', target, on: on ? 1 : 0, x, y, z });
   }
 
-  // 匹配：请求进入对战房间（mode 指定玩法；当前只支持 'meteor' 躲避陨石混战）
+  // 匹配：请求进入对战房间（mode 指定玩法：'meteor' 躲避陨石混战 / 'grapple' 疯狂抓钩）
   sendMatch(mode) {
     this.send({ t: 'match', mode: mode || 'meteor' });
+  }
+
+  // 训练场：请求立刻开一个单人房（不排队、不等别人）。
+  // 走房间而不是本机离线开，是为了让快照按房间隔离：否则训练场里的坐标会广播进大厅。
+  sendTrain(mode) {
+    this.send({ t: 'train', mode: mode || 'meteor' });
+  }
+
+  // 阵亡广播：由阵亡者自己上报（他知道最后一击来自谁），用于全场统计击杀数
+  sendDie(by) {
+    this.send({ t: 'die', by: by || '' });
+  }
+
+  // 暂停/恢复自身状态上报。仅用于「老服务端不支持训练场」时的本机兜底：
+  // 那时本机离线在竞技场里，若继续上报坐标，大厅的人会看到你在竞技场里飘。
+  setStateMuted(on) {
+    this._stateMuted = !!on;
+    if (on) this._pendingState = null;
   }
 
   // 取消匹配：还在队列里时退出
@@ -224,15 +243,18 @@ export class Network {
   _flush() {
     const st = this._pendingState;
     if (st) {
-      if (this._stateChanged(st)) {
-        this.send({ t: 'state', ...st });
-        this._lastSent = this._copyState(st);
-        this._staticTicks = 0;
-      } else {
-        this._staticTicks = (this._staticTicks || 0) + 1;
-        if (this._staticTicks >= SEND_STATIC_DIV) {
+      // 被静音（训练场本机兜底）时不发，但要照常把待发状态清掉，免得恢复后补发一个过期位置
+      if (!this._stateMuted) {
+        if (this._stateChanged(st)) {
           this.send({ t: 'state', ...st });
+          this._lastSent = this._copyState(st);
           this._staticTicks = 0;
+        } else {
+          this._staticTicks = (this._staticTicks || 0) + 1;
+          if (this._staticTicks >= SEND_STATIC_DIV) {
+            this.send({ t: 'state', ...st });
+            this._staticTicks = 0;
+          }
         }
       }
       this._pendingState = null;
