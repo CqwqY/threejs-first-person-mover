@@ -25,6 +25,7 @@ import { LocalPlayer } from '../player/LocalPlayer.js';
 import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
+import { onRelayout } from '../ui/layout.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 import { setBgmVolume } from '../audio/Bgm.js';
@@ -51,13 +52,14 @@ const BOSS_PHASE_NAMES = ['', '一阶段', '二阶段', '三阶段'];
 // 圆锥几何默认朝 +Y，制导导弹用它转到飞行方向
 const UP_Y = new THREE.Vector3(0, 1, 0);
 
-// 每帧复用的临时向量（抓钩绳索起点），避免在热路径里新建对象
+// 每帧复用的临时向量（抓钩绳索起点 / 光点瞄准方向），避免在热路径里新建对象
 const _gpA = new THREE.Vector3();
+const _gDir = new THREE.Vector3();
 
 // 对战玩法表：新增模式时这里加一条，服务端也要放行同名 mode
 const COMBAT_MODES = {
   meteor: { name: '躲避陨石混战', tip: '陨石不断砸落，中被砸 200 血；也能用左键能量球打人' },
-  grapple: { name: '疯狂抓钩', tip: '左键甩抓钩在柱子间飞行吃金币，掉进底部岩浆就出局' },
+  grapple: { name: '疯狂抓钩', tip: '把准星对上柱顶的光点按攻击，钩爪就带你飞过去；在柱子间吃金币，掉进岩浆出局' },
 };
 
 export class Game {
@@ -278,7 +280,13 @@ export class Game {
     this.boss.setOnPhase((kind, ph) => this._onBossPhase(kind, ph));
     this.boss.setOnStatus(() => this._updateBossUI());
     this._portalHint = this._createPortalHint();
+    // 手机端「攻击」是圆形，且排在跳跃键正上方：这两个标记供布局变化时重算位置
+    this._attackCoarse = coarsePointer;
+    this._attackShown = false;  // 攻击键当前是否显示（只在显隐翻转时重算位置，避免每帧量 DOM）
     this._attackBtn = this._createAttackButton();
+    // 视口变化（旋转/地址栏）后重算攻击键位置；本回调在布局层里靠后注册，
+    // 所以执行时跳跃键/技能槽已经排好，_placeAttackBtn 末尾再让技能槽跟着重排一次
+    onRelayout(() => this._placeAttackBtn());
     this._shieldBtn = this._createShieldButton();
     this._bossBar = this._createBossBar();
     this._redOverlay = this._createRedOverlay();
@@ -448,6 +456,7 @@ export class Game {
     this._grappleHold = null;   // 我们写进 physics.velocityHold 的那个对象（松手时只清自己那份）
     this._grappleRope = null;   // 绳索（Line）
     this._grappleHook = null;   // 钩爪（Cone）
+    this._beacons = null;       // 疯狂抓钩模式的柱顶光点（瞄准靶），仅在该模式下有值
     // 疯狂抓钩模式：金币与岩浆
     this._coins = [];           // 在空中的金币 { id, x,y,z, mesh, life }
     this._coinSeq = 0;          // 本机生成金币的自增序号（拼出全场唯一 id）
@@ -1048,16 +1057,37 @@ export class Game {
     return el;
   }
 
-  // Boss 战期间的「攻击」按钮（手机没有鼠标左键，必须给可点按钮）
+  // 「攻击」按钮：手机没有鼠标左键，必须给可点按钮。
+  // 手机端做成**圆形**并排在**跳跃键正上方**（拇指自然落点，也不挡准星）：
+  // 尺寸与跳跃键一致，位置每帧由 _placeAttackBtn 按跳跃键的实际矩形重算。
+  // 桌面端保留原来的底部居中长条（桌面用左键，按钮只是提示）。
   _createAttackButton() {
     const el = document.createElement('div');
-    el.className = 'kui-btn kui-btn--red';
-    el.style.cssText =
-      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
-      'bottom:calc(env(safe-area-inset-bottom, 0px) + 27%);' +
-      'min-width:clamp(54px,15vmin,86px);box-sizing:border-box;text-align:center;' +
-      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
-      'user-select:none;-webkit-user-select:none;touch-action:none;';
+    if (this._attackCoarse) {
+      // 不用 .kui-btn：那套样式带 border-image 与 min-width，套在圆上会被撑成方块
+      el.className = 'mc-atk';
+      el.style.cssText =
+        'position:fixed;right:20px;z-index:62;display:none;cursor:pointer;' +
+        'width:clamp(56px,15vmin,78px);height:clamp(56px,15vmin,78px);border-radius:50%;' +
+        'box-sizing:border-box;text-align:center;padding:0;' +
+        'line-height:clamp(56px,15vmin,78px);overflow:hidden;' +
+        'color:var(--kui-paper);font-weight:600;letter-spacing:1px;font-family:var(--kui-font);' +
+        'font-size:clamp(13px,3.6vmin,16px);' +
+        // 与跳跃键同一套观感（半透明底 + 描边），换成危险色区分「攻击」
+        'background:color-mix(in srgb, var(--kui-danger) 34%, transparent);' +
+        'border:2px solid color-mix(in srgb, var(--kui-danger) 78%, transparent);' +
+        // 首帧兜底：跳到跳跃键（同尺寸 clamp(56,15vmin,78) + 底距 24px）上方一点点
+        'bottom:calc(env(safe-area-inset-bottom, 0px) + 24px + clamp(56px,15vmin,78px) + clamp(10px,2.6vmin,16px));' +
+        'user-select:none;-webkit-user-select:none;touch-action:none;';
+    } else {
+      el.className = 'kui-btn kui-btn--red';
+      el.style.cssText =
+        'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
+        'bottom:calc(env(safe-area-inset-bottom, 0px) + 27%);' +
+        'min-width:clamp(54px,15vmin,86px);box-sizing:border-box;text-align:center;' +
+        'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
+        'user-select:none;-webkit-user-select:none;touch-action:none;';
+    }
     el.textContent = '攻击';
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -1071,6 +1101,33 @@ export class Game {
     el.addEventListener('pointercancel', () => { this._gatlingHeld = false; });
     document.body.appendChild(el);
     return el;
+  }
+
+  // 手机端：把圆形攻击键摆到跳跃键正上方（与跳跃键同一条竖线，留一点缝）。
+  // 跳跃键支持在「按键布局」里拖动，所以不能写死 CSS，得按它的实际矩形算。
+  _placeAttackBtn() {
+    const el = this._attackBtn;
+    if (!el || !this._attackCoarse) return;
+    if (el.style.display === 'none') return; // 隐藏时量不到尺寸，等显示那次再摆
+    const j = document.querySelector('.mc-jump');
+    if (!j) return; // 触屏控件还没创建（初始化顺序），等下一次布局回调
+    const jr = j.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    if (!jr.width || !r.width) return;
+    const gap = Math.max(6, Math.round(Math.min(18, jr.height * 0.16)));
+    const cx = jr.left + jr.width / 2;
+    const top = Math.max(4, jr.top - gap - r.height); // 夹住顶部，别被挤出屏幕
+    el.style.left = Math.round(cx - r.width / 2) + 'px';
+    el.style.top = Math.round(top) + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    // 技能键默认也排在跳跃键上方，这里要让它改挂到攻击键上方，避免两个圆叠在一起
+    this._relayoutSkillBtn();
+  }
+
+  // 让技能键按「当前显示在跳跃键上方的那些键」重排（攻击键在就挂在攻击键上方）
+  _relayoutSkillBtn() {
+    if (this.skillSlots && typeof this.skillSlots.relayout === 'function') this.skillSlots.relayout();
   }
 
   // 三阶段的「护盾」按钮（手机没有 Q 键）
@@ -1500,7 +1557,17 @@ export class Game {
     this._bossUiKey = key;
 
     if (this._portalHint) this._portalHint.style.display = showPortal ? '' : 'none';
-    if (this._attackBtn) this._attackBtn.style.display = showAtk ? '' : 'none';
+    if (this._attackBtn) {
+      const shown = !!showAtk;
+      // 只在显隐翻转时动手：_updateBossUI 会因为血条数字变化被频繁触发，
+      // 每次都去量 rect / 重排技能键会造成没必要的布局抖动
+      if (shown !== this._attackShown) {
+        this._attackShown = shown;
+        this._attackBtn.style.display = shown ? '' : 'none';
+        if (shown) this._placeAttackBtn(); // 手机端：刚显示时按跳跃键位置摆一次（内部顺带重排技能键）
+        else this._relayoutSkillBtn();     // 收起时技能键要落回跳跃键上方
+      }
+    }
     if (this._shieldBtn) {
       this._shieldBtn.style.display = showShield ? '' : 'none';
       this._shieldBtn.style.opacity = shieldReady ? '1' : '0.4'; // 冷却中变淡
@@ -3740,6 +3807,8 @@ export class Game {
   _updateSkillBarVisibility() {
     if (!this.skillSlots || typeof this.skillSlots.setVisible !== 'function') return;
     this.skillSlots.setVisible(!this._combat && !this._soul);
+    // 显隐翻转后位置可能要变（攻击键显示/隐藏会改变技能键的挂靠对象）
+    this._relayoutSkillBtn();
   }
 
   _updateCombatHUD() {
@@ -3783,6 +3852,7 @@ export class Game {
     this._mainColliders = this.colliders.slice(); // 快照主世界碰撞体内容（退出时还原）
     // 按模式换场景：陨石混战 = 平地竞技场；疯狂抓钩 = 柱子林 + 底部岩浆
     this._arena = (mode === 'grapple') ? buildGrappleArena(this.scene) : buildArena(this.scene);
+    this._beacons = this._arena.beacons || null; // 抓钩模式的柱顶光点（瞄准靶）；其它模式为 null
     this.colliders.length = 0; // 原地改写：LocalPlayer 持有的数组引用保持不变
     for (const c of this._arena.colliders) this.colliders.push(c);
 
@@ -3824,6 +3894,7 @@ export class Game {
     this._meteors.length = 0;
     this._disposeMeteorAssets();
     if (this._arena) { this._arena.dispose(); this._arena = null; }
+    this._beacons = null; // 光点随竞技场一起销毁，别在下一场景里继续高亮
 
     // 还原城市景物与 NPC
     if (this._cityRoots) for (const r of this._cityRoots) r.visible = true;
@@ -3890,7 +3961,24 @@ export class Game {
     const sinP = Math.sin(s.pitch);
     const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
     const origin = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.6);
-    // 先判「钩到人」：勾中别人就不拽自己，而是把他朝视线方向甩出去
+    // 疯狂抓钩模式：最优先「瞄柱顶光点」。玩家只要把准星对上光点按攻击，钩爪就飞过去，
+    // 不用再去精确勾柱子的面（移动端根本瞄不准复杂几何）。锚点比抓墙更近，才能正好落到柱顶。
+    const beacon = this._pickBeacon(s, dir);
+    if (beacon) {
+      this._grappleCd = Config.GRAPPLE_COOLDOWN;
+      this._grapple = {
+        x: beacon.x, y: beacon.y, z: beacon.z,
+        fx: origin.x, fy: origin.y, fz: origin.z,
+        flying: true,
+        t: Config.GRAPPLE_MAX_TIME,
+        stop: Config.GRAPPLE_BEACON_STOP, // 收得比抓墙紧，落点才压在柱顶
+      };
+      this._ensureGrappleViz();
+      this._grappleRope.visible = true;
+      this._grappleHook.visible = true;
+      return;
+    }
+    // 其次判「钩到人」：勾中别人就不拽自己，而是把他朝视线方向甩出去
     // （疯狂抓钩模式的乐趣就在这——把人从柱子上甩进岩浆）
     const victim = this._grappleCatchTarget(s, dir);
     if (victim) {
@@ -3917,6 +4005,49 @@ export class Game {
     this._ensureGrappleViz();
     this._grappleRope.visible = true;
     this._grappleHook.visible = true;
+  }
+
+  // 光点瞄准判定：疯狂抓钩模式下，准星中轴 GRAPPLE_BEACON_ARC 度内、GRAPPLE_RANGE 内最近的那颗柱顶光点。
+  // 返回光点对象（含 x/y/z 锚点）或 null。非抓钩模式 this._beacons 为 null，直接返回 null。
+  _pickBeacon(s, dir) {
+    const list = this._beacons;
+    if (!list || !list.length) return null;
+    const cosHalf = Math.cos((Config.GRAPPLE_BEACON_ARC * Math.PI) / 180 / 2);
+    let best = null;
+    let bestD = Infinity;
+    for (const b of list) {
+      const dx = b.x - s.x;
+      const dy = b.y - s.y;
+      const dz = b.z - s.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < 1.2 || d > Config.GRAPPLE_RANGE) continue; // 太近（已在柱上）/ 太远都判不中
+      if ((dx * dir.x + dy * dir.y + dz * dir.z) / d < cosHalf) continue;
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    return best;
+  }
+
+  // 光点每帧表现：整体呼吸 + 「当前瞄中的那颗」放大发亮。
+  // 高亮是给玩家的反馈——看到哪颗变亮，就知道按攻击会飞去哪根柱子。
+  _updateBeacons() {
+    const list = this._beacons;
+    if (!list || !list.length) return;
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    _gDir.set(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
+    const aimed = (this._dead || this._soul) ? null : this._pickBeacon(s, _gDir);
+    const pulse = 1 + Math.sin(this.clock.elapsedTime * 2.6) * 0.14;
+    for (const b of list) {
+      const hot = b === aimed;
+      const k = (hot ? 1.5 : 1) * pulse;
+      if (b.halo) {
+        b.halo.scale.setScalar(k);
+        // 光晕（与激光柱）材质是每个光点独享的，所以这里改透明度只影响自己
+        b.halo.material.opacity = hot ? 0.66 : 0.3;
+      }
+      if (b.core) b.core.scale.setScalar(hot ? 1.5 : 1);
+    }
   }
 
   // 钩人判定：准星中轴 GRAPPLE_CATCH_ARC 度内、GRAPPLE_RANGE 内最近的那个玩家
@@ -3976,7 +4107,14 @@ export class Game {
       const dy = g.y - s.y;
       const dz = g.z - s.z;
       const dist = Math.hypot(dx, dy, dz);
-      if (dist <= Config.GRAPPLE_STOP_DIST || g.t <= 0) { this._endGrapple(); return; }
+      // 光点锚点收得比抓墙更紧（g.stop），否则会在柱子斜上方就松手 → 落在柱外掉进岩浆
+      if (dist <= (g.stop || Config.GRAPPLE_STOP_DIST) || g.t <= 0) {
+        // 到点了把速度收住：拽人时每帧速度都被覆盖成 25m/s，直接松手会带着这股冲劲
+        // 冲过柱子（锚点在半空中，没有墙挡）再掉下去。收住后靠重力自然落到柱顶。
+        this.localPlayer.physics.velocity.multiplyScalar(0.1);
+        this._endGrapple();
+        return;
+      }
       // 用 velocityHold 每帧覆盖速度：重力与输入都被覆盖，拽得干脆且仍会被墙挡住
       const k = Config.GRAPPLE_SPEED / Math.max(0.001, dist);
       const hold = { x: dx * k, y: dy * k, z: dz * k, t: 0.3 };
@@ -4462,6 +4600,8 @@ export class Game {
     this._updateDrops(dt);
     // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）
     this._updatePickupHint();
+    // 柱顶光点：呼吸 + 瞄准高亮（给「按攻击能飞过去」的反馈）
+    this._updateBeacons();
     // 抓钩：钩爪飞行 + 拽人（必须放在玩家物理更新之后，用最新的自身坐标算方向）
     this._updateGrapple(dt);
     // 疯狂抓钩：房主生成金币、全场吃金币、掉进岩浆判负

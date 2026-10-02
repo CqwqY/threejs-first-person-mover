@@ -198,12 +198,24 @@ export function createSkillSlots(opts = {}) {
     return r.width ? r : null;
   }
 
+  // 按钮要「贴着下面那颗键」往上排。右下角从下往上是：跳跃键 → 攻击键（圆形，只在对战/Boss 等状态下显示）。
+  // 所以有攻击键时挂它上方，否则直接挂跳跃键上方——两者都不可见时返回 null（走兜底位）。
+  function anchorRect() {
+    for (const sel of ['.mc-atk', '.mc-jump']) {
+      const el = document.querySelector(sel);
+      if (!el || getComputedStyle(el).display === 'none') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width) return r;
+    }
+    return null;
+  }
+
   function layoutMobile() {
     if (!coarse) return;
     const { width: vw, height: vh } = viewportSize();
     const W = box.offsetWidth || 56;
     const H = box.offsetHeight || 56;
-    const jr = jumpRect();
+    const jr = anchorRect();
     // 按钮中心与跳跃键中心的间距 = 跳跃键半径 + 按钮半径 + 一点缝
     const gap = Math.round(Math.min(14, Math.max(8, H * 0.16)));
     const R = Math.min(110, Math.max(64, (jr ? jr.height / 2 : 39) + H / 2 + gap));
@@ -551,6 +563,13 @@ export function createSkillSlots(opts = {}) {
     applyBoxDisplay();
   }
 
+  // 供外部触发重排：攻击键（圆形，排在跳跃键上方）显示/移位后，本按钮要跟着往上让位
+  function relayout() {
+    if (!coarse) return;
+    readSavedPos();
+    layoutMobile();
+  }
+
   function dispose() {
     window.removeEventListener('keydown', keyHandler);
     window.removeEventListener('keyup', keyUpHandler);
@@ -559,5 +578,5 @@ export function createSkillSlots(opts = {}) {
     box.remove();
   }
 
-  return { assign, clearSlot, registerSkill, setVisible, setDropHandler, dispose };
+  return { assign, clearSlot, registerSkill, setVisible, setDropHandler, relayout, dispose };
 }

@@ -4,7 +4,7 @@
 //  3) 静态确认抓钩/掉落物已改用 worldQuery（其数学在 world-query-check.mjs 里逐条验证）
 // 用法：node grapple-check.mjs
 import { readFileSync } from 'node:fs';
-import { buildPillarLayout } from './src/world/GrappleArena.js';
+import { buildPillarLayout, GRAPPLE_SPAWN_RADIUS, GRAPPLE_SPAWN_TOP_Y, GRAPPLE_SPAWN_COUNT } from './src/world/GrappleArena.js';
 import { Config } from './src/config.js';
 
 let fails = 0;
@@ -79,10 +79,67 @@ const flipBottom = (cyBottom - 8 < R1 + 56 * 0.9) ? -1 : 1;
 ok(flipBottom === 1, '按钮在常规位置（跳跃键上方）→ 轮盘朝上展开');
 ok(POINTS_OF(4, R1, -1).every((p) => p.y >= -1e-9), '翻到下方时全部落在按钮下方');
 
+console.log('== 3. 柱顶光点（疯狂抓钩的瞄准靶）==');
+const BY = Config.GRAPPLE_BEACON_Y;       // 光点相对柱顶高度 = 抓钩锚点高度
+const ARC = Config.GRAPPLE_BEACON_ARC;    // 瞄准判定张角
+const STOP = Config.GRAPPLE_BEACON_STOP;  // 抓光点时的松手距离
+ok(BY > 0.5 && BY < 1.7, '光点高度 ' + BY + 'm：站柱顶够得着，也不至于埋进金币（金币在 +1.9）');
+ok(ARC > Config.GRAPPLE_CATCH_ARC, '光点判定张角 ' + ARC + '° > 钩人的 ' + Config.GRAPPLE_CATCH_ARC + '°（更好瞄）');
+ok(STOP < Config.GRAPPLE_STOP_DIST, '抓光点收得更紧：' + STOP + ' < 抓墙 ' + Config.GRAPPLE_STOP_DIST);
+ok(BY + 0.62 < 1.9, '光点光晕顶（+' + (BY + 0.62).toFixed(2) + '）不与金币（+1.9）重叠');
+// 每根柱子都有一颗光点，且正对柱心
+const beaconOf = (p) => ({ x: p.x, y: p.topY + BY, z: p.z });
+ok(a.every((p) => Math.abs(beaconOf(p).x - p.x) < 1e-9), '每根柱顶光点都对准柱心');
+
+// 从出生平台出发、朝光点直线被拽过去：
+//  ① 掠过柱边时若已高于柱顶 → 干净的抛物线式飞行（要求余量 ≥0.2m）；
+//  ② 若直线会先撞到柱身 → 拉拽方向必须足够陡（竖直分量 ≥0.5），此时水平分量被柱身挡住、
+//     竖直分量照常生效，玩家会贴着柱身「爬」到柱顶（PlayerPhysics 的水平解算不消竖直速度）。
+//     这一条保证「贴着柱子」也能上去，而不是原地卡住掉进岩浆。
+//  ③ 松手点必须仍压在柱顶范围内，否则会擦着柱子掉下去。
+let worstClear = Infinity;    // 干净掠过的组里，高出柱顶的最小值
+let worstStopOut = -Infinity; // 松手点超出柱 footprint 多少（≤0 才落在柱顶内）
+let clipMinUp = Infinity;     // 会撞柱身的组里，拉拽方向的最小竖直分量
+let clean = 0;
+let clip = 0;
+for (const p of a) {
+  const b = beaconOf(p);
+  for (let k = 0; k < GRAPPLE_SPAWN_COUNT; k++) {
+    const ang = (k / GRAPPLE_SPAWN_COUNT) * Math.PI * 2;
+    const sx = Math.cos(ang) * GRAPPLE_SPAWN_RADIUS;
+    const sz = Math.sin(ang) * GRAPPLE_SPAWN_RADIUS;
+    const sy = GRAPPLE_SPAWN_TOP_Y; // 抓钩拽的是脚下物理位置
+    const d3 = Math.hypot(b.x - sx, b.y - sy, b.z - sz);
+    if (d3 > Config.GRAPPLE_RANGE) continue;   // 超出抓钩射程，不参与
+    const ux = (b.x - sx) / d3;
+    const uy = (b.y - sy) / d3;
+    const uz = (b.z - sz) / d3;
+    const horiz = Math.hypot(b.x - sx, b.z - sz);
+    if (horiz > p.half) {
+      const t = (horiz - p.half) / horiz;
+      const yAtEdge = sy + (b.y - sy) * t;
+      const clear = yAtEdge - p.topY; // >0 = 从柱顶上方掠过
+      if (clear > 0) { clean++; worstClear = Math.min(worstClear, clear); }
+      else { clip++; clipMinUp = Math.min(clipMinUp, uy); }
+    }
+    const px = b.x - ux * STOP;
+    const pz = b.z - uz * STOP;
+    worstStopOut = Math.max(worstStopOut, Math.hypot(px - b.x, pz - b.z) - p.half);
+  }
+}
+ok(clean > 0, '能勾到至少一根柱子（可勾组合 ' + (clean + clip) + ' 个，其中 ' + clean + ' 个可干净掠过）');
+ok(worstClear > 0.2, '干净掠过时高出柱顶 ≥0.2m（实际最小 ' + worstClear.toFixed(2) + 'm）');
+ok(clip === 0 || clipMinUp >= 0.5, '会撞柱身的组合（' + clip + ' 个）拉拽方向竖直分量 ≥0.5（实际最小 '
+  + (Number.isFinite(clipMinUp) ? clipMinUp.toFixed(2) : '—') + '，可贴柱爬升）');
+ok(worstStopOut <= 0, '松手点落在柱顶范围内（最差超出 ' + worstStopOut.toFixed(2) + 'm）');
+
 // 抓钩的射线求交已下沉到 src/world/collision/worldQuery.js（盒 OBB / 凸包 / trimesh / 隐式地面），
 // 专项测试在 world-query-check.mjs，这里不重复。只做一次静态确认：Game 不再自带那套 AABB 近似。
 const gameSrc = readFileSync(new URL('./src/core/Game.js', import.meta.url), 'utf8');
 ok(!gameSrc.includes('_rayAabb('), 'Game._rayAabb 已移除（改用 worldQuery.raycastWorld）');
+ok(gameSrc.includes('_pickBeacon('), '抓钩在抓钩模式优先瞄柱顶光点（_pickBeacon）');
+ok(gameSrc.includes('this._beacons = this._arena.beacons'), '进入抓钩模式时挂上光点列表（退出时清空）');
+ok(gameSrc.includes('GRAPPLE_BEACON_STOP'), '抓光点时用更紧的松手距离');
 ok(gameSrc.includes('raycastWorld('), '抓钩射线走 worldQuery.raycastWorld');
 ok(gameSrc.includes('moveSphereWorld('), '掉落物物理走 worldQuery.moveSphereWorld');
 

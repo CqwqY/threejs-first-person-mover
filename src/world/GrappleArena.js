@@ -125,6 +125,7 @@ export function buildGrappleArena(scene) {
 
   // ---- 柱子林：抓钩的主要落点 ----
   const tops = []; // 供金币生成用：每根柱子的顶面中心
+  const beacons = []; // 柱顶光点：抓钩的瞄准靶
   const pillars = buildPillarLayout();
   const pillarMat = new THREE.MeshStandardMaterial({ color: 0x6b5a86, roughness: 0.88, metalness: 0.08 });
   const topMat = new THREE.MeshStandardMaterial({ color: 0x9a86c4, roughness: 0.7, emissive: 0x2c2340, emissiveIntensity: 0.6 });
@@ -141,6 +142,31 @@ export function buildGrappleArena(scene) {
     tops.push({ x: p.x, y: p.topY, z: p.z });
   }
 
+  // ---- 柱顶光点：这个模式的瞄准靶。玩家只要把准星对上光点按攻击，抓钩就会飞过去，
+  //      不需要再去精确勾柱子的面（复杂几何在移动端很难瞄）。光点不参与碰撞，纯视觉锚点。
+  const coreMat = new THREE.MeshBasicMaterial({ color: 0xfff2bd });
+  const haloGeo = new THREE.SphereGeometry(0.62, 12, 10);
+  const coreGeo = new THREE.SphereGeometry(0.26, 12, 10);
+  const beamGeo = new THREE.CylinderGeometry(0.06, 0.06, Config.GRAPPLE_BEACON_Y, 6, 1, true);
+  for (const t of tops) {
+    const y = t.y + Config.GRAPPLE_BEACON_Y; // 光点中心：柱顶上方一点
+    // 光晕材质每个光点单独一份：瞄准时要单独调透明度高亮，共用材质会一起变
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0xffd24a, transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    core.position.set(t.x, y, t.z);
+    group.add(core);
+    const halo = new THREE.Mesh(haloGeo, haloMat);
+    halo.position.set(t.x, y, t.z);
+    group.add(halo);
+    // 柱顶到光点之间拉一条很淡的光柱：远处也能一眼看出「这里可以勾」
+    const beam = new THREE.Mesh(beamGeo, haloMat); // 和光晕共用一份材质，高亮时一起变亮
+    beam.position.set(t.x, t.y + Config.GRAPPLE_BEACON_Y / 2, t.z);
+    group.add(beam);
+    beacons.push({ x: t.x, y, z: t.z, topY: t.y, core, halo });
+  }
+
   scene.add(group); // 必须真正加入场景，否则地板/柱子都不会渲染
 
   return {
@@ -148,6 +174,7 @@ export function buildGrappleArena(scene) {
     colliders,
     half,
     tops,
+    beacons,
     dispose() {
       scene.remove(group);
       group.traverse((o) => {

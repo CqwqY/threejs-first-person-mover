@@ -207,6 +207,10 @@ export const Config = {
   GRAPPLE_THROW_UP: 9,            // 钩中人时附加的向上速度（米/秒）
   GRAPPLE_CATCH_ARC: 18,          // 钩人的判定张角（度，以准星为中轴）
   GRAPPLE_CATCH_DY: 2.8,          // 钩人允许的高度差（米）
+  // 疯狂抓钩：每根柱子顶上飘一颗光点，准星对上去按攻击就飞过去（不用再精确勾几何）
+  GRAPPLE_BEACON_Y: 1.0,          // 光点中心相对柱顶的高度（米，也是抓钩的锚点）
+  GRAPPLE_BEACON_ARC: 20,         // 瞄准光点的判定张角（度，以准星为中轴）
+  GRAPPLE_BEACON_STOP: 0.9,       // 抓到光点后离它这么近就松手（比抓墙近，才能正好落到柱顶）
   // 疯狂抓钩：柱子场地 + 金币 + 底部岩浆（踩到地面＝掉进岩浆）
   GRAPPLE_ARENA_HALF: 22,         // 柱子场地半边长（米），实际 44×44
   GRAPPLE_PILLAR_COUNT: 16,       // 柱子数量
