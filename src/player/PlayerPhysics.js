@@ -293,17 +293,24 @@ export class PlayerPhysics {
     }
   }
 
-  // 玩家 AABB 对凸多面体（凸包）碰撞：SAT。
-  // 分离轴 = 世界 X/Y/Z（玩家面法线）+ 凸包各三角面法线（去重、封顶）。
-  // 取最小穿透轴解析：若为世界 Y 且玩家在凸包质心上方则顶面着陆（站在凸包顶部），否则沿该轴推出。
-  _resolveConvex(state, b, px, py, pz, pr, hh) {
-    const V = b.vertices;
-    const F = b.faces;
-    const pC = { x: px, y: py, z: pz };
-    const cC = { x: b.cx, y: b.cy, z: b.cz };
+  // 凸包碰撞体的一次性预计算（惰性、幂等）：把每帧重复计算的面法线 / 包围盒 / 可站立面
+  // 缓存到碰撞体对象上，消除 _resolveConvex / _convexStandHeight 每帧的叉乘 + new Set() + toFixed 分配开销。
+  // vertices 为世界坐标（生成时已乘 holder.matrixWorld），故可在此直接算世界 AABB。
+  _prepareConvex(b) {
+    if (b._cvPrepared) return;
+    const V = b.vertices, F = b.faces;
+    // 世界空间 AABB（X/Y/Z 全量，供廉价早淘汰）
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < V.length; i += 3) {
+      const x = V[i], y = V[i + 1], z = V[i + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    b.minX = minX; b.maxX = maxX; b.minY = minY; b.maxY = maxY; b.minZ = minZ; b.maxZ = maxZ;
 
-    // 候选轴：世界三轴 + 去重后的凸包面法线
-    const axes = [{ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }];
+    // SAT 分离轴：去重后的凸包面法线（世界三轴在 _resolveConvex 里补）。封顶 45（= 原 axes.length>=48 上限 48 减 3 世界轴），与原行为严格一致。
+    const satNormals = [];
     const seen = new Set();
     for (let i = 0; i + 2 < F.length; i += 3) {
       const i0 = F[i] * 3, i1 = F[i + 1] * 3, i2 = F[i + 2] * 3;
@@ -312,15 +319,59 @@ export class PlayerPhysics {
       let nx = ay * bz - az * by;
       let ny = az * bx - ax * bz;
       let nz = ax * by - ay * bx;
-      let len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (len < 1e-9) continue;
       nx /= len; ny /= len; nz /= len;
       const key = nx.toFixed(3) + ',' + ny.toFixed(3) + ',' + nz.toFixed(3);
       if (seen.has(key)) continue;
       seen.add(key);
-      axes.push({ x: nx, y: ny, z: nz });
-      if (axes.length >= 48) break; // 面数很多时封顶，避免每帧过重
+      satNormals.push({ x: nx, y: ny, z: nz });
+      if (satNormals.length >= 45) break;
     }
+    b.satNormals = satNormals;
+
+    // 可站立面（朝上、ny >= 阈值），预存法线 + 平面常数 d + 顶点索引（供 _convexStandHeight 每帧使用）。
+    const minNy = Config.SLOPE_MAX_NORMAL_Y;
+    const standFaces = [];
+    for (let i = 0; i + 2 < F.length; i += 3) {
+      const i0 = F[i] * 3, i1 = F[i + 1] * 3, i2 = F[i + 2] * 3;
+      const ax = V[i1] - V[i0], ay = V[i1 + 1] - V[i0 + 1], az = V[i1 + 2] - V[i0 + 2];
+      const bx = V[i2] - V[i0], by = V[i2 + 1] - V[i0 + 1], bz = V[i2 + 2] - V[i0 + 2];
+      let nx = ay * bz - az * by;
+      let ny = az * bx - ax * bz;
+      let nz = ax * by - ay * bx;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len < 1e-9) continue;
+      nx /= len; ny /= len; nz /= len;
+      if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; } // 统一朝上，便于按平面求高度
+      if (ny < minNy) continue; // 陡面 / 竖直面不可站立，按墙处理
+      const d = nx * V[i0] + ny * V[i0 + 1] + nz * V[i0 + 2];
+      standFaces.push({ nx, ny, nz, d, i0, i1, i2 });
+    }
+    b.standFaces = standFaces;
+    b._cvPrepared = true;
+  }
+
+  // 玩家 AABB 对凸多面体（凸包）碰撞：SAT。
+  // 分离轴 = 世界 X/Y/Z（玩家面法线）+ 凸包各三角面法线（去重、封顶）。
+  // 取最小穿透轴解析：若为世界 Y 且玩家在凸包质心上方则顶面着陆（站在凸包顶部），否则沿该轴推出。
+  _resolveConvex(state, b, px, py, pz, pr, hh) {
+    if (!b._cvPrepared) this._prepareConvex(b);
+    // ---- AABB 早淘汰：玩家世界 AABB 与凸包世界 AABB 不相交则必不碰撞，直接跳过 ----
+    // 最便宜的过滤：远处 / 背后的凸包一帧即可跳过，免去后续 SAT。AABB 是严格上界，不会漏判。
+    if (px + pr < b.minX || px - pr > b.maxX ||
+        py + hh < b.minY || py - hh > b.maxY ||
+        pz + pr < b.minZ || pz - pr > b.maxZ) return;
+
+    const V = b.vertices;
+    const F = b.faces;
+    const pC = { x: px, y: py, z: pz };
+    const cC = { x: b.cx, y: b.cy, z: b.cz };
+
+    // 候选轴：世界三轴 + 预计算的去重凸包面法线（_prepareConvex 已算好，避免每帧叉乘/字符串去重）
+    const axes = [{ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }];
+    const satN = b.satNormals;
+    for (let i = 0; i < satN.length; i++) axes.push(satN[i]);
 
     let minOverlap = Infinity;
     let minAxis = null;
@@ -427,9 +478,13 @@ export class PlayerPhysics {
     for (const b of colliders) {
       let y = null;
       if (b.type === 'convex') {
-        // 粗筛：凸包整体都在脚底之上、或最高点已经低于吸附范围时，不可能成为支撑面
-        if (b.minY !== undefined && b.minY > feet + 1e-4) continue;
-        if (b.maxY !== undefined && b.maxY < feet - snap) continue;
+        if (!b._cvPrepared) this._prepareConvex(b);
+        // 竖直粗筛：凸包整体在脚底之上、或最高点已低于吸附范围 → 不可能是支撑面
+        if (b.minY > feet + 1e-4) continue;
+        if (b.maxY < feet - snap) continue;
+        // XZ 早筛：玩家水平范围与凸包 XZ 投影不相交 → 不可能是支撑面，跳过昂贵的三角面判定
+        if (state.x + pr < b.minX || state.x - pr > b.maxX ||
+            state.z + pr < b.minZ || state.z - pr > b.maxZ) continue;
         y = this._convexStandHeight(b, state.x, state.z, pr);
       } else if (this._overFootprint(state.x, state.z, pr, b)) {
         y = b.cy + b.hy; // 盒顶面（绕 Y 旋转不改变顶面高度）
@@ -450,31 +505,18 @@ export class PlayerPhysics {
   // 与 _resolveConvex 的推出约定保持一致：以玩家 AABB 脚底角点中沿坡面法线最低者刚触面为准，
   // 故接触高度 = 该面在 (x,z) 的平面高度 + pr*(|nx|+|nz|)/ny（面越斜，这一补偿越大）。
   // 两者用同一约定，才不会出现「解析抬一点、吸附压一点」的来回抖动。
+  // standFaces 已在 _prepareConvex 预计算：朝上、ny >= SLOPE_MAX_NORMAL_Y 的可站立面（含法线/平面常数 d/顶点索引）。
   _convexStandHeight(b, x, z, pr) {
     const V = b.vertices;
-    const F = b.faces;
-    if (!Array.isArray(V) || !Array.isArray(F)) return null;
-    const minNy = Config.SLOPE_MAX_NORMAL_Y;
+    const stand = b.standFaces;
+    if (!Array.isArray(V) || !stand || !stand.length) return null;
     let best = null;
-    for (let i = 0; i + 2 < F.length; i += 3) {
-      const i0 = F[i] * 3, i1 = F[i + 1] * 3, i2 = F[i + 2] * 3;
-      // 三角面法线 = 两边叉乘后归一化
-      const eax = V[i1] - V[i0], eay = V[i1 + 1] - V[i0 + 1], eaz = V[i1 + 2] - V[i0 + 2];
-      const ebx = V[i2] - V[i0], eby = V[i2 + 1] - V[i0 + 1], ebz = V[i2 + 2] - V[i0 + 2];
-      let nx = eay * ebz - eaz * eby;
-      let ny = eaz * ebx - eax * ebz;
-      let nz = eax * eby - eay * ebx;
-      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      if (len < 1e-9) continue;
-      nx /= len; ny /= len; nz /= len;
-      if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; } // 统一朝上，便于按平面求高度
-      if (ny < minNy) continue; // 陡面 / 竖直面：不可站立，按墙处理
-      // 面所在平面 n·p = d，再求 (x,z) 处的高度并做「脚底角点触面」补偿
-      const d = nx * V[i0] + ny * V[i0 + 1] + nz * V[i0 + 2];
-      const h = (d - nx * x - nz * z + pr * (Math.abs(nx) + Math.abs(nz))) / ny;
+    for (let k = 0; k < stand.length; k++) {
+      const f = stand[k];
+      const h = (f.d - f.nx * x - f.nz * z + pr * (Math.abs(f.nx) + Math.abs(f.nz))) / f.ny;
       if (best !== null && h <= best) continue; // 已有更高的可站面
       // 只在 (x,z) 落在该三角面的 XZ 投影内时才有效（否则是外推出来的假地面）
-      if (!this._pointInTriXZ(x, z, V[i0], V[i0 + 2], V[i1], V[i1 + 2], V[i2], V[i2 + 2])) continue;
+      if (!this._pointInTriXZ(x, z, V[f.i0], V[f.i0 + 2], V[f.i1], V[f.i1 + 2], V[f.i2], V[f.i2 + 2])) continue;
       best = h;
     }
     return best;
