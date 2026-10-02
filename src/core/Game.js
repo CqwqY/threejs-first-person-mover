@@ -670,6 +670,15 @@ export class Game {
     setTimeout(() => this._respawn(), Config.RESPAWN_DELAY * 1000);
   }
 
+  // 出生点高度换算：spawn.y 是「脚底」高度（抓钩模式的起始平台顶面 = 6m），
+  // 而 localState.y 存的是「玩家顶部 / 相机高度」= 脚底 + 身高。
+  // ⚠️ 首次进场与阵亡重生**必须**共用这一套换算：只按地面高度放人时，
+  //    抓钩模式（唯一出生点高于地面的模式）重生会直接落在岩浆面上 → 死 → 重生 → 死循环。
+  _feetToTop(spY) {
+    const lift = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    return (Number.isFinite(spY) ? spY : 0) + lift;
+  }
+
   // 重生：满血、清速度，回到服务器分配的出生点
   _respawn() {
     const sp = this._spawn || { x: 0, y: 0, z: 0, yaw: 0 };
@@ -678,7 +687,7 @@ export class Game {
     this.localState.x = sp.x;
     this.localState.z = sp.z;
     this.localState.yaw = sp.yaw || 0;
-    this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    this.localState.y = this._feetToTop(sp.y);
     this.localPlayer.physics.velocity.set(0, 0, 0);
     this._dead = false;
     // 训练场里复活后要重新算作「活着」，否则状态条会一直挂着 0 人
@@ -4184,11 +4193,11 @@ export class Game {
     this.colliders.length = 0; // 原地改写：LocalPlayer 持有的数组引用保持不变
     for (const c of this._arena.colliders) this.colliders.push(c);
 
-    // 玩家落到出生点（抓钩模式出生在平台顶面，spawn.y 是脚底高度）
+    // 玩家落到出生点（抓钩模式出生在平台顶面，spawn.y 是脚底高度；换算见 _feetToTop）
     this.localState.x = sp.x;
     this.localState.z = sp.z;
     this.localState.yaw = sp.yaw || 0;
-    this.localState.y = (Number.isFinite(sp.y) ? sp.y : 0) + Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
+    this.localState.y = this._feetToTop(sp.y);
     this.localState.health = Config.HEALTH_MAX;
     this.localPlayer.physics.velocity.set(0, 0, 0);
     this._dead = false;

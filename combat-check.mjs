@@ -210,7 +210,42 @@ ok(trainingScore('meteor', { coins: 7, survivalMs: 999 }) === 999, 'trainingScor
 ok(survivalMs({ alive: false, diedAt: T0 + 3000 }, T0, T0 + 99999) === 3000, 'survivalMs：阵亡算到阵亡时刻（不随时间长大）');
 ok(survivalMs({ alive: true, diedAt: T0 + 1 }, T0, T0 + 7000) === 7000, 'survivalMs：存活算到当前');
 
-console.log('== 5. 静态接线断言 ==');
+console.log('== 5. 出生点站得住（真物理 + 真竞技场碰撞体）==');
+{
+  // 回归：抓钩是唯一「出生点高于地面」的模式（起始平台顶面 6m，岩浆面是物理地面 y=0）。
+  // 曾经 _respawn() 把 localState.y 写死成地面高度、丢掉 spawn.y，
+  // 导致抓钩里阵亡重生直接落在岩浆面上 → 死 → 重生 → 死循环（表现为「出生点在岩浆里」）。
+  // 这里驱动真的 PlayerPhysics + 真的 buildGrappleArena 碰撞体，逐点验「放上去站得住」。
+  const { PlayerPhysics } = await import('./src/player/PlayerPhysics.js');
+  const { buildGrappleArena } = await import('./src/world/GrappleArena.js');
+  const THREE = await import('three');
+  const noInput = {
+    forwarded: () => false, backwarded: () => false,
+    strafeLeft: () => false, strafeRight: () => false,
+    sprinting: () => false, joyX: 0, joyY: 0, joyMagnitude: () => 0,
+    isDown: () => false, consumeJump: () => false,
+  };
+  const arena = buildGrappleArena(new THREE.Scene());
+  const H = Config.PLAYER_HEIGHT;
+  const LAVA_Y = 0.08; // 与 Game._updateCoinMode 里的判负阈值一致
+  let bad = 0, minFeet = Infinity;
+  for (let i = 0; i < Config.GRAPPLE_SPAWN_COUNT; i++) {
+    const sp = spawnForMode('grapple', i, 1);
+    const phys = new PlayerPhysics();
+    const state = { id: 'local', x: sp.x, y: sp.y + H, z: sp.z, onGround: true };
+    for (let f = 0; f < 180; f++) phys.update(1 / 60, noInput, sp.yaw || 0, state, arena.colliders);
+    const feet = state.y - H;
+    minFeet = Math.min(minFeet, feet);
+    if (!(feet > LAVA_Y + 0.5)) bad++;
+  }
+  ok(bad === 0, Config.GRAPPLE_SPAWN_COUNT + ' 个抓钩出生点放上去都站得住（脚底 ' + minFeet.toFixed(2) + 'm，岩浆判负线 ' + LAVA_Y + 'm）');
+  // 陨石竞技场出生点在地面高度（spawn.y 缺省 0），不该被误抬到空中
+  const msp = spawnForMode('meteor', 1, 4);
+  ok(!Number.isFinite(msp.y), '陨石出生点不带 y（= 站在地面上，由物理地面兜住）');
+  arena.dispose();
+}
+
+console.log('== 6. 静态接线断言 ==');
 // —— 训练场 / 匹配分两组 ——
 ok(gameSrc.includes("group('训练场'") && gameSrc.includes("group('玩家匹配'"), '模式面板分「训练场 / 玩家匹配」两组');
 ok(/card\.appendChild\(mk\('meteor', 'kui-btn--primary', 'soloTip', \(m\) => this\._startTraining\(m\)\)\)/.test(gameSrc), '训练场按钮走 _startTraining');
@@ -230,6 +265,18 @@ ok(/this\.network\.sendDie\(/.test(gameSrc) && netSrc.includes('sendDie('), '阵
 ok(/if \(msg\.from\)/.test(gameSrc) && /st\.coins\+\+/.test(gameSrc), 'coin 广播按 from 记战绩');
 ok(gameSrc.includes('_endRound(this._scoreRows())'), '训练场主动退出 → 先出成绩面板再退');
 ok(gameSrc.includes('if (this._trainLocal) break;'), "case 'join' 有 _trainLocal 守卫（本机兜底时不放大厅玩家进竞技场）");
+// 出生点高度换算只能有一份：首次进场与阵亡重生都走 _feetToTop（否则抓钩重生会落进岩浆）
+ok(gameSrc.includes('_feetToTop('), '存在 _feetToTop（脚底高度 → localState.y 的唯一换算入口）');
+{
+  const ent = gameSrc.indexOf('_enterCombat(mode, spawn, isOwner, members, opts) {');
+  const seg = ent >= 0 ? gameSrc.slice(ent, gameSrc.indexOf('_exitCombat(lobbySpawn) {', ent)) : '';
+  ok(/_feetToTop\(sp\.y\)/.test(seg), '首次进场用 _feetToTop(sp.y)');
+  ok(!/localState\.y = Config\.PLAYER_HEIGHT \* this\.localPlayer\.physics\.sizeScale/.test(seg), '首次进场不再有「写死地面高度」的旧写法');
+  const rsp = gameSrc.indexOf('_respawn() {');
+  const rseg = rsp >= 0 ? gameSrc.slice(rsp, rsp + 700) : '';
+  ok(/_feetToTop\(sp\.y\)/.test(rseg), '阵亡重生用 _feetToTop(sp.y)（抓钩重生回平台顶面，不再落进岩浆）');
+  ok(!/localState\.y = Config\.PLAYER_HEIGHT \* this\.localPlayer\.physics\.sizeScale/.test(rseg), '阵亡重生不再写死地面高度');
+}
 ok(netSrc.includes('setStateMuted(') && netSrc.includes('_stateMuted'), 'Network 支持状态静音（本机兜底训练场用）');
 // —— 服务端 ——
 ok(/msg\.t === 'train'/.test(srvSrc), '服务端已支持 train（立刻开单人房）');
