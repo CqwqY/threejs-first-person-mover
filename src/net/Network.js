@@ -144,6 +144,7 @@ export class Network {
     if (!info || !info.item) return;
     this.send({
       t: 'drop',
+      id: String(info.id || '').slice(0, 40),
       item: String(info.item).slice(0, 24),
       x: Number(info.x) || 0,
       y: Number(info.y) || 0,
@@ -152,6 +153,12 @@ export class Network {
       vy: Number(info.vy) || 0,
       vz: Number(info.vz) || 0,
     });
+  }
+
+  // 拾取掉落物广播：带上掉落物 id，让同场其他人把它从地上移除（物品只能被捡走一次）
+  sendPickup(id) {
+    if (!id) return;
+    this.send({ t: 'pickup', id: String(id).slice(0, 40) });
   }
 
   // 爆炸广播：让其他玩家在同样的位置播爆炸特效

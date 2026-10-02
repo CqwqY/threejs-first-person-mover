@@ -12,7 +12,7 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill, redeemCode } from '../player/Shop.js';
+import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { buildArena } from '../world/CombatArena.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
@@ -303,6 +303,17 @@ export class Game {
     this.merchant = createMerchant();
     this.scene.add(this.merchant.group);
     this._merchantHint = this._createMerchantHint();
+    // 「拾取」按钮：走到别人（或自己）丢在地上的物品旁边就冒出来，手机点它 / PC 按 E 都能捡
+    this._pickupHint = this._createPickupHint();
+    // PC：靠近掉落物时按 E 拾取（鼠标被指针锁定，点不到 DOM 按钮）
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.PICKUP_KEY) return;
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
+      if (!this._pickupTarget) return;
+      e.preventDefault();
+      this._pickupNearest();
+    });
     this.merchant.onRange((r) => { this._merchantNear = !!r; });
     this.shop = createShopPanel({
       onBuy: (id) => this._buyShopItem(id),
@@ -415,7 +426,11 @@ export class Game {
     this._pendingCombatExit = false; // 对战中被击倒 → 下一帧统一退房（避免在伤害循环里改状态）
     this._failEl = null;        // 屏幕中央「失败」字样（非弹窗）
     this._soul = null;          // P 键灵魂出窍：{ x, y, z, yaw, pitch }，null 表示未出窍
-    this._drops = [];           // 丢在地上的物品 { item, x,y,z,vx,vy,vz, resting, life, mesh, label }
+    this._drops = [];           // 丢在地上的物品 { id, item, x,y,z,vx,vy,vz, resting, life, mesh, label }
+    this._dropSeq = 0;          // 本机丢弃物自增序号（拼出全场唯一的掉落物 id，供拾取同步）
+    this._pickupTarget = null;  // 当前可拾取的掉落物（离得最近那一件），null 表示够不到
+    this._pickupLabel = null;   // 按钮上正在显示哪件物品（避免每帧重写 textContent）
+    this._pickupShown = false;  // 「拾取」按钮显隐去抖（避免每帧写 style）
     this._dropGeo = null;       // 丢弃物共用几何（立方体，避免每件都新建）
     this._dropLabelTex = new Map(); // 物品名 → Canvas 贴图（缓存，同名共用）
     this._dropLabelMat = new Map(); // 物品名 → Sprite 材质（缓存，同名共用）
@@ -753,10 +768,16 @@ export class Game {
       case 'drop': {
         // 别人丢弃的物品：用同样的初始状态在本地复现，全员可见
         this._spawnDrop({
+          id: msg.id,
           item: msg.item,
           x: Number(msg.x), y: Number(msg.y), z: Number(msg.z),
           vx: Number(msg.vx), vy: Number(msg.vy), vz: Number(msg.vz),
         });
+        break;
+      }
+      case 'pickup': {
+        // 别人把地上的东西捡走了：本地移除同一件，避免「已经没了还留在地上」
+        this._pickupRemote(msg.id);
         break;
       }
       default:
@@ -1053,6 +1074,101 @@ export class Game {
     });
     document.body.appendChild(el);
     return el;
+  }
+
+  // 掉落物旁边的「拾取」按钮：靠近就出现，点一下把地上的东西捡回背包
+  _createPickupHint() {
+    const el = document.createElement('div');
+    el.className = 'kui-btn kui-btn--primary';
+    // 放在准星正下方一点：底部中间的按钮位（上下车/召唤/攻击/护盾）已经排满，这里不会打架
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);top:calc(50% + 52px);z-index:63;display:none;cursor:pointer;' +
+      'min-width:clamp(66px,18vmin,104px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
+    el.textContent = '拾取';
+    // PC 上光标被指针锁定，点不到 DOM 按钮，所以在按钮上标出快捷键
+    this._pickupKeySuffix = ('ontouchstart' in window) ? '' : (' (' + Config.PICKUP_KEY.slice(-1) + ')');
+    // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._pickupNearest();
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 拾取按钮显隐 + 文案：找离自己最近、且在拾取范围内的一件掉落物
+  _updatePickupHint() {
+    if (!this._pickupHint) return;
+    const s = this.localState;
+    const R = Config.DROP_PICKUP_RANGE;
+    const HY = Config.DROP_PICKUP_HEIGHT;
+    let best = null;
+    let bestD = Infinity;
+    for (const d of this._drops) {
+      const dh = d.y - s.y; // 物品比自己高/低太多就够不到（比如还飞在半空）
+      if (dh > HY || dh < -HY - 2) continue;
+      const dist = Math.hypot(s.x - d.x, s.z - d.z);
+      if (dist <= R && dist < bestD) { best = d; bestD = dist; }
+    }
+    // 灵魂出窍 / 已倒地时只飘着看，不提示拾取（也不允许按 E 捡）
+    const allow = !this._dead && !this._soul;
+    this._pickupTarget = allow ? best : null;
+    const show = !!this._pickupTarget;
+    if (this._pickupShown !== show) {
+      this._pickupShown = show;
+      this._pickupHint.style.display = show ? '' : 'none';
+    }
+    if (show && this._pickupLabel !== best.item) {
+      this._pickupLabel = best.item;
+      this._pickupHint.textContent = '拾取「' + best.item + '」' + (this._pickupKeySuffix || '');
+    }
+  }
+
+  // 捡起当前目标掉落物：进背包、有空槽就装备上，然后通知同场其他人把它移除
+  _pickupNearest() {
+    const d = this._pickupTarget;
+    if (!d) return;
+    const i = this._drops.indexOf(d);
+    if (i < 0) { this._pickupTarget = null; this._pickupLabel = null; return; } // 已被移除（过期/被别人捡走）
+    const item = d.item;
+    // 先把自己这边移除，避免重复点击重复入包
+    this._pickupTarget = null;
+    this._pickupLabel = null;
+    this._removeDrop(d); this._drops.splice(i, 1);
+    if (d.id) this.network.sendPickup(d.id); // 让其他人也看到它被捡走了
+    this._pickupShown = false;
+    if (this._pickupHint) this._pickupHint.style.display = 'none';
+
+    const n = addToBag(getBagKey(this._profile), item, 1);
+    // 捡到别人丢的东西时，本机可能还不知道它的效果（自己没买过）：
+    // 从商店目录按名字补一份效果，这样捡回来的物品是真的能用，而不是「未识别」兜底
+    if (!this._loadItemEffect(item)) {
+      const catalog = SHOP_ITEMS.find((it) => it.name === item);
+      if (catalog && catalog.effect) this._storeItemEffect(item, catalog.effect);
+    }
+    // 已经装在某个槽里就只加背包；否则挑第一个空槽装上去
+    let slot = Object.keys(this._skillMap).find((k) => this._skillMap[k] === item);
+    if (slot != null) slot = Number(slot);
+    else {
+      for (let k = 0; k < SLOT_COUNT; k++) { if (!(k in this._skillMap)) { slot = k; break; } }
+      if (slot != null && slot >= 0) this._setSlot(slot, item);
+    }
+    this._toast('已拾取「' + item + '」，背包 ' + n + ' 个'
+      + (slot != null && slot >= 0 ? '（' + (slot + 1) + ' 号技能槽）' : ''));
+  }
+
+  // 别人捡走了掉落物：本地把同 id 的那件移除（不重复入包）
+  _pickupRemote(id) {
+    if (!id) return;
+    const i = this._drops.findIndex((d) => d.id && d.id === id);
+    if (i >= 0) {
+      if (this._pickupTarget === this._drops[i]) { this._pickupTarget = null; this._pickupLabel = null; }
+      this._removeDrop(this._drops[i]);
+      this._drops.splice(i, 1);
+    }
   }
 
   // 顶部的学币小牌，常驻显示
@@ -3610,7 +3726,9 @@ export class Game {
     const start = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.7);
     const vel = dir.clone().multiplyScalar(Config.DROP_THROW_SPEED);
     vel.y += Config.DROP_THROW_UP;
-    const payload = { item, x: start.x, y: start.y, z: start.z, vx: vel.x, vy: vel.y, vz: vel.z };
+    // 全场唯一的掉落物 id：玩家 id + 本机自增序号（拾取时靠它让所有人同步移除）
+    const id = (this.localState.id || 'local') + ':' + (++this._dropSeq);
+    const payload = { id, item, x: start.x, y: start.y, z: start.z, vx: vel.x, vy: vel.y, vz: vel.z };
     this._spawnDrop(payload);
     this.network.sendDrop(payload); // 广播给同场其他人
     this._toast('已丢弃「' + item + '」');
@@ -3643,6 +3761,7 @@ export class Game {
     this.scene.add(label);
 
     this._drops.push({
+      id: String(o.id || ''),
       item, x, y: yy, z,
       vx: Number(o.vx) || 0, vy: Number(o.vy) || 0, vz: Number(o.vz) || 0,
       resting: false, life: Config.DROP_LIFETIME, mesh, label,
@@ -3683,6 +3802,11 @@ export class Game {
   _clearDrops() {
     for (const d of this._drops) this._removeDrop(d);
     this._drops.length = 0;
+    // 目标与按钮一并复位，避免残留一个已不在场景里的拾取目标
+    this._pickupTarget = null;
+    this._pickupLabel = null;
+    if (this._pickupHint && this._pickupShown) { this._pickupHint.style.display = 'none'; }
+    this._pickupShown = false;
   }
 
   // 掉落物物理：重力 → 落地弹跳 → 地面摩擦 → 静止；越界回弹；到寿命自动消失
@@ -3884,6 +4008,8 @@ export class Game {
     this._updateProjectiles(dt);
     // 掉落物（丢弃的物品）：重力/弹跳/摩擦推进
     this._updateDrops(dt);
+    // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）
+    this._updatePickupHint();
     // 爆炸特效：推进动画
     this._updateFX(dt);
 

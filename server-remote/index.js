@@ -637,6 +637,7 @@ wss.on('connection', (ws) => {
       if (!item) return;
       const out = {
         t: 'drop',
+        id: String(msg.id || '').slice(0, 40),
         item,
         x: num(msg.x, 0, -1000, 1000),
         y: num(msg.y, 0, -100, 300),
@@ -649,7 +650,15 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // 驾驶员代报后座乘客：把乘客钉到驾驶位后方。乘客自己不再单独上报，
+    // 拾取：某件掉落物被捡走后，通知同场其他人把它从地上移除。
+    // 服务器不校验归属，只做房间内转发（id 是丢弃者生成的全场唯一串）。
+    if (msg.t === 'pickup') {
+      const id = String(msg.id || '').slice(0, 40);
+      if (!id) return;
+      roomBroadcast(ws.__room, { t: 'pickup', id }, ws);
+      return;
+    }
+
     // 用驾驶员的权威坐标统一校准，避免双方各自插值导致乘客相对车身乱抖。
     if (msg.t === 'veh') {
       const pax = String(msg.pax || '');
