@@ -7,16 +7,20 @@ import {
   LAYOUT_ITEMS, installViewportWatcher, applyLayout, writeLayout, currentMode,
   relayout, resetLayout, setLayoutPaused, viewportSize, snapshotEl,
 } from './layout.js';
+import { ensureTheme } from './theme.js';
 
 const MARGIN = 4;
 
 export function initMobileLayout() {
+  ensureTheme(); // 配色/字体统一取自主题变量，本模块不再自带一套颜色
   const coarse =
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
     'ontouchstart' in window;
   if (!coarse) return;
 
-  // ---- 自适应样式：尺寸随屏幕缩放 + 安全区 + 不使用会含浏览器工具栏的 100vh ----
+  // 纯布局样式（一次性注入）：自适应尺寸、侧栏定位与 .open 显隐是行为依赖，必须留在这里。
+  // theme.js 不含这些类，且侧栏按钮是叠在世界上的小尺寸控件，套 .kui-btn 会被 min-width/border 撑大，
+  // 所以这里只保留布局，把硬编码颜色/字体换成主题变量。
   const style = document.createElement('style');
   style.textContent = `
     /* 用 vmin（短边）而非 vw：vw 在旋转后宽度翻倍，控件会突然变大 */
@@ -29,20 +33,25 @@ export function initMobileLayout() {
       left:calc(env(safe-area-inset-left, 0px) + 8px);
       top:calc(env(safe-area-inset-top, 0px) + 52px);
       user-select:none;-webkit-user-select:none;
-      font:clamp(11px,2.8vmin,12px)/1.2 system-ui,"Microsoft YaHei",sans-serif}
-    .ml-tab{background:rgba(10,16,26,.72);color:#fff;border:1px solid rgba(255,255,255,.3);
-      border-radius:8px;padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
+      font:clamp(11px,2.8vmin,12px)/1.2 var(--kui-font)}
+    /* 半透明深色底 + 主题描边：保持原本的小尺寸与留白 */
+    .ml-tab{background:color-mix(in srgb, var(--kui-ink) 72%, transparent);color:var(--kui-paper);
+      border:1px solid color-mix(in srgb, var(--kui-blue-soft) 55%, transparent);
+      border-radius:var(--kui-radius);padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
       user-select:none;-webkit-user-select:none;letter-spacing:1px}
+    /* 收起/展开状态：由 setPanelOpen 切 .open 驱动，这两条规则必须保留 */
     .ml-panel{display:none;flex-direction:column;gap:6px}
     .ml-panel.open{display:flex}
-    .ml-btn{background:rgba(10,16,26,.72);color:#fff;border:1px solid rgba(255,255,255,.3);
-      border-radius:8px;padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
+    .ml-btn{background:color-mix(in srgb, var(--kui-ink) 72%, transparent);color:var(--kui-paper);
+      border:1px solid color-mix(in srgb, var(--kui-blue-soft) 55%, transparent);
+      border-radius:var(--kui-radius);padding:6px 9px;cursor:pointer;text-align:center;touch-action:none;
       user-select:none;-webkit-user-select:none}
-    .ml-btn.on{background:#2e7ddd;border-color:#8fc3ff}
-    .ml-handle{position:fixed;z-index:81;border:2px dashed #ffd479;border-radius:10px;
+    .ml-btn.on{background:var(--kui-blue);border-color:var(--kui-blue-soft)}
+    /* 编辑模式的拖拽把手保留黄色：toast 文案写的就是「拖动黄色把手」，主题里没有黄色变量 */
+    .ml-handle{position:fixed;z-index:81;border:2px dashed #ffd479;border-radius:var(--kui-radius);
       box-sizing:border-box;background:rgba(255,212,121,.10);touch-action:none;cursor:move}
-    .ml-tag{position:absolute;left:0;top:-20px;font:11px/1.4 system-ui,"Microsoft YaHei",sans-serif;
-      padding:1px 6px;border-radius:6px;color:#fff;white-space:nowrap}
+    .ml-tag{position:absolute;left:0;top:-20px;font:11px/1.4 var(--kui-font);
+      padding:1px 6px;border-radius:var(--kui-radius);color:var(--kui-paper);white-space:nowrap}
   `;
   document.head.appendChild(style);
 
@@ -54,8 +63,9 @@ export function initMobileLayout() {
       toastEl = document.createElement('div');
       toastEl.style.cssText =
         'position:fixed;left:50%;top:12%;transform:translateX(-50%);z-index:82;max-width:82vw;' +
-        'background:rgba(10,16,26,.88);color:#fff;padding:8px 14px;border-radius:10px;' +
-        'font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif;pointer-events:none;text-align:center;';
+        'background:color-mix(in srgb, var(--kui-ink) 88%, transparent);color:var(--kui-paper);' +
+        'padding:8px 14px;border-radius:var(--kui-radius);' +
+        'font:12px/1.5 var(--kui-font);pointer-events:none;text-align:center;';
       document.body.appendChild(toastEl);
     }
     toastEl.textContent = text;
@@ -128,7 +138,8 @@ export function initMobileLayout() {
     const ok = visibleOf(rec.el);
     rec.ok = ok;
     rec.tag.textContent = rec.it.label + (ok ? ' 可见' : ' 超出屏幕');
-    rec.tag.style.background = ok ? '#2ecc71' : '#e74c3c';
+    // 绿/红直接取主题的成功色与危险色（toast 文案说的「红色表示超出屏幕」依然成立）
+    rec.tag.style.background = ok ? 'var(--kui-ok)' : 'var(--kui-danger)';
   }
   function syncAll() { for (const rec of handles) syncOne(rec); }
 

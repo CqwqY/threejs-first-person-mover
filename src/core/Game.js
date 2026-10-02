@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
-import { attachSky, createNightSky, fitNightSky } from '../world/SkyBox.js';
+import { createTimeSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
@@ -25,6 +25,7 @@ import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 import { setBgmVolume } from '../audio/Bgm.js';
+import { ensureTheme } from '../ui/theme.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
 // target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
@@ -56,6 +57,9 @@ export class Game {
     this._profile = profile;
     this._placed = false; // 是否已用服务端出生点定位过（断线重连不再重定位，避免被拉回出生点）
 
+    // UI 主题：注入 Kenney UI 样式表，必须在任何 UI 元素创建之前完成
+    ensureTheme();
+
     // ---- 渲染器 ----
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     // dpr 封顶到 2：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
@@ -68,10 +72,9 @@ export class Game {
 
     // ---- 场景与相机 ----
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，贴图/天空盒覆盖其上）
-    attachSky(this.scene); // 城市天空贴图（优先）→ 程序化天空兜底
-    // 夜空球壳：夜晚时淡入（白天 visible=false，完全不绘制）
-    this._nightSky = createNightSky(this.scene);
+    this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，时段天空球壳覆盖其上）
+    // 时段天空盒：清晨/白天/夜晚/深夜四张全景图，按世界时刻交叉淡入（内部含程序化天空兜底）
+    this._timeSky = createTimeSky(this.scene);
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
@@ -366,7 +369,7 @@ export class Game {
     box.className = 'hp-box'; // 供手机端「按键布局调整」定位与检查
     box.style.cssText =
       'position:fixed;left:18px;bottom:22px;z-index:53;width:min(240px,42vw);' +
-      'font:12px/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;user-select:none;pointer-events:none;';
+      'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;';
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.6);';
     const label = document.createElement('span');
@@ -375,11 +378,13 @@ export class Game {
     num.textContent = Config.HEALTH_MAX + ' / ' + Config.HEALTH_MAX;
     row.appendChild(label);
     row.appendChild(num);
+    // 进度条外观交给主题类；高度仍用内联保持原尺寸，填充色由 _updateHealthBar 按血量动态写入
     const track = document.createElement('div');
-    track.style.cssText =
-      'height:10px;border-radius:6px;background:rgba(10,16,26,.65);border:1px solid rgba(255,255,255,.28);overflow:hidden;';
+    track.className = 'kui-bar';
+    track.style.cssText = 'height:10px;';
     const fill = document.createElement('div');
-    fill.style.cssText = 'height:100%;width:100%;background:#2ecc71;transition:width .18s ease,background .18s ease;';
+    fill.className = 'kui-bar__fill';
+    fill.style.cssText = 'width:100%;background:#2ecc71;transition:width .18s ease,background .18s ease;';
     track.appendChild(fill);
     box.appendChild(row);
     box.appendChild(track);
@@ -456,20 +461,13 @@ export class Game {
     this._sun.intensity = this._dayBaseSun * sunUp;
     this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
     this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
-    // 天空贴图整体压暗 + 夜空淡入：日落时白天贴图自然变黑，
-    // 同时星空球壳按「夜的浓度」淡入（sunUp 到 0 就是全黑的世界）。
-    const night = Math.min(1, Math.max(0, 1 - sunUp / 0.35));
-
+    // 兜底背景色日落后压暗（时段天空球壳正常覆盖时看不见它）
     if ('backgroundIntensity' in this.scene) {
-      this.scene.backgroundIntensity = sunUp; // 白天贴图日落后压到 0（全黑）
+      this.scene.backgroundIntensity = sunUp;
     }
 
-    if (this._nightSky) {
-      fitNightSky(this._nightSky, this.camera); // 跟着相机 far 缩放，防止调小视距后球壳被裁掉
-      this._nightSky.visible = night > 0.01;
-      this._nightSky.material.opacity = night;
-      this._nightSky.position.copy(this.camera.position); // 天空不该有视差，跟着相机走
-    }
+    // 时段天空盒：按当前时刻选图并交叉淡入，同时跟随相机（无视差、不被裁剪）
+    if (this._timeSky) this._timeSky.update(t, this.camera);
 
     // 校卡上的时间（0 = 00:00，0.5 = 12:00）：只在整分钟变化时写 DOM
     const mins = Math.floor(t * 1440);
@@ -664,14 +662,13 @@ export class Game {
   // 放在屏幕下方中间（居中于两个拇指区之间），跟随安全区，尺寸用 vmin 以免旋转跳变。
   _createVehicleHint() {
     const el = document.createElement('div');
+    el.className = 'kui-btn';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
       'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
-      'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
-      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -827,14 +824,13 @@ export class Game {
   // 传送门附近的「召唤老师」按钮：和上下车按钮同一位置（传送门与电动车相距 18 米，不会同时出现）
   _createPortalHint() {
     const el = document.createElement('div');
+    el.className = 'kui-btn kui-btn--primary';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
       'min-width:clamp(76px,22vmin,124px);box-sizing:border-box;text-align:center;' +
-      'background:linear-gradient(150deg,#8a5cff,#5a2bd8);color:#fff;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
-      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '召唤老师';
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
     el.addEventListener('pointerdown', (e) => {
@@ -851,14 +847,13 @@ export class Game {
   // Boss 战期间的「攻击」按钮（手机没有鼠标左键，必须给可点按钮）
   _createAttackButton() {
     const el = document.createElement('div');
+    el.className = 'kui-btn kui-btn--danger';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 27%);' +
       'min-width:clamp(70px,20vmin,112px);box-sizing:border-box;text-align:center;' +
-      'background:linear-gradient(150deg,#e0693c,#b83a1f);color:#fff;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
-      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '攻击';
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -876,14 +871,13 @@ export class Game {
   // 三阶段的「护盾」按钮（手机没有 Q 键）
   _createShieldButton() {
     const el = document.createElement('div');
+    el.className = 'kui-btn kui-btn--primary';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 37%);' +
       'min-width:clamp(70px,20vmin,112px);box-sizing:border-box;text-align:center;' +
-      'background:linear-gradient(150deg,#4bb8f0,#1f6fb8);color:#fff;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
-      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '护盾';
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -897,14 +891,13 @@ export class Game {
   // 商人附近的「找小满买东西」按钮
   _createMerchantHint() {
     const el = document.createElement('div');
+    el.className = 'kui-btn kui-btn--primary';
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
       'min-width:clamp(86px,24vmin,142px);box-sizing:border-box;text-align:center;' +
-      'background:linear-gradient(150deg,#c99a3b,#8a6416);color:#fff;' +
-      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);border-radius:clamp(10px,3vmin,14px);' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;touch-action:none;' +
-      'font:clamp(12px,3.2vmin,14px)/1.3 system-ui,"Microsoft YaHei",sans-serif;';
+      'padding:clamp(8px,2.4vmin,12px) clamp(14px,4vmin,22px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '找小满买东西';
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
     el.addEventListener('pointerdown', (e) => {
@@ -920,12 +913,15 @@ export class Game {
   // 顶部的学币小牌，常驻显示
   _createCoinBadge() {
     const el = document.createElement('div');
-    el.style.cssText =
-      'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;' +
-      'background:linear-gradient(150deg,#c99a3b,#8a6416);color:#fff;padding:9px 12px;border-radius:12px;' +
-      'box-shadow:0 6px 18px rgba(0,0,0,.25);font:13px system-ui,"Microsoft YaHei",sans-serif;user-select:none;';
+    el.className = 'kui-panel';
+    el.style.cssText = 'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;user-select:none;';
+    const body = document.createElement('div');
+    body.className = 'kui-panel__body';
+    body.style.cssText = 'font:13px var(--kui-font);';
+    el.appendChild(body);
     document.body.appendChild(el);
-    return el;
+    // 返回内容容器：_refreshCoins 直接写它的 textContent
+    return body;
   }
 
   // 学币变化后刷新顶部牌子与商店里的余额
@@ -1156,7 +1152,7 @@ export class Game {
       'position:fixed;left:50%;transform:translateX(-50%);z-index:58;display:none;' +
       'top:calc(env(safe-area-inset-top, 0px) + clamp(56px,11vmin,78px));' +
       'width:min(420px,62vw);user-select:none;pointer-events:none;' +
-      'font:clamp(11px,2.8vmin,13px)/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;';
+      'font:clamp(11px,2.8vmin,13px)/1.3 var(--kui-font);color:var(--kui-paper);';
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);';
     const name = document.createElement('span');
@@ -1165,11 +1161,13 @@ export class Game {
     const num = document.createElement('span');
     row.appendChild(name);
     row.appendChild(num);
+    // Boss 血条用主题的危险色进度条；高度仍用内联保持原尺寸
     const track = document.createElement('div');
-    track.style.cssText =
-      'height:10px;border-radius:6px;background:rgba(10,16,26,.7);border:1px solid rgba(255,180,198,.5);overflow:hidden;';
+    track.className = 'kui-bar kui-bar--danger';
+    track.style.cssText = 'height:10px;';
     const fill = document.createElement('div');
-    fill.style.cssText = 'height:100%;width:100%;background:#e0526f;transition:width .18s ease;';
+    fill.className = 'kui-bar__fill';
+    fill.style.cssText = 'width:100%;transition:width .18s ease;';
     track.appendChild(fill);
     box.appendChild(row);
     box.appendChild(track);
@@ -1484,22 +1482,22 @@ export class Game {
       'position:fixed;inset:0;z-index:9750;display:none;background:rgba(15,20,30,.45);' +
       'align-items:center;justify-content:center;font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;';
     const card = document.createElement('div');
-    card.style.cssText =
-      'background:#fff;color:#1f2933;border-radius:16px;padding:22px 22px 18px;width:min(380px,88vw);' +
-      'box-shadow:0 18px 50px rgba(0,0,0,.3);box-sizing:border-box;';
+    card.className = 'kui-panel';
+    card.style.cssText = 'width:min(380px,88vw);box-sizing:border-box;';
     card.innerHTML =
-      '<h3 style="margin:0 0 14px;font-size:16px;">捉迷藏玩具</h3>' +
+      '<div class="kui-panel__body">' +
+      '<h3 class="kui-title" style="margin:0 0 14px;font-size:16px;">捉迷藏玩具</h3>' +
       '<label style="display:block;margin-bottom:10px;">一起玩的人' +
-      '<select class="hd-partner" style="margin-left:8px;max-width:190px;"></select></label>' +
+      '<select class="hd-partner kui-input" style="margin-left:8px;max-width:190px;width:auto;display:inline-block;"></select></label>' +
       '<label style="display:block;margin-bottom:12px;">谁抓' +
-      '<select class="hd-role" style="margin-left:8px;max-width:230px;">' +
+      '<select class="hd-role kui-input" style="margin-left:8px;max-width:230px;width:auto;display:inline-block;">' +
       '<option value="partner">对方抓（我变成方块躲起来）</option>' +
       '<option value="me">我抓（对方变成方块）</option></select></label>' +
       '<div style="margin-bottom:16px;">方块颜色<div class="hd-colors" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;"></div></div>' +
       '<div style="display:flex;gap:10px;justify-content:flex-end;">' +
-      '<button class="hd-cancel" type="button" style="border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:7px 16px;cursor:pointer;">取消</button>' +
-      '<button class="hd-go" type="button" style="border:0;background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;border-radius:8px;' +
-      'padding:7px 18px;cursor:pointer;font-weight:600;">开始</button></div>';
+      '<button class="hd-cancel kui-btn kui-btn--ghost" type="button">取消</button>' +
+      '<button class="hd-go kui-btn kui-btn--primary" type="button">开始</button></div>' +
+      '</div>';
     ov.appendChild(card);
     document.body.appendChild(ov);
 
@@ -1511,14 +1509,14 @@ export class Game {
     let color = COLORS[3];
     const swatches = COLORS.map((c) => {
       const d = document.createElement('div');
-      d.style.cssText = 'width:30px;height:30px;border-radius:8px;cursor:pointer;background:' + c + ';box-sizing:border-box;';
+      d.style.cssText = 'width:30px;height:30px;border-radius:var(--kui-radius);cursor:pointer;background:' + c + ';box-sizing:border-box;';
       d.addEventListener('click', () => { color = c; paint(); });
       colorBox.appendChild(d);
       return { c, d };
     });
     function paint() {
       for (const s of swatches) {
-        s.d.style.border = s.c === color ? '3px solid #1f2933' : '3px solid transparent';
+        s.d.style.border = s.c === color ? '3px solid var(--kui-ink)' : '3px solid transparent';
       }
     }
     paint();
@@ -1883,12 +1881,14 @@ export class Game {
     box.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:61;display:none;pointer-events:none;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 34%);width:min(220px,52vw);text-align:center;' +
-      'font:clamp(11px,2.8vmin,12px)/1.3 system-ui,"Microsoft YaHei",sans-serif;color:#fff;';
+      'font:clamp(11px,2.8vmin,12px)/1.3 var(--kui-font);color:var(--kui-paper);';
+    // 进度条外观交给主题类；高度仍用内联保持原尺寸，填充色由 _updateGatlingUI 按热度动态写入
     const track = document.createElement('div');
-    track.style.cssText =
-      'height:8px;border-radius:5px;background:rgba(10,16,26,.6);border:1px solid rgba(255,255,255,.3);overflow:hidden;';
+    track.className = 'kui-bar';
+    track.style.cssText = 'height:8px;';
     const fill = document.createElement('div');
-    fill.style.cssText = 'height:100%;width:0%;background:#2ecc71;transition:width .06s linear;';
+    fill.className = 'kui-bar__fill';
+    fill.style.cssText = 'width:0%;background:#2ecc71;transition:width .06s linear;';
     track.appendChild(fill);
     const txt = document.createElement('div');
     txt.style.cssText = 'margin-top:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);';
@@ -1945,13 +1945,11 @@ export class Game {
   // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
   _createChatTab() {
     const el = document.createElement('div');
-    el.className = 'chat-tab'; // 供手机端「按键布局调整」定位与检查
+    el.className = 'chat-tab kui-btn kui-btn--primary'; // 保留 chat-tab 供手机端「按键布局调整」定位与检查
     el.textContent = '按 F 与她对话';
     el.style.cssText =
       'position:fixed;right:26%;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
-      'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:12px 14px;border-radius:14px;' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.3);user-select:none;' +
-      'font:13px/1.4 system-ui,"Microsoft YaHei",sans-serif;text-align:center;';
+      'padding:12px 14px;user-select:none;text-align:center;';
     el.addEventListener('click', () => { this.aiChat.toggle(); });
     document.body.appendChild(el);
     this._chatTab = el;
@@ -1961,11 +1959,10 @@ export class Game {
   _createTopButtons() {
     const mkBtn = (text, posCss, onClick) => {
       const b = document.createElement('div');
+      b.className = 'kui-btn';
       b.textContent = text;
       b.style.cssText =
-        'position:fixed;z-index:9500;cursor:pointer;user-select:none;' +
-        'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:10px 13px;border-radius:12px;' +
-        'box-shadow:0 6px 18px rgba(0,0,0,.25);font:13px system-ui,"Microsoft YaHei",sans-serif;' + posCss;
+        'position:fixed;z-index:9500;cursor:pointer;user-select:none;padding:10px 13px;' + posCss;
       b.addEventListener('click', onClick);
       document.body.appendChild(b);
       return b;
@@ -1977,18 +1974,18 @@ export class Game {
   }
 
   _buildBag() {
+    // 全屏浮层只保留定位/滚动/显隐；配色统一走主题变量
     const ov = document.createElement('div');
     ov.style.cssText =
       'position:fixed;z-index:9700;top:0;left:0;width:100vw;height:100vh;overflow:auto;' +
-      'background:rgba(255,255,255,.96);' +
-      'box-sizing:border-box;padding:70px 24px 40px;display:none;' +
-      'font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;color:#1f2933;';
+      'background:rgba(11,21,34,.62);' +
+      'box-sizing:border-box;padding:84px 24px 40px;display:none;' +
+      'font:14px/1.5 var(--kui-font);color:var(--kui-ink);';
     ov.innerHTML =
-      '<div style="position:fixed;top:0;left:0;right:0;z-index:1;display:flex;justify-content:space-between;align-items:center;' +
-      'background:linear-gradient(150deg,#3b7ddd,#1e55a8);color:#fff;padding:14px 18px;box-sizing:border-box;">' +
-      '<h2 style="margin:0;font-size:17px;font-weight:700;">我的背包</h2>' +
-      '<button type="button" style="border:0;background:rgba(255,255,255,.2);color:#fff;cursor:pointer;' +
-      'font-size:16px;width:34px;height:34px;border-radius:8px;">×</button></div>' +
+      '<div class="kui-panel" style="position:fixed;top:0;left:0;right:0;z-index:1;box-sizing:border-box;">' +
+      '<div class="kui-panel__body" style="display:flex;justify-content:space-between;align-items:center;gap:10px;">' +
+      '<h2 class="kui-title" style="margin:0;font-size:17px;">我的背包</h2>' +
+      '<button type="button" class="kui-iconbtn">×</button></div></div>' +
       '<div class="bag-grid"></div>';
     document.body.appendChild(ov);
     ov.querySelector('button').addEventListener('click', () => { ov.style.display = 'none'; });
@@ -2007,7 +2004,7 @@ export class Game {
     const grid = this._bagList;
     grid.innerHTML = '';
     if (!entries.length) {
-      grid.style.cssText = 'text-align:center;color:#7b8794;padding:40px 0;';
+      grid.style.cssText = 'text-align:center;color:var(--kui-paper);padding:40px 0;';
       grid.textContent = '背包空空如也，去喷泉边找阿花要宝贝吧。';
       return;
     }
@@ -2015,15 +2012,16 @@ export class Game {
     for (const [name, count] of entries) {
       const eff = this._effectForItem(name);
       const card = document.createElement('div');
-      card.style.cssText =
-        'display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 12px;' +
-        'border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 4px 14px rgba(0,0,0,.06);';
+      card.className = 'kui-panel';
+      const cardBody = document.createElement('div');
+      cardBody.className = 'kui-panel__body';
+      cardBody.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:8px;';
       // 图标：带颜色的圆角方块，里面放物品名的首字（阿花挑的图标以物品名首个字符为代表）
       const icon = document.createElement('div');
       icon.textContent = name.charAt(0) || '?';
       icon.style.cssText =
-        'width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;' +
-        'background:' + this._itemColor(name) + ';color:#fff;font-weight:700;font-size:20px;';
+        'width:46px;height:46px;border-radius:var(--kui-radius);display:flex;align-items:center;justify-content:center;' +
+        'background:' + this._itemColor(name) + ';color:var(--kui-paper);font-weight:700;font-size:20px;';
       const meta = document.createElement('div');
       meta.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center;';
       const nameEl = document.createElement('div');
@@ -2031,18 +2029,15 @@ export class Game {
       nameEl.style.cssText = 'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;';
       const countEl = document.createElement('div');
       countEl.textContent = '× ' + count + '   ·' + eff.label;
-      countEl.style.cssText = 'font-size:12px;color:#7b8794;';
+      countEl.style.cssText = 'font-size:12px;color:var(--kui-ink-soft);';
       const useBtn = document.createElement('button');
       useBtn.type = 'button';
       useBtn.textContent = '使用';
-      useBtn.style.cssText =
-        'border:0;cursor:pointer;border-radius:8px;padding:6px 18px;color:#fff;font-weight:600;' +
-        'background:linear-gradient(150deg,#3b7ddd,#1e55a8);';
+      useBtn.className = 'kui-btn kui-btn--primary';
       // 槽位选择：选「直接使用」则只触发效果；选具体槽位则把该物品指定到该技能键后再触发
       const slotSel = document.createElement('select');
-      slotSel.style.cssText =
-        'font:12px/1.4 system-ui,"Microsoft YaHei",sans-serif;color:#1f2933;border:1px solid #cbd5e1;' +
-        'border-radius:8px;padding:4px 6px;background:#fff;cursor:pointer;max-width:130px;';
+      slotSel.className = 'kui-input';
+      slotSel.style.cssText = 'font-size:12px;padding:5px 8px;max-width:130px;';
       const optNone = document.createElement('option');
       optNone.value = '';
       optNone.textContent = '直接使用';
@@ -2065,8 +2060,7 @@ export class Game {
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.textContent = '销毁';
-      delBtn.style.cssText =
-        'border:1px solid #e0b4b4;cursor:pointer;border-radius:8px;padding:5px 14px;color:#b03030;font-weight:600;background:#fff;';
+      delBtn.className = 'kui-btn kui-btn--danger';
       delBtn.addEventListener('click', () => {
         removeFromBag(getBagKey(this._profile), name, 1);
         this._renderBag();
@@ -2078,9 +2072,10 @@ export class Game {
       btnRow.appendChild(delBtn);
       meta.appendChild(nameEl);
       meta.appendChild(countEl);
-      card.appendChild(icon);
-      card.appendChild(meta);
-      card.appendChild(btnRow);
+      cardBody.appendChild(icon);
+      cardBody.appendChild(meta);
+      cardBody.appendChild(btnRow);
+      card.appendChild(cardBody);
       grid.appendChild(card);
     }
   }
@@ -2746,10 +2741,11 @@ export class Game {
     if (!el) {
       el = document.createElement('div');
       el.className = 'npc-toast';
+      // 只换配色与圆角/字体，动画与显隐时机保持原样
       el.style.cssText =
         'position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:9800;' +
-        'background:rgba(30,40,60,.88);color:#fff;padding:8px 16px;border-radius:18px;' +
-        'font:14px/1.4 system-ui,"Microsoft YaHei",sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.3);pointer-events:none;' +
+        'background:var(--kui-blue-deep);color:var(--kui-paper);padding:8px 16px;border-radius:var(--kui-radius);' +
+        'font:14px/1.4 var(--kui-font);box-shadow:0 6px 20px rgba(0,0,0,.3);pointer-events:none;' +
         'opacity:0;transition:opacity .25s;';
       document.body.appendChild(el);
       this._toastEl = el;

@@ -64,54 +64,110 @@ export function attachSky(scene, opts = {}) {
   return sky;
 }
 
-// 夜空贴图（星空）。
-// 用球壳而不是 scene.background：整屏背景是「贴」在屏幕上的（转视角时星空不动、只有场景在转，
-// 看着很晕），而球壳是真正钉在世界里的天空，转视角时星空按相反方向移动。
-// 又因为这张图是普通照片（不是 360° 全景等距圆柱图），直接铺满整个球面会被放大约 3 倍、
-// 星星糊成一团，所以用 RepeatWrapping 平铺成若干份，让单个副本只占约 144°×93°，
-// 尺寸接近原图（像素基本 1:1），既清楚又不会像贴纸一样粘在屏幕上。
-const NIGHT_SKY_URL = 'sky/night_sky.png';
+// ---- 时段天空盒：按「现实作息」把一天切成四段，用四张 2:1 全景图交叉淡入 ----
+// 每张图各自一个「跟随相机」的球壳（BackSide），而不是 scene.background：
+// 背景是贴在屏幕上的（转视角时天空不动，很晕），球壳才是钉在世界里的天空。
+// 这些是标准等距圆柱（equirect）全景图，直接贴到球面 UV 上比例正好，无需平铺。
+const SKYBOX_URLS = {
+  morning: 'sky/skybox-morning.png', // 清晨
+  day: 'sky/skybox-day.png',         // 白天
+  night: 'sky/skybox-night.png',     // 夜晚
+  space: 'sky/skybox-space.png',     // 深夜
+};
 
-// createNightSky(scene)：生成包住场景的夜空球壳，透明度由调用方按「夜的浓度」驱动。
-// 球壳半径在 update 里按相机 far 动态缩放，否则把「视距」调小后整个球会被裁掉、夜空消失。
-export function createNightSky(scene) {
-  const mat = new THREE.MeshBasicMaterial({
-    map: null,
-    color: 0x05070f, // 贴图没加载成功时，至少天空会变暗而不是原样
-    side: THREE.BackSide,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-    fog: false,
-  });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), mat);
-  mesh.renderOrder = -1; // 与天空同层：先于地面/建筑绘制
-  mesh.visible = false;  // 白天完全不参与绘制，零开销
-  scene.add(mesh);
+// 时段划分（世界时刻 t：0 = 00:00，0.5 = 12:00）。按现实作息切：
+//   05:00-08:00 清晨 / 08:00-17:00 白天 / 17:00-22:00 夜晚 / 22:00-05:00 深夜（跨零点）
+// 数组按 start 升序；每段的结束时间即下一段的开始时间（最后一段绕回第一段）。
+const SKY_PHASES = [
+  { key: 'morning', start: 5 / 24 },
+  { key: 'day', start: 8 / 24 },
+  { key: 'night', start: 17 / 24 },
+  { key: 'space', start: 22 / 24 },
+];
 
-  new THREE.TextureLoader().load(
-    NIGHT_SKY_URL,
-    (texture) => {
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.RepeatWrapping;
-      texture.repeat.set(Config.NIGHT_SKY_TILE_X, Config.NIGHT_SKY_TILE_Y);
-      mat.map = texture;
-      mat.color.setHex(0xffffff); // 有贴图时按原色显示星空
-      mat.needsUpdate = true;
-    },
-    undefined,
-    () => {
-      // 加载失败：保留深色兜底，并打一条日志便于定位路径问题
-      console.warn('[sky] 夜空贴图加载失败，改用纯深色天空:', NIGHT_SKY_URL);
-    }
-  );
-
-  return mesh;
+// 计算当前时刻的天空混合：返回正在显示的时段 from、即将接替的时段 to，以及过渡进度 a（0~1）。
+// a = 0 表示完全显示 from（不处于过渡期）。
+function skyBlend(t) {
+  const n = SKY_PHASES.length;
+  let i = n - 1; // 默认落在最后一段（深夜），它跨越 22:00-05:00
+  for (let k = 0; k < n; k++) {
+    if (t >= SKY_PHASES[k].start) i = k;
+  }
+  const cur = SKY_PHASES[i];
+  const next = SKY_PHASES[(i + 1) % n];
+  const end = next.start > cur.start ? next.start : next.start + 1; // 处理跨零点
+  const len = end - cur.start;
+  const p = (t >= cur.start ? t - cur.start : t + 1 - cur.start) / len; // 本段进度 0~1
+  const FADE = Config.SKY_FADE_RATIO; // 每段结尾这段比例用于交叉淡入下一张
+  if (p > 1 - FADE) {
+    return { from: cur.key, to: next.key, a: (p - (1 - FADE)) / FADE };
+  }
+  return { from: cur.key, to: null, a: 0 };
 }
 
-// 让夜空球壳刚好套在相机可视范围内（跟随 far，避免被裁剪）
-export function fitNightSky(mesh, camera) {
-  if (!mesh || !camera) return;
-  mesh.scale.setScalar(camera.far * 0.92);
+// createTimeSky(scene)：生成四张天空球壳 + 程序化天空兜底，返回 { update(t, camera) }。
+// update 每帧调用：按时刻决定哪张球壳可见并交叉淡入，同时让球壳跟随相机（无视差、不被裁剪）。
+export function createTimeSky(scene) {
+  const fallback = createSky(scene); // 贴图没加载出来前的兜底，加载成功后隐藏
+  const domes = new Map();
+  let anyLoaded = false;
+
+  for (const key of Object.keys(SKYBOX_URLS)) {
+    const mat = new THREE.MeshBasicMaterial({
+      map: null,
+      color: 0x000000, // 贴图未就绪时先保持全黑，避免闪白
+      side: THREE.BackSide,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      fog: false,
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), mat);
+    mesh.renderOrder = -1;
+    mesh.visible = false;
+    scene.add(mesh);
+    domes.set(key, mesh);
+
+    new THREE.TextureLoader().load(
+      SKYBOX_URLS[key],
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.anisotropy = 4; // 贴图与视线接近平行时（近地平线）少糊一点
+        mat.map = texture;
+        mat.color.setHex(0xffffff);
+        mat.needsUpdate = true;
+        anyLoaded = true;
+        fallback.visible = false;
+      },
+      undefined,
+      () => {
+        console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
+      }
+    );
+  }
+
+  function update(t, camera) {
+    const { from, to, a } = skyBlend(t);
+    for (const [key, mesh] of domes) {
+      let opacity = 0;
+      let order = -1;
+      if (key === from) {
+        opacity = 1; // 当前时段全不透明（先把整片天盖住）
+        order = -2;
+      } else if (key === to) {
+        opacity = a; // 下一时段叠在上面淡入，最终呈现 = a*下一张 + (1-a)*当前张
+        order = -1;
+      }
+      mesh.material.opacity = opacity;
+      mesh.renderOrder = order;
+      mesh.visible = opacity > 0.001;
+      if (!mesh.visible) continue;
+      // 球壳刚好套在相机可视范围内：跟着 far 缩放，避免把「视距」调小后整个球被裁掉
+      mesh.scale.setScalar(camera.far * 0.92);
+      mesh.position.copy(camera.position); // 天空不该有视差，跟着相机走
+    }
+    fallback.visible = !anyLoaded;
+  }
+
+  return { update };
 }

@@ -1,6 +1,7 @@
 // 职责：进游戏前的登录/注册弹窗。返回 Promise<{token, profile}>。
 // token：会话令牌（游客为空串）；profile：登录/注册成功返回的用户资料（含昵称/颜色/称号/皮肤/背包预留位）。
 import { Config } from '../config.js';
+import { ensureTheme } from './theme.js';
 
 // 由 WS 中继地址推导同源 HTTP 地址（wss: -> https:, ws: -> http:），用于账号接口
 function httpBase() {
@@ -35,19 +36,23 @@ async function api(method, path, body, token) {
 
 // 显示登录/注册弹窗；用户完成一次交互后 resolve
 function showModal(done) {
+  ensureTheme();
+
   const root = document.createElement('div');
   root.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(20,24,32,0.45);backdrop-filter:blur(6px);';
   root.innerHTML = `
-    <div class="auth-card" style="width:340px;background:rgba(255,255,255,0.82);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:24px;box-shadow:0 12px 40px rgba(0,0,0,0.25);color:#1f2430;font-family:system-ui,sans-serif;">
-      <div style="font-size:20px;font-weight:700;margin-bottom:18px;">账号登录</div>
-      <input id="au-name" placeholder="用户名" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d5dae3;border-radius:8px;margin-bottom:10px;font-size:14px;outline:none;" />
-      <input id="au-nick" placeholder="昵称（注册时可起，可留空）" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d5dae3;border-radius:8px;margin-bottom:10px;font-size:14px;outline:none;display:none;" />
-      <input id="au-pass" type="password" placeholder="密码" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d5dae3;border-radius:8px;margin-bottom:10px;font-size:14px;outline:none;" />
-      <div id="au-err" style="color:#d33;font-size:13px;margin-bottom:10px;min-height:18px;"></div>
-      <button id="au-submit" style="width:100%;padding:11px;border:none;border-radius:8px;background:#5b7cfa;color:#fff;font-size:15px;font-weight:600;cursor:pointer;">登 录</button>
-      <div style="display:flex;justify-content:space-between;margin-top:12px;font-size:13px;">
-        <a id="au-toggle" href="javascript:void(0)" style="color:#5b7cfa;text-decoration:none;">没有账号？去注册</a>
-        <a id="au-skip" href="javascript:void(0)" style="color:#888;text-decoration:none;">游客进入</a>
+    <div class="kui-panel" style="width:340px;">
+      <div class="kui-panel__body">
+        <div class="kui-title" style="margin-bottom:18px;">账号登录</div>
+        <input id="au-name" class="kui-input" placeholder="用户名" style="margin-bottom:10px;" />
+        <input id="au-nick" class="kui-input" placeholder="昵称（注册时可起，可留空）" style="margin-bottom:10px;display:none;" />
+        <input id="au-pass" class="kui-input" type="password" placeholder="密码" style="margin-bottom:10px;" />
+        <div id="au-err" style="color:var(--kui-danger);font-size:13px;margin-bottom:10px;min-height:18px;"></div>
+        <button id="au-submit" class="kui-btn kui-btn--primary" style="width:100%;">登 录</button>
+        <div style="display:flex;justify-content:space-between;margin-top:12px;">
+          <a id="au-toggle" class="kui-btn kui-btn--ghost" href="javascript:void(0)" style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">没有账号？去注册</a>
+          <a id="au-skip" class="kui-btn kui-btn--ghost" href="javascript:void(0)" style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">游客进入</a>
+        </div>
       </div>
     </div>`;
 

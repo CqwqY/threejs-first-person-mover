@@ -1,62 +1,33 @@
 // 职责：AI 商人 NPC 的对话面板，原神式「单条对话 + 打字机」。
 // 消息由调用方通过 onSend 回调走后端 /api/ai；NPC 的回复逐字显示(打字机，非流式)。
-let styleInjected = false;
-function injectStyle() {
-  if (styleInjected || typeof document === 'undefined') return;
-  styleInjected = true;
-  const st = document.createElement('style');
-  st.textContent = `
-    .npc-chat {
-      position: fixed; left: 0; right: 0; bottom: 0; z-index: 9500; width: 100%;
-      background: #ffffff; border-top: 1px solid #dde3ec;
-      box-shadow: 0 -8px 40px rgba(0,0,0,.2); display: flex; flex-direction: column;
-      font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; overflow: hidden;
-    }
-    .npc-chat.hidden { display: none; }
-    .npc-chat-head {
-      display: flex; align-items: center; gap: 8px; padding: 8px 16px;
-      background: linear-gradient(150deg,#3b7ddd,#1e55a8); color: #fff; font-weight: 700;
-    }
-    .npc-chat-head .dot { width: 8px; height: 8px; border-radius: 50%; background: #9be15d; }
-    .npc-chat-head .close { margin-left: auto; cursor: pointer; font-weight: 400; font-size: 15px; opacity:.9; padding: 0 6px; }
-    .npc-chat-head .close:hover { opacity: 1; }
-    .npc-chat-body { max-height: 150px; height: 150px; overflow-y: auto; padding: 10px 16px; background: #f5f7fa; }
-    .npc-msg { margin-bottom: 8px; max-width: 88%; padding: 6px 10px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
-    .npc-msg.npc { background: #e7eefb; color: #1f2430; border-top-left-radius: 3px; }
-    .npc-msg.me { margin-left: auto; background: #3b7ddd; color: #fff; border-top-right-radius: 3px; }
-    .npc-msg.busy { color: #8a94a6; font-style: italic; }
-    .npc-msg .caret { display:inline-block; width:0; border-right:2px solid currentColor; margin-left:1px;
-      -webkit-animation: npc-blink .8s steps(1) infinite; animation: npc-blink .8s steps(1) infinite; }
-    @keyframes npc-blink { 50% { border-color: transparent; } }
-    .npc-chat-foot { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #e6eaf0; }
-    .npc-chat-foot input {
-      flex: 1; padding: 7px 10px; border: 1px solid #d5dae3; border-radius: 8px; outline: none; font-size: 13px; background: #fff;
-    }
-    .npc-chat-foot input:focus { border-color: #3b7ddd; }
-    .npc-chat-foot button {
-      padding: 7px 12px; border: 0; border-radius: 8px; background: #3b7ddd; color: #fff; cursor: pointer; font-weight: 600;
-    }
-    .npc-chat-foot button:hover { background: #2f6cc9; }
-  `;
-  document.head.appendChild(st);
-}
+import { ensureTheme } from './theme.js';
 
 // 创建对话面板。返回 { root, open, close, toggle, isOpen, addMsg, setOnSend, focusInput }
 export function createNpcChat() {
-  injectStyle();
+  ensureTheme();
 
   const root = document.createElement('div');
   root.className = 'npc-chat hidden';
+  Object.assign(root.style, {
+    position: 'fixed', left: '0', right: '0', bottom: '0',
+    width: '100%', zIndex: '9500',
+    display: 'none', flexDirection: 'column', overflow: 'hidden',
+    fontFamily: 'var(--kui-font)', fontSize: '13px', lineHeight: '1.5',
+  });
   root.innerHTML = `
-    <div class="npc-chat-head">
-      <span class="dot"></span>
-      <span>阿花 · 物品商人</span>
-      <span class="close">×</span>
-    </div>
-    <div class="npc-chat-body"></div>
-    <div class="npc-chat-foot">
-      <input placeholder="想要什么宝贝？直接跟阿花开口…" />
-      <button type="button">发送</button>
+    <div class="kui-panel npc-chat-panel">
+      <div class="kui-panel__body">
+        <div class="npc-chat-head" style="display:flex;align-items:center;gap:8px;padding:4px 2px 8px;border-bottom:2px solid var(--kui-blue-dark);">
+          <span class="dot" style="flex:none;width:8px;height:8px;border-radius:50%;background:var(--kui-ok);"></span>
+          <span class="kui-title">阿花 · 物品商人</span>
+          <span class="close kui-iconbtn" style="margin-left:auto;">×</span>
+        </div>
+        <div class="npc-chat-body" style="height:150px;max-height:150px;overflow-y:auto;padding:8px;margin:8px 0;background:var(--kui-blue-soft);border-radius:var(--kui-radius);"></div>
+        <div class="npc-chat-foot" style="display:flex;gap:6px;padding:2px;">
+          <input class="kui-input" style="flex:1;" placeholder="想要什么宝贝？直接跟阿花开口…" />
+          <button type="button" class="kui-btn kui-btn--primary">发送</button>
+        </div>
+      </div>
     </div>`;
   document.body.appendChild(root);
 
@@ -69,10 +40,29 @@ export function createNpcChat() {
   let _stopType = null; // 正在进行的打字机停止句柄
   let _busyEl = null;   // 当前显示的「正在想…」元素
 
+  // 消息气泡外观（只做视觉）：换成 Kenney 主题变量，排版尺寸沿用原值
+  function styleMsg(el, role) {
+    el.style.cssText = 'margin-bottom:8px;max-width:88%;padding:6px 10px;border-radius:10px;white-space:pre-wrap;word-break:break-word;';
+    if (role === 'me') {
+      el.style.marginLeft = 'auto';
+      el.style.background = 'var(--kui-blue)';
+      el.style.color = 'var(--kui-paper)';
+      el.style.borderTopRightRadius = '3px';
+    } else if (role === 'busy') {
+      el.style.color = 'var(--kui-ink-soft)';
+      el.style.fontStyle = 'italic';
+    } else {
+      el.style.background = 'var(--kui-paper)';
+      el.style.color = 'var(--kui-ink)';
+      el.style.borderTopLeftRadius = '3px';
+    }
+  }
+
   // 追加普通消息（玩家自己的话 / 忙时提示）：立即显示，不逐字。
   function addPlain(role, text) {
     const el = document.createElement('div');
     el.className = 'npc-msg ' + role;
+    styleMsg(el, role);
     el.textContent = text;
     body.appendChild(el);
     body.scrollTop = body.scrollHeight;
@@ -98,11 +88,24 @@ export function createNpcChat() {
 
     const el = document.createElement('div');
     el.className = 'npc-msg npc';
+    styleMsg(el, 'npc');
     body.appendChild(el);
 
     let i = 1;
     const caret = document.createElement('span');
     caret.className = 'caret';
+    caret.style.display = 'inline-block';
+    caret.style.width = '0';
+    caret.style.borderRight = '2px solid currentColor';
+    caret.style.marginLeft = '1px';
+    // 光标闪烁：原先由被移除的 <style> 里的 @keyframes 提供，这里改用 Web Animations API
+    // 复刻同样的 0.8s 硬闪烁（0~400ms 显示 / 400~800ms 隐藏），不改打字节奏。
+    if (typeof caret.animate === 'function') {
+      caret.animate(
+        [{ opacity: 1 }, { opacity: 1, offset: 0.5 }, { opacity: 0, offset: 0.5 }, { opacity: 0 }],
+        { duration: 800, iterations: Infinity }
+      );
+    }
     el.textContent = full.slice(0, i);
     el.appendChild(caret);
 
@@ -133,6 +136,7 @@ export function createNpcChat() {
   let onClose = null;
   function open() {
     root.classList.remove('hidden');
+    root.style.display = 'flex';
     input.focus();
     if (!body.querySelector('.npc-msg')) {
       addMsg('npc', '来啦来啦～我是物品商人阿花。想要什么宝贝，直接跟我说，东西放进你背包里。');
@@ -142,6 +146,7 @@ export function createNpcChat() {
   function close() {
     if (_stopType) { _stopType(); _stopType = null; }
     root.classList.add('hidden');
+    root.style.display = 'none';
     if (onClose) onClose();
   }
   function toggle() { root.classList.contains('hidden') ? open() : close(); }

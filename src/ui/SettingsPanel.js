@@ -4,6 +4,7 @@
 // 绑定方式：调用方传入 binds，形如 { ambient, sun, sunElev, sunAz, viewFar, shadowR, shadowSize, castShadow }，
 // 每项是一个 (value) => void 的 setter，面板在初始化、改动、恢复默认时都会调用对应 setter 立即应用。
 // 编辑器写入的「光照设计」（环境光/阳光强度、阳光角度）会保存到设计键，客户端读取并应用同一份。
+import { ensureTheme } from './theme.js';
 
 export const DEFAULT_SETTINGS = {
   ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）—— 编辑器中可调，会保存给客户端
@@ -78,61 +79,6 @@ const FIELDS = [
   { id: 'dayOffset', label: '本地时刻偏移(时)', kind: 'range', min: -12, max: 12, step: 1 },
 ];
 
-let styleInjected = false;
-function injectStyle() {
-  if (styleInjected || typeof document === 'undefined') return;
-  styleInjected = true;
-  const css = `
-    .gx-win {
-      position: fixed; z-index: 9999;
-      /* 跟随安全区；宽度/高度都收在可视区内，横屏竖屏都不溢出 */
-      right: calc(env(safe-area-inset-right, 0px) + 12px);
-      top: calc(env(safe-area-inset-top, 0px) + 56px);
-      width: min(280px, calc(100vw - 24px));
-      max-height: calc(var(--app-vh, 100vh) - 76px);
-      overflow-y: auto; -webkit-overflow-scrolling: touch;
-      background: rgba(24,26,32,.92); color: #e8eaf0;
-      border: 1px solid rgba(255,255,255,.12); border-radius: 10px;
-      box-shadow: 0 14px 40px rgba(0,0,0,.5);
-      font: 12px/1.6 system-ui, sans-serif;
-      padding: 14px 16px 12px; backdrop-filter: blur(10px);
-    }
-    .gx-win.hidden { display: none; }
-    .gx-win-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-    .gx-win-head b { font-weight: 700; color: #ffd479; letter-spacing: .5px; }
-    .gx-win-close { background: none; border: 0; color: #8a93a0; font-size: 14px; cursor: pointer; padding: 0 4px; }
-    .gx-win-close:hover { color: #fff; }
-    .gx-field { margin: 8px 0; }
-    .gx-lbl { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; color: #c7d0da; }
-    .gx-lbl .gx-val { color: #ffd479; font-variant-numeric: tabular-nums; }
-    .gx-field input[type=range] { width: 100%; accent-color: #3a6ea5; }
-    .gx-field select { width: 100%; background: #1d1f26; color: #e8eaf0; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; }
-    .gx-toggle { display: flex; align-items: center; justify-content: space-between; color: #c7d0da; }
-    .gx-toggle input { accent-color: #2e7d5b; }
-    .gx-reset { width: 100%; margin-top: 12px; padding: 6px 0; background: #2e7d5b; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
-    .gx-reset:hover { filter: brightness(1.1); }
-    .gx-fab {
-      position: fixed; left: 16px; bottom: 16px; z-index: 9000;
-      padding: 8px 14px; background: rgba(24,26,32,.92); color: #ffd479;
-      border: 1px solid rgba(255,255,255,.14); border-radius: 8px; cursor: pointer;
-      font: 12px/1 system-ui, sans-serif; box-shadow: 0 4px 14px rgba(0,0,0,.4);
-    }
-    .gx-fab:hover { background: #2a2d36; }
-    /* 图标形态的设置按钮：圆形玻璃质感，配合右侧中部停靠 */
-    .gx-fab-icon {
-      width: 44px; height: 44px; padding: 0; border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      background: rgba(255,255,255,.74); color: #3a4250;
-      border: 1px solid rgba(255,255,255,.68); backdrop-filter: blur(12px);
-      box-shadow: 0 6px 20px rgba(0,0,0,.16);
-    }
-    .gx-fab-icon:hover { background: #fff; color: #1f2430; }
-  `;
-  const style = document.createElement('style');
-  style.textContent = css;
-  document.head.appendChild(style);
-}
-
 function fmt(v) {
   if (Number.isInteger(v)) return String(v);
   return Number(v).toFixed(2);
@@ -144,7 +90,7 @@ function fmt(v) {
 // open/close/toggle 控制浮层显隐；get() 返回当前设置对象。
 // opts：{ storeKey?, fields? } —— storeKey 指定独立的持久化键；fields 限制只渲染哪些设置项。
 export function createSettingsPanel(binds, opts = {}) {
-  injectStyle();
+  ensureTheme();
   const storeKey = opts.storeKey || STORE_KEY;
   const include = Array.isArray(opts.fields) ? opts.fields : null;
   const fields = include ? FIELDS.filter((f) => include.includes(f.id)) : FIELDS;
@@ -157,10 +103,23 @@ export function createSettingsPanel(binds, opts = {}) {
 
   const root = document.createElement('div');
   root.className = 'gx-win hidden';
-  root.innerHTML = `<div class="gx-win-head"><b>画面设置</b><button class="gx-win-close" type="button">&times;</button></div>`;
+  // 外层保留原有的浮层定位/滚动结构（安全区、宽度、最大高度、可滚动），仅承载蓝色的 kui 面板
+  root.style.cssText =
+    'position:fixed;z-index:9999;display:none;' +
+    'right:calc(env(safe-area-inset-right, 0px) + 12px);' +
+    'top:calc(env(safe-area-inset-top, 0px) + 56px);' +
+    'width:min(280px, calc(100vw - 24px));' +
+    'max-height:calc(var(--app-vh, 100vh) - 76px);' +
+    'overflow-y:auto;-webkit-overflow-scrolling:touch;';
+  root.innerHTML =
+    '<div class="kui-panel"><div class="kui-panel__body">' +
+    '<div class="gx-win-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">' +
+    '<b class="kui-title">画面设置</b>' +
+    '<button class="gx-win-close kui-iconbtn" type="button">&times;</button>' +
+    '</div></div></div>';
 
   const body = document.createElement('div');
-  root.appendChild(body);
+  root.querySelector('.kui-panel__body').appendChild(body);
 
   const inputs = {};
   const valueEls = {};
@@ -178,8 +137,9 @@ export function createSettingsPanel(binds, opts = {}) {
   for (const f of fields) {
     const row = document.createElement('div');
     row.className = 'gx-field';
+    row.style.cssText = 'margin:8px 0;';
     if (f.kind === 'range') {
-      row.innerHTML = `<div class="gx-lbl"><span>${f.label}</span><span class="gx-val"></span></div>`;
+      row.innerHTML = `<div class="gx-lbl kui-row"><span>${f.label}</span><b class="gx-val kui-num"></b></div>`;
       valueEls[f.id] = row.querySelector('.gx-val');
       const input = document.createElement('input');
       input.type = 'range';
@@ -187,6 +147,7 @@ export function createSettingsPanel(binds, opts = {}) {
       input.max = f.max;
       input.step = f.step;
       input.value = settings[f.id];
+      input.style.cssText = 'width:100%;accent-color:var(--kui-blue);';
       input.addEventListener('input', () => {
         settings[f.id] = parseFloat(input.value);
         renderValue(f.id);
@@ -196,7 +157,7 @@ export function createSettingsPanel(binds, opts = {}) {
       row.appendChild(input);
       inputs[f.id] = input;
     } else if (f.kind === 'select') {
-      row.innerHTML = `<div class="gx-lbl"><span>${f.label}</span></div>`;
+      row.innerHTML = `<div class="gx-lbl kui-row"><span>${f.label}</span></div>`;
       const select = document.createElement('select');
       for (const o of f.options) {
         const opt = document.createElement('option');
@@ -205,6 +166,9 @@ export function createSettingsPanel(binds, opts = {}) {
         select.appendChild(opt);
       }
       select.value = String(settings[f.id]);
+      select.style.cssText =
+        'width:100%;background:var(--kui-paper);color:var(--kui-ink);' +
+        'border:2px solid var(--kui-blue-dark);border-radius:10px;padding:3px 6px;font-family:var(--kui-font);';
       select.addEventListener('change', () => {
         settings[f.id] = parseFloat(select.value);
         applyOne(f.id, settings[f.id]);
@@ -214,11 +178,13 @@ export function createSettingsPanel(binds, opts = {}) {
       inputs[f.id] = select;
     } else if (f.kind === 'toggle') {
       row.className += ' gx-toggle';
+      row.style.cssText += 'display:flex;align-items:center;justify-content:space-between;color:var(--kui-ink-soft);';
       const lab = document.createElement('span');
       lab.textContent = f.label;
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = !!settings[f.id];
+      cb.style.cssText = 'accent-color:var(--kui-blue);';
       cb.addEventListener('change', () => {
         settings[f.id] = cb.checked;
         applyOne(f.id, settings[f.id]);
@@ -233,7 +199,8 @@ export function createSettingsPanel(binds, opts = {}) {
 
   const reset = document.createElement('button');
   reset.type = 'button';
-  reset.className = 'gx-reset';
+  reset.className = 'gx-reset kui-btn kui-btn--primary';
+  reset.style.cssText = 'width:100%;margin-top:12px;';
   reset.textContent = '恢复默认';
   reset.addEventListener('click', () => {
     for (const f of fields) settings[f.id] = DEFAULT_SETTINGS[f.id];
@@ -253,7 +220,10 @@ export function createSettingsPanel(binds, opts = {}) {
   });
   body.appendChild(reset);
 
-  root.querySelector('.gx-win-close').addEventListener('click', () => root.classList.add('hidden'));
+  root.querySelector('.gx-win-close').addEventListener('click', () => {
+    root.classList.add('hidden');
+    root.style.display = 'none';
+  });
   document.body.appendChild(root);
 
   // 初始化时应用已保存的设置
@@ -262,9 +232,18 @@ export function createSettingsPanel(binds, opts = {}) {
   return {
     root,
     get: () => ({ ...settings }),
-    open: () => root.classList.remove('hidden'),
-    close: () => root.classList.add('hidden'),
-    toggle: () => root.classList.toggle('hidden'),
+    open: () => {
+      root.classList.remove('hidden');
+      root.style.display = '';
+    },
+    close: () => {
+      root.classList.add('hidden');
+      root.style.display = 'none';
+    },
+    toggle: () => {
+      root.classList.toggle('hidden');
+      root.style.display = root.classList.contains('hidden') ? 'none' : '';
+    },
   };
 }
 
@@ -279,10 +258,12 @@ const GEAR_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" st
 //   position：{ left?, right?, top?, bottom?, centerY? }，给 centerY 时以 top 为中线垂直居中。
 //   icon：true 时渲染齿轮图标（圆形按钮），false 时渲染文字。
 export function createSettingsButton({ text = '画面', panel, position = { left: 16, bottom: 16 }, icon = false }) {
-  injectStyle();
+  ensureTheme();
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = icon ? 'gx-fab gx-fab-icon' : 'gx-fab';
+  btn.className = icon ? 'gx-fab gx-fab-icon kui-iconbtn' : 'gx-fab kui-btn kui-btn--primary';
+  btn.style.position = 'fixed';
+  btn.style.zIndex = '9000';
   if (icon) btn.innerHTML = GEAR_SVG;
   else btn.textContent = text;
   btn.title = '画面设置';

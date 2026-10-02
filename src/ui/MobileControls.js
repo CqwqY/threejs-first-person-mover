@@ -4,6 +4,7 @@
 // 非触屏设备（粗指针）不创建任何 DOM，保持桌面体验不变。
 import { Config } from '../config.js';
 import { onRelayout, viewportSize } from './layout.js';
+import { ensureTheme } from './theme.js';
 
 // 模块级持有者：把「清触摸残留」暴露给重排逻辑，旋转/地址栏变化时调用
 let _resetTouchState = null;
@@ -12,12 +13,15 @@ export function resetTouchState() {
 }
 
 export function initMobileControls(input) {
+  ensureTheme(); // 配色/字体统一取自主题变量，本模块不再自带一套颜色
   const coarse =
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
     'ontouchstart' in window;
   if (!coarse) return;
 
-  // 控件样式（一次性注入）
+  // 纯布局样式（一次性注入）：摇杆与视角区的定位/尺寸/触控区属于行为依赖，必须留在这里。
+  // theme.js 只提供可换肤的类与变量（面板/按钮），而这几个控件是叠在世界之上的半透明层，
+  // 套 .kui-panel/.kui-btn 会挡住视野、也会和这里的圆形几何冲突，所以只把硬编码颜色换成主题变量。
   const style = document.createElement('style');
   style.textContent = `
     .mc-zone{position:fixed;bottom:0;touch-action:none;user-select:none;-webkit-user-select:none;z-index:50}
@@ -25,20 +29,23 @@ export function initMobileControls(input) {
        iOS 的 100vh 等于"大视口"（含地址栏）且旋转后不更新，会导致错位与跳动 */
     .mc-left{left:0;width:44vw;height:calc(var(--app-vh, 100vh) * 0.42);min-height:200px}
     .mc-right{right:0;top:0;width:50vw;height:var(--app-vh, 100vh)}
+    /* 摇杆：半径/厚度/位置一律不动，只把白色前景换成主题蓝（透明度由主题变量混出） */
     .mc-joy{position:absolute;left:20px;bottom:26px;width:118px;height:118px;border-radius:50%;
-      border:2px solid rgba(255,255,255,.32);background:rgba(255,255,255,.08);
+      border:2px solid color-mix(in srgb, var(--kui-blue-soft) 70%, transparent);
+      background:color-mix(in srgb, var(--kui-blue) 12%, transparent);
       box-sizing:content-box}
     .mc-joy::after{content:'';position:absolute;inset:50%;width:64px;height:64px;transform:translate(-50%,-50%);
-      border-radius:50%;border:1px solid rgba(255,255,255,.18)}
+      border-radius:50%;border:1px solid color-mix(in srgb, var(--kui-blue-soft) 45%, transparent)}
     .mc-knob{position:absolute;left:50%;top:50%;width:54px;height:54px;transform:translate(-50%,-50%);
-      border-radius:50%;background:rgba(255,255,255,.5);box-shadow:0 4px 12px rgba(0,0,0,.3)}
+      border-radius:50%;background:color-mix(in srgb, var(--kui-blue) 72%, transparent);box-shadow:var(--kui-shadow)}
     .mc-jump{position:fixed;right:20px;bottom:calc(env(safe-area-inset-bottom, 0px) + 24px);
       width:72px;height:72px;border-radius:50%;z-index:51;
-      display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.9);
-      font-size:15px;font-weight:600;letter-spacing:1px;
-      background:rgba(255,255,255,.12);border:2px solid rgba(255,255,255,.35);
+      display:flex;align-items:center;justify-content:center;color:var(--kui-paper);
+      font-size:15px;font-weight:600;letter-spacing:1px;font-family:var(--kui-font);
+      background:color-mix(in srgb, var(--kui-blue) 30%, transparent);
+      border:2px solid color-mix(in srgb, var(--kui-blue-soft) 75%, transparent);
       touch-action:none;user-select:none;-webkit-user-select:none}
-    .mc-jump:active{background:rgba(255,255,255,.3)}
+    .mc-jump:active{background:color-mix(in srgb, var(--kui-blue) 62%, transparent)}
   `;
   document.head.appendChild(style);
 
