@@ -195,12 +195,40 @@ export function ensureTheme() {
     }
     .kui-row > b { color: var(--kui-ink); font-weight: 700; }
 
-    /* ---- 准星 ---- */
+    /* ---- 准星 ----
+       用 CSS 画而不是贴图：素材是纯黑 PNG，在紫柱子/岩浆/夜景里基本看不见；
+       这里每条线都带 1px 深色描边，任何背景上都读得出来。
+       .is-hot = 准星压住了可攻击目标（疯狂抓钩的柱顶光点），整体转金色并放大一圈。 */
     .kui-crosshair {
       position: fixed; left: 50%; top: 50%;
-      width: 26px; height: 26px; margin: -13px 0 0 -13px;
-      background: url('/ui/crosshair_a.png') center / contain no-repeat;
-      pointer-events: none; z-index: 60; opacity: .9;
+      width: 24px; height: 24px; margin: -12px 0 0 -12px;
+      pointer-events: none; z-index: 60; opacity: .92;
+      transition: opacity .1s linear, transform .1s ease-out;
+    }
+    .kui-crosshair > i {
+      position: absolute; background: #fff; border-radius: 1px;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, .6);
+    }
+    .kui-crosshair > i.t { left: 11px; top: 0;     width: 2px; height: 7px; }
+    .kui-crosshair > i.b { left: 11px; bottom: 0;  width: 2px; height: 7px; }
+    .kui-crosshair > i.l { top: 11px; left: 0;     width: 7px; height: 2px; }
+    .kui-crosshair > i.r { top: 11px; right: 0;    width: 7px; height: 2px; }
+    .kui-crosshair > i.c { left: 11px; top: 11px;  width: 2px; height: 2px; }
+    .kui-crosshair.is-hot { opacity: 1; transform: scale(1.22); }
+    .kui-crosshair.is-hot > i {
+      background: #ffd24a;
+      box-shadow: 0 0 6px 1px rgba(255, 140, 40, .95), 0 0 0 1px rgba(0, 0, 0, .6);
+    }
+
+    /* ---- 手机端圆形攻击键的「可攻击」高亮 ----
+       按钮本体颜色写在行内样式里，所以这里必须 !important 才盖得住；
+       transform 只用于放大，手机分支的行内样式没有 transform（桌面长条才有 translateX）。 */
+    .mc-atk--hot {
+      background: color-mix(in srgb, var(--kui-danger) 82%, transparent) !important;
+      border-color: #ffd24a !important;
+      box-shadow: 0 0 0 3px rgba(255, 210, 74, .45), 0 0 20px 6px rgba(255, 110, 40, .55) !important;
+      transform: scale(1.08);
+      transition: transform .1s ease-out, box-shadow .1s linear;
     }
   `;
   document.head.appendChild(style);

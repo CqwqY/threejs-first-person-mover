@@ -296,6 +296,12 @@ export class Game {
     this.boss.setOnPhase((kind, ph) => this._onBossPhase(kind, ph));
     this.boss.setOnStatus(() => this._updateBossUI());
     this._portalHint = this._createPortalHint();
+    // 准星：屏幕正中的瞄准点。PC 上只在指针锁定时显示（没锁定＝玩家在点 UI 或还没进画面），
+    // 手机没有指针锁定，常显。
+    this._coarsePointer = coarsePointer;
+    this._crosshair = this._createCrosshair();
+    this._crosshairShown = null;  // 三态：null = 还没写过 DOM，true/false = 当前显隐
+    this._aimHot = false;         // 准星当前是否压住了可攻击目标（疯狂抓钩的柱顶光点）
     // 手机端「攻击」是圆形，且排在跳跃键正上方：这两个标记供布局变化时重算位置
     this._attackCoarse = coarsePointer;
     this._attackShown = false;  // 攻击键当前是否显示（只在显隐翻转时重算位置，避免每帧量 DOM）
@@ -541,6 +547,8 @@ export class Game {
   // 死亡：锁住操控，短暂延迟后满血重生到出生点；若在对战中则直接判负退房
   _die() {
     this._dead = true;
+    // 死了就立刻收掉「抓钩无视碰撞」，别让倒地后的这一帧还穿墙
+    if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.noClip = false;
     this._setChatLock(true);
     if (this._soul) this._soul = null; // 死亡先收回灵魂，避免相机卡在自由飞行
     if (this._combat) {
@@ -1170,6 +1178,47 @@ export class Game {
   // 让技能键按「当前显示在跳跃键上方的那些键」重排（攻击键在就挂在攻击键上方）
   _relayoutSkillBtn() {
     if (this.skillSlots && typeof this.skillSlots.relayout === 'function') this.skillSlots.relayout();
+  }
+
+  // 屏幕正中的准星：四条短线 + 中心点。样式与 is-hot 高亮态都在 theme.js 的 .kui-crosshair 里。
+  // 用 CSS 画而不是 public/ui/crosshair_a.png：那张是纯黑图，柱林/岩浆这种深色场景里几乎看不见。
+  _createCrosshair() {
+    const el = document.createElement('div');
+    el.className = 'kui-crosshair';
+    el.style.display = 'none'; // 等 _updateAimUI 判定（PC 要先锁定指针）
+    for (const k of ['t', 'b', 'l', 'r', 'c']) {
+      const bar = document.createElement('i');
+      bar.className = k;
+      el.appendChild(bar);
+    }
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 准星显隐 + 「瞄中目标」反馈（准星变色放大、手机攻击键亮起）。
+  // 只在状态翻转时写 style/class：这几个 getter 每帧读没问题，但每帧写 DOM 会让样式反复失效。
+  _updateAimUI() {
+    // 打开任何需要鼠标/键盘的面板时收起准星（这时候屏幕上有光标，画个准星是误导）
+    const panel =
+      (this.aiChat && this.aiChat.isOpen()) ||
+      (this.chat && typeof this.chat.isOpen === 'function' && this.chat.isOpen()) ||
+      (this.shop && typeof this.shop.isOpen === 'function' && this.shop.isOpen());
+    const vis = !this._dead && !this._soul && !panel &&
+      (this._coarsePointer || !!(this.input && this.input.locked));
+    if (vis !== this._crosshairShown) {
+      this._crosshairShown = vis;
+      if (this._crosshair) this._crosshair.style.display = vis ? '' : 'none';
+    }
+
+    // 「可攻击」= 准星压住了柱顶光点（只有疯狂抓钩模式才有光点）
+    const hot = !!this._beaconAimed && !this._dead && !this._soul && !panel;
+    if (hot !== this._aimHot) {
+      this._aimHot = hot;
+      if (this._crosshair) this._crosshair.classList.toggle('is-hot', hot);
+      // 手机攻击键是自绘的圆形（行内样式），亮起态由 .mc-atk--hot 用 !important 覆盖；
+      // 桌面端是长条且用鼠标左键，不需要变亮
+      if (this._attackBtn && this._attackCoarse) this._attackBtn.classList.toggle('mc-atk--hot', hot);
+    }
   }
 
   // 三阶段的「护盾」按钮（手机没有 Q 键）
@@ -4014,6 +4063,12 @@ export class Game {
         flying: true,
         t: Config.GRAPPLE_MAX_TIME,
         stop: Config.GRAPPLE_BEACON_STOP, // 收得比抓墙紧，落点才压在柱顶
+        // 光点在柱顶上方 1m、松手点还要再退 0.9m，靠碰撞解算会把人嵌进柱子再侧向弹出去
+        // （柱顶是这里唯一的落脚点，弹出去就是掉岩浆），所以直接记下「柱顶站立点」，
+        // 到达时把人放上去（见 _updateGrapple）。
+        landX: beacon.x,
+        landZ: beacon.z,
+        landY: beacon.topY + Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale,
       };
       this._ensureGrappleViz();
       this._grappleRope.visible = true;
@@ -4071,25 +4126,30 @@ export class Game {
 
   // 光点每帧表现：整体呼吸 + 「当前瞄中的那颗」放大发亮。
   // 高亮是给玩家的反馈——看到哪颗变亮，就知道按攻击会飞去哪根柱子。
+  // 同时把结果记进 this._beaconAimed，供 _updateAimUI 驱动准星/攻击键（这里必须每帧都写，
+  // 哪怕这次没有光点，否则退出抓钩模式后准星会一直停在「热」的状态）。
   _updateBeacons() {
     const list = this._beacons;
-    if (!list || !list.length) return;
     const s = this.localState;
-    const cosP = Math.cos(s.pitch);
-    const sinP = Math.sin(s.pitch);
-    _gDir.set(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
-    const aimed = (this._dead || this._soul) ? null : this._pickBeacon(s, _gDir);
-    const pulse = 1 + Math.sin(this.clock.elapsedTime * 2.6) * 0.14;
-    for (const b of list) {
-      const hot = b === aimed;
-      const k = (hot ? 1.5 : 1) * pulse;
-      if (b.halo) {
-        b.halo.scale.setScalar(k);
-        // 光晕（与激光柱）材质是每个光点独享的，所以这里改透明度只影响自己
-        b.halo.material.opacity = hot ? 0.66 : 0.3;
+    let aimed = null;
+    if (list && list.length) {
+      const cosP = Math.cos(s.pitch);
+      const sinP = Math.sin(s.pitch);
+      _gDir.set(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
+      if (!this._dead && !this._soul) aimed = this._pickBeacon(s, _gDir);
+      const pulse = 1 + Math.sin(this.clock.elapsedTime * 2.6) * 0.14;
+      for (const b of list) {
+        const hot = b === aimed;
+        const k = (hot ? 1.5 : 1) * pulse;
+        if (b.halo) {
+          b.halo.scale.setScalar(k);
+          // 光晕（与激光柱）材质是每个光点独享的，所以这里改透明度只影响自己
+          b.halo.material.opacity = hot ? 0.66 : 0.3;
+        }
+        if (b.core) b.core.scale.setScalar(hot ? 1.5 : 1);
       }
-      if (b.core) b.core.scale.setScalar(hot ? 1.5 : 1);
     }
+    this._beaconAimed = aimed;
   }
 
   // 钩人判定：准星中轴 GRAPPLE_CATCH_ARC 度内、GRAPPLE_RANGE 内最近的那个玩家
@@ -4119,6 +4179,8 @@ export class Game {
       this.localPlayer.physics.velocityHold = null;
     }
     this._grappleHold = null;
+    // 抓钩一结束就恢复碰撞，别把「无视碰撞」漏到落地之后的正常移动里
+    this.localPlayer.physics.noClip = false;
     this._grapple = null;
     if (this._grappleRope) this._grappleRope.visible = false;
     if (this._grappleHook) this._grappleHook.visible = false;
@@ -4149,11 +4211,19 @@ export class Game {
       const dy = g.y - s.y;
       const dz = g.z - s.z;
       const dist = Math.hypot(dx, dy, dz);
+      const stop = g.stop || Config.GRAPPLE_STOP_DIST;
       // 光点锚点收得比抓墙更紧（g.stop），否则会在柱子斜上方就松手 → 落在柱外掉进岩浆
-      if (dist <= (g.stop || Config.GRAPPLE_STOP_DIST) || g.t <= 0) {
+      if (dist <= stop || g.t <= 0) {
         // 到点了把速度收住：拽人时每帧速度都被覆盖成 25m/s，直接松手会带着这股冲劲
         // 冲过柱子（锚点在半空中，没有墙挡）再掉下去。收住后靠重力自然落到柱顶。
         this.localPlayer.physics.velocity.multiplyScalar(0.1);
+        // 光点抓钩：直接站到柱顶。超时（t<=0）时人还在半空，不能凭空瞬移过去，所以只在正常到点时生效。
+        if (g.landY != null && dist <= stop) {
+          this.localState.x = g.landX;
+          this.localState.z = g.landZ;
+          this.localState.y = g.landY;
+          this.localPlayer.physics.velocity.set(0, 0, 0);
+        }
         this._endGrapple();
         return;
       }
@@ -4162,6 +4232,9 @@ export class Game {
       const hold = { x: dx * k, y: dy * k, z: dz * k, t: 0.3 };
       this.localPlayer.physics.velocityHold = hold;
       this._grappleHold = hold;
+      // 疯狂抓钩模式：拽人期间无视碰撞（被柱身卡住或被侧向弹开都很难受，柱子密起来尤甚）。
+      // 主世界勾墙保持原手感——那里穿墙就等于穿模，必须挡住。
+      this.localPlayer.physics.noClip = !!(this._combat && this._combat.mode === 'grapple');
     }
     this._drawGrapple();
   }
@@ -4644,6 +4717,8 @@ export class Game {
     this._updatePickupHint();
     // 柱顶光点：呼吸 + 瞄准高亮（给「按攻击能飞过去」的反馈）
     this._updateBeacons();
+    // 准星与攻击键：瞄中光点时变亮（必须在 _updateBeacons 之后，读它算出的 _beaconAimed）
+    this._updateAimUI();
     // 抓钩：钩爪飞行 + 拽人（必须放在玩家物理更新之后，用最新的自身坐标算方向）
     this._updateGrapple(dt);
     // 疯狂抓钩：房主生成金币、全场吃金币、掉进岩浆判负

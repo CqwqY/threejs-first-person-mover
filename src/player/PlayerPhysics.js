@@ -28,6 +28,9 @@ export class PlayerPhysics {
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
     this.canJump = true;  // 是否允许跳跃（骑电动车时关掉）
     this.controlLock = false; // 锁定操控：对话栏打开等 UI 占用时，移动/跳/喷气不响应
+    // 无视世界碰撞：被抓钩拽着飞的这段时间不再理会柱身/墙（否则会半路被挡下或被侧向弹出去）。
+    // 只在「疯狂抓钩」模式由 Game 临时开启，松手/死亡/切场景都会关掉。
+    this.noClip = false;
   }
 
   // 移动模式对应的基础速度系数：走路 1、奔跑 1.6、游泳 0.6、飞行 1.2
@@ -152,12 +155,17 @@ export class PlayerPhysics {
     }
 
     // ---- 5.5 世界碰撞体碰撞：水平方向把玩家挡在 AABB 之外（simple 碰撞体，行为不变）----
-    this._resolveWorldCollisions(state, simples);
+    // noClip（抓钩拖拽中）整段跳过：被拽的过程不该被柱身/墙拦下，也不该被侧向推出去换个方向飞。
+    // 终点安全由 Game 侧负责（光点抓钩在结束时直接把人放到柱顶），所以这里不需要兜底解析。
+    // 注意：trimesh 的位移走上面的 resolveMove（自带碰撞），抓钩场景里只有盒碰撞体，不受影响。
+    if (!this.noClip) {
+      this._resolveWorldCollisions(state, simples);
 
-    // ---- 5.6 地面吸附：脚底仍贴近可站立地面（坡面 / 盒顶 / 平地）时把 y 吸附上去（simple 碰撞体）----
-    // 目的：重力每帧把玩家往坡面里嵌、再被碰撞解析推出，会让玩家沿坡持续下滑（像踩冰）。
-    // 吸附只做竖直修正（不产生任何水平位移），因此输入为零时玩家能稳稳停在坡上。
-    this._snapToGround(state, simples);
+      // ---- 5.6 地面吸附：脚底仍贴近可站立地面（坡面 / 盒顶 / 平地）时把 y 吸附上去（simple 碰撞体）----
+      // 目的：重力每帧把玩家往坡面里嵌、再被碰撞解析推出，会让玩家沿坡持续下滑（像踩冰）。
+      // 吸附只做竖直修正（不产生任何水平位移），因此输入为零时玩家能稳稳停在坡上。
+      this._snapToGround(state, simples);
+    }
 
     // ---- 6. 地面碰撞：防止下穿地面，落到 PLAYER_HEIGHT 处即认为着地 ----
     const groundY = Config.PLAYER_HEIGHT * this.sizeScale;

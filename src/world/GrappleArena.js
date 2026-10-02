@@ -13,6 +13,7 @@ import { Config } from '../config.js';
 export const GRAPPLE_SPAWN_RADIUS = 15;
 export const GRAPPLE_SPAWN_TOP_Y = 6;
 export const GRAPPLE_SPAWN_COUNT = 6;
+export const GRAPPLE_PLATFORM_HALF = 3; // 平台的半边长（6×6 的方盒），柱子布局要避开它的占地
 
 // 固定种子随机数（整数运算 → 各端结果完全一致）
 function mulberry32(seed) {
@@ -33,8 +34,9 @@ export function buildPillarLayout() {
   const limit = half - 2.5; // 柱子中心的最大范围（留出墙厚）
   const list = [];
   const want = Config.GRAPPLE_PILLAR_COUNT;
+  const PAD = Config.PLAYER_RADIUS + 0.4; // 柱顶站立点与别的盒子之间至少留这么宽的净空
   let guard = 0;
-  while (list.length < want && guard < 2000) {
+  while (list.length < want && guard < 4000) {
     guard++;
     const x = (rnd() * 2 - 1) * limit;
     const z = (rnd() * 2 - 1) * limit;
@@ -43,6 +45,21 @@ export function buildPillarLayout() {
     if (r > limit - 1) continue;  // 贴边的不要
     // 和起始平台圆环（半径 15）错开，别把出生点埋在柱子里
     if (Math.abs(r - GRAPPLE_SPAWN_RADIUS) < 3) continue;
+    const hs = 0.95 + rnd() * 0.65;   // 顶面半边长
+    // 和 6 个出生平台（3×3 的方盒，高 6m）保持净空。
+    // 只按「半径错开 3m」是不够的：平台是方块，r≈12 的柱子可能正好斜斜地贴住平台的角，
+    // 站上柱顶会有一小截嵌进平台里（被解算推一下才出来）。这里按盒到盒的实际间隔再筛一次。
+    let nearPlat = false;
+    for (let k = 0; k < GRAPPLE_SPAWN_COUNT; k++) {
+      const ang = (k / GRAPPLE_SPAWN_COUNT) * Math.PI * 2;
+      const px = Math.cos(ang) * GRAPPLE_SPAWN_RADIUS;
+      const pz = Math.sin(ang) * GRAPPLE_SPAWN_RADIUS;
+      const gapX = Math.abs(x - px) - (GRAPPLE_PLATFORM_HALF + hs);
+      const gapZ = Math.abs(z - pz) - (GRAPPLE_PLATFORM_HALF + hs);
+      // 任一轴分离即两盒不相交，两轴间隔的最大值就是「分离程度」
+      if (Math.max(gapX, gapZ) < PAD) { nearPlat = true; break; }
+    }
+    if (nearPlat) continue;
     // 柱子之间保持间距，避免连成一堵墙
     let tooClose = false;
     for (const p of list) {
@@ -50,7 +67,6 @@ export function buildPillarLayout() {
     }
     if (tooClose) continue;
     const topY = 2.6 + rnd() * 6.8;   // 顶面高度 2.6 ~ 9.4m
-    const hs = 0.95 + rnd() * 0.65;   // 顶面半边长
     list.push({ x, z, topY, half: hs });
   }
   return list;
@@ -109,7 +125,7 @@ export function buildGrappleArena(scene) {
     const ang = (k / GRAPPLE_SPAWN_COUNT) * Math.PI * 2;
     const x = Math.cos(ang) * GRAPPLE_SPAWN_RADIUS;
     const z = Math.sin(ang) * GRAPPLE_SPAWN_RADIUS;
-    const s = 3;
+    const s = GRAPPLE_PLATFORM_HALF;
     const h = GRAPPLE_SPAWN_TOP_Y;
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(s * 2, h, s * 2), platMat);
     mesh.position.set(x, h / 2, z);
