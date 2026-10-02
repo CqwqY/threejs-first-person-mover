@@ -62,10 +62,11 @@ export class Game {
     ensureTheme();
 
     // ---- 渲染器 ----
+    this._qualityDpr = 2; // 画质档可调的 dpr 封顶：high=2 / mid=1.5 / low=1（默认 2，quality='mid' 时由 _applyQuality 降到 1.5）
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    // dpr 封顶到 2：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
+    // dpr 封顶：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
     // 会反复触发 canvas 重算（掉帧/抖动的隐藏来源）
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -201,9 +202,10 @@ export class Game {
         dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 240); }, // 一昼夜秒数
         bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
         dayOffset: (v) => { this._dayOffset = (Number(v) || 0) / 24; }, // 本地时刻偏移（小时→一天比例）
+        quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
       },
       {
-        fields: ['viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
+        fields: ['quality', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
       }
     );
@@ -502,8 +504,31 @@ export class Game {
     const h = vv && vv.height ? vv.height : window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // dpr 封顶，且缩放后重新夹一次
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr)); // dpr 封顶跟随画质档，且缩放后重新夹一次
     this.renderer.setSize(w, h);
+  }
+
+  // 画质档：聚合控制阴影贴图分辨率 / dpr 封顶 / 阴影采样类型，一键降级提帧。
+  // 在画面设置面板初始化与改动时都会被调用（bind 'quality'）；默认 'mid'。
+  _applyQuality(q) {
+    const presets = {
+      high: { shadowSize: 2048, dpr: 2, type: THREE.PCFSoftShadowMap },
+      mid:  { shadowSize: 1024, dpr: 1.5, type: THREE.PCFShadowMap },
+      low:  { shadowSize: 512,  dpr: 1,   type: THREE.BasicShadowMap },
+    };
+    const p = presets[q] || presets.mid;
+    if (this._sun && this._sun.shadow) {
+      this._sun.shadow.mapSize.set(p.shadowSize, p.shadowSize);
+      if (this._sun.shadow.map) {
+        this._sun.shadow.map.dispose();
+        this._sun.shadow.map = null; // 强制用新分辨率重建
+      }
+    }
+    this._qualityDpr = p.dpr;
+    this.renderer.shadowMap.type = p.type;
+    this.renderer.shadowMap.needsUpdate = true; // 类型变了要重渲
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
 
   // 处理服务器发来的消息（中继协议）
@@ -1204,7 +1229,7 @@ export class Game {
     const P = Config.PORTAL_POS;
     const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
     const showPortal = mode === 'idle' && near;
-    const showAtk = (mode === 'alive' && !this._dead) || this._gatlingOn;
+    const showAtk = (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn;
     const showShield = mode === 'alive' && phase >= 3 && !this._dead;
     const shieldReady = performance.now() >= this._shieldReadyAt;
     const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
@@ -1244,6 +1269,13 @@ export class Game {
 
   // 每帧推进 Boss：把「离老师最近的玩家」作为追击目标，其余交给 TeacherBoss 内部模拟
   _updateBoss(dt) {
+    // Boss 完全未召唤（idle）时：无追逐/攻击/动画，仅保持技能槽与按钮状态同步，
+    // 省下每帧构建玩家列表 + boss.update 的开销（玩家大部分时间处于该状态）
+    if (this.boss.mode === 'idle') {
+      this._updateSuperSlot();
+      this._updateBossUI();
+      return;
+    }
     const me = this.localState;
     const bpos = this.boss.pos;
     const players = [{ id: me.id || '__local', x: me.x, y: me.y, z: me.z }];
@@ -1854,6 +1886,7 @@ export class Game {
   _toggleCtrlGun() {
     this._ctrlOn = !this._ctrlOn;
     if (!this._ctrlOn && this._ctrl) this._releaseCtrl('已收起控制枪');
+    this._updateBossUI(); // 同步手机端攻击按钮显隐（装备/收起控制枪都要即时反映）
     this._toast(this._ctrlOn ? '控制枪已就绪，左键开火抓人（再按一次收起）' : '已收起控制枪');
   }
 
@@ -1894,7 +1927,7 @@ export class Game {
       sent: false,
     };
     this.network.sendCtrl(hitId, true, a.x, a.y, a.z);
-    this._toast('抓住了！移动视角就能拖动对方（对方按空格挣脱）');
+    this._toast('抓住了！移动视角就能拖动对方（对方按跳跃挣脱）');
   }
 
   // 松开：主动收枪 / 超时 / 目标离线。toastText 为空则不提示
@@ -1930,7 +1963,7 @@ export class Game {
       ay: Number(msg.y) || 0,
       az: Number(msg.z) || 0,
     };
-    this._toast('被控制枪抓住了！按空格挣脱');
+    this._toast('被控制枪抓住了！按跳跃挣脱');
   }
 
   // 挣脱：通知控制者并进入短时免疫

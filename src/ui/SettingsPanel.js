@@ -14,8 +14,9 @@ export const DEFAULT_SETTINGS = {
   sunAz: 56, // 阳光方位角（°）—— 编辑器中可调，会保存给客户端
   viewFar: 500, // 视距（相机远裁剪面 / 绘制距离）—— 客户端本地可调
   shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心）
-  shadowSize: 2048, // 阴影贴图边长
+  shadowSize: 2048, // 阴影贴图边长（画质档会按档位覆盖此值）
   castShadow: true, // 阴影总开关
+  quality: 'mid', // 画质档：high / mid / low（聚合控制阴影分辨率、dpr 封顶、阴影类型）
   nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
   dayNight: true, // 是否开启昼夜循环
   dayCycle: 240, // 一昼夜时长（秒），越大变化越慢
@@ -63,6 +64,7 @@ const FIELDS = [
   { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05, editorOnly: true },
   { id: 'sunElev', label: '阳光高度角', kind: 'range', min: 0, max: 90, step: 1, editorOnly: true },
   { id: 'sunAz', label: '阳光方位角', kind: 'range', min: 0, max: 360, step: 1, editorOnly: true },
+  { id: 'quality', label: '画质（聚合）', kind: 'select', options: ['low', 'mid', 'high'], gameOnly: true },
   { id: 'viewFar', label: '视距', kind: 'range', min: 200, max: 1000, step: 10 },
   { id: 'shadowR', label: '阴影范围', kind: 'range', min: 15, max: 120, step: 1 },
   {
@@ -93,7 +95,12 @@ export function createSettingsPanel(binds, opts = {}) {
   ensureTheme();
   const storeKey = opts.storeKey || STORE_KEY;
   const include = Array.isArray(opts.fields) ? opts.fields : null;
-  const fields = include ? FIELDS.filter((f) => include.includes(f.id)) : FIELDS;
+  const isGame = storeKey === GAME_STORE_KEY;
+  // 游戏端只渲染 include 指定的项；编辑器（默认）则排除 editorOnly 与 gameOnly 项，
+  // 避免「画质」这种仅客户端生效的聚合项出现在编辑器里（编辑器没传对应 bind）
+  const fields = include
+    ? FIELDS.filter((f) => include.includes(f.id))
+    : FIELDS.filter((f) => !f.editorOnly && (!f.gameOnly || isGame));
 
   const loaded = loadSettings(storeKey);
   const settings = {};
