@@ -328,6 +328,7 @@ export class Game {
     this._ctrlBeam = null;          // 控制激光线（控制者侧可见）
     this._ctrlRig = this._createCtrlRig();   // 第一人称手持模型（挂在相机下）
     this._ctrlFireAt = 0;           // 最近一次开火时刻，用于后坐动画
+    this._ctrlOn = false;           // 是否「装备」控制枪（技能槽切换，左键开火）
     this._gatlingRig = this._createGatlingRig(); // 开启加特林时握在手上（枪管会转）
     this._gatlingBar = this._createGatlingBar();
 
@@ -357,6 +358,7 @@ export class Game {
       if (e.button !== 0) return;
       if (document.pointerLockElement !== this.renderer.domElement) return;
       if (this._gatlingOn) { this._gatlingHeld = true; return; }
+      if (this._ctrlOn) { this._fireCtrlGun(); return; }
       this._attackBoss();
     });
     window.addEventListener('mouseup', (e) => {
@@ -878,6 +880,7 @@ export class Game {
       e.stopPropagation();
       // 开了加特林就改成按住持续扫射（松手停火）
       if (this._gatlingOn) { this._gatlingHeld = true; return; }
+      if (this._ctrlOn) { this._fireCtrlGun(); return; }
       this._attackBoss();
     });
     el.addEventListener('pointerup', () => { this._gatlingHeld = false; });
@@ -1419,9 +1422,8 @@ export class Game {
   // 否则别人会看到武器忽隐忽现。
   _heldWeaponKind() {
     if (this._gatlingOn) return 'gatling';
-    if (this._ctrl) return 'ctrlgun';
+    if (this._ctrlOn || this._ctrl) return 'ctrlgun';
     if (this._hasSkillKind('club')) return 'club';
-    if (this._hasSkillKind('control')) return 'ctrlgun';
     return '';
   }
 
@@ -1847,6 +1849,14 @@ export class Game {
     };
   }
 
+  // 装备/收起控制枪：技能槽触发，和加特林一样是「切换」而不是直接开火；
+  // 开启后左键才开火（抓人/松手）。收起时若正在控制则一并松手。
+  _toggleCtrlGun() {
+    this._ctrlOn = !this._ctrlOn;
+    if (!this._ctrlOn && this._ctrl) this._releaseCtrl('已收起控制枪');
+    this._toast(this._ctrlOn ? '控制枪已就绪，左键开火抓人（再按一次收起）' : '已收起控制枪');
+  }
+
   // 开火：射线抓最近的目标；已经在控制中则松手（同一个技能键切换）
   _fireCtrlGun() {
     this._ctrlFireAt = performance.now(); // 后坐动画计时
@@ -1944,7 +1954,7 @@ export class Game {
   _updateCtrl(dt) {
     // 第一人称手持：装备了控制枪就一直握着（第三人称/死亡/加特林开启时收起）
     if (this._ctrlRig) {
-      const held = (!!this._ctrl || this._hasSkillKind('control'))
+      const held = !!(this._ctrlOn || this._ctrl)
         && !this.thirdPerson && !this._dead && !this._gatlingOn;
       this._ctrlRig.visible = held;
       if (held) {
@@ -2904,7 +2914,7 @@ export class Game {
       case 'control':
         return {
           label: '控制',
-          run: () => this._fireCtrlGun(),
+          run: () => this._toggleCtrlGun(),
         };
       case 'gatling':
         return {
