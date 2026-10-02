@@ -3281,6 +3281,7 @@ export class Game {
     if (this._soul) {
       this._soul = null;
       this.input.consumeJump(); // 清掉出窍期间累积的跳跃请求，归位后不要莫名跳一下
+      this._updateSkillBarVisibility();
       this._toast('灵魂归位');
       return;
     }
@@ -3292,6 +3293,7 @@ export class Game {
       yaw: this.localState.yaw,
       pitch: this.localState.pitch,
     };
+    this._updateSkillBarVisibility(); // 出窍时收起技能栏
     this._toast('灵魂出窍：WASD 飞行 / 空格上升 / Ctrl 下降 / Shift 加速 / P 归位');
   }
 
@@ -3447,6 +3449,12 @@ export class Game {
     if (this._combatHud) this._combatHud.style.display = 'none';
   }
 
+  // 技能栏显隐：对战（竞技场）与灵魂出窍下不显示——这两个场景里技能栏无意义
+  _updateSkillBarVisibility() {
+    if (!this.skillSlots || typeof this.skillSlots.setVisible !== 'function') return;
+    this.skillSlots.setVisible(!this._combat && !this._soul);
+  }
+
   _updateCombatHUD() {
     if (!this._combat || !this._combatHud) return;
     const a = this._combatHud.querySelector('#__cAlive');
@@ -3506,6 +3514,7 @@ export class Game {
     this._showCombatHUD();
     if (this._btnCombat) this._btnCombat.textContent = '退出对战';
     this._updateBossUI(); // 刷新攻击按钮（对战中常驻）
+    this._updateSkillBarVisibility(); // 竞技场里不显示技能栏
     this._toast('已匹配！进入「躲避陨石混战」');
   }
 
@@ -3547,6 +3556,7 @@ export class Game {
     this._hideCombatHUD();
     if (this._btnCombat) this._btnCombat.textContent = '对战匹配';
     this._updateBossUI(); // 交回给主世界逻辑控制攻击按钮显隐
+    this._updateSkillBarVisibility(); // 回到主世界，恢复技能栏
     this._toast('已退出对战，返回主世界');
   }
 

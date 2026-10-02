@@ -44,6 +44,7 @@ export function createSkillSlots() {
   const slots = [];
 
   function fire(slot) {
+    if (boxHidden) return; // 整体隐藏时（对战 / 灵魂出窍）技能不可触发，而不只是看不见
     const now = performance.now();
     if (now < slot.cdUntil || !slot.act) return;
     slot.cdUntil = now + COOLDOWN;
@@ -58,10 +59,14 @@ export function createSkillSlots() {
     slot.labelEl.style.color = slot.act ? 'var(--kui-ink)' : 'var(--kui-ink-soft)';
     slot.el.style.display = (coarse && !slot.act) ? 'none' : '';
   }
-  function refreshBox() {
+  // boxHidden：由外部（Game）控制整体隐藏——某些模式（对战 / 灵魂出窍）不显示技能栏
+  let boxHidden = false;
+  function applyBoxDisplay() {
+    if (boxHidden) { box.style.display = 'none'; return; }
     const any = slots.some((s) => s.act);
     box.style.display = (!coarse || any) ? 'flex' : 'none';
   }
+  function refreshBox() { applyBoxDisplay(); }
 
   // 预建全部槽位
   for (let i = 0; i < SLOT_COUNT; i++) {
@@ -161,10 +166,16 @@ export function createSkillSlots() {
   };
   window.addEventListener('keydown', keyHandler);
 
+  // 整体显隐（对战 / 灵魂出窍等模式下隐藏技能栏）；与 refreshBox 的空槽逻辑互不覆盖
+  function setVisible(v) {
+    boxHidden = !v;
+    applyBoxDisplay();
+  }
+
   function dispose() {
     window.removeEventListener('keydown', keyHandler);
     box.remove();
   }
 
-  return { assign, clearSlot, registerSkill, dispose };
+  return { assign, clearSlot, registerSkill, setVisible, dispose };
 }
