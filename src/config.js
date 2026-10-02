@@ -185,6 +185,15 @@ export const Config = {
   BOSS_SHIELD_KEY: 'KeyQ',        // 开启护盾的键
   SOUL_KEY: 'KeyP',               // 灵魂出窍切换键（肉身留在原地，视角自由飞行）
   SOUL_SPEED: 18,                 // 灵魂飞行速度（米/秒），按住 Shift 三倍
+  // 丢弃物品（会带物理效果掉在地上，全员可见）
+  DROP_MODIFIER_KEY: 'KeyY',      // PC：按住该键 + 数字键，丢弃对应技能槽的物品
+  DROP_THROW_SPEED: 7,            // 丢弃时朝视线方向的初速度（米/秒）
+  DROP_THROW_UP: 3.5,             // 丢弃时附加的向上初速度（米/秒）
+  DROP_RADIUS: 0.32,              // 丢弃物碰撞半径（静止时中心离地高度）
+  DROP_LIFETIME: 90,              // 丢在地上的物品存在时长（秒）
+  DROP_MAX: 60,                   // 同屏最多保留的丢弃物（超出先移除最旧的）
+  DROP_GESTURE_MS: 320,           // 手机长按判定：最短按住时长（毫秒）
+  DROP_GESTURE_DY: 42,            // 手机长按后上滑：触发丢弃的位移阈值（像素）
   BOSS_SHIELD_DURATION: 1.5,      // 护盾持续时间（秒）
   BOSS_SHIELD_COOLDOWN: 2.8,      // 护盾冷却（秒，从开启时算）
   BOSS_SHIELD_DAMAGE: 100,        // 护盾成功挡下激光时老师掉的血

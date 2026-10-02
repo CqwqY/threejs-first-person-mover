@@ -10,8 +10,12 @@ export const SKILL_KEYS = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Di
 export const SLOT_COUNT = SKILL_KEYS.length;
 const COOLDOWN = 800; // 相邻两次触发的最小间隔（毫秒）
 
-export function createSkillSlots() {
+export function createSkillSlots(opts = {}) {
   ensureTheme();
+  // 丢弃手势相关：PC 按住修饰键 + 数字键；手机长按技能槽后上滑
+  const dropModifier = opts.dropModifier || 'KeyY';
+  const gestureMs = Number.isFinite(opts.gestureMs) ? opts.gestureMs : 320;
+  const gestureDy = Number.isFinite(opts.gestureDy) ? opts.gestureDy : 42;
   const coarse =
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
     'ontouchstart' in window;
@@ -42,6 +46,21 @@ export function createSkillSlots() {
   document.body.appendChild(box);
 
   const slots = [];
+
+  let dropHandler = null; // 由 Game 注入：丢弃第 index 个槽位的物品
+  let yHeld = false;      // PC：丢弃修饰键是否按住（按住 + 数字键 = 丢弃）
+
+  // 丢弃某个槽位（仅在技能栏未被整体隐藏、且已注入处理器时生效）
+  function dropSlot(slot) {
+    if (boxHidden || !dropHandler) return;
+    const idx = slots.indexOf(slot);
+    if (idx < 0) return;
+    dropHandler(idx);
+  }
+
+  function setDropHandler(fn) {
+    dropHandler = typeof fn === 'function' ? fn : null;
+  }
 
   function fire(slot) {
     if (boxHidden) return; // 整体隐藏时（对战 / 灵魂出窍）技能不可触发，而不只是看不见
@@ -115,12 +134,51 @@ export function createSkillSlots() {
     // 触摸优先：自行捕获指针并阻止冒泡，确保点击技能槽不会同时被转视角区吃掉。
     // 直接按下即触发（不等 click）：多点触控时另一只手正按住摇杆，合成的 click 常常不派发，
     // 会导致「边走边点技能」没反应。
+    // 手势：轻点 = 触发技能；长按（≥gestureMs）后上滑（≥gestureDy）= 丢弃该槽物品。
+    // 因此这里改为「按下记录、抬起才触发」：只有这样才能把轻点与长按上滑区分开。
+    // 指针已被该元素捕获，多点触控下 pointerup 仍会派发到本元素（不同于合成 click），
+    // 所以「另一只手按着摇杆时边走边点技能」依然可用。
+    let pressT = 0;      // 本次按下的时间戳
+    let pressY = 0;      // 本次按下的纵坐标
+    let armed = false;   // 是否已进入「长按」状态
+    let consumed = false;// 本次手势是否已作为丢弃消费掉
+    let timer = 0;
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
       try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
-      fire(slot);
+      pressT = performance.now();
+      pressY = e.clientY;
+      armed = false;
+      consumed = false;
+      clearTimer();
+      timer = setTimeout(() => {
+        timer = 0;
+        armed = true;
+        el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
+      }, gestureMs);
     });
+    el.addEventListener('pointermove', (e) => {
+      if (!armed || consumed) return;
+      if (pressY - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃
+        consumed = true;
+        armed = false;
+        clearTimer();
+        el.style.transform = '';
+        dropSlot(slot);
+      }
+    });
+    const endPress = (canceled) => {
+      clearTimer();
+      el.style.transform = '';
+      const wasArmed = armed;
+      armed = false;
+      if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能
+      if (performance.now() - pressT < gestureMs) fire(slot); // 轻点 → 触发技能
+    };
+    el.addEventListener('pointerup', () => endPress(false));
+    el.addEventListener('pointercancel', () => endPress(true));
     box.appendChild(el);
     slots.push(slot);
     paint(slot);
@@ -158,13 +216,18 @@ export function createSkillSlots() {
 
   const keyHandler = (e) => {
     if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+    if (e.code === dropModifier) { yHeld = true; return; } // 先按住丢弃修饰键，等数字键
     const slot = slots.find((s) => s.keyName === e.code);
-    if (slot) {
-      e.preventDefault();
-      fire(slot);
-    }
+    if (!slot) return;
+    e.preventDefault();
+    if (yHeld) dropSlot(slot); // 按住 Y + 数字键 = 丢弃该槽物品
+    else fire(slot);
   };
+  const keyUpHandler = (e) => { if (e.code === dropModifier) yHeld = false; };
+  const blurHandler = () => { yHeld = false; }; // 切窗口时可能收不到 keyup，复位避免修饰键「粘住」
   window.addEventListener('keydown', keyHandler);
+  window.addEventListener('keyup', keyUpHandler);
+  window.addEventListener('blur', blurHandler);
 
   // 整体显隐（对战 / 灵魂出窍等模式下隐藏技能栏）；与 refreshBox 的空槽逻辑互不覆盖
   function setVisible(v) {
@@ -174,8 +237,10 @@ export function createSkillSlots() {
 
   function dispose() {
     window.removeEventListener('keydown', keyHandler);
+    window.removeEventListener('keyup', keyUpHandler);
+    window.removeEventListener('blur', blurHandler);
     box.remove();
   }
 
-  return { assign, clearSlot, registerSkill, setVisible, dispose };
+  return { assign, clearSlot, registerSkill, setVisible, setDropHandler, dispose };
 }

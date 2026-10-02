@@ -139,6 +139,21 @@ export class Network {
     this.send({ t: 'proj', ...info });
   }
 
+  // 丢弃物品广播：让同场所有人看到同一个物品以同样的物理掉在地上
+  sendDrop(info) {
+    if (!info || !info.item) return;
+    this.send({
+      t: 'drop',
+      item: String(info.item).slice(0, 24),
+      x: Number(info.x) || 0,
+      y: Number(info.y) || 0,
+      z: Number(info.z) || 0,
+      vx: Number(info.vx) || 0,
+      vy: Number(info.vy) || 0,
+      vz: Number(info.vz) || 0,
+    });
+  }
+
   // 爆炸广播：让其他玩家在同样的位置播爆炸特效
   sendBoom(info) {
     if (!info) return;

@@ -248,9 +248,15 @@ export class Game {
     });
 
     // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能；恢复上次指定的槽位
-    this.skillSlots = createSkillSlots();
+    this.skillSlots = createSkillSlots({
+      dropModifier: Config.DROP_MODIFIER_KEY,
+      gestureMs: Config.DROP_GESTURE_MS,
+      gestureDy: Config.DROP_GESTURE_DY,
+    });
     this._skillMap = this._loadSkillSlots();
     this._restoreSkills();
+    // 丢弃物品：PC 按住 Y + 数字键，手机长按技能槽上滑 → 由 Game 执行扣除与抛出
+    this.skillSlots.setDropHandler((index) => this._dropSlot(index));
 
     // ---- 传送门与「老师」Boss：位于 (11,142)，靠近点「召唤老师」10 秒后出现 ----
     // 三阶段：一阶段弹幕 → 白光+世界变红 → 二阶段旋转激光（跳着躲）→ 三阶段高激光（手动开护盾挡）
@@ -409,6 +415,10 @@ export class Game {
     this._pendingCombatExit = false; // 对战中被击倒 → 下一帧统一退房（避免在伤害循环里改状态）
     this._failEl = null;        // 屏幕中央「失败」字样（非弹窗）
     this._soul = null;          // P 键灵魂出窍：{ x, y, z, yaw, pitch }，null 表示未出窍
+    this._drops = [];           // 丢在地上的物品 { item, x,y,z,vx,vy,vz, resting, life, mesh, label }
+    this._dropGeo = null;       // 丢弃物共用几何（立方体，避免每件都新建）
+    this._dropLabelTex = new Map(); // 物品名 → Canvas 贴图（缓存，同名共用）
+    this._dropLabelMat = new Map(); // 物品名 → Sprite 材质（缓存，同名共用）
   }
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
@@ -738,6 +748,15 @@ export class Game {
         if (this._combat) {
           this._spawnMeteor({ x: Number(msg.x), z: Number(msg.z), vy: Number(msg.vy), r: Number(msg.r) });
         }
+        break;
+      }
+      case 'drop': {
+        // 别人丢弃的物品：用同样的初始状态在本地复现，全员可见
+        this._spawnDrop({
+          item: msg.item,
+          x: Number(msg.x), y: Number(msg.y), z: Number(msg.z),
+          vx: Number(msg.vx), vy: Number(msg.vy), vz: Number(msg.vz),
+        });
         break;
       }
       default:
@@ -3553,6 +3572,7 @@ export class Game {
 
     this._combat = null;
     this._room = null;
+    this._clearDrops(); // 竞技场里丢的东西不跟着回大厅
     this._hideCombatHUD();
     if (this._btnCombat) this._btnCombat.textContent = '对战匹配';
     this._updateBossUI(); // 交回给主世界逻辑控制攻击按钮显隐
@@ -3570,6 +3590,143 @@ export class Game {
     this._fx.length = 0;
     for (const m of this._missiles) { if (m && m.mesh) this.scene.remove(m.mesh); }
     this._missiles.length = 0;
+    this._clearDrops(); // 掉落物属于当前场景，切换场景时清掉
+  }
+
+  // ============ 丢弃物品：带物理地抛在地上，且全员可见 ============
+
+  // 丢弃第 index 个技能槽的物品：扣背包 1 件、必要时清空该槽、朝视线前方抛出并广播
+  _dropSlot(index) {
+    const item = this._skillMap ? this._skillMap[index] : null;
+    if (!item) { this._toast('该技能槽没有可丢弃的物品'); return; }
+    // 背包扣 1 件；扣到 0 则同时清空该技能槽（技能栏上也会消失）
+    const left = removeFromBag(getBagKey(this._profile), item, 1);
+    if (left <= 0) this._clearSlot(index);
+    // 出手点：眼睛前方 0.7m；初速度：视线方向 + 一点向上 → 抛物线落地
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP);
+    const start = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.7);
+    const vel = dir.clone().multiplyScalar(Config.DROP_THROW_SPEED);
+    vel.y += Config.DROP_THROW_UP;
+    const payload = { item, x: start.x, y: start.y, z: start.z, vx: vel.x, vy: vel.y, vz: vel.z };
+    this._spawnDrop(payload);
+    this.network.sendDrop(payload); // 广播给同场其他人
+    this._toast('已丢弃「' + item + '」');
+  }
+
+  // 生成一件掉落物（本地丢弃 / 远端广播共用）；各端用同一套物理复现同样的运动
+  _spawnDrop(o) {
+    if (!o) return;
+    const item = String(o.item || '').slice(0, 24);
+    const x = Number(o.x), y = Number(o.y), z = Number(o.z);
+    if (!item || ![x, y, z].every(Number.isFinite)) return;
+    if (this._drops.length >= Config.DROP_MAX) this._removeDrop(this._drops.shift()); // 超出上限先移除最旧的
+
+    const R = Config.DROP_RADIUS;
+    const yy = Math.max(y, R);
+    if (!this._dropGeo) this._dropGeo = new THREE.BoxGeometry(R * 1.7, R * 1.7, R * 1.7);
+    const color = new THREE.Color(this._itemColor(item));
+    const mat = new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.22, roughness: 0.55, metalness: 0.15,
+    });
+    const mesh = new THREE.Mesh(this._dropGeo, mat);
+    mesh.position.set(x, yy, z);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+
+    // 头顶名字牌（Sprite + Canvas 文字）：让所有人一眼看出丢的是什么
+    const label = new THREE.Sprite(this._dropLabelMaterial(item));
+    label.scale.set(1.7, 0.42, 1);
+    label.position.set(x, yy + 0.78, z);
+    this.scene.add(label);
+
+    this._drops.push({
+      item, x, y: yy, z,
+      vx: Number(o.vx) || 0, vy: Number(o.vy) || 0, vz: Number(o.vz) || 0,
+      resting: false, life: Config.DROP_LIFETIME, mesh, label,
+    });
+  }
+
+  // 物品名 → Sprite 材质（Canvas 文字贴图，按名字缓存共用；移除掉落物时不要释放它）
+  _dropLabelMaterial(item) {
+    let m = this._dropLabelMat.get(item);
+    if (m) return m;
+    let tex = this._dropLabelTex.get(item);
+    if (!tex) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 64;
+      const g = c.getContext('2d');
+      g.fillStyle = 'rgba(11,21,34,0.72)';
+      g.fillRect(0, 0, 256, 64);
+      g.font = 'bold 34px sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillStyle = '#ffffff';
+      g.fillText(item, 128, 34, 244);
+      tex = new THREE.CanvasTexture(c);
+      this._dropLabelTex.set(item, tex);
+    }
+    m = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    this._dropLabelMat.set(item, m);
+    return m;
+  }
+
+  // 移除一件掉落物（方块几何与名字牌材质是共用的，只释放每件自己的方块材质）
+  _removeDrop(d) {
+    if (!d) return;
+    if (d.mesh) { this.scene.remove(d.mesh); if (d.mesh.material) d.mesh.material.dispose(); }
+    if (d.label) this.scene.remove(d.label);
+  }
+
+  _clearDrops() {
+    for (const d of this._drops) this._removeDrop(d);
+    this._drops.length = 0;
+  }
+
+  // 掉落物物理：重力 → 落地弹跳 → 地面摩擦 → 静止；越界回弹；到寿命自动消失
+  _updateDrops(dt) {
+    if (!this._drops.length) return;
+    const R = Config.DROP_RADIUS;
+    const G = -24;
+    // 边界：对战中用竞技场半边长，大厅用世界地面范围
+    const bx = (this._combat ? Config.COMBAT_ARENA_HALF : Config.GROUND_WIDTH / 2) - R;
+    const bz = (this._combat ? Config.COMBAT_ARENA_HALF : Config.GROUND_DEPTH / 2) - R;
+    const t = this.clock.elapsedTime;
+    for (let i = this._drops.length - 1; i >= 0; i--) {
+      const d = this._drops[i];
+      d.life -= dt;
+      if (d.life <= 0) { this._removeDrop(d); this._drops.splice(i, 1); continue; }
+
+      if (!d.resting) {
+        d.vy += G * dt;
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+        d.z += d.vz * dt;
+        // 地面：速度还快就弹一下，慢下来则贴地并进入摩擦减速
+        if (d.y <= R) {
+          d.y = R;
+          if (Math.abs(d.vy) > 1.6) d.vy = -d.vy * 0.34;
+          else d.vy = 0;
+          d.vx *= 0.72;
+          d.vz *= 0.72;
+          if (d.vy === 0 && Math.abs(d.vx) < 0.18 && Math.abs(d.vz) < 0.18) { d.vx = 0; d.vz = 0; d.resting = true; }
+        }
+        // 边界回弹
+        if (d.x > bx) { d.x = bx; d.vx = -Math.abs(d.vx) * 0.45; }
+        else if (d.x < -bx) { d.x = -bx; d.vx = Math.abs(d.vx) * 0.45; }
+        if (d.z > bz) { d.z = bz; d.vz = -Math.abs(d.vz) * 0.45; }
+        else if (d.z < -bz) { d.z = -bz; d.vz = Math.abs(d.vz) * 0.45; }
+        // 翻滚：水平速度越快转得越快
+        const sp = Math.hypot(d.vx, d.vz);
+        d.mesh.rotation.x += sp * dt * 0.9;
+        d.mesh.rotation.z += sp * dt * 0.65;
+      }
+
+      d.mesh.position.set(d.x, d.y, d.z);
+      d.label.position.set(d.x, d.y + 0.78 + Math.sin(t * 2 + i) * 0.04, d.z); // 名字牌轻轻浮动
+    }
   }
 
   // 陨石模式每帧推进：房主按间隔生成，全场推进下落并结算落地伤害
@@ -3725,6 +3882,8 @@ export class Game {
 
     // 投掷物：推进飞行、命中/落地后结算范围伤害
     this._updateProjectiles(dt);
+    // 掉落物（丢弃的物品）：重力/弹跳/摩擦推进
+    this._updateDrops(dt);
     // 爆炸特效：推进动画
     this._updateFX(dt);
 

@@ -629,6 +629,26 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 丢弃物品：把物品以初始位置+初速度抛向前方，转发给同场其他人。
+    // 服务器不模拟，各端本地用同一套物理（重力/弹跳/摩擦）复现，因此落点一致。
+    if (msg.t === 'drop') {
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const item = String(msg.item || '').slice(0, 24);
+      if (!item) return;
+      const out = {
+        t: 'drop',
+        item,
+        x: num(msg.x, 0, -1000, 1000),
+        y: num(msg.y, 0, -100, 300),
+        z: num(msg.z, 0, -1000, 1000),
+        vx: num(msg.vx, 0, -80, 80),
+        vy: num(msg.vy, 0, -80, 80),
+        vz: num(msg.vz, 0, -80, 80),
+      };
+      roomBroadcast(ws.__room, out, ws);
+      return;
+    }
+
     // 驾驶员代报后座乘客：把乘客钉到驾驶位后方。乘客自己不再单独上报，
     // 用驾驶员的权威坐标统一校准，避免双方各自插值导致乘客相对车身乱抖。
     if (msg.t === 'veh') {
