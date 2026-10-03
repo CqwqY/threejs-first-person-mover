@@ -373,6 +373,12 @@ async function bake(gender) {
   }
 
   const outAnims = [];
+  // ⚠ 关键修复：alignM 把整套骨架绕 Y 旋了 θ 才贴合 Tripo 网格，但动画的「动作方向」也会被同步转 θ。
+  // 若不补偿，走路时「腿前后摆」会整体变成「侧向甩」（静止态 q_anim≈rest 看不出，一动就诡异 = 用户说的移动猎奇）。
+  // 修法：对动画局部旋转做 alignM 的共轭预旋转 qAlign·q_anim·qAlign⁻¹ ——
+  //   静止时恒等（q_anim=q_srcRest → 还原成 q_ourRest，不破坏对齐）；动作时把摆动轴旋回世界正确方向。
+  const qAlign = new THREE.Quaternion().setFromRotationMatrix(alignM);
+  const qAlignInv = qAlign.clone().invert();
   for (const want of WANT_CLIPS) {
     const anim = src.json.animations.find((a) => a.name === want);
     if (!anim) { console.warn(`[warn] 源里没有 ${want}`); continue; }
@@ -404,8 +410,9 @@ async function bake(gender) {
         const ARM_KEEP = 0.45;
         for (let k = 0; k < values.length; k += 4) {
           qa.set(values[k], values[k + 1], values[k + 2], values[k + 3]);
-          qa.premultiply(delta);
-          if (isArm) qa.slerp(qRestO, 1 - ARM_KEEP); // 拉回静止态，保留 55% 摆幅
+          qa.premultiply(qAlign).multiply(qAlignInv); // 共轭预旋转：抵消 alignM 把「动作方向」转 θ（修移动猎奇）
+          qa.premultiply(delta);                       // q_ourRest · q_srcRest⁻¹ · (对齐后的动画)
+          if (isArm) qa.slerp(qRestO, 1 - ARM_KEEP);   // 拉回静止态，保留 45% 摆幅
           outVals[k] = qa.x; outVals[k + 1] = qa.y; outVals[k + 2] = qa.z; outVals[k + 3] = qa.w;
         }
       } else { // translation

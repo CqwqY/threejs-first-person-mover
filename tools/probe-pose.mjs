@@ -6,6 +6,9 @@ globalThis.self = globalThis;
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { GLTFLoader } from '../node_modules/three/examples/jsm/loaders/GLTFLoader.js';
 
+process.on('uncaughtException', (e) => { console.error('UNCAUGHT:', (e && e.stack) || e); process.exit(1); });
+process.on('unhandledRejection', (e) => { console.error('UNHANDLED:', (e && (e.stack || e))); process.exit(1); });
+
 const file = process.argv[2];
 const buf = fs.readFileSync(file);
 const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
@@ -63,4 +66,4 @@ loader.parse(ab, '', (gltf) => {
       console.log(`    臂展(左手x-髋x)=${(lh.x - hips.x).toFixed(2)}  (右手x-髋x)=${(rh.x - hips.x).toFixed(2)}  手前后(左手z-髋z)=${(lh.z - hips.z).toFixed(2)}`);
     }
   }
-}, (e) => console.log('!! parse 失败:', e && (e.message || e)));
+}, (e) => console.log('!! parse 失败:', (e && (e.stack || e.message)) || e));
