@@ -1,7 +1,8 @@
 // 职责：定义玩家的“外观”。
 
 // 模型 = 人物 GLB（girl/boy，原模型自带正确贴图/UV）+ 头顶名牌。GLB 异步加载，加载前先用缩小版占位身体保证即时可见。
-// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制（模型正面朝 +X，转 90° 后朝 -Z）。
+// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制（原始 boy/girl.glb 肩膀沿 X、髋部沿 Z，
+// 正面朝 -Z；glTF 前进约定也是 -Z，所以 modelDeg=0 即正对移动方向，不再额外旋转）。
 //
 // 骨骼动画：用的是 `${gender}-rig.glb`（由 tools/auto-rig.mjs 离线生成）——
 //   网格沿用带贴图的原 GLB（UV/贴图一个字节没动，二进制手术追加骨骼），骨骼与蒙皮权重
@@ -40,8 +41,9 @@ function drawHpBar(ctx, ratio) {
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
 // modelDeg：模型整体视觉朝向，直接绕 Y 旋转最终模型（安全、不动骨架）。
-// 骨架是网格对齐过的（烘焙时已校正），不再需要额外的 skelDeg 反向补偿，字段保留只为兼容旧面板。
-const cfg = { modelDeg: 90, skelDeg: 0 };
+// 原始 boy/girl.glb 正面朝 -Z（与游戏前进约定一致），故 0 即可正对移动方向。
+// 若真机上发现角色「面朝后/倒着走」，把 0 改成 180（即朝 +Z）即可，无需其它改动。
+const cfg = { modelDeg: 0, skelDeg: 0 };
 const models = []; // 已创建模型条目 {group, gender, faceHolder, rig}
 
 // 把给定模型的朝向同步到当前 cfg 配置

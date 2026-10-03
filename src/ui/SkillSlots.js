@@ -321,9 +321,12 @@ export function createSkillSlots(opts = {}) {
   }
 
   // 切换手机排布（由设置面板调用）。grid 模式下轮盘整个退出舞台。
+  // 用运行时 isCoarsePointer() 重新判定（而不是加载时捕获的 coarse），
+  // 避免某些 WebView 在构造期误判为桌面、把切换永久锁死。
   function setMobileLayout(mode) {
     const m = mode === 'grid' ? 'grid' : 'wheel';
-    if (!coarse || m === mobileMode) return;
+    if (m === mobileMode) return;
+    if (!isCoarsePointer()) return; // 桌面端不套用手机排布
     mobileMode = m;
     if (wheel) wheel.style.display = 'none';
     applyBoxStyle();
