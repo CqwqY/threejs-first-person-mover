@@ -1497,22 +1497,32 @@ export class Game {
     const st = this.localState;
     const seats = this._vehicleSeats();
 
-    // 1) 车体：有人驾驶就跟驾驶员，否则回停放点
-    if (seats.driver) {
+    // 1) 停放点那辆车：有人**真的骑着它**就跟驾驶员走，否则回停放点。
+    //    ⚠ 校园狂飙「开赛自动发的那辆车」不算 —— 否则一开赛，校门口那辆车就被"骑"走了
+    //    （用户报「校门口的车车没了」）。狂飙的车走下面的池子，各画各的。
+    const localId = this.localState.id || '__local';
+    const raceGranted = !!(this._race && this.localState.ride === 1 && seats.driver === localId);
+    let mainDriver = null;
+    if (seats.driver && !raceGranted) {
       const d = this._playerStateById(seats.driver);
-      if (d) this.vehicle.setPose(d.x, d.y - Config.PLAYER_HEIGHT * (d.size || 1), d.z, d.yaw);
+      if (d) {
+        this.vehicle.setPose(d.x, d.y - Config.PLAYER_HEIGHT * (d.size || 1), d.z, d.yaw);
+        mainDriver = seats.driver;
+      } else {
+        this.vehicle.park();
+      }
     } else {
       this.vehicle.park();
     }
 
-    // 1.2) 其他骑手：每人各一辆车（多人同时骑时用，例如校园狂飙）。
+    // 1.2) 其他骑手（含开狂飙的本地玩家）：每人各一辆车（多人同时骑时用）。
     // 车体只是视觉，位置从各自的 player state 推出来 —— 所以「每人一辆」不用改网络协议
     // （ride / veh 本来就在状态广播里，远端玩家照样能看到你骑着车）。
     const inUse = new Set();
     const drawDriver = (id, s2) => {
       if (!s2 || s2.veh !== Config.VEHICLE_ID || s2.ride !== 1) return;
       inUse.add(id);
-      if (id === seats.driver) return; // 主车上面已经画过这一辆了
+      if (id === mainDriver) return; // 这辆已经由停放点那辆车画过了
       const v = this._vehFor(id);
       v.group.visible = true;
       v.setPose(s2.x, s2.y - Config.PLAYER_HEIGHT * (s2.size || 1), s2.z, s2.yaw);
@@ -4759,6 +4769,8 @@ export class Game {
     if (this.aiNpc) this.aiNpc.group.visible = false;
     if (this.merchant) this.merchant.group.visible = false;
     if (this.vehicle) this.vehicle.group.visible = false;
+    // 狂飙的池子车也一起藏（竞技场里不该出现它们；退出对战后由 _updateVehicle 按需重新露出来）
+    if (this._vehPool) for (const v of this._vehPool.values()) v.group.visible = false;
     if (this.boss && this.boss.group) this.boss.group.visible = false;
     if (this.boss && this.boss.portalGroup) this.boss.portalGroup.visible = false;
     this._syncBoundary(); // 边界让位：竞技场自带一圈墙，大厅边界在这局里不生效
