@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS = {
   shadowSize: 2048, // 阴影贴图边长（画质档会按档位覆盖此值）
   castShadow: true, // 阴影总开关
   quality: 'mid', // 画质档：high / mid / low（聚合控制阴影分辨率、dpr 封顶、阴影类型）
+  renderScale: 'auto', // 渲染分辨率：auto=自适应；'85'/'70' 等 = 钉死为该百分比（弱卡兜底）
   nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
   dayNight: true, // 是否开启昼夜循环
   dayCycle: 240, // 一昼夜时长（秒），越大变化越慢
@@ -65,6 +66,9 @@ const FIELDS = [
   { id: 'sunElev', label: '阳光高度角', kind: 'range', min: 0, max: 90, step: 1, editorOnly: true },
   { id: 'sunAz', label: '阳光方位角', kind: 'range', min: 0, max: 360, step: 1, editorOnly: true },
   { id: 'quality', label: '画质（聚合）', kind: 'select', options: ['low', 'mid', 'high'], gameOnly: true },
+  // 渲染分辨率：auto=自适应（掉帧自动降、富余自动升）；其余为钉死的百分比。
+  // 老卡/入门卡（如 GT 640）是真·填充率瓶颈，这一项比画质档更直接有效。
+  { id: 'renderScale', label: '渲染分辨率(卡顿先降它)', kind: 'select', options: ['auto', '100', '85', '70', '60', '50'], gameOnly: true },
   { id: 'viewFar', label: '视距', kind: 'range', min: 200, max: 1000, step: 10 },
   { id: 'shadowR', label: '阴影范围', kind: 'range', min: 15, max: 120, step: 1 },
   {
@@ -201,7 +205,11 @@ export function createSettingsPanel(binds, opts = {}) {
         'width:100%;background:var(--kui-paper);color:var(--kui-ink);' +
         'border:2px solid var(--kui-blue-dark);border-radius:10px;padding:3px 6px;font-family:var(--kui-font);';
       select.addEventListener('change', () => {
-        settings[f.id] = parseFloat(select.value);
+        // 非数字选项（如画质档的 'low'/'mid'、渲染分辨率的 'auto'）不能被 parseFloat 吃成 NaN ——
+        // 之前所有 select 都走 parseFloat，字符串档位存进去就成了 NaN（画质档因此等于没生效）。
+        const raw = select.value;
+        const num = parseFloat(raw);
+        settings[f.id] = isFinite(num) ? num : raw;
         applyOne(f.id, settings[f.id]);
         saveSettings(settings, storeKey);
       });

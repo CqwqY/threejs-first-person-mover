@@ -246,6 +246,9 @@ export class Game {
           this.camera.far = v;
           this.camera.updateProjectionMatrix();
         },
+        // 渲染分辨率：auto = 交给自适应（掉帧自动降、富余自动升）；
+        // 手动档则钉死该比例，不再自动调整（给知道自己机器极限的用户兜底）。
+        renderScale: (v) => this._setRenderScale(v),
         shadowR: (v) => {
           const cam = this._sun.shadow.camera;
           cam.left = -v;
@@ -276,7 +279,7 @@ export class Game {
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
       },
       {
-        fields: ['quality', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
+        fields: ['quality', 'renderScale', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -605,14 +608,36 @@ export class Game {
     return name;
   }
 
+  // 渲染分辨率设置项：'auto' 交给自适应；数字串（'80'）钉死为该百分比，不再自动调整。
+  _setRenderScale(v) {
+    const n = Number(v);
+    if (v === 'auto' || !isFinite(n) || n <= 0) {
+      this._autoScale = true;
+      this._dynScale = 1; // 自动模式从原生分辨率起步再往下探
+    } else {
+      this._autoScale = false;
+      this._dynScale = Math.max(0.4, Math.min(1, n / 100));
+    }
+    this._applyRenderScale();
+  }
+
+  // 把「画质档 dpr 封顶 × 自适应/手动系数」写到渲染器。
+  // 只改 drawingBuffer（setSize 第三参 false），不动 CSS 尺寸，否则布局会被撑变形。
+  // 传入 w/h 时同时更新 CSS 尺寸（窗口缩放用）；不传则只改 drawingBuffer（改分辨率用）。
+  _applyRenderScale(w, h) {
+    const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
+    this.renderer.setPixelRatio(base * (this._dynScale || 1));
+    this.renderer.setSize(w || window.innerWidth, h || window.innerHeight, !!(w && h));
+  }
+
   // 自适应分辨率：按实测真实帧率动态调整 pixelRatio。
   // 老卡/入门卡（如 640 级）是真·填充率瓶颈，画面分辨率是唯一有效杠杆 ——
   // 与其让用户手动调画质档，不如自动保帧率：掉帧就降，富余就慢慢升回。
   // 节流 1.5s：改 pixelRatio 会重建 drawingBuffer，频繁做本身就会卡顿。
   _adaptResolution(fps) {
+    if (this._autoScale === false) return; // 用户手钉了分辨率，不再自动干预
     const now = performance.now();
     if (now - this._dynLast < 1500) return;
-    const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
     let s = this._dynScale;
     if (fps < 45 && s > 0.6) s = Math.max(0.6, s - 0.2);
     else if (fps > 57 && s < 1) s = Math.min(1, s + 0.1);
@@ -620,9 +645,7 @@ export class Game {
     if (Math.abs(s - this._dynScale) < 0.01) return;
     this._dynScale = s;
     this._dynLast = now;
-    this.renderer.setPixelRatio(base * s);
-    // 只改 drawingBuffer，不动 CSS 尺寸（第三个参数 false），否则布局会被撑变形
-    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this._applyRenderScale();
   }
 
   _updatePerfHud(dt, physMs, renderMs, totalMs) {
@@ -842,9 +865,8 @@ export class Game {
     const h = vv && vv.height ? vv.height : window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    // dpr 封顶跟随画质档，再乘自适应系数（缩放/切画质档后都不能把它丢了）
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr) * (this._dynScale || 1));
-    this.renderer.setSize(w, h);
+    // dpr 封顶跟随画质档，再乘自适应/手动系数（缩放/切画质档后都不能把它丢了）
+    this._applyRenderScale(w, h); // 传尺寸 → 连 CSS 一起更新，避免窗口缩放后画布被拉伸
   }
 
   // 画质档：聚合控制阴影贴图分辨率 / dpr 封顶 / 阴影采样类型，一键降级提帧。
@@ -864,7 +886,8 @@ export class Game {
       }
     }
     this._qualityDpr = p.dpr;
-    this._dynScale = 1; // 画质档变了，自适应系数回满（重新从封顶值开始探测）
+    // 画质档变了：自动模式回满重新探测；手动模式保留用户钉的比例
+    if (this._autoScale !== false) this._dynScale = 1;
     this.renderer.shadowMap.type = p.type;
     this.renderer.shadowMap.needsUpdate = true; // 类型变了要重渲
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
