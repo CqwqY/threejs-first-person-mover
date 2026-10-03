@@ -4562,6 +4562,7 @@ export class Game {
     };
     this._raceHudShow(true);
     this._raceHudTick(true);
+    this._setTrackVisible(true); // 开赛才把赛道（路面 + 门框）露出来
     this._toast('出发！按顺序穿过 1 → ' + t.checkpoints.length + ' 号门，跑满 ' + t.laps + ' 圈');
   }
 
@@ -4569,6 +4570,7 @@ export class Game {
     if (!this._race) return;
     this._race = null;
     this._raceHudShow(false);
+    this._setTrackVisible(false); // 一结束就把赛道收回（含中途弃赛、被拉进对战）
     if (toastText) this._toast(toastText);
   }
 
@@ -4578,6 +4580,7 @@ export class Game {
     const ms = performance.now() - r.startedAt;
     this._race = null;
     this._raceHudShow(false);
+    this._setTrackVisible(false);
     const prev = this._raceBest();
     const isNew = !prev || ms < prev;
     if (isNew) this._raceSaveBest(ms);
@@ -4888,6 +4891,9 @@ export class Game {
     this._resetMatchStats(mode, roster);
     // 若正骑着电动车进对战，先下车（车不在竞技场里）
     if (this.localState.ride) this._dismountVehicle();
+    // 一进竞技场就结束狂飙：_updateRace 在对战中不再跑，不在这里收掉的话，
+    // 跑圈 HUD 与赛道可视化（路面 + 门框）会一路留到竞技场里。
+    if (this._race) this._exitRace(null);
 
     // 隐藏主世界景物与城市 NPC；碰撞体先快照再原地替换为竞技场
     if (this._cityRoots) for (const r of this._cityRoots) r.visible = false;
@@ -6027,8 +6033,16 @@ export class Game {
     }
     // 贝塞尔路面 + 中线 + 方向箭头（与编辑器预览共用同一份几何，见 world/TrackViz.js）
     group.add(buildTrackPath(t, { arrowCount: 16 }));
+    // 平时收起：校园里不该杵着一条路面 + 一排门框，只有「校园狂飙」进行中才露面。
+    // （编辑器那边同样是「只在赛道模式里显示」，两边口径一致。）
+    group.visible = !!this._race;
     this.scene.add(group);
     this._trackGroup = group;
+  }
+
+  // 赛道可视化（路面 + 中线 + 方向箭头 + 门框）的显隐。门框是实体网格，收起来后连影子一起没了。
+  _setTrackVisible(on) {
+    if (this._trackGroup) this._trackGroup.visible = !!on;
   }
 
   // 边界要同步到两处：① 物理夹取（真正挡人的是它）② 可选的可视半透明墙。
