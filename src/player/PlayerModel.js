@@ -3,10 +3,11 @@
 // 模型 = 人物 GLB（girl/boy，原模型自带正确贴图/UV）+ 头顶名牌。GLB 异步加载，加载前先用缩小版占位身体保证即时可见。
 // 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制（模型正面朝 +X，转 90° 后朝 -Z）。
 //
-// 骨骼动画：用的是 `${gender}-rig.glb`（由 tools/bake-player-rig.mjs 离线烘焙而来）——
-//   网格沿用带贴图的原 GLB（UV/贴图一个字节没动），骨骼与蒙皮权重取自 Mixamo 绑骨版 FBX，
-//   走/跑/待机动画是从 three.js 官方 Soldier.glb 重定向过来的（已做静止姿态修正与体型缩放）。
-//   旧的 AutoRig.js（靠顶点高度硬分区猜出来的启发式骨架）已删除——那套绑骨会让四肢绕错轴甩，属于屎山。
+// 骨骼动画：用的是 `${gender}-rig.glb`（由 tools/auto-rig.mjs 离线生成）——
+//   网格沿用带贴图的原 GLB（UV/贴图一个字节没动，二进制手术追加骨骼），骨骼与蒙皮权重
+//   基于 AABB 程序化生成，待机/走/跑动画也是同坐标系程序化生成（绕局部 X 摆腿=前后走）。
+//   彻底放弃 Mixamo 绑骨 + Soldier 动画重定向（那套跨骨架比例/朝向不匹配导致侧躺/外撇/猎奇）。
+//   旧的 AutoRig.js（靠顶点高度硬分区猜骨架）与 bake-player-rig.mjs（Mixamo 路线）均已弃用。
 import * as THREE from 'three';
 import { instantiate, instantiateRigged } from '../world/AssetLoader.js';
 import { Config } from '../config.js';
