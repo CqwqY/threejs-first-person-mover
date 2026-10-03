@@ -1600,11 +1600,11 @@ export class Game {
 
     let cx = null;
     let cy = null;
+    const { width: vw, height: vh } = viewportSize();
     // 用户是否在「画面元素」里摆过攻击键？（按横竖屏分别存，跟技能槽同一套）
     const conf = readLayout(currentMode()) || {};
     const p = conf.attack;
     if (p && Number.isFinite(p.cx) && Number.isFinite(p.cy)) {
-      const { width: vw, height: vh } = viewportSize();
       cx = p.cx * vw;
       cy = p.cy * vh;
     }
@@ -1615,7 +1615,6 @@ export class Game {
       cy = jr.top - gap - r.height / 2;
     }
     // 夹进屏幕，避免按钮被挤出可视区
-    const { width: vw, height: vh } = viewportSize();
     cx = Math.max(4 + r.width / 2, Math.min(vw - 4 - r.width / 2, cx));
     cy = Math.max(4 + r.height / 2, Math.min(vh - 4 - r.height / 2, cy));
     el.style.left = Math.round(cx - r.width / 2) + 'px';
