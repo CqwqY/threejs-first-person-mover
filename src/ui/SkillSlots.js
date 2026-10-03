@@ -9,6 +9,7 @@
 // 物品可被「指定」到某个具体槽位（背包里选槽位后点使用即可）。
 import { ensureTheme } from './theme.js';
 import { onRelayout, viewportSize, readLayout, currentMode } from './layout.js';
+import { isCoarsePointer } from '../util/isCoarse.js';
 
 export const SKILL_KEYS = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8'];
 export const SLOT_COUNT = SKILL_KEYS.length;
@@ -26,9 +27,9 @@ export function createSkillSlots(opts = {}) {
   const dropModifier = opts.dropModifier || 'KeyY';
   const gestureMs = Number.isFinite(opts.gestureMs) ? opts.gestureMs : 320;
   const gestureDy = Number.isFinite(opts.gestureDy) ? opts.gestureDy : 42;
-  const coarse =
-    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-    'ontouchstart' in window;
+  // 触屏判定：统一走 isCoarsePointer()（多信号 OR，覆盖 WebView / Capacitor / 真机），
+  // 否则手机专属的轮盘/两列排布整段被跳过（设置里切了没反应）。
+  const coarse = isCoarsePointer();
 
   // 手机端两种排布：
   //   wheel = 只留「当前技能」一颗按钮，向外拖出扇形轮盘选技能（省地方，但要两步操作）

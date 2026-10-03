@@ -10,6 +10,7 @@
 import { Config } from '../config.js';
 import { onRelayout, viewportSize } from './layout.js';
 import { ensureTheme } from './theme.js';
+import { isCoarsePointer } from '../util/isCoarse.js';
 
 // 模块级持有者：把「清触摸残留」暴露给重排逻辑，旋转/地址栏变化时调用
 let _resetTouchState = null;
@@ -19,9 +20,9 @@ export function resetTouchState() {
 
 export function initMobileControls(input, opts = {}) {
   ensureTheme(); // 配色/字体统一取自主题变量，本模块不再自带一套颜色
-  const coarse =
-    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-    'ontouchstart' in window;
+  // 触屏判定：统一走 isCoarsePointer()（多信号 OR，覆盖 WebView / Capacitor / 真机），
+  // 否则移动摇杆（轮盘）+ 左右触控区（两列）整段不创建。
+  const coarse = isCoarsePointer();
   if (!coarse) return;
 
   // 纯布局样式（一次性注入）：摇杆与视角区的定位/尺寸/触控区属于行为依赖，必须留在这里。

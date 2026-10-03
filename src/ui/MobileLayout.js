@@ -12,6 +12,7 @@ import {
   forceRelayout, resetLayout, setLayoutPaused, viewportSize, snapshotEl,
 } from './layout.js';
 import { ensureTheme } from './theme.js';
+import { isCoarsePointer } from '../util/isCoarse.js';
 
 const MARGIN = 4;
 
@@ -19,9 +20,7 @@ const MARGIN = 4;
 // 非触屏设备直接返回 null（调用方据此跳过接线）。
 export function initMobileLayout() {
   ensureTheme(); // 配色/字体统一取自主题变量，本模块不再自带一套颜色
-  const coarse =
-    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-    'ontouchstart' in window;
+  const coarse = isCoarsePointer();
   if (!coarse) return null;
 
   // 纯布局样式（一次性注入）：自适应尺寸与编辑态顶栏是行为依赖，必须留在这里。

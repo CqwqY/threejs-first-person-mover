@@ -18,6 +18,7 @@ import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSce
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
+import { isCoarsePointer } from '../util/isCoarse.js';
 import { judge, spawnForMode, trainingScore, formatClock, bestKey, parseBest, isBetter, modeRule } from '../game/MatchRules.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { raycastWorld, moveSphereWorld } from '../world/collision/worldQuery.js';
@@ -250,10 +251,9 @@ export class Game {
     window.addEventListener('resize', () => this._onResize());
 
     // 触屏判定：设置面板要不要带「画面元素」区块、顶部按钮排布、载具按键提示都要用，
-    // 所以在这里就算一次（后面 _vehKeyHint / _coarsePointer 直接复用，别再各判一份）
-    const coarsePointer =
-      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-      'ontouchstart' in window;
+    // 所以在这里就算一次（后面 _vehKeyHint / _coarsePointer 直接复用，别再各判一份）。
+    // 统一走 isCoarsePointer()（多信号 OR，覆盖 WebView / Capacitor / 真机）。
+    const coarsePointer = isCoarsePointer();
     this._coarsePointer = coarsePointer; // 提前落定：顶部按钮排布 / 准星 / 攻击键都要读它
 
     // ---- 设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
@@ -1702,7 +1702,7 @@ export class Game {
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '拾取';
     // PC 上光标被指针锁定，点不到 DOM 按钮，所以在按钮上标出快捷键
-    this._pickupKeySuffix = ('ontouchstart' in window) ? '' : (' (' + Config.PICKUP_KEY.slice(-1) + ')');
+    this._pickupKeySuffix = (isCoarsePointer()) ? '' : (' (' + Config.PICKUP_KEY.slice(-1) + ')');
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();

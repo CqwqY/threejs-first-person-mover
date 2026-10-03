@@ -5,6 +5,7 @@
 // 消息一律用 textContent 渲染（纯文本，不解析任何标记），因此天然免疫注入。
 import { ensureTheme } from './theme.js';
 import { viewportSize } from './layout.js';
+import { isCoarsePointer } from '../util/isCoarse.js';
 
 const SEND_MAX = 60;      // 自己发出去的字数上限（服务端另有 80 字硬上限）
 const DISPLAY_MAX = 120;  // 别人发来的字数上限（只是兜底，服务端已经截到 80）
@@ -34,7 +35,7 @@ export function createChatBox(opts = {}) {
   // 注意不能用 Number.isFinite 判——那对 boolean 返回 false，会把 true 当成「没传」。
   const coarse = typeof opts.coarse === 'boolean'
     ? opts.coarse
-    : ((window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window);
+    : isCoarsePointer();
   const logMax = Number.isFinite(opts.logMax) ? Math.max(1, opts.logMax) : LOG_MAX;
   const lineLife = (Number.isFinite(opts.lineLife) ? opts.lineLife : LINE_LIFE) * 1000;
   const fadeMs = (Number.isFinite(opts.fade) ? opts.fade : LINE_FADE) * 1000;
