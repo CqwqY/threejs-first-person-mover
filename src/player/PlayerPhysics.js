@@ -35,9 +35,6 @@ export class PlayerPhysics {
     // 场地边界（空气墙）：null = 用 Config.GROUND_* 推导的默认矩形。
     // 由 Game 在拉到编辑器保存的 boundary 后注入，四边独立，可不对称于原点。
     this.bound = null;
-    // 抓钩绳索约束（大世界荡秋千）：{x,y,z 锚点, len 绳长}。设了就每帧把玩家限制在球面内，
-    // 并吃掉朝外（拉紧绳子）的径向速度、只留切向 → 自然钟摆。由 Game 在摆荡期间每帧写入。
-    this.rope = null;
   }
 
   // 移动模式对应的基础速度系数：走路 1、奔跑 1.6、游泳 0.6、飞行 1.2
@@ -159,29 +156,6 @@ export class PlayerPhysics {
       state.x += this.velocity.x * dt;
       state.y += this.velocity.y * dt;
       state.z += this.velocity.z * dt;
-    }
-
-    // ---- 5.4 抓钩绳索约束（大世界荡秋千）：把玩家限制在锚点 len 米内，并去掉朝外的径向速度 ----
-    // 「位置投射 + 去径向速度」= 钟摆：绳绷紧后只能沿切向运动，配合重力自然摆动。
-    // 刻意放在碰撞解算之前：万一绳把人拉进墙里，紧接着的碰撞仍能把人推出来（碰撞优先）。
-    if (this.rope) {
-      const dx = state.x - this.rope.x;
-      const dy = state.y - this.rope.y;
-      const dz = state.z - this.rope.z;
-      const d = Math.hypot(dx, dy, dz);
-      if (d > this.rope.len && d > 1e-4) {
-        const k = this.rope.len / d;
-        state.x = this.rope.x + dx * k;
-        state.y = this.rope.y + dy * k;
-        state.z = this.rope.z + dz * k;
-        const nx = dx / d, ny = dy / d, nz = dz / d;
-        const vn = this.velocity.x * nx + this.velocity.y * ny + this.velocity.z * nz;
-        if (vn > 0) { // 只吃掉朝外（把绳拉长）的那一半速度，切向保留 → 摆荡
-          this.velocity.x -= vn * nx;
-          this.velocity.y -= vn * ny;
-          this.velocity.z -= vn * nz;
-        }
-      }
     }
 
     // ---- 5.5 世界碰撞体碰撞：水平方向把玩家挡在 AABB 之外（simple 碰撞体，行为不变）----

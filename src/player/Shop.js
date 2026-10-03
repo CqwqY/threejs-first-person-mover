@@ -47,7 +47,7 @@ export const SHOP_ITEMS = [
     id: 'grapple',
     name: '抓钩',
     price: 160,
-    desc: '朝准星甩出钩爪（短按发射 / 长按瞄准、松手发射）。勾住后吊在绳上摆荡，再点一下收绳把自己拉过去。',
+    desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去；空中再按一次即可松手。',
     effect: { k: 'grapple' },
   },
 ];

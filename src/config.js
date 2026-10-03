@@ -219,13 +219,6 @@ export const Config = {
   GRAPPLE_THROW_UP: 9,            // 钩中人时附加的向上速度（米/秒）
   GRAPPLE_CATCH_ARC: 18,          // 钩人的判定张角（度，以准星为中轴）
   GRAPPLE_CATCH_DY: 2.8,          // 钩人允许的高度差（米）
-
-  // ---- 大世界抓钩（系绳摆荡，仅大世界；对战「疯狂抓钩」不受影响）----
-  GRAPPLE_AIM_HOLD_MS: 220,       // 按住攻击键超过它算「长按=瞄准」；松手才发射；短按直接发射
-  GRAPPLE_SWING_TAUT: 0.98,       // 绳长 = 挂钩时「玩家→锚点」距离 × 它（略绷紧，摆荡更跟手）
-  GRAPPLE_SWING_MIN_LEN: 3,       // 绳长下限（米）：太短会原地打转
-  GRAPPLE_REEL_STOP: 1.7,         // 「勾过去」收绳到离锚点这么近就松钩（米）
-  GRAPPLE_REEL_MAX_TIME: 3,       // 收绳最长持续（秒），兜底防卡住
   // 疯狂抓钩：每根柱子顶上飘一颗光点，准星对上去按攻击就飞过去（不用再精确勾几何）
   GRAPPLE_BEACON_Y: 1.0,          // 光点中心相对柱顶的高度（米，也是抓钩的锚点）
   GRAPPLE_BEACON_ARC: 20,         // 瞄准光点的判定张角（度，以准星为中轴）
