@@ -56,6 +56,15 @@ export function initMobileControls(input, opts = {}) {
       border-radius:50%;border:1px solid color-mix(in srgb, var(--kui-blue-soft) 45%, transparent)}
     .mc-knob{position:absolute;left:50%;top:50%;width:54px;height:54px;transform:translate(-50%,-50%);
       border-radius:50%;background:color-mix(in srgb, var(--kui-blue) 72%, transparent);box-shadow:var(--kui-shadow)}
+    /* 开车时摇杆变「前进油门键」：不再是模拟摇杆，按下去就是全油门（见 setDriving / 指针处理）。
+       中央那个「油门」字样只在驾驶时露出来（此时滑块被顶到上方，中央是空的）。 */
+    .mc-joy .mc-joy-lbl{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+      font:600 clamp(12px,3.4vmin,15px)/1 var(--kui-font);color:var(--kui-paper);
+      letter-spacing:2px;opacity:0;pointer-events:none}
+    .mc-joy.is-throttle{border-color:color-mix(in srgb, var(--kui-gold) 80%, transparent);
+      background:color-mix(in srgb, var(--kui-gold) 16%, transparent)}
+    .mc-joy.is-throttle .mc-knob{background:color-mix(in srgb, var(--kui-gold) 82%, transparent)}
+    .mc-joy.is-throttle .mc-joy-lbl{opacity:.95}
     .mc-jump{position:fixed;right:20px;bottom:calc(env(safe-area-inset-bottom, 0px) + 24px);
       width:72px;height:72px;border-radius:50%;z-index:51;
       display:flex;align-items:center;justify-content:center;color:var(--kui-paper);
@@ -135,18 +144,30 @@ export function initMobileControls(input, opts = {}) {
     return b;
   };
   mkDriveBtn('◀', 'KeyA');   // 左转
+  mkDriveBtn('倒', 'KeyS');   // 倒车（摇杆改成了前进油门键，倒车挪到这里，功能不丢）
   mkDriveBtn('刹', 'Space'); // 刹车（骑乘时空格就是刹车）
   mkDriveBtn('▶', 'KeyD');   // 右转
   document.body.appendChild(drivePad);
 
-  // 进出驾驶：藏「跳」露驾驶键组；退出时把可能卡住的虚拟键一并清掉
+  // 进出驾驶：藏「跳」露驾驶键组；摇杆切成「前进油门键」；退出时把可能卡住的虚拟键一并清掉
+  let driving = false; // 是否在开车（决定左下摇杆是「模拟摇杆」还是「前进油门键」）
   const setDriving = (on) => {
-    drivePad.style.display = on ? 'flex' : 'none';
-    jumpBtn.style.display = on ? 'none' : '';
-    if (!on) {
+    driving = !!on;
+    drivePad.style.display = driving ? 'flex' : 'none';
+    jumpBtn.style.display = driving ? 'none' : '';
+    base.classList.toggle('is-throttle', driving);
+    if (driving) {
+      // 进驾驶先复位：不要让上一轮残留的摇杆轴向继续当油门
+      knob.style.transform = '';
+      input.setJoystick(0, 0);
+    } else {
       input.setVirtualKey('KeyA', false);
       input.setVirtualKey('KeyD', false);
+      input.setVirtualKey('KeyS', false);
       input.setVirtualKey('Space', false);
+      joyId = null;
+      knob.style.transform = '';
+      input.setJoystick(0, 0);
     }
   };
 
@@ -193,6 +214,11 @@ export function initMobileControls(input, opts = {}) {
   const knob = document.createElement('div');
   knob.className = 'mc-knob';
   base.appendChild(knob);
+  // 「油门」字样：只在开车时露出来（此时滑块被顶到上方，中央正好空着）
+  const joyLbl = document.createElement('div');
+  joyLbl.className = 'mc-joy-lbl';
+  joyLbl.textContent = '油门';
+  base.appendChild(joyLbl);
   zone.appendChild(base);
   document.body.appendChild(zone);
 
@@ -211,7 +237,9 @@ export function initMobileControls(input, opts = {}) {
       dx = (dx / len) * RADIUS;
       dy = (dy / len) * RADIUS;
     }
-    knob.style.transform = `translate(${dx}px,${dy}px)`;
+    // ⚠ 必须带上 CSS 里的 -50%,-50% 居中分量：inline transform 会整条覆盖类里的 transform，
+    // 少写这一截滑块会整体偏右下半格（约 27px），按下时「跳」一下。
+    knob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
     // x 右正、y 前正（屏幕上移为前进）
     input.setJoystick(dx / RADIUS, -dy / RADIUS);
   };
@@ -228,16 +256,41 @@ export function initMobileControls(input, opts = {}) {
     cy = r.top + r.height / 2;
   };
 
+  // 开车时摇杆 = 「前进油门键」：按下即全油门、松开回零。走的是**同一条摇杆输入通道**
+  // （setJoystick(0,1) 与「把摇杆前推到底」等价），所以驾驶逻辑一行都不用改。
+  // 不做模拟拖动：另一只手在管左右转向，拖摇杆很难拖稳，按一下更跟手。
+  const pressThrottle = () => {
+    input.setJoystick(0, 1);
+    // 视觉上把滑块顶到最前（同样要保留 -50% 居中分量）
+    knob.style.transform = `translate(-50%, calc(-50% - ${RADIUS}px))`;
+  };
+  const releaseThrottle = (e) => {
+    if (e.pointerId !== joyId) return;
+    joyId = null;
+    input.setJoystick(0, 0);
+    knob.style.transform = '';
+  };
+
   zone.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     joyId = e.pointerId;
     zone.setPointerCapture(e.pointerId);
+    if (driving) { pressThrottle(); return; } // 开车：按下就是油门，不做摇杆拖动
     refreshCenter();
     joyDrag(e);
   });
-  zone.addEventListener('pointermove', joyDrag);
-  zone.addEventListener('pointerup', joyEnd);
-  zone.addEventListener('pointercancel', joyEnd);
+  zone.addEventListener('pointermove', (e) => {
+    if (driving) return; // 开车时忽略拖动，避免手指滑动被当成倒车
+    joyDrag(e);
+  });
+  zone.addEventListener('pointerup', (e) => {
+    if (driving) { releaseThrottle(e); return; }
+    joyEnd(e);
+  });
+  zone.addEventListener('pointercancel', (e) => {
+    if (driving) { releaseThrottle(e); return; }
+    joyEnd(e);
+  });
 
   // ---- 右侧视角拖动 ----
   const look = document.createElement('div');
@@ -283,9 +336,10 @@ export function initMobileControls(input, opts = {}) {
     knob.style.transform = '';
     input.setJoystick(0, 0);
     input.setJumpHeld(false);
-    // 驾驶虚拟键也一起清（旋转/重排时最容易被落下，表现为「车一直自己转」）
+    // 驾驶虚拟键也一起清（旋转/重排时最容易被落下，表现为「车一直自己转」/「一直倒车」）
     input.setVirtualKey('KeyA', false);
     input.setVirtualKey('KeyD', false);
+    input.setVirtualKey('KeyS', false);
     input.setVirtualKey('Space', false);
   };
 

@@ -1468,8 +1468,10 @@ export class Game {
     phys.canJump = false;      // 骑乘时不能跳
     if (seat === 1) {
       phys.speedMult = Config.VEHICLE_SPEED / Config.MOVE_SPEED; // 兜底：真实速度由 LocalPlayer._driveVehicle 接管
-      if (this.mobileControls) this.mobileControls.setDriving(true); // 手机：把「跳」换成 左转/刹车/右转
-      this._toast('已上车（驾驶位）：W / 前推前进 · 左右转向 · ' + (this._coarsePointer ? '刹车键' : '空格') + '刹车');
+      if (this.mobileControls) this.mobileControls.setDriving(true); // 手机：把「跳」换成 左转/倒车/刹车/右转，摇杆变油门键
+      this._toast(this._coarsePointer
+        ? '已上车（驾驶位）：按住左下「油门」前进 · ◀ ▶ 转向 · 刹 刹车 · 倒 后退'
+        : '已上车（驾驶位）：W/S 前进后退 · A/D 转向 · 空格刹车');
     } else {
       this._vehDriver = driverId || null;
       phys.controlLock = true; // 后座不参与操控
