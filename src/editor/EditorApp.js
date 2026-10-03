@@ -18,6 +18,10 @@ import {
   defaultBoundary, normalizeBoundary, boundaryWallSpecs, boundarySpan,
   BOUNDARY_THICKNESS, BOUNDARY_MIN_SPAN,
 } from '../world/Boundary.js';
+// 赛道（校园狂飙）：与游戏运行时共用同一份数据/几何/判定，见 world/Track.js
+import {
+  defaultTrack, normalizeTrack, gateSpecs, trackSummary, TRACK_GATE_W_DEF,
+} from '../world/Track.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
@@ -199,6 +203,11 @@ export function createEditor() {
     boundary: defaultBoundary(),
     boundaryFocus: true, // 边界模式：只显示边界（把模型/景物/光源藏起来，看得更清）
     boundaryDrag: null,  // 正在拖的边界手柄 { kind:'edge'|'corner', side?/keys? }
+    // 赛道（校园狂飙）：在「赛道」模式里编辑，随场景一起保存为 track 字段
+    track: defaultTrack(),
+    trackFocus: true,   // 赛道模式：只显示赛道（把模型/景物/光源藏起来，看得清）
+    trackDrag: null,    // 正在拖的门索引（null = 没在拖）
+    trackSel: -1,       // 当前选中的门（右侧列表与 3D 高亮共用；-1 = 没选）
   };
   // 物体 id：全局唯一的纯数字 id，随场景一起保存/还原。
   // 编号顺序：景物先按 buildScenery 顺序占 1..N（key 固定 → id 固定），摆放物体接续往后排。
@@ -274,6 +283,17 @@ export function createEditor() {
     bFrame: document.getElementById('bFrame'),
     bFit: document.getElementById('bFit'),
     bShrink: document.getElementById('bShrink'),
+    btnTrack: document.getElementById('tTrack'),
+    trackPanel: document.getElementById('trackPanel'),
+    tkInfo: document.getElementById('tkInfo'),
+    tkHint: document.getElementById('tkHint'),
+    tkName: document.getElementById('tkName'),
+    tkLaps: document.getElementById('tkLaps'),
+    tkFocus: document.getElementById('tkFocus'),
+    tkList: document.getElementById('tkList'),
+    tkFrame: document.getElementById('tkFrame'),
+    tkDel: document.getElementById('tkDel'),
+    tkClear: document.getElementById('tkClear'),
     btnEmptyCollider: document.getElementById('btnEmptyCollider'),
     cStep: document.getElementById('cStep'),
     cMax: document.getElementById('cMax'),
@@ -551,6 +571,7 @@ export function createEditor() {
   // 退出边界模式：所有东西无条件恢复可见（它们原本都是可见的）
   function restoreAllVisible() {
     state.boundaryFocus = false;
+    state.trackFocus = false;
     for (const rec of state.placed) if (rec.obj) rec.obj.visible = true;
     for (const rec of state.scenery) if (rec.obj) rec.obj.visible = true;
     for (const rec of state.lights) {
@@ -1314,6 +1335,8 @@ export function createEditor() {
     if (e.button !== 0) return;
     // 边界模式：点/拖边界板与角球由自己处理，不走「点选模型」那套
     if (state.mode === 'bound') { onBoundaryDown(e); return; }
+    // 赛道模式：点地面加门 / 拖门由自己处理
+    if (state.mode === 'track') { onTrackDown(e); return; }
     downPt = { x: e.clientX, y: e.clientY };
     dragged = false;
     if (tCtl.axis) return; // 正在拖 3D 轴，交给 TransformControls
@@ -1334,6 +1357,8 @@ export function createEditor() {
     if (state.mode === 'ruler') { onRulerMove(e.clientX, e.clientY); return; }
     // 边界模式：拖动中改边界；没在拖则只做悬停高亮
     if (state.mode === 'bound') { onBoundaryMove(e); return; }
+    // 赛道模式：拖动中挪门；没在拖则只做悬停高亮
+    if (state.mode === 'track') { onTrackMove(e); return; }
     // 幽灵跟随（放置模式）
     if (state.mode === 'place' && state.ghost) {
       const p = groundPos(e.clientX, e.clientY, hit);
@@ -1350,6 +1375,7 @@ export function createEditor() {
   renderer.domElement.addEventListener('pointerup', (e) => {
     // 边界拖动结束：无论如何都要收尾（否则视角控件会一直停在禁用状态）
     if (state.mode === 'bound') onBoundaryUp();
+    if (state.mode === 'track') onTrackUp();
     if (e.button !== 0) return;
     if (orbitLocked) { controls.enabled = true; orbitLocked = false; }
     downPt = null;
@@ -1986,6 +2012,9 @@ export function createEditor() {
       // 场地边界（空气墙）：游戏运行时读这份数据决定玩家能走到哪；
       // 不写这个字段时游戏用地面范围兜底，所以旧存档一样能跑。
       boundary: { ...state.boundary },
+      // 赛道（校园狂飙）：游戏「校园狂飙」玩法读这份数据决定门的位置与圈数。
+      // 不写该字段时游戏用默认演示赛道兜底，所以旧存档一样能跑。
+      track: { ...state.track, checkpoints: state.track.checkpoints.map((c) => ({ ...c })) },
       // 游戏景物：保存每个可编辑景物（地形/道路/墙体/树/建筑…）的变换，key 为统一下标
       scenery: state.scenery.map((rec) => {
         const s = normScale(rec.scale ?? rec.obj.scale);
@@ -2144,10 +2173,15 @@ export function createEditor() {
     // 4) 读回场地边界（空气墙）。旧存档没这个字段 → 保持默认（地面范围），行为不变。
     const bnd = normalizeBoundary(data && data.boundary);
     if (bnd) state.boundary = bnd;
+    // 赛道：存档里没有 track 字段就保持当前（默认演示赛道）
+    const trk = normalizeTrack(data && data.track);
+    if (trk) state.track = trk;
+    state.trackSel = -1;
 
     outlinerUpdate();
     syncLightPanel();
     refreshBoundaryViz(); // 边界可视化与面板数值跟着存档刷新
+    refreshTrackViz();     // 赛道可视化与面板数值同样跟着存档刷新
   }
 
   // 「保存场景」：把当前用户摆放清单 POST 到服务器写入编辑器场景文件
@@ -2401,6 +2435,240 @@ export function createEditor() {
     });
   });
 
+  // ---------- 赛道（校园狂飙）----------
+  // 赛道 = 一串「有序的门」，车手按 1→2→…→N 的顺序穿过；数据/几何/判定都在 world/Track.js，
+  // 与游戏运行时共用同一份（跟「边界」一个套路，见上）。
+  // 编辑入口：工具栏「赛道」→ 左键点地面加门 / 拖门移动 / 右键拖拽转视角 / 右侧面板改圈数与删除。
+  const trackGroup = new THREE.Group();
+  trackGroup.name = 'editor-track';
+  trackGroup.visible = false;
+  scene.add(trackGroup);
+
+  const TK_COLOR = 0xffc14d;        // 普通门（琥珀）
+  const TK_START_COLOR = 0x5ddc7a;  // 起终点 = 0 号门（绿）
+  const TK_SEL_COLOR = 0x4ea1ff;    // 选中（蓝）
+  const tkPickerMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false });
+
+  // 编号牌贴图：同样的「数字 + 是不是起点」只画一次，之后就复用（拖门时每帧都要用它）
+  const tkTexCache = new Map();
+  function tkNumberTexture(n, isStart) {
+    const key = n + (isStart ? 's' : '');
+    if (tkTexCache.has(key)) return tkTexCache.get(key);
+    const cv = document.createElement('canvas');
+    cv.width = 128; cv.height = 128;
+    const c2 = cv.getContext('2d');
+    c2.fillStyle = isStart ? 'rgba(24,86,44,.92)' : 'rgba(10,20,34,.88)';
+    c2.beginPath();
+    c2.arc(64, 64, 52, 0, Math.PI * 2);
+    c2.fill();
+    c2.lineWidth = 7;
+    c2.strokeStyle = isStart ? '#5ddc7a' : '#ffc14d';
+    c2.stroke();
+    c2.fillStyle = '#fff';
+    c2.font = 'bold 66px sans-serif';
+    c2.textAlign = 'center';
+    c2.textBaseline = 'middle';
+    c2.fillText(String(n), 64, 68);
+    const tex = new THREE.CanvasTexture(cv);
+    tkTexCache.set(key, tex);
+    return tex;
+  }
+
+  // 一个门的可视化：两根柱子 + 横梁 + 隐形拾取体 + 头顶编号牌（尺寸都靠 scale 改，拖拽时不重建几何）
+  function mkTrackGate() {
+    const g = new THREE.Group();
+    const mkMat = () => new THREE.MeshBasicMaterial({ color: TK_COLOR, transparent: true, opacity: 0.85, depthTest: false });
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const postL = new THREE.Mesh(box, mkMat());
+    const postR = new THREE.Mesh(box, mkMat());
+    const bar = new THREE.Mesh(box, mkMat());
+    const pick = new THREE.Mesh(box, tkPickerMat);
+    for (const m of [postL, postR, bar]) { m.renderOrder = 996; g.add(m); }
+    pick.renderOrder = 995;
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false }));
+    label.renderOrder = 999;
+    g.add(pick);
+    g.add(label);
+    g.userData = { postL, postR, bar, pick, label };
+    trackGroup.add(g);
+    return g;
+  }
+  const tkGates = []; // 池子：长度始终与门数一致
+
+  function syncTrackPanel() {
+    const t = state.track;
+    if (!StepUI.tkInfo) return;
+    const s = trackSummary(t);
+    if (StepUI.tkName && document.activeElement !== StepUI.tkName) StepUI.tkName.value = t.name;
+    if (StepUI.tkLaps && document.activeElement !== StepUI.tkLaps) StepUI.tkLaps.value = String(t.laps);
+    if (StepUI.tkFocus) StepUI.tkFocus.checked = !!state.trackFocus;
+    StepUI.tkInfo.textContent = '共 ' + s.gates + ' 个门 · ' + s.laps + ' 圈 · '
+      + (s.gates >= 2 ? '可以开赛' : '至少要有 2 个门才能开赛');
+    const list = StepUI.tkList;
+    if (list) {
+      list.textContent = ''; // 不用 innerHTML，逐行建节点
+      if (!t.checkpoints.length) {
+        const empty = document.createElement('div');
+        empty.style.color = '#7f8b99';
+        empty.textContent = '还没有门：左键点地面添加。';
+        list.appendChild(empty);
+      }
+      t.checkpoints.forEach((c, i) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'cursor:pointer;padding:2px 5px;border-radius:4px;'
+          + (state.trackSel === i ? 'background:rgba(78,161,255,.28);color:#fff;' : '');
+        row.textContent = (i + 1) + '.   X ' + c.x.toFixed(1) + '   Z ' + c.z.toFixed(1);
+        row.onclick = () => { state.trackSel = i; refreshTrackViz(); };
+        list.appendChild(row);
+      });
+    }
+    if (StepUI.tkHint) {
+      StepUI.tkHint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 右键拖拽转视角 · 第 1 个门同时也是起终点';
+    }
+  }
+
+  // 赛道变化后统一刷新：3D 可视化 + 面板（拖拽 / 手填 / 按钮都汇聚到这里）
+  function refreshTrackViz() {
+    const specs = gateSpecs(state.track);
+    while (tkGates.length < specs.length) tkGates.push(mkTrackGate());
+    while (tkGates.length > specs.length) trackGroup.remove(tkGates.pop());
+    specs.forEach((sp, i) => {
+      const g = tkGates[i];
+      const u = g.userData;
+      g.position.set(sp.x, sp.y, sp.z);
+      // 本地 +X 对齐门的横向：世界 (rx,rz) = (dz,-dx) → rotation.y = atan2(dx, dz)
+      g.rotation.y = Math.atan2(sp.dx, sp.dz);
+      u.postL.position.set(-sp.w / 2, sp.h / 2, 0);
+      u.postL.scale.set(0.45, sp.h, 0.45);
+      u.postR.position.set(sp.w / 2, sp.h / 2, 0);
+      u.postR.scale.set(0.45, sp.h, 0.45);
+      u.bar.position.set(0, sp.h, 0);
+      u.bar.scale.set(sp.w + 0.45, 0.45, 0.45);
+      u.pick.position.set(0, sp.h / 2, 0);
+      u.pick.scale.set(Math.max(2, sp.w), sp.h, 1.6);
+      u.pick.userData.trackGate = i;
+      const sel = state.trackSel === i;
+      const col = sel ? TK_SEL_COLOR : (i === 0 ? TK_START_COLOR : TK_COLOR);
+      for (const m of [u.postL, u.postR, u.bar]) {
+        m.material.color.setHex(col);
+        m.material.opacity = sel ? 1 : 0.85;
+      }
+      u.label.position.set(0, sp.h + 1.5, 0);
+      u.label.scale.set(2.6, 2.6, 1);
+      u.label.material.map = tkNumberTexture(i + 1, i === 0);
+      u.label.material.needsUpdate = true;
+    });
+    syncTrackPanel();
+  }
+
+  // 改赛道：一律先过 normalizeTrack（非法门丢弃、宽度/圈数夹回范围），再刷新可视化
+  function setTrack(next, opts) {
+    const norm = normalizeTrack({ ...state.track, ...next });
+    if (norm) state.track = norm;
+    if (state.trackSel >= state.track.checkpoints.length) state.trackSel = state.track.checkpoints.length - 1;
+    refreshTrackViz();
+    if (!(opts && opts.silent)) markDirty();
+  }
+
+  // 「只看赛道」：把模型/景物/光源藏起来，摆门时不会被建筑挡视线
+  function applyTrackFocus(on) {
+    state.trackFocus = !!on;
+    const vis = !state.trackFocus;
+    for (const rec of state.placed) if (rec.obj) rec.obj.visible = vis;
+    for (const rec of state.scenery) if (rec.obj) rec.obj.visible = vis;
+    for (const rec of state.lights) {
+      if (rec.obj) rec.obj.visible = vis;
+      if (rec.helper) rec.helper.visible = vis;
+    }
+    if (StepUI.tkFocus) StepUI.tkFocus.checked = state.trackFocus;
+  }
+
+  function pickTrackGate(clientX, clientY) {
+    if (!tkGates.length) return -1;
+    controlOffset(clientX, clientY);
+    raycaster.setFromCamera(ndc, camera);
+    const hits = raycaster.intersectObjects(tkGates.map((g) => g.userData.pick), false);
+    return hits.length ? hits[0].object.userData.trackGate : -1;
+  }
+
+  function onTrackDown(e) {
+    if (e.button !== 0) return;
+    const gi = pickTrackGate(e.clientX, e.clientY);
+    if (gi >= 0) { // 抓住一个门 → 拖它
+      state.trackDrag = gi;
+      state.trackSel = gi;
+      controls.enabled = false;
+      refreshTrackViz();
+      return;
+    }
+    // 点空白地面 → 在末尾接一个新门
+    const p = groundPos(e.clientX, e.clientY, hit);
+    if (!p) return;
+    const cps = state.track.checkpoints.concat([{ x: snapVal(p.x), y: 0, z: snapVal(p.z), w: TRACK_GATE_W_DEF }]);
+    state.trackSel = cps.length - 1;
+    setTrack({ checkpoints: cps });
+  }
+
+  function onTrackMove(e) {
+    if (state.trackDrag === null) {
+      renderer.domElement.style.cursor = pickTrackGate(e.clientX, e.clientY) >= 0 ? 'grab' : 'crosshair';
+      return;
+    }
+    renderer.domElement.style.cursor = 'grabbing';
+    const p = groundPos(e.clientX, e.clientY, hit);
+    if (!p) return;
+    const cps = state.track.checkpoints.map((c, i) => (i === state.trackDrag
+      ? { ...c, x: snapVal(p.x), z: snapVal(p.z) } : c));
+    setTrack({ checkpoints: cps });
+  }
+
+  function onTrackUp() {
+    if (state.trackDrag === null) return;
+    state.trackDrag = null;
+    controls.enabled = true;
+    renderer.domElement.style.cursor = 'default';
+    markDirty();
+  }
+
+  // 俯视全览：把整条赛道框进画面（没门时退回地面中心）
+  function frameTrackTop() {
+    const cps = state.track.checkpoints;
+    let cx = 0, cz = 0, span = 60;
+    if (cps.length) {
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const c of cps) {
+        minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+        minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+      }
+      cx = (minX + maxX) / 2;
+      cz = (minZ + maxZ) / 2;
+      span = Math.max(maxX - minX, maxZ - minZ, 40) + 40;
+    }
+    camera.position.set(cx, span * 1.15, cz + 0.001);
+    controls.target.set(cx, 0, cz);
+    controls.update();
+  }
+
+  let trackCamBackup = null;
+  if (StepUI.tkFrame) StepUI.tkFrame.onclick = () => frameTrackTop();
+  if (StepUI.tkDel) StepUI.tkDel.onclick = () => {
+    if (state.trackSel < 0) { StepUI.hint.textContent = '先在列表里（或点 3D 里的门）选中一个门'; return; }
+    const cps = state.track.checkpoints.filter((_, i) => i !== state.trackSel);
+    state.trackSel = Math.min(state.trackSel, cps.length - 1);
+    setTrack({ checkpoints: cps });
+  };
+  if (StepUI.tkClear) StepUI.tkClear.onclick = () => {
+    if (!state.track.checkpoints.length) return;
+    state.trackSel = -1;
+    setTrack({ checkpoints: [] });
+  };
+  if (StepUI.tkName) StepUI.tkName.addEventListener('input', () => setTrack({ name: StepUI.tkName.value || '校园狂飙' }));
+  if (StepUI.tkLaps) StepUI.tkLaps.addEventListener('input', () => {
+    const v = parseInt(StepUI.tkLaps.value, 10);
+    if (Number.isFinite(v)) setTrack({ laps: v });
+  });
+  if (StepUI.tkFocus) StepUI.tkFocus.addEventListener('change', () => applyTrackFocus(StepUI.tkFocus.checked));
+
   // ---------- 模式切换 ----------
   // ---------- 测距器实现 ----------
   function rulerRemoveObjects() {
@@ -2470,25 +2738,30 @@ export function createEditor() {
 
   function setMode(m) {
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
       StepUI.hint.textContent = 'Shift+左键：第一点 · Shift+右键：第二点 · 未按 Shift 拖拽转视角';
     } else if (m === 'bound') {
       StepUI.hint.textContent = '拖青绿板 = 移动这条边 · 拖橙色角球 = 同时改相邻两边 · 右侧面板可填精确数值 · 右键拖拽转视角';
-    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板')) {
+    } else if (m === 'track') {
+      StepUI.hint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 右键拖拽转视角 · 右侧面板可改圈数 / 删除 / 清空';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门')) {
       StepUI.hint.textContent = '';
     }
 
-    // 边界模式：显示边界可视化 + 俯视全览 + 只留边界；离开时全部还原
+    // 边界 / 赛道模式：显示各自的可视化 + 俯视全览 + 只留自己那一层；离开时全部还原
     const isBound = m === 'bound';
+    const isTrack = m === 'track';
     boundaryGroup.visible = isBound;
+    trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
+    if (StepUI.trackPanel) StepUI.trackPanel.style.display = isTrack ? 'block' : 'none';
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -2496,12 +2769,25 @@ export function createEditor() {
       // 重复点「边界」不要把已经俯视的机位当成原机位存下来（否则退出后回不到原来的视角）
       if (!boundaryCamBackup) boundaryCamBackup = { pos: camera.position.clone(), target: controls.target.clone() };
       frameBoundaryTop();
+    } else if (isTrack) {
+      state.trackDrag = null;
+      if (state.trackSel >= state.track.checkpoints.length) state.trackSel = state.track.checkpoints.length - 1;
+      applyTrackFocus(StepUI.tkFocus ? StepUI.tkFocus.checked : true);
+      refreshTrackViz();
+      if (!trackCamBackup) trackCamBackup = { pos: camera.position.clone(), target: controls.target.clone() };
+      frameTrackTop();
     } else {
       if (boundaryCamBackup) {
         camera.position.copy(boundaryCamBackup.pos);
         controls.target.copy(boundaryCamBackup.target);
         controls.update();
         boundaryCamBackup = null;
+      }
+      if (trackCamBackup) {
+        camera.position.copy(trackCamBackup.pos);
+        controls.target.copy(trackCamBackup.target);
+        controls.update();
+        trackCamBackup = null;
       }
       restoreAllVisible();
     }
@@ -2510,8 +2796,8 @@ export function createEditor() {
       tCtl.detach(); tCtl.enabled = false;
       resetGhost();
       if (!state.placingEmpty) StepUI.hint.textContent = '';
-    } else if (isBound) {
-      // 边界模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
+    } else if (isBound || isTrack) {
+      // 边界 / 赛道模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
       state.placingEmpty = false;
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
       tCtl.detach(); tCtl.enabled = false;
@@ -2541,6 +2827,7 @@ export function createEditor() {
   StepUI.btnScale.onclick = () => setMode('scale');
   StepUI.btnRuler.onclick = () => setMode('ruler');
   if (StepUI.btnBound) StepUI.btnBound.onclick = () => setMode('bound'); // 边界编辑模式（空气墙）
+  if (StepUI.btnTrack) StepUI.btnTrack.onclick = () => setMode('track'); // 赛道编辑模式（校园狂飙）
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');
 

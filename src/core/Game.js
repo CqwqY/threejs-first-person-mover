@@ -16,6 +16,7 @@ import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
+import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable } from '../world/Track.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
@@ -48,6 +49,7 @@ async function _fetchRemoteScene(game, scene, roots, target) {
     buildEditorBuildings(scene, roots, data, target);
     buildEditorLights(scene, data); // 远端光源覆盖打包数据；函数内部会先清掉上一次的光源，不会重复叠加
     game._applyBoundary(data.boundary); // 边界（空气墙）：没有该字段时保持默认，行为与改动前一致
+    game._applyTrack(data.track);       // 赛道（校园狂飙）：没有该字段时保持默认演示赛道
   } catch (e) {
     console.warn('[Game] 应用远程场景失败，回退打包数据:', e);
   }
@@ -222,6 +224,13 @@ export class Game {
     this.boundary = defaultBoundary();
     this._boundaryWalls = null;
     this._syncBoundary();
+
+    // ---- 赛道（校园狂飙）----
+    // track 由编辑器「赛道」模式调、随场景 JSON 一起保存；这里默认给一条演示赛道，
+    // 拉到远程场景后 _applyTrack 会覆盖它。数据/几何/判定都在 world/Track.js（与编辑器共用同一份）。
+    this.track = defaultTrack();
+    this._trackGroup = null;
+    this._buildTrackViz();
 
     // ---- 网络连接 ----
     this.network = new Network(Config.RELAY_URL, this._token);
@@ -5607,6 +5616,51 @@ export class Game {
     this._syncBoundary();
     console.log('[Game] 已应用场景边界 ' + (b.maxX - b.minX).toFixed(1) + '×' + (b.maxZ - b.minZ).toFixed(1)
       + ' 米，可见墙=' + (b.showWalls ? '开' : '关'), b);
+  }
+
+  // ---------- 赛道（校园狂飙）----------
+  // 应用来自编辑器「赛道」模式的赛道数据（随场景 JSON 保存为 track 字段）。
+  // 没有该字段 / 解析失败 → 保持当前（默认演示赛道），行为与改动前一致。
+  _applyTrack(raw) {
+    const t = normalizeTrack(raw);
+    if (t) this.track = t;
+    this._buildTrackViz();
+  }
+
+  // 把门画进世界：两根细柱 + 横梁。几何来自 Track.gateSpecs，与编辑器预览同一份 ——
+  // 编辑器里摆成什么样，游戏里就是什么样。门少于 2 个（或赛道被清空）就整组移除。
+  _buildTrackViz() {
+    if (this._trackGroup) {
+      this.scene.remove(this._trackGroup);
+      this._trackGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+      this._trackGroup = null;
+    }
+    const t = this.track;
+    if (!isTrackRunnable(t)) return;
+    const group = new THREE.Group();
+    group.name = 'track-gates';
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const startMat = new THREE.MeshStandardMaterial({ color: 0x38a35c, roughness: 0.65, metalness: 0.1 });
+    const gateMat = new THREE.MeshStandardMaterial({ color: 0xc9942f, roughness: 0.65, metalness: 0.1 });
+    for (const sp of gateSpecs(t)) {
+      const mat = sp.index === 0 ? startMat : gateMat; // 0 号门 = 起点，用绿色区分
+      const g = new THREE.Group();
+      g.position.set(sp.x, sp.y, sp.z);
+      g.rotation.y = Math.atan2(sp.dx, sp.dz); // 本地 +X = 门的横向
+      const add = (sx, sy, sz, px, py, pz) => {
+        const m = new THREE.Mesh(geo, mat);
+        m.scale.set(sx, sy, sz);
+        m.position.set(px, py, pz);
+        m.castShadow = true;
+        g.add(m);
+      };
+      add(0.35, sp.h, 0.35, -sp.w / 2, sp.h / 2, 0); // 左柱
+      add(0.35, sp.h, 0.35, sp.w / 2, sp.h / 2, 0);  // 右柱
+      add(sp.w + 0.35, 0.35, 0.35, 0, sp.h, 0);      // 横梁
+      group.add(g);
+    }
+    this.scene.add(group);
+    this._trackGroup = group;
   }
 
   // 边界要同步到两处：① 物理夹取（真正挡人的是它）② 可选的可视半透明墙。
