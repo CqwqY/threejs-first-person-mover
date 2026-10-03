@@ -106,8 +106,12 @@ export class Game {
     // MSAA 只在低密度屏（dpr<2，主要是桌面显示器）开：手机 dpr 普遍 2.6~3，像素已经很密，
     // MSAA 在此几乎是纯 GPU 开销（填充率大户），关掉肉眼无差 —— 这是移动端最大的单项省耗。
     // 注意 antialias 无法运行时切换，只能在构造期按设备定死。
+    // MSAA 无法运行时开关，只能构造期定死：低画质档会记一个标记，下次启动时直接不开。
+    // （GT 640 这类老卡上 MSAA 是纯粹的 4 倍片元开销，是最值钱的单项）
+    let noAA = false;
+    try { noAA = localStorage.getItem('fpm-noaa') === '1'; } catch (e) { /* 隐私模式下忽略 */ }
     this.renderer = new THREE.WebGLRenderer({
-      antialias: (window.devicePixelRatio || 1) < 2,
+      antialias: !noAA && (window.devicePixelRatio || 1) < 2,
       // 双显卡笔记本默认可能选中集成显卡，这里明确要独显
       powerPreference: 'high-performance',
     });
@@ -886,6 +890,9 @@ export class Game {
       }
     }
     this._qualityDpr = p.dpr;
+    // 低画质档顺带在下次启动时关掉 MSAA：AA 只能在构造期决定，无法运行时切换。
+    // 老卡上它是最值钱的一项（4 倍片元开销），所以给 low 档配这个副作用。
+    try { localStorage.setItem('fpm-noaa', q === 'low' ? '1' : '0'); } catch (e) { /* 忽略 */ }
     // 画质档变了：自动模式回满重新探测；手动模式保留用户钉的比例
     if (this._autoScale !== false) this._dynScale = 1;
     this.renderer.shadowMap.type = p.type;
