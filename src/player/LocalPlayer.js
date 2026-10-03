@@ -4,6 +4,13 @@ import * as THREE from 'three';
 import { Config } from '../config.js';
 import { PlayerPhysics } from './PlayerPhysics.js';
 
+// 把角度折到 [-π, π]：相机缓动必须走「最短方向」，否则从 179° 转到 -179° 会绕一大圈。
+function wrapPi(a) {
+  let v = (a + Math.PI) % (Math.PI * 2);
+  if (v < 0) v += Math.PI * 2;
+  return v - Math.PI;
+}
+
 export class LocalPlayer {
   // camera：渲染相机；input：输入实例；state：本玩家的 PlayerState 实例（来自 PlayerManager）
   // colliders：世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]，参与物理碰撞。
@@ -25,21 +32,24 @@ export class LocalPlayer {
     this._prevZ = this.state.z;
     this._vehSpeed = 0; // 电动车驾驶速度（带惯性，见 _driveVehicle）
     this._vehSteer = 0; // 平滑后的方向盘位置（-1 左 / 0 正 / +1 右），见 _driveVehicle
-    // 骑车时的自由视角（仅电脑）：鼠标左右只让**相机**转头，state.yaw（= 车头）不动。
-    // 见 update() 与 Game._thirdPerson 的 viewYaw。0 = 正对车头。
+    // 骑车相机（仅电脑）拆成两层，见 update()：
+    //   _camYaw  = 相机自己的水平朝向，按 RIDE_CAM_LAG 缓动追车头 → 转弯时视角是「被一股力慢慢拖过去」的
+    //   _rideLook = 鼠标掰出来的自由视角偏移，按 RIDE_CAM_RECENTER 慢慢回正（随时可以再掰）
+    this._camYaw = state.yaw;
     this._rideLook = 0;
     this.rideLookEnabled = false; // 由 Game 按触屏判定设置（手机不开）
     this._rideLookMax = THREE.MathUtils.degToRad(Config.RIDE_LOOK_MAX_DEG);
   }
 
-  // 相机实际用的水平朝向 = 车头朝向 + 骑行自由视角偏移（不骑车时偏移恒为 0）
+  // 相机实际用的水平朝向 = 缓动跟上的车头 + 自由视角偏移（不骑车/手机时两层都恒等于 state.yaw）
   get viewYaw() {
-    return this.state.yaw + this._rideLook;
+    return this._camYaw + this._rideLook;
   }
 
-  // 下车 / 切场景时立刻回正（别等下一帧的 update，免得有一帧歪着看）
+  // 下车 / 切场景时立刻对齐（别等下一帧的 update，免得有一帧歪着看）
   resetRideLook() {
     this._rideLook = 0;
+    this._camYaw = this.state.yaw;
   }
 
   // 电动车驾驶：油门（W / 摇杆前推）→ 有惯性地点加速；松油门靠阻力滑行；跳跃键（骑乘时跳跃本来就无效）当刹车；
@@ -98,16 +108,29 @@ export class LocalPlayer {
     // 所以鼠标右移（x>0）要减 —— 这里写 `-=` 是对的，别被"右移该增加"的直觉带反。
     // 骑电动车时车头由「转向」控制（A/D 或手机左右按钮），鼠标只负责俯仰 ——
     // 否则一动视角车头就跟着甩，配上惯性根本没法开。
-    // 但电脑上还想「边开边左右看看」，所以给一份**只作用于相机**的自由视角偏移：
-    // 鼠标左右改的是 _rideLook（转头），state.yaw（车头 / 广播给别人的朝向）一点不动。
+    // 电脑上另给一层「软跟随相机」（只影响相机，state.yaw / 广播 / 车头一点不动）：
+    //   ① 转弯时相机不是瞬间锁死在车头上，而是按 RIDE_CAM_LAG 缓动跟过去 → 视角像被一股力慢慢拖过去；
+    //   ② 鼠标可以随时把它掰开（自由视角），松手后按 RIDE_CAM_RECENTER 慢慢回正。
     if (!this.state.ride) {
       this.state.yaw -= x * Config.MOUSE_SENSITIVITY;
-      this._rideLook = 0; // 下车 → 偏移清零，视角自动回到车后/正前方
+      // 不在车上：两层都对齐朝向，相机行为与改动前完全一致
+      this._camYaw = this.state.yaw;
+      this._rideLook = 0;
     } else if (this.rideLookEnabled) {
       this._rideLook = THREE.MathUtils.clamp(
         this._rideLook - x * Config.MOUSE_SENSITIVITY,
         -this._rideLookMax, this._rideLookMax
       );
+      // 「回正力」：指数衰减，松手后会自己回到车头方向（越小回得越慢，0 = 不回）
+      this._rideLook *= Math.exp(-dt * Config.RIDE_CAM_RECENTER);
+      if (Math.abs(this._rideLook) < 1e-4) this._rideLook = 0;
+      // 「跟随拉力」：把相机朝向按最短角缓动到车头方向
+      const d = wrapPi(this.state.yaw - this._camYaw);
+      this._camYaw += d * (1 - Math.exp(-dt * Config.RIDE_CAM_LAG));
+    } else {
+      // 手机：不做软跟随相机，两层对齐（行为与改动前一致）
+      this._camYaw = this.state.yaw;
+      this._rideLook = 0;
     }
     // 鼠标上移（y<0）对应 pitch 增加（向上看）；这里为了让“上移=向上看”取负号
     this.state.pitch -= y * Config.MOUSE_SENSITIVITY;
@@ -123,7 +146,7 @@ export class LocalPlayer {
     this.physics.update(dt, this.input, this.state.yaw, this.state, this.colliders);
 
     // ---- 3. 同步相机位置与旋转（从 state 读取） ----
-    // 水平朝向用 viewYaw（= 车头 + 骑行自由视角），所以骑车时能左右转头看而不影响行驶方向。
+    // 水平朝向用 viewYaw（缓动跟上的车头 + 自由视角偏移）：骑车时能左右转头看而不影响行驶方向。
     this.camera.position.set(this.state.x, this.state.y, this.state.z);
     this.camera.rotation.y = this.viewYaw;
     this.camera.rotation.x = this.state.pitch;
