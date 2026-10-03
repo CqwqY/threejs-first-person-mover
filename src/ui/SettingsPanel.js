@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS = {
   antiAlias:
     typeof localStorage !== 'undefined' && localStorage.getItem('fpm-noaa') === '1' ? 'off' : 'on',
   nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
+  skillLayout: '轮盘', // 手机技能槽排布：轮盘 / 2行竖列（PC 无影响）
   dayNight: true, // 是否开启昼夜循环
   dayCycle: 240, // 一昼夜时长（秒），越大变化越慢
   bgmVolume: 0.25, // 背景音乐音量（0 = 静音），默认就很小声
@@ -87,6 +88,8 @@ const FIELDS = [
   },
   { id: 'castShadow', label: '阴影开关', kind: 'toggle', defaultValue: true },
   { id: 'nameTag', label: '显示名牌与血条', kind: 'toggle', defaultValue: true },
+  // 手机端技能槽的两种排布：轮盘省地方但要点两下；网格一眼看见、点一下就用（仅触屏生效）
+  { id: 'skillLayout', label: '手机技能槽', kind: 'select', options: ['轮盘', '2行竖列'], gameOnly: true },
   { id: 'dayNight', label: '昼夜循环', kind: 'toggle', defaultValue: true },
   { id: 'dayCycle', label: '一昼夜时长(秒)', kind: 'range', min: 60, max: 1200, step: 20 },
   { id: 'bgmVolume', label: '背景音乐音量(0=静音)', kind: 'range', min: 0, max: 1, step: 0.05 },

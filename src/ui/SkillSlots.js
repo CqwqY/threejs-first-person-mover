@@ -30,9 +30,16 @@ export function createSkillSlots(opts = {}) {
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
     'ontouchstart' in window;
 
+  // 手机端两种排布：
+  //   wheel = 只留「当前技能」一颗按钮，向外拖出扇形轮盘选技能（省地方，但要两步操作）
+  //   grid  = 装备的技能直接铺成 2 行竖列网格，看一眼就在，点一下就用
+  // PC 恒为 desk（横排 + 数字键）。
+  let mobileMode = coarse ? (opts.mobileLayout === 'grid' ? 'grid' : 'wheel') : 'desk';
+
   // ---------------------------------------------------------------------------
   // 容器
-  //   手机：box 本身就是那颗「当前技能」按钮（有尺寸 → 「按键布局」里能正常抓取/存位置）
+  //   手机 wheel：box 本身就是那颗「当前技能」按钮（有尺寸 → 「按键布局」里能正常抓取/存位置）
+  //   手机 grid ：box 是 2 行竖列的网格容器，槽位直接住在里面
   //   PC  ：box 是横排容器，8 个槽位是它的孩子
   // ---------------------------------------------------------------------------
   const box = document.createElement('div');
@@ -115,8 +122,8 @@ export function createSkillSlots(opts = {}) {
     const now = performance.now();
     if (now < slot.cdUntil) return;
     slot.cdUntil = now + COOLDOWN;
-    // 手机端槽位藏在轮盘里，反馈要打在看得见的按钮上
-    const visual = coarse ? box : slot.el;
+    // 手机端槽位藏在轮盘里时，反馈要打在看得见的按钮上；网格模式下槽位自己就看得见
+    const visual = (coarse && mobileMode !== 'grid') ? box : slot.el;
     visual.style.transition = 'opacity .12s ease';
     visual.style.opacity = '0.55';
     setTimeout(() => { visual.style.opacity = '1'; }, COOLDOWN);
@@ -145,9 +152,9 @@ export function createSkillSlots(opts = {}) {
   }
   cur = coarse ? readCur() : 0;
 
-  // 刷新按钮上的「技能名 + 第几个/共几个」
+  // 刷新按钮上的「技能名 + 第几个/共几个」（只有 wheel 模式有那颗按钮）
   function paintBtn() {
-    if (!coarse) return;
+    if (!coarse || mobileMode !== 'wheel') return;
     const list = equipped();
     ensureCur();
     const s = slots[cur];
@@ -175,7 +182,8 @@ export function createSkillSlots(opts = {}) {
       return;
     }
     const any = slots.some((s) => s.act);
-    box.style.display = (!coarse || any) ? 'flex' : 'none';
+    // grid 模式下 box 是网格容器，不能再写死回 flex
+    box.style.display = (!coarse || any) ? (mobileMode === 'grid' ? 'grid' : 'flex') : 'none';
   }
   function refreshBox() { applyBoxDisplay(); if (coarse) { readSavedPos(); layoutMobile(); } }
 
@@ -238,9 +246,139 @@ export function createSkillSlots(opts = {}) {
     box.style.top = (cy - H / 2) + 'px';
     box.style.right = 'auto';
     box.style.bottom = 'auto';
-    wheel.style.left = cx + 'px';
-    wheel.style.top = cy + 'px';
-    layoutWheel();
+    if (mobileMode === 'wheel') {
+      wheel.style.left = cx + 'px';
+      wheel.style.top = cy + 'px';
+      layoutWheel();
+    }
+  }
+
+  // ---- 两种手机排布的外壳差异 ----
+  // wheel：box 是那颗圆按钮（定尺寸、column 居中、显示当前技能名），槽位挂在 wheel 里绕圈排。
+  // grid ：box 是 2 行竖列网格（grid-auto-flow:column 表示「先竖着填」），尺寸由内容撑开；
+  //        整块不吃触摸（pointer-events:none），只有槽位本身吃，免得挡住转视角。
+  function applyBoxStyle() {
+    if (!coarse) return;
+    if (mobileMode === 'grid') {
+      box.classList.add('sk-box--grid');
+      box.style.display = 'grid';
+      box.style.flexDirection = '';
+      box.style.alignItems = '';
+      box.style.justifyContent = '';
+      box.style.gap = '6px';
+      box.style.gridTemplateRows = 'repeat(2, auto)';
+      box.style.gridAutoFlow = 'column';
+      box.style.padding = '5px';
+      box.style.width = 'auto';
+      box.style.height = 'auto';
+      box.style.pointerEvents = 'none'; // 空隙留给转视角
+      // 网格是「一块技能栏」而不是一颗按钮：给层半透明底衬，跟后面的 3D 画面拉开
+      box.style.background = 'rgba(0, 0, 0, .26)';
+      box.style.borderRadius = '10px';
+      if (btnLabel) btnLabel.style.display = 'none';
+      if (btnCount) btnCount.style.display = 'none';
+      return;
+    }
+    box.classList.remove('sk-box--grid');
+    box.style.display = 'flex';
+    box.style.flexDirection = 'column';
+    box.style.alignItems = 'center';
+    box.style.justifyContent = 'center';
+    box.style.gap = '1px';
+    box.style.gridTemplateRows = '';
+    box.style.gridAutoFlow = '';
+    box.style.padding = '';
+    box.style.width = 'clamp(50px, 14vmin, 66px)';
+    box.style.height = 'clamp(50px, 14vmin, 66px)';
+    box.style.pointerEvents = 'auto';
+    box.style.background = ''; // 交回给 .kui-iconbtn 的按钮样式
+    box.style.borderRadius = '';
+    if (btnLabel) btnLabel.style.display = '';
+    if (btnCount) btnCount.style.display = '';
+  }
+
+  // 槽位住哪儿、怎么定位——两种模式完全不同，切换时整套重设
+  function mountSlots() {
+    if (!coarse) return;
+    const host = mobileMode === 'grid' ? box : wheel;
+    for (const s of slots) {
+      if (mobileMode === 'grid') {
+        s.el.style.position = 'static';
+        s.el.style.left = '';
+        s.el.style.top = '';
+        s.el.style.transform = '';
+        s.el.style.pointerEvents = 'auto';
+      } else {
+        s.el.style.position = 'absolute'; // 相对轮盘容器（其左上角＝按钮中心）定位
+        s.el.style.left = '0px';
+        s.el.style.top = '0px';
+        s.el.style.transform = 'translate(-50%,-50%)';
+        s.el.style.pointerEvents = 'none'; // 选择由按钮的手势统一处理，轮盘项本身不吃触摸
+      }
+      if (s.el.parentElement !== host) host.appendChild(s.el);
+    }
+  }
+
+  // 切换手机排布（由设置面板调用）。grid 模式下轮盘整个退出舞台。
+  function setMobileLayout(mode) {
+    const m = mode === 'grid' ? 'grid' : 'wheel';
+    if (!coarse || m === mobileMode) return;
+    mobileMode = m;
+    if (wheel) wheel.style.display = 'none';
+    applyBoxStyle();
+    mountSlots();
+    applyBoxDisplay();
+    refreshBox();
+    if (m === 'wheel') layoutWheel();
+  }
+
+  // 槽位自身的手势：轻点 = 触发；长按（≥gestureMs）后上滑 = 丢弃。
+  // PC 与手机「网格」模式都是直接点槽位，共用这一套；
+  // 手机「轮盘」模式下槽位藏在轮盘里不吃触摸，由按钮手势统一处理 —— 故这里直接放行不干活。
+  function bindSlotGesture(slot) {
+    let pressT = 0;      // 本次按下的时间戳
+    let pressY = 0;      // 本次按下的纵坐标
+    let armed = false;   // 是否已进入「长按」状态
+    let consumed = false;// 本次手势是否已作为丢弃消费掉
+    let timer = 0;
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+    slot.el.addEventListener('pointerdown', (e) => {
+      if (mobileMode === 'wheel') return;
+      e.preventDefault();
+      e.stopPropagation();
+      try { slot.el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      pressT = performance.now();
+      pressY = e.clientY;
+      armed = false;
+      consumed = false;
+      clearTimer();
+      timer = setTimeout(() => {
+        timer = 0;
+        armed = true;
+        slot.el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
+      }, gestureMs);
+    });
+    slot.el.addEventListener('pointermove', (e) => {
+      if (mobileMode === 'wheel' || !armed || consumed) return;
+      if (pressY - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃
+        consumed = true;
+        armed = false;
+        clearTimer();
+        slot.el.style.transform = '';
+        dropSlot(slot);
+      }
+    });
+    const endPress = (canceled) => {
+      if (mobileMode === 'wheel') return;
+      clearTimer();
+      slot.el.style.transform = '';
+      const wasArmed = armed;
+      armed = false;
+      if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能
+      if (performance.now() - pressT < gestureMs) fire(slot); // 轻点 → 触发技能
+    };
+    slot.el.addEventListener('pointerup', () => endPress(false));
+    slot.el.addEventListener('pointercancel', () => endPress(true));
   }
 
   function boxCenter() {
@@ -252,7 +390,7 @@ export function createSkillSlots(opts = {}) {
   // 角度用屏幕坐标：sx = cos(a)*R，sy = -sin(a)*R（取负才是「屏幕上方」）。
   // 槽位多、弧上挤不下时按比例缩小（轮盘保持小巧，不靠放大半径去腾地方）。
   function layoutWheel() {
-    if (!coarse) return;
+    if (!coarse || mobileMode !== 'wheel') return; // grid 模式没有轮盘
     const { width: vw, height: vh } = viewportSize();
     const c = boxCenter();
     const vmin = Math.min(vw, vh);
@@ -296,12 +434,8 @@ export function createSkillSlots(opts = {}) {
     el.style.textAlign = 'center';
     el.style.fontFamily = 'var(--kui-font)';
     if (coarse) {
-      // 尺寸用 vmin（短边）而不是 vw——vw 在旋转后宽度翻倍会让控件突然变大
-      el.style.position = 'absolute'; // 相对轮盘容器（其左上角＝按钮中心）定位
-      el.style.left = '0px';
-      el.style.top = '0px';
-      el.style.transform = 'translate(-50%,-50%)';
-      el.style.pointerEvents = 'none'; // 选择由按钮的手势统一处理，轮盘项本身不吃触摸
+      // 尺寸用 vmin（短边）而不是 vw——vw 在旋转后宽度翻倍会让控件突然变大。
+      // 定位方式（轮盘里绕圈 / 网格里排队）由 mountSlots 按当前模式统一写，这里不碰。
       el.style.width = 'clamp(42px, 12vmin, 56px)';
       el.style.height = 'clamp(42px, 12vmin, 56px)';
       el.style.fontSize = 'clamp(10px, 2.8vmin, 12px)';
@@ -330,59 +464,13 @@ export function createSkillSlots(opts = {}) {
 
     const slot = { el, labelEl: label, act: null, name: '', cdUntil: 0, keyName };
 
-    if (coarse) {
-      wheel.appendChild(el);
-    } else {
-      // PC：触摸优先那套手势直接作用在每个槽位上
-      // 按下即触发（不等 click）：多点触控时另一只手正按住摇杆，合成的 click 常常不派发，
-      // 会导致「边走边点技能」没反应。手势：轻点 = 触发技能；长按（≥gestureMs）后上滑 = 丢弃。
-      // 因此改成「按下记录、抬起才触发」：只有这样才能把轻点与长按上滑区分开。
-      let pressT = 0;      // 本次按下的时间戳
-      let pressY = 0;      // 本次按下的纵坐标
-      let armed = false;   // 是否已进入「长按」状态
-      let consumed = false;// 本次手势是否已作为丢弃消费掉
-      let timer = 0;
-      const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
-      el.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
-        pressT = performance.now();
-        pressY = e.clientY;
-        armed = false;
-        consumed = false;
-        clearTimer();
-        timer = setTimeout(() => {
-          timer = 0;
-          armed = true;
-          el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
-        }, gestureMs);
-      });
-      el.addEventListener('pointermove', (e) => {
-        if (!armed || consumed) return;
-        if (pressY - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃
-          consumed = true;
-          armed = false;
-          clearTimer();
-          el.style.transform = '';
-          dropSlot(slot);
-        }
-      });
-      const endPress = (canceled) => {
-        clearTimer();
-        el.style.transform = '';
-        const wasArmed = armed;
-        armed = false;
-        if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能
-        if (performance.now() - pressT < gestureMs) fire(slot); // 轻点 → 触发技能
-      };
-      el.addEventListener('pointerup', () => endPress(false));
-      el.addEventListener('pointercancel', () => endPress(true));
-      box.appendChild(el);
-    }
+    // 槽位自身手势：PC 与手机「网格」模式共用同一套；轮盘模式下函数内部直接放行不干活
+    bindSlotGesture(slot);
+    if (!coarse) box.appendChild(el); // 手机端挂哪儿由 mountSlots 按模式决定
     slots.push(slot);
     paint(slot);
   }
+  if (coarse) { applyBoxStyle(); mountSlots(); } // 槽位都建完再排布，否则 mountSlots 遍历不到
   refreshBox();
 
   // ---------------------------------------------------------------------------
@@ -432,6 +520,7 @@ export function createSkillSlots(opts = {}) {
     };
 
     box.addEventListener('pointerdown', (e) => {
+      if (mobileMode !== 'wheel') return; // 网格模式下每个槽位自己吃触摸，按钮不再接管手势
       e.preventDefault();
       e.stopPropagation();
       try { box.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
@@ -578,5 +667,5 @@ export function createSkillSlots(opts = {}) {
     box.remove();
   }
 
-  return { assign, clearSlot, registerSkill, setVisible, setDropHandler, relayout, dispose };
+  return { assign, clearSlot, registerSkill, setVisible, setDropHandler, setMobileLayout, relayout, dispose };
 }

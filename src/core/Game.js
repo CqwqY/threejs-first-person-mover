@@ -271,6 +271,12 @@ export class Game {
           this._sharpen = Number(v) || 0;
           this._applyRenderScale();
         },
+        // 手机技能槽排布：切到「2行竖列」时槽位从轮盘搬到网格里，立即生效
+        skillLayout: (v) => {
+          if (this.skillSlots && typeof this.skillSlots.setMobileLayout === 'function') {
+            this.skillSlots.setMobileLayout(v === '2行竖列' ? 'grid' : 'wheel');
+          }
+        },
         shadowR: (v) => {
           const cam = this._sun.shadow.camera;
           cam.left = -v;
@@ -301,7 +307,7 @@ export class Game {
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
       },
       {
-        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
+        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'skillLayout', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -360,6 +366,8 @@ export class Game {
       dropModifier: Config.DROP_MODIFIER_KEY,
       gestureMs: Config.DROP_GESTURE_MS,
       gestureDy: Config.DROP_GESTURE_DY,
+      // 手机端排布：'2行竖列' = 技能直接铺成网格；其余（含默认）= 单按钮 + 拖出轮盘
+      mobileLayout: gset.skillLayout === '2行竖列' ? 'grid' : 'wheel',
     });
     this._skillMap = this._loadSkillSlots();
     this._restoreSkills();
