@@ -210,7 +210,7 @@ export class Game {
 
     // 本地玩家的可序列化状态（id 稍后由 welcome 消息填充）
     this.localState = new PlayerState('', 0, Config.PLAYER_HEIGHT, 0);
-    this.localState.gender = this._gender; // 让本机状态里带上性别（服务端目前不转发，仅本地自用）
+    this.localState.gender = this._gender; // 本机自己选的性别；服务端已转发 gender 字段给同房其他人
 
     // 本地玩家逻辑
     this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState, this.colliders);
