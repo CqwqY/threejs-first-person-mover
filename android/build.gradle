@@ -1,0 +1,49 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+    
+    repositories {
+        // 国内镜像放前面优先命中：google() / mavenCentral() 这两台在本机拉不动
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath 'com.google.gms:google-services:4.4.4'
+
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
+    }
+}
+
+apply from: "variables.gradle"
+
+allprojects {
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        google()
+        mavenCentral()
+    }
+}
+
+// Capacitor 的库模块（capacitor-android / app / screen-orientation / status-bar）
+// 都只声明 compileSdk，不写 buildToolsVersion，于是落到 AGP 8.13 内置的默认值 35.0.0。
+// 本机只装了 36.0.0，AGP 便转去 dl.google.com 拉包，在内网/受限网络下会卡在
+// "Still waiting for package manifests to be fetched remotely" 而无限等待。
+// 这里把全部 Android 子模块统一钉到本地已有的版本，顺带省掉一次 50MB 下载。
+subprojects { subproject ->
+    subproject.plugins.withId('com.android.library') {
+        subproject.android.buildToolsVersion = '36.0.0'
+    }
+    subproject.plugins.withId('com.android.application') {
+        subproject.android.buildToolsVersion = '36.0.0'
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}

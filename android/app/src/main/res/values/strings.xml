@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">花草中学</string>
+    <string name="title_activity_main">花草中学</string>
+    <string name="package_name">org.dpdns.graduate.fpm</string>
+    <string name="custom_url_scheme">org.dpdns.graduate.fpm</string>
+    <string name="back_exit_hint">再按一次返回键退出</string>
+</resources>

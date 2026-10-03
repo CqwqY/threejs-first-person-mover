@@ -27,8 +27,20 @@ export function initMobileControls(input) {
     .mc-zone{position:fixed;bottom:0;touch-action:none;user-select:none;-webkit-user-select:none;z-index:50}
     /* 高度用 --app-vh（visualViewport 实时写），不用 vh/dvh：
        iOS 的 100vh 等于"大视口"（含地址栏）且旋转后不更新，会导致错位与跳动 */
-    .mc-left{left:0;width:44vw;height:calc(var(--app-vh, 100vh) * 0.42);min-height:200px}
+    /* 左右两个触控区必须首尾相接：原来是 44vw + 50vw，中间永远留着 6vw 的缝
+       （竖屏 360px 时 21.6px，横屏 780px 时 46.8px）。那条缝两头都摸不到——
+       手指落进去「既不走也不转视角」，是横屏最明显的手感问题。改成各 50vw 即无缝。 */
+    .mc-left{left:0;width:50vw;height:calc(var(--app-vh, 100vh) * 0.42);min-height:200px}
     .mc-right{right:0;top:0;width:50vw;height:var(--app-vh, 100vh)}
+    /* 横屏：高度只剩 ~360px，竖屏那份「上半屏留给看路」的 58% 余量已无必要，
+       移动区补满全高，拇指从下往上都摸得到，也顺手消掉左上角那块死区。
+       左右安全区：横屏时刘海/圆角在两侧，摇杆与跳跃键必须让开，否则会被切掉。 */
+    @media (orientation: landscape) {
+      .mc-left{height:var(--app-vh, 100vh);min-height:0}
+      .mc-joy{left:calc(env(safe-area-inset-left, 0px) + 20px);
+        bottom:calc(env(safe-area-inset-bottom, 0px) + 26px)}
+      .mc-jump{right:calc(env(safe-area-inset-right, 0px) + 20px)}
+    }
     /* 摇杆：半径/厚度/位置一律不动，只把白色前景换成主题蓝（透明度由主题变量混出） */
     .mc-joy{position:absolute;left:20px;bottom:26px;width:118px;height:118px;border-radius:50%;
       border:2px solid color-mix(in srgb, var(--kui-blue-soft) 70%, transparent);

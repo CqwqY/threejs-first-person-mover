@@ -94,7 +94,10 @@ function ensureCardLayout() {
        小牌要放下「昵称 + 时间」两块，所以昵称改成自适应（flex + min-width:0）截断，
        时间固定宽度不被挤掉——旧写法把 .idc-time 一起 display:none，手机端就永远看不到时钟了。 */
     @media (pointer: coarse) {
-      .idc { left: 12px; top: 12px; transform: none; }
+      /* 让开安全区：竖屏是顶部（刘海/状态栏），横屏是左右（刘海跑到侧边去了）。
+         基础值仍是 12px —— 无安全区的设备上 calc(0px + 12px) 与原来完全等价。 */
+      .idc { left: calc(env(safe-area-inset-left, 0px) + 12px);
+             top: calc(env(safe-area-inset-top, 0px) + 12px); transform: none; }
       /* 156px = padding 16 + 状态点 9 + 两处 gap 12 + 时间 ~36 + 昵称剩 ~83 */
       .idc-card { width: 156px; }
       .idc.open .idc-card { width: min(268px, calc(100vw - 24px)); }

@@ -3,6 +3,8 @@
 //     且桌面端不出现「画面元素」区块（没注入动作就不该留一个点了没反应的按钮）
 //   · 手机态（360x780 窄屏 + CDP 触屏模拟）：校卡显示时钟且完整落在小牌内、
 //     顶部三个按钮不溢出屏幕、设置里的「画面元素」能进/出拖拽模式、旧左上角侧栏已消失
+//   · 手机横屏（780x360 + 触屏）：两个触控区首尾相接（改前中间留着 46.8px 的盲区，
+//     手指落进去既不走也不转视角）、移动区补满全高、摇杆/跳跃键/顶部一排都不越界
 // 与纯逻辑自检（ui-check.mjs）分工：那边钉源码接线与算术关系，这边钉真实 DOM 行为。
 // 前置：另开一个终端跑 `npm run dev`（或 vite --port 5173 --strictPort）。
 // 用法：node ui-browser-check.mjs
@@ -65,10 +67,22 @@ async function waitFor(expr, ms = 30000, label = expr) {
 }
 
 async function enterGame() {
-  await waitFor('!!document.querySelector("#au-skip")', 30000, '登录面板');
+  await waitFor('!!document.querySelector("#au-skip")', 60000, '登录面板');
   await evaluate('document.querySelector("#au-skip").click(); true');
-  await waitFor('!!window.__game && !!window.__game.settingsPanel', 40000, '游戏实例');
+  await waitFor('!!window.__game && !!window.__game.settingsPanel', 60000, '游戏实例');
   await sleep(500);
+}
+
+// 手机态导航：设备尺寸 + 触屏模拟 + 真的重新加载一次。
+// URL 必须带时间戳：同一份 URL 连着导航第二次时，浏览器可能认为「已经在那一页了」
+// 而不重新加载，于是后续 waitFor 只能等到上一次遗留的 DOM，表现为「等不到登录面板」。
+// （软件渲染下每加载一次 3D 场景都不算快，超时也给得宽一些。）
+async function gotoPhone(w, h) {
+  await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 2, mobile: true });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await send('Emulation.setEmitTouchEventsForMouse', { enabled: true, configuration: 'mobile' });
+  await send('Page.navigate', { url: APP + '?ts=' + Date.now() });
+  await enterGame();
 }
 
 try {
@@ -143,13 +157,7 @@ try {
 
   // ============ 手机态（360x780 窄屏 + 触屏）============
   console.log('== B. 手机态（360x780，touch）==');
-  await send('Emulation.setDeviceMetricsOverride', {
-    width: 360, height: 780, deviceScaleFactor: 2, mobile: true,
-  });
-  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-  await send('Emulation.setEmitTouchEventsForMouse', { enabled: true, configuration: 'mobile' });
-  await send('Page.navigate', { url: APP });
-  await enterGame();
+  await gotoPhone(360, 780);
 
   const mob = await evaluate(`(() => {
     const idc = document.querySelector('.idc');
@@ -257,6 +265,80 @@ try {
   ok(await evaluate('document.querySelectorAll(".ml-handle").length === 4'), '可反复进出（第二次仍是 4 个把手）');
   await evaluate('document.querySelector(".ml-edit-bar button").click(); true');
   await sleep(300);
+
+  // ============ 手机横屏（780x360 + 触屏）============
+  // 横屏的坑和竖屏不一样：竖屏上下窄，横屏左右窄，而刘海也跑到侧边去了。
+  // 这里钉两件事：① 两个触控区必须首尾相接 —— 曾经是 44vw + 50vw，中间永远留着
+  // 6vw 的缝（横屏 780px 时 46.8px），手指落进去「既不走也不转视角」；
+  // ② 横屏时移动区补满全高（竖屏那份留给「上半屏看路」的余量在 360px 高度上已无必要）。
+  console.log('== C. 手机横屏（780x360，touch）==');
+  await gotoPhone(780, 360);
+
+  const land = await evaluate(`(() => {
+    const R = (s) => {
+      const e = document.querySelector(s);
+      if (!e) return null;
+      const r = e.getBoundingClientRect();
+      return { l: r.left, r: r.right, t: r.top, b: r.bottom, w: r.width, h: r.height };
+    };
+    const left = R('.mc-left');
+    const right = R('.mc-right');
+    const joy = R('.mc-joy');
+    const jump = R('.mc-jump');
+    const card = R('.idc-card');
+    const rowEl = window.__game ? window.__game._topRow : null;
+    const rowR = rowEl ? rowEl.getBoundingClientRect() : null;
+    const btns = rowEl ? [...rowEl.children].map((b) => b.getBoundingClientRect()) : [];
+    const gap = (left && right) ? right.l - left.r : null;
+    // 沿两区交界线纵向采样：改之前这一列命中的是 .CANVAS，也就是「那头摸不到」
+    const mid = (left && right) ? (left.r + right.l) / 2 : null;
+    const probes = [];
+    if (mid !== null) {
+      for (let y = 30; y < innerHeight - 30; y += 30) {
+        const el = document.elementFromPoint(mid, y);
+        probes.push(el ? String(el.className || el.tagName) : 'null');
+      }
+    }
+    // 血条正好落在移动区里，但它是 pointer-events:none，应该穿透到触控区去
+    const hp = document.querySelector('.hp-box');
+    let hpHit = '';
+    if (hp) {
+      const hr = hp.getBoundingClientRect();
+      const el = document.elementFromPoint(hr.left + hr.width / 2, hr.top + hr.height / 2);
+      hpHit = el ? String(el.className || el.tagName) : 'null';
+    }
+    return {
+      landscape: matchMedia('(orientation: landscape)').matches,
+      vw: innerWidth, vh: innerHeight,
+      left, right, joy, jump, gap, probes, hpHit,
+      cardRight: card ? card.r : -1,
+      rowLeft: rowR ? rowR.left : -1,
+      btnCount: btns.length,
+      btnInView: btns.length > 0 && btns.every((b) => b.left >= -0.5 && b.right <= innerWidth + 0.5),
+      btnRightMost: btns.length ? Math.max(...btns.map((b) => b.right)) : -1,
+    };
+  })()`);
+  ok(land.landscape, '横屏：matchMedia(orientation: landscape) 为真（模拟生效）');
+  ok(land.vw === 780 && land.vh === 360, `横屏：视口 780x360（实际 ${land.vw}x${land.vh}）`);
+  ok(land.gap !== null && land.gap <= 0.5, `两个触控区首尾相接、没有盲区（缝宽 ${land.gap}px；改前是 46.8px）`);
+  // 交界线上不该有任何一处落到画布 —— 落到画布就等于「摸不到」（改前这一列全是 .CANVAS，
+  // 手指落进去既不走也不转视角）。顶部那排按钮 z=9500 横跨分界线，命中它是正常的层级关系，
+  // 所以只要求「没有画布命中」+「绝大多数点归触控区」。
+  const canvasHits = land.probes.filter((c) => c === 'CANVAS' || c === 'null').length;
+  const zoneHits = land.probes.filter((c) => c.includes('mc-zone')).length;
+  ok(canvasHits === 0,
+    `交界线纵向取 ${land.probes.length} 点，没有一处落到画布（落到画布＝那一段既不走也不转视角）`);
+  ok(zoneHits >= land.probes.length - 2,
+    `其中 ${zoneHits}/${land.probes.length} 点命中触控区（余下的是盖在其上的顶部按钮行）`);
+  ok(land.left.h >= land.vh - 1, `横屏移动区补满全高（${land.left.h} / ${land.vh}）`);
+  ok(land.right.h >= land.vh - 1, `横屏视角区仍是全高（${land.right.h}）`);
+  ok(land.joy.l >= 0 && land.joy.r <= land.vw && land.joy.t >= 0 && land.joy.b <= land.vh, '摇杆完整在视口内');
+  ok(land.jump.l >= 0 && land.jump.r <= land.vw && land.jump.t >= 0 && land.jump.b <= land.vh, '跳跃键完整在视口内');
+  ok(land.joy.r < land.jump.l,
+    `摇杆与跳跃键不重叠（摇杆右缘 ${land.joy.r.toFixed(1)} < 跳跃键左缘 ${land.jump.l.toFixed(1)}）`);
+  ok(land.rowLeft >= land.cardRight - 0.5, `按钮行不压校卡（行起点 ${land.rowLeft} ≥ 校卡右缘 ${land.cardRight}）`);
+  ok(land.btnInView, `横屏下 ${land.btnCount} 个按钮都在屏幕内（最右 ${land.btnRightMost.toFixed(1)}）`);
+  ok(land.hpHit.includes('mc-zone'), '血条不吃触摸（pointer-events:none → 穿透到移动区）');
 
   console.log(fails === 0 ? '\nPASS 全部通过' : `\nFAIL ${fails} 条未通过`);
 } catch (e) {

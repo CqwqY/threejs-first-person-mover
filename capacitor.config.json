@@ -1,0 +1,16 @@
+{
+  "appId": "org.dpdns.graduate.fpm",
+  "appName": "花草中学",
+  "webDir": "dist",
+  "server": {
+    "url": "https://play.caiyz.dpdns.org",
+    "androidScheme": "https",
+    "cleartext": false,
+    "errorPath": "error.html"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": true,
+    "backgroundColor": "#0d1117ff"
+  }
+}

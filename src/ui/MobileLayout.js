@@ -9,7 +9,7 @@
 // （见 SettingsPanel 的 setLayoutActions）。编辑期间屏幕顶部会浮出一条「完成」提示条负责收口。
 import {
   LAYOUT_ITEMS, installViewportWatcher, applyLayout, writeLayout, currentMode,
-  relayout, resetLayout, setLayoutPaused, viewportSize, snapshotEl,
+  forceRelayout, resetLayout, setLayoutPaused, viewportSize, snapshotEl,
 } from './layout.js';
 import { ensureTheme } from './theme.js';
 
@@ -209,7 +209,9 @@ export function initMobileLayout() {
       if (rec.hidden) rec.el.style.display = 'none'; // 只还原显示状态，不动位置
     }
     handles.length = 0;
-    relayout(); // 退出时补跑一次重排
+    // 必须强制重排：拖拽的落点只进了 localStorage，视口尺寸没变时 relayout() 的尺寸门槛
+    // 不会放行 → applyLayout 不跑、技能槽的 onRelayout 回调也不触发，表现为「要刷新才生效」。
+    forceRelayout();
   }
 
   // 检查：只读，不改动任何锚点（旧实现会 enter() 从而把自适应锚点改写成 px）

@@ -2,6 +2,20 @@
 node_modules/
 dist/
 
+# Android 构建缓存与产物（工程源码 android/ 要入库，便于复现构建；这些是缓存和打包结果）
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+
 # 账号数据库（含密码哈希与会话，绝不能入库）
 *.db
 *.db-wal

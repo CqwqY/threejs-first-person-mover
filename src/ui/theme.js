@@ -33,6 +33,10 @@ export function ensureTheme() {
       --kui-paper: #ffffff;
       --kui-danger: #d9534f;
       --kui-ok: #46b36b;
+      /* 学币金币：主体 / 描边 / 内圈高光 */
+      --kui-gold: #e8b53a;
+      --kui-gold-deep: #a97c15;
+      --kui-gold-hi: #f7dc7a;
       --kui-shadow: 0 10px 28px rgba(8, 26, 48, .3);
       --kui-radius: 12px;
       /* 显示数字/拉丁字母用的方体字；中文请继续用系统 CJK 字体 */

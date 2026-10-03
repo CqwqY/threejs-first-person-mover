@@ -599,15 +599,26 @@ export class Game {
     const coarse = !!this._coarsePointer; // 触屏判定统一在构造函数里算一次
     const box = document.createElement('div');
     box.className = 'hp-box'; // 供手机端「按键布局调整」定位与检查
-    // 手机端默认位置要避开左下角的摇杆（摇杆占 left 20 / bottom 26 起、118px 见方），
-    // 所以血条挪到摇杆正上方；PC 维持左下角原样。
+    // PC 维持左下角；手机端挪到「屏幕下方正中」——左右两侧是摇杆与跳跃/攻击键的势力范围，
+    // 底部中间是唯一空着的带状区域，横条形状放这里也最自然（不窄不挤、双手拇指都够不着）。
+    // 用 left:50% + translateX(-50%) 居中：布局系统按中心点比例存取（placeWithRatio 会把
+    // transform 置 none 并改写 left/top），所以拖动过的用户仍能自由摆放，未拖动的走这里的居中默认值。
     box.style.cssText = coarse
-      ? 'position:fixed;left:14px;bottom:calc(env(safe-area-inset-bottom, 0px) + 156px);z-index:53;width:min(210px,46vw);' +
-        'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;'
+      ? 'position:fixed;left:50%;transform:translateX(-50%);' +
+        'bottom:calc(env(safe-area-inset-bottom, 0px) + 8px);z-index:53;width:min(300px,62vw);' +
+        'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;' +
+        'text-shadow:0 1px 3px rgba(0,0,0,.6);'
       : 'position:fixed;left:18px;bottom:22px;z-index:53;width:min(240px,42vw);' +
         'font:12px/1.3 var(--kui-font);color:var(--kui-paper);user-select:none;pointer-events:none;';
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.6);';
+    // 手机端血条移到屏幕下方正中，背景可能是任意 3D 画面 → 加一层半透明底衬保证可读。
+    // PC 端在左下角、原本没有底衬，保持原样不动。
+    row.style.cssText = coarse
+      ? 'display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;' +
+        'padding:3px 10px;border-radius:999px;' +
+        'background:color-mix(in srgb, var(--kui-ink) 55%, transparent);' +
+        'text-shadow:0 1px 2px rgba(0,0,0,.7);'
+      : 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.6);';
     const label = document.createElement('span');
     label.textContent = '生命';
     const num = document.createElement('span');
@@ -617,7 +628,10 @@ export class Game {
     // 进度条外观交给主题类；高度仍用内联保持原尺寸，填充色由 _updateHealthBar 按血量动态写入
     const track = document.createElement('div');
     track.className = 'kui-bar';
-    track.style.cssText = 'height:10px;';
+    // 手机端与上方圆角文字条同一套圆角/底衬，避免「圆角数字 + 直角进度条」拼在一起显得不搭
+    track.style.cssText = coarse
+      ? 'height:10px;border-radius:999px;overflow:hidden;'
+      : 'height:10px;';
     const fill = document.createElement('div');
     fill.className = 'kui-bar__fill';
     fill.style.cssText = 'width:100%;background:#2ecc71;transition:width .18s ease,background .18s ease;';
@@ -1521,18 +1535,36 @@ export class Game {
       ? 'position:fixed;z-index:890;left:12px;top:58px;pointer-events:none;user-select:none;'
       : 'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;user-select:none;';
     const body = document.createElement('div');
-    body.className = 'kui-panel__body';
-    body.style.cssText = 'font:13px var(--kui-font);';
+    // 学币用图标 + 数字，别再是一句「学币 123」的纯文字——那在满是 3D 画面的小牌上很突兀。
+    body.className = 'coin-badge__body';
+    body.style.cssText = 'font:13px var(--kui-font);display:flex;align-items:center;gap:5px;';
+    const icon = document.createElement('span');
+    icon.className = 'coin-badge__icon';
+    icon.setAttribute('aria-hidden', 'true');
+    // 内联 SVG（不额外发请求、任意尺寸不糊、颜色跟随主题变量）
+    icon.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" focusable="false">'
+      + '<circle cx="12" cy="12" r="11" fill="var(--kui-gold,#e8b53a)"/>'
+      + '<circle cx="12" cy="12" r="11" fill="none" stroke="var(--kui-gold-deep,#a97c15)" stroke-width="1.6"/>'
+      + '<circle cx="12" cy="12" r="7.4" fill="none" stroke="var(--kui-gold-hi,#f7dc7a)" stroke-width="1.4"/>'
+      // 币面「学」字：笔画做成简化的横竖，避免字体依赖导致不同设备形态不一致
+      + '<path d="M9 8.4h6M12 8.4v7.2M9.6 11.4h4.8" stroke="var(--kui-gold-deep,#a97c15)"'
+      + ' stroke-width="1.7" stroke-linecap="round" fill="none"/>'
+      + '</svg>';
+    const num = document.createElement('span');
+    num.className = 'coin-badge__num';
+    num.style.cssText = 'font-weight:600;';
+    body.appendChild(icon);
+    body.appendChild(num);
     el.appendChild(body);
     document.body.appendChild(el);
-    // 返回内容容器：_refreshCoins 直接写它的 textContent
-    return body;
+    // 返回数字容器：_refreshCoins 只改数字，图标不动
+    return num;
   }
 
   // 学币变化后刷新顶部牌子与商店里的余额
   _refreshCoins() {
     const w = loadWallet(this._profile);
-    if (this._coinBadge) this._coinBadge.textContent = '学币 ' + w.coins;
+    if (this._coinBadge) this._coinBadge.textContent = String(w.coins);
     if (this.shop && this.shop.isOpen()) this.shop.render();
   }
 
@@ -2932,10 +2964,16 @@ export class Game {
   _createTopButtons() {
     const coarse = !!this._coarsePointer;
     if (coarse) {
-      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐
+      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐。
+      // 三处基础值都要加上安全区：横屏时刘海在左右两侧，不减掉 inset 的话校卡会被切、
+      // 最右边的「对战匹配」会被顶出屏幕。基础值 172 = 12 + 156 + 4，与校卡宽度是一对，ui-check 有对拍。
       const row = document.createElement('div');
       row.style.cssText =
-        'position:fixed;z-index:9500;left:172px;right:8px;top:12px;display:flex;gap:6px;' +
+        'position:fixed;z-index:9500;' +
+        'left:calc(env(safe-area-inset-left, 0px) + 172px);' +
+        'right:calc(env(safe-area-inset-right, 0px) + 8px);' +
+        'top:calc(env(safe-area-inset-top, 0px) + 12px);' +
+        'display:flex;gap:6px;' +
         'justify-content:flex-end;align-items:center;flex-wrap:nowrap;';
       document.body.appendChild(row);
       const mk = (text, onClick) => {

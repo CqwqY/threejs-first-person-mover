@@ -15,8 +15,11 @@ const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
 const hudSrc = read('./src/ui/PlayerHUD.js');
 const setSrc = read('./src/ui/SettingsPanel.js');
 const mobSrc = read('./src/ui/MobileLayout.js');
+const layoutSrc = read('./src/ui/layout.js');
+const skillSrc = read('./src/ui/SkillSlots.js');
 const mainSrc = read('./src/main.js');
 const gameSrc = read('./src/core/Game.js');
+const mcCtlSrc = read('./src/ui/MobileControls.js');
 const edSrc = read('./src/editor/EditorApp.js');
 
 // 抽出 `header ... { ... }` 的完整块（花括号配对）
@@ -52,15 +55,27 @@ const wMatch = /\.idc-card\s*\{[^}]*?width:\s*(\d+)px/.exec(coarse || '');
 const wCard = wMatch ? Number(wMatch[1]) : NaN;
 ok(Number.isFinite(wCard), '能抽出手机端校卡宽度：' + (wMatch ? wMatch[1] + 'px' : '(未找到)'));
 
-// Game 里顶部按钮行：left:172px;right:8px;top:12px  —— 与校卡同一个 top:12px
-const topRow = /left:(\d+)px;right:8px;top:12px/.exec(gameSrc);
-const leftRow = topRow ? Number(topRow[1]) : NaN;
-ok(Number.isFinite(leftRow), '能抽出顶部按钮行的 left：' + (topRow ? topRow[1] + 'px' : '(未找到)'));
+// 两侧的锚点都写成 calc(env(safe-area-inset-*) + Npx)：横屏时刘海在左右两侧，
+// 不减掉 inset 的话校卡会被切、最右边的按钮会被顶出屏幕。这里把「基础值」抽出来验算，
+// 并确认 inset 确实挂上了 —— 少了任何一处，横屏真机上才会露馅，纯逻辑测不出来。
+const idcBase = /\.idc\s*\{[^}]*?left:\s*calc\(env\(safe-area-inset-left,\s*0px\)\s*\+\s*(\d+)px\)/.exec(coarse || '');
+const idcLeft = idcBase ? Number(idcBase[1]) : NaN;
+ok(Number.isFinite(idcLeft), '能抽出校卡 left 的安全区基准值：' + (idcBase ? idcBase[1] + 'px' : '(未找到)'));
+ok(idcLeft === 12, `校卡左边距基准仍是 12px（实际 ${idcLeft}）`);
 
-// 校卡贴 left:12px，按钮行要落在「12 + 宽 + 间距 4」上
-const expectLeft = 12 + wCard + 4;
+// Game 里顶部按钮行：left/right/top 三个基础值都跟在 env() 后面
+const rowRe = /left:calc\(env\(safe-area-inset-left,\s*0px\)\s*\+\s*(\d+)px\);\s*' \+\s*'right:calc\(env\(safe-area-inset-right,\s*0px\)\s*\+\s*(\d+)px\);\s*' \+\s*'top:calc\(env\(safe-area-inset-top,\s*0px\)\s*\+\s*(\d+)px\)/.exec(gameSrc);
+const leftRow = rowRe ? Number(rowRe[1]) : NaN;
+const rightRow = rowRe ? Number(rowRe[2]) : NaN;
+const topRowV = rowRe ? Number(rowRe[3]) : NaN;
+ok(Number.isFinite(leftRow), '能抽出顶部按钮行的 left 基准值：' + (rowRe ? rowRe[1] + 'px' : '(未找到)'));
+ok(rightRow === 8, `按钮行右边距基准仍是 8px（实际 ${rightRow}）`);
+ok(topRowV === 12, `按钮行顶部基准与校卡同高 12px（实际 ${topRowV}）`);
+
+// 校卡贴 left(safe + 12)，按钮行要落在「同一基准 + 宽 + 间距 4」上
+const expectLeft = idcLeft + wCard + 4;
 ok(leftRow === expectLeft,
-  `顶部按钮行起点 = 12 + 校卡宽 + 4（期望 ${expectLeft}，实际 ${leftRow}）`);
+  `顶部按钮行起点 = 校卡 left + 校卡宽 + 4（期望 ${expectLeft}，实际 ${leftRow}）`);
 
 // 窄屏兜底：按钮行可用宽度要容得下三个按钮（背包 / 设置 / 对战匹配）
 // 每个按钮 padding 6+8*2=22 + 1px 边框*2，字号 12px 的中文按 12px/字估算
@@ -130,6 +145,50 @@ console.log('== 6. 联动：Game 里 coarse 只判一次 ==');
   ok(/this\._coarsePointer = coarsePointer;/.test(gameSrc), '判定结果落在实例上供各处复用');
   ok(/const coarse = !!this\._coarsePointer;/.test(gameSrc), '_createTopButtons 复用同一份判定');
 }
+
+// ---------------------------------------------------------------------------
+console.log('== 7. 横屏触控区（无缝 + 让开安全区）==');
+// 两个触控区必须首尾相接：曾经是 44vw + 50vw，中间永远留着 6vw 的缝
+// （竖屏 360px 时 21.6px、横屏 780px 时 46.8px）。那条缝两头都摸不到 ——
+// 手指落进去「既不走也不转视角」，是横屏最明显的手感问题。
+const widthVw = (sel) => {
+  const m = new RegExp('\\.' + sel + '\\{[^}]*?width:\\s*(\\d+)vw').exec(mcCtlSrc);
+  return m ? Number(m[1]) : NaN;
+};
+const wLeft = widthVw('mc-left');
+const wRight = widthVw('mc-right');
+ok(Number.isFinite(wLeft) && Number.isFinite(wRight), `能抽出两个触控区宽度：左 ${wLeft}vw / 右 ${wRight}vw`);
+ok(wLeft + wRight === 100, `左右触控区无缝相接（${wLeft}vw + ${wRight}vw = ${wLeft + wRight}vw，必须等于 100）`);
+
+const landCss = extractBlock(mcCtlSrc, '@media (orientation: landscape)');
+ok(!!landCss, 'MobileControls 里有横屏专用媒体查询');
+ok(/\.mc-left\{[^}]*height:\s*var\(--app-vh[^}]*min-height:\s*0/.test(landCss || ''),
+  '横屏时移动区补满全高，并撤掉竖屏那条 min-height:200px');
+ok(/\.mc-joy\{[^}]*left:calc\(env\(safe-area-inset-left/.test(landCss || ''),
+  '横屏摇杆让开左侧安全区（刘海在侧边）');
+ok(/\.mc-jump\{[^}]*right:calc\(env\(safe-area-inset-right/.test(landCss || ''),
+  '横屏跳跃键让开右侧安全区');
+// 横屏块只该改位置：摇杆/跳跃键的尺寸由 MobileLayout 用 vmin 的 clamp 统一管，
+// 而 ChatBox 的聊天栏高度公式直接依赖那组 clamp —— 在这里再写一套 px 尺寸会静默错位。
+ok(!/\.mc-(joy|jump)\{[^}]*(width|height):\s*\d+px/.test(landCss || ''),
+  '横屏块不重复定义摇杆/跳跃键的尺寸（尺寸只归 MobileLayout 的 clamp 管）');
+ok(/clamp\(92px,\s*26vmin,\s*124px\)/.test(mobSrc), '摇杆尺寸仍是 clamp(92px,26vmin,124px)');
+ok(/clamp\(56px,\s*15vmin,\s*78px\)/.test(mobSrc), '跳跃键尺寸仍是 clamp(56px,15vmin,78px)');
+
+// ---- 拖完位置必须立刻生效，不能要刷新 ----
+// relayout() 有「视口尺寸变了才重排」的滞回门槛（防地址栏小幅抖动），
+// 而拖拽保存只写 localStorage、屏幕尺寸没变 → 门槛不放行 → applyLayout 不跑、
+// 技能槽的 onRelayout 回调也不触发 → 表现为「位置改了要刷新才生效」。
+// 凡是「刚改了记录但尺寸没动」的场景必须走 forceRelayout()。
+ok(/export function forceRelayout\(\)/.test(layoutSrc), 'layout.js 导出 forceRelayout()');
+ok(/forceRelayout\(\)/.test(mobSrc), 'MobileLayout 退出编辑模式时调用 forceRelayout()');
+ok(!/^\s*relayout\(\);.*退出时补跑/ms.test(mobSrc),
+  'MobileLayout 不再用无参 relayout() 收尾（那会被尺寸门槛挡掉）');
+ok(/forceRelayout\(\)/.test(layoutSrc.replace(/export function forceRelayout\(\)[\s\S]*?\n\}/, '')),
+  'resetLayout 也走 forceRelayout()（重置同样不改变视口尺寸）');
+// 技能槽必须订阅重排，否则按钮不会贴到保存的位置
+ok(/onRelayout\(\(\)\s*=>\s*\{[^}]*readSavedPos\(\)[^}]*layoutMobile\(\)/s.test(skillSrc),
+  '技能槽订阅 onRelayout，读保存位置后重排（否则拖完位置不动）');
 
 console.log(fails === 0 ? '\nPASS 全部通过' : `\nFAIL ${fails} 条未通过`);
 process.exit(fails === 0 ? 0 : 1);

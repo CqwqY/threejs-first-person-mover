@@ -9,10 +9,16 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/screen-orientation": "^8.0.1",
+    "@capacitor/status-bar": "^8.0.3",
     "three": "^0.170.0",
     "vhacd-js": "^0.0.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "vite": "^5.4.0"
   }
 }

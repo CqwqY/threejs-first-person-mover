@@ -209,12 +209,21 @@ export function relayout(force) {
   }
 }
 
+// 不改变视口、但布局数据变了时的强制重排。
+// 拖拽保存的落点只写进了 localStorage，视口尺寸没变 → relayout() 的尺寸门槛不会放行 →
+// applyLayout 不跑、订阅回调（技能槽按保存位置重新贴位）也不跑，表现为「位置改了要刷新才生效」。
+// 凡是「刚改了记录、但屏幕尺寸没动」的场景（退出编辑模式、重置布局）都必须走这里。
+export function forceRelayout() {
+  lastApplied = { w: 0, h: 0, mode: '' }; // 让下一次 relayout 也必然放行，保持两边一致
+  relayout(true);
+}
+
 // 重置布局：清掉本地记录，回到默认锚点
 export function resetLayout() {
   try { localStorage.removeItem(STORE_KEY); } catch (e) { /* 忽略 */ }
   migrated = true;
   applyLayout(currentMode());
-  relayout(true);
+  forceRelayout();
 }
 
 // 拦截浏览器手势：iOS 10+ 会忽略 meta 里的 user-scalable=no，
