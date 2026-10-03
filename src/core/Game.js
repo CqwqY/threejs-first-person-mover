@@ -103,12 +103,20 @@ export class Game {
 
     // ---- 渲染器 ----
     this._qualityDpr = 2; // 画质档可调的 dpr 封顶：high=2 / mid=1.5 / low=1（默认 2，quality='mid' 时由 _applyQuality 降到 1.5）
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    // MSAA 只在低密度屏（dpr<2，主要是桌面显示器）开：手机 dpr 普遍 2.6~3，像素已经很密，
+    // MSAA 在此几乎是纯 GPU 开销（填充率大户），关掉肉眼无差 —— 这是移动端最大的单项省耗。
+    // 注意 antialias 无法运行时切换，只能在构造期按设备定死。
+    this.renderer = new THREE.WebGLRenderer({ antialias: (window.devicePixelRatio || 1) < 2 });
     // dpr 封顶：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
     // 会反复触发 canvas 重算（掉帧/抖动的隐藏来源）
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // 阴影贴图不再每帧全量重渲（GPU 大头），改为主循环里隔帧置 needsUpdate ——
+    // 太阳是平行光、阴影变化极慢，30Hz 更新肉眼无差；画质档切换时的单次重渲
+    // 仍由 _applyQuality 里的一次性 needsUpdate 兜底（最迟 2 帧内会被循环置位）。
+    this.renderer.shadowMap.autoUpdate = false;
+    this._shadowTick = 0;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     document.getElementById('app').appendChild(this.renderer.domElement);
 
@@ -583,6 +591,10 @@ export class Game {
     const frame = p.acc / n;
     const phys = p.phys / n;
     const rend = p.render / n;
+    // 真实帧率：帧数 ÷ 真实流逝时间（rAF 间隔），受屏幕 vsync 封顶（60/120Hz）。
+    // 之前用 1000/CPU耗时 是「CPU 吞吐」，GPU 卡住时它照样显示 500+，有误导性；
+    // CPU 耗时单独保留一列，两者对比正好能判断瓶颈在 CPU 还是 GPU。
+    const fps = p.t > 0 ? n / p.t : 0;
     p.frames = 0; p.phys = 0; p.render = 0; p.acc = 0; p.t = 0;
 
     // 碰撞体规模：判断「卡」是不是真的来自碰撞（复杂建筑的数量与三角形总数）
@@ -594,8 +606,8 @@ export class Game {
       else boxes++;
     }
     const txt =
-      'FPS ' + (frame > 0 ? (1000 / frame) : 0).toFixed(0).padStart(3) +
-      '   帧 ' + frame.toFixed(1) + ' ms\n' +
+      'FPS ' + fps.toFixed(0).padStart(3) +
+      '   CPU ' + frame.toFixed(1) + ' ms\n' +
       '物理 ' + phys.toFixed(2) + ' ms   渲染 ' + rend.toFixed(2) +
       ' ms   其他 ' + Math.max(0, frame - phys - rend).toFixed(2) + ' ms\n' +
       '碰撞体 盒' + boxes + ' 凸包' + hulls + ' trimesh' + tms +
@@ -5587,6 +5599,10 @@ export class Game {
     }
 
     // 渲染当前帧
+    // 阴影隔帧重渲：autoUpdate 已关，这里每 2 帧置一次 needsUpdate（≈30Hz），
+    // 平衡掉阴影贴图那一份 GPU 开销；玩家快速移动时阴影最多滞后 1 帧，不可感知。
+    this._shadowTick = (this._shadowTick + 1) & 1;
+    this.renderer.shadowMap.needsUpdate = this._shadowTick === 0;
     const _pt3 = this._perf ? performance.now() : 0;
     this.renderer.render(this.scene, this.camera);
 
