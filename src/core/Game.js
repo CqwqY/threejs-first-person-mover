@@ -17,7 +17,8 @@ import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
-import { buildTrackPath } from '../world/TrackViz.js';
+import { buildTrackPath, buildTrackCollision } from '../world/TrackViz.js';
+import { bakeTriMesh } from '../world/collision/trimesh.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
@@ -238,6 +239,7 @@ export class Game {
     // 拉到远程场景后 _applyTrack 会覆盖它。数据/几何/判定都在 world/Track.js（与编辑器共用同一份）。
     this.track = defaultTrack();
     this._trackGroup = null;
+    this._trackCollider = null; // 路面烘出来的 trimesh 碰撞体（重建赛道时摘掉重烘）
     this._buildTrackViz();
     // 校园狂飙：本机正在跑圈时的状态（null = 没在跑）；HUD 元素；「每人一辆车」的载具池
     this._race = null;
@@ -4548,6 +4550,7 @@ export class Game {
     const st = this.localState;
     st.x = sp.x;
     st.z = sp.z;
+    st.y = this._feetToTop(sp.y); // 立体赛道：起点在 0 号门那么高，别把车手丢在门下方的半空
     st.yaw = sp.yaw;
     st.pitch = 0;
     this.localPlayer.physics.velocity.set(0, 0, 0);
@@ -6002,6 +6005,7 @@ export class Game {
   // 把门画进世界：两根细柱 + 横梁。几何来自 Track.gateSpecs，与编辑器预览同一份 ——
   // 编辑器里摆成什么样，游戏里就是什么样。门少于 2 个（或赛道被清空）就整组移除。
   _buildTrackViz() {
+    this._applyTrackCollider(); // 路面碰撞体：先摘掉旧的，再按当前赛道重新烘一份
     if (this._trackGroup) {
       this.scene.remove(this._trackGroup);
       this._trackGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
@@ -6043,6 +6047,26 @@ export class Game {
   // 赛道可视化（路面 + 中线 + 方向箭头 + 门框）的显隐。门框是实体网格，收起来后连影子一起没了。
   _setTrackVisible(on) {
     if (this._trackGroup) this._trackGroup.visible = !!on;
+  }
+
+  // 赛道路面的碰撞体：把「与视觉路面同一条曲线、同半宽」的实体板烘成 trimesh，塞进世界碰撞体。
+  // 于是门被抬高时（立体赛道），玩家/车能真的开上去、也能被路沿挡住，而不是穿过去。
+  // 重建赛道（编辑器保存后拉到新场景）时会先摘掉旧的，避免碰撞体越积越多。
+  _applyTrackCollider() {
+    if (this._trackCollider) {
+      const i = this.colliders.indexOf(this._trackCollider);
+      if (i >= 0) this.colliders.splice(i, 1);
+      this._trackCollider = null;
+    }
+    const t = this.track;
+    if (!isTrackRunnable(t)) return;
+    const mesh = buildTrackCollision(t);
+    if (!mesh) return;
+    const col = bakeTriMesh(mesh); // 顶点已是世界坐标（mesh 自身无变换），可直接烘
+    mesh.geometry.dispose();       // 碰撞体内部已复制三角形，渲染几何没用了
+    if (!col) return;
+    this._trackCollider = col;
+    this.colliders.push(col);
   }
 
   // 边界要同步到两处：① 物理夹取（真正挡人的是它）② 可选的可视半透明墙。

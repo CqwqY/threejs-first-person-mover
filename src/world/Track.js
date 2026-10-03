@@ -6,6 +6,8 @@
 //  - checkpoints 是**有序**的门：车手必须按 0,1,2,… 的顺序依次穿过；穿过最后一个之后
 //    再穿第 0 个 = 完成一圈。圈数跑满 laps 即完赛。
 //  - 每个门：中心 (x,y,z)，宽度 w（米，沿「垂直于赛道行进方向」铺开）。
+//    **y = 门/路面的高度**（编辑器里可逐门调，或按住 Shift 上下拖），把门抬高就得到一条立体赛道：
+//    路面是沿曲线插值出的 y，碰撞体也随之生成（见 TrackViz.buildTrackCollision）。
 //    ⚠ 门自身**不存朝向**：横梁方向由「本门 → 下一个门」自动推出来（见 gateSpecs），
 //      这样编辑器只摆点、不用再调角度，摆出来的门永远垂直于跑线。
 //  - laps：跑几圈算完赛。
@@ -25,6 +27,11 @@ export const TRACK_LAPS_MAX = 20;
 export const TRACK_LAPS_DEF = 3;
 export const TRACK_MAX_ABS = 5000;      // 坐标绝对值上限（米）：挡住 NaN / 1e9 之类的脏数据
 export const TRACK_START_BACK = 8;      // 起跑线放在 0 号门「后方」多少米（米）
+export const TRACK_Y_MIN = -20;         // 门高度下限（米）：负值是往地里埋，意义不大，给一点余量即可
+export const TRACK_Y_MAX = 400;         // 门高度上限（米）：立体赛道够用了，再高也没法开车
+export const TRACK_ROAD_HALF_W = 3.2;   // 路面半宽（米）——视觉路面与碰撞体**必须**用同一个值
+export const TRACK_ROAD_LIFT = 0.06;    // 路面顶面相对门中心线再抬一点（防 z-fighting / 防和地面同面）
+export const TRACK_SLAB = 0.45;         // 路面碰撞板的厚度（米）：零厚度薄片会被 SAT 推到任意一侧
 
 const clamp = (v, a, b) => (v < a ? a : (v > b ? b : v));
 const num = (v, fb) => (Number.isFinite(Number(v)) ? Number(v) : fb);
@@ -62,7 +69,7 @@ export function normalizeTrack(raw) {
     if (Math.abs(x) > TRACK_MAX_ABS || Math.abs(z) > TRACK_MAX_ABS) continue;
     cps.push({
       x,
-      y: clamp(num(c.y, 0), -TRACK_MAX_ABS, TRACK_MAX_ABS),
+      y: clamp(num(c.y, 0), TRACK_Y_MIN, TRACK_Y_MAX),
       z,
       w: clamp(num(c.w, TRACK_GATE_W_DEF), TRACK_GATE_W_MIN, TRACK_GATE_W_MAX),
     });
@@ -143,7 +150,11 @@ export function nextGateIndex(i, total) {
 // 贝塞尔赛道线：把门按顺序用**闭合三次贝塞尔**连成一条平滑赛道，并给出方向。
 // 控制点用 Catmull-Rom → 贝塞尔的经典换算（每段过两个相邻门），所以曲线**一定穿过每一个门**，
 // 不会像"随手连点"那样飘到门外面去。首尾相连 = 一条闭合的赛道。
+// **y 也一起插值** —— 门有高低时，路面就是一条跟着上下的立体赛道（起坡/跨桥都靠它）。
 // ---------------------------------------------------------------------------
+
+// 每个门的 y 容错取数（老存档可能没有 y）
+const cy = (p) => (Number.isFinite(Number(p && p.y)) ? Number(p.y) : 0);
 
 // 每段的四个控制点 { p0, c1, c2, p1 }（p0 / p1 是端点 = 两个相邻门）
 export function curveSegments(t) {
@@ -155,10 +166,10 @@ export function curveSegments(t) {
   for (let i = 0; i < n; i++) {
     const a = at(i - 1), b = at(i), c = at(i + 1), d = at(i + 2);
     segs.push({
-      p0: { x: b.x, z: b.z },
-      c1: { x: b.x + (c.x - a.x) / 6, z: b.z + (c.z - a.z) / 6 },
-      c2: { x: c.x - (d.x - b.x) / 6, z: c.z - (d.z - b.z) / 6 },
-      p1: { x: c.x, z: c.z },
+      p0: { x: b.x, y: cy(b), z: b.z },
+      c1: { x: b.x + (c.x - a.x) / 6, y: cy(b) + (cy(c) - cy(a)) / 6, z: b.z + (c.z - a.z) / 6 },
+      c2: { x: c.x - (d.x - b.x) / 6, y: cy(c) - (cy(d) - cy(b)) / 6, z: c.z - (d.z - b.z) / 6 },
+      p1: { x: c.x, y: cy(c), z: c.z },
     });
   }
   return segs;
@@ -169,7 +180,7 @@ const _bez = (a, b, c, d, u) => {
   return m * m * m * a + 3 * m * m * u * b + 3 * m * u * u * c + u * u * u * d;
 };
 
-// 采样成折线（画线 / 铺路面都用它）；闭合，首尾同点
+// 采样成折线（画线 / 铺路面 / 造碰撞体都用它）；闭合，首尾同点。点带 y。
 export function curvePoints(t, per = 16) {
   const segs = curveSegments(t);
   if (!segs.length) return [];
@@ -179,15 +190,16 @@ export function curvePoints(t, per = 16) {
       const u = k / per;
       out.push({
         x: _bez(s.p0.x, s.c1.x, s.c2.x, s.p1.x, u),
+        y: _bez(s.p0.y, s.c1.y, s.c2.y, s.p1.y, u),
         z: _bez(s.p0.z, s.c1.z, s.c2.z, s.p1.z, u),
       });
     }
   }
-  out.push({ x: out[0].x, z: out[0].z });
+  out.push({ x: out[0].x, y: out[0].y, z: out[0].z });
   return out;
 }
 
-// 沿曲线按**弧长均匀**取 count 个「方向箭头」的落点与朝向：{ x, z, dx, dz }
+// 沿曲线按**弧长均匀**取 count 个「方向箭头」的落点与朝向：{ x, y, z, dx, dz }
 // （按弧长而不是按参数 u，才能让箭头之间等距，不会在转弯处挤成一堆）
 export function curveArrows(t, count = 10) {
   const pts = curvePoints(t, 20);
@@ -210,9 +222,18 @@ export function curveArrows(t, count = 10) {
     const dx = b.x - a.x;
     const dz = b.z - a.z;
     const len = Math.hypot(dx, dz) || 1;
-    out.push({ x: a.x + dx * u, z: a.z + dz * u, dx: dx / len, dz: dz / len });
+    out.push({ x: a.x + dx * u, y: a.y + (b.y - a.y) * u, z: a.z + dz * u, dx: dx / len, dz: dz / len });
   }
   return out;
+}
+
+// 赛道高度范围（编辑器面板显示用）：{ min, max }，没有门时都是 0
+export function trackHeightRange(t) {
+  const cps = (t && Array.isArray(t.checkpoints)) ? t.checkpoints : [];
+  if (!cps.length) return { min: 0, max: 0 };
+  let min = Infinity, max = -Infinity;
+  for (const c of cps) { const v = cy(c); if (v < min) min = v; if (v > max) max = v; }
+  return { min, max };
 }
 
 // 赛道规模提示（几处文案共用）

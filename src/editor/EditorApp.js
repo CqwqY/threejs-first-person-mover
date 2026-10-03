@@ -20,7 +20,7 @@ import {
 } from '../world/Boundary.js';
 // 赛道（校园狂飙）：与游戏运行时共用同一份数据/几何/判定，见 world/Track.js
 import {
-  defaultTrack, normalizeTrack, gateSpecs, trackSummary, TRACK_GATE_W_DEF,
+  defaultTrack, normalizeTrack, gateSpecs, trackSummary, trackHeightRange, TRACK_GATE_W_DEF,
 } from '../world/Track.js';
 import { buildTrackPath, disposeTrackViz } from '../world/TrackViz.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
@@ -209,6 +209,8 @@ export function createEditor() {
     trackFocus: true,   // 赛道模式：只显示赛道（把模型/景物/光源藏起来，看得清）
     trackDrag: null,    // 正在拖的门索引（null = 没在拖）
     trackSel: -1,       // 当前选中的门（右侧列表与 3D 高亮共用；-1 = 没选）
+    trackDragPx: 0,     // 拖门起始的屏幕 y 像素（按 Shift 调高度时的基准）
+    trackDragY0: 0,     // 拖门起始时这个门的高度（同上）
   };
   // 物体 id：全局唯一的纯数字 id，随场景一起保存/还原。
   // 编号顺序：景物先按 buildScenery 顺序占 1..N（key 固定 → id 固定），摆放物体接续往后排。
@@ -290,6 +292,7 @@ export function createEditor() {
     tkHint: document.getElementById('tkHint'),
     tkName: document.getElementById('tkName'),
     tkLaps: document.getElementById('tkLaps'),
+    tkY: document.getElementById('tkY'),
     tkFocus: document.getElementById('tkFocus'),
     tkList: document.getElementById('tkList'),
     tkFrame: document.getElementById('tkFrame'),
@@ -2505,7 +2508,15 @@ export function createEditor() {
     if (StepUI.tkName && document.activeElement !== StepUI.tkName) StepUI.tkName.value = t.name;
     if (StepUI.tkLaps && document.activeElement !== StepUI.tkLaps) StepUI.tkLaps.value = String(t.laps);
     if (StepUI.tkFocus) StepUI.tkFocus.checked = !!state.trackFocus;
-    StepUI.tkInfo.textContent = '共 ' + s.gates + ' 个门 · ' + s.laps + ' 圈 · '
+    // 选中门的高度：只在没聚焦时回填（别抢用户正在输入的框）
+    const selCp = state.trackSel >= 0 ? t.checkpoints[state.trackSel] : null;
+    if (StepUI.tkY && document.activeElement !== StepUI.tkY) {
+      StepUI.tkY.value = selCp ? selCp.y.toFixed(1) : '';
+      StepUI.tkY.disabled = !selCp;
+    }
+    const hr = trackHeightRange(t);
+    StepUI.tkInfo.textContent = '共 ' + s.gates + ' 个门 · ' + s.laps + ' 圈 · 高度 '
+      + hr.min.toFixed(1) + ' ~ ' + hr.max.toFixed(1) + ' 米 · '
       + (s.gates >= 2 ? '可以开赛' : '至少要有 2 个门才能开赛');
     const list = StepUI.tkList;
     if (list) {
@@ -2520,13 +2531,13 @@ export function createEditor() {
         const row = document.createElement('div');
         row.style.cssText = 'cursor:pointer;padding:2px 5px;border-radius:4px;'
           + (state.trackSel === i ? 'background:rgba(78,161,255,.28);color:#fff;' : '');
-        row.textContent = (i + 1) + '.   X ' + c.x.toFixed(1) + '   Z ' + c.z.toFixed(1);
+        row.textContent = (i + 1) + '.   X ' + c.x.toFixed(1) + '   Z ' + c.z.toFixed(1) + '   Y ' + c.y.toFixed(1);
         row.onclick = () => { state.trackSel = i; refreshTrackViz(); };
         list.appendChild(row);
       });
     }
     if (StepUI.tkHint) {
-      StepUI.tkHint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 右键拖拽转视角 · 第 1 个门同时也是起终点';
+      StepUI.tkHint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 按住 Shift 拖门 = 调高度（往上拖抬高）· 右键拖拽转视角 · 第 1 个门同时也是起终点';
     }
   }
 
@@ -2563,7 +2574,7 @@ export function createEditor() {
     });
     // 贝塞尔路面 + 方向箭头（与游戏共用同一份几何）。只在门的坐标真的变了时重建 ——
     // 拖门时每帧都会调到这里，无条件重建会白白造上千个顶点。
-    const sig = state.track.checkpoints.map((c) => c.x.toFixed(2) + ',' + c.z.toFixed(2)).join(';');
+    const sig = state.track.checkpoints.map((c) => c.x.toFixed(2) + ',' + c.y.toFixed(2) + ',' + c.z.toFixed(2)).join(';');
     if (sig !== tkPathSig) {
       tkPathSig = sig;
       if (tkPath) { disposeTrackViz(tkPath); tkPath = null; }
@@ -2611,11 +2622,14 @@ export function createEditor() {
     if (gi >= 0) { // 抓住一个门 → 拖它
       state.trackDrag = gi;
       state.trackSel = gi;
+      // 记下起始像素与起始高度：按 Shift 拖动时用它算「往上拖 = 抬高」
+      state.trackDragPx = e.clientY;
+      state.trackDragY0 = state.track.checkpoints[gi] ? state.track.checkpoints[gi].y : 0;
       controls.enabled = false;
       refreshTrackViz();
       return;
     }
-    // 点空白地面 → 在末尾接一个新门
+    // 点空白地面 → 在末尾接一个新门（新门从地面起，高度 0）
     const p = groundPos(e.clientX, e.clientY, hit);
     if (!p) return;
     const cps = state.track.checkpoints.concat([{ x: snapVal(p.x), y: 0, z: snapVal(p.z), w: TRACK_GATE_W_DEF }]);
@@ -2628,7 +2642,17 @@ export function createEditor() {
       renderer.domElement.style.cursor = pickTrackGate(e.clientX, e.clientY) >= 0 ? 'grab' : 'crosshair';
       return;
     }
-    renderer.domElement.style.cursor = 'grabbing';
+    renderer.domElement.style.cursor = e.shiftKey ? 'ns-resize' : 'grabbing';
+    // 按住 Shift = 只调高度（往上拖抬高）。用「相对起始点」的绝对位移算，
+    // 中途才按下 Shift 也不会跳一下；系数 0.1 米/像素，再走一次吸附取整。
+    if (e.shiftKey) {
+      const dy = (state.trackDragPx || e.clientY) - e.clientY;
+      const ny = snapVal((state.trackDragY0 || 0) + dy * 0.1);
+      if (Math.abs(ny - state.trackDragY0) < 1e-6) return;
+      const cps = state.track.checkpoints.map((c, i) => (i === state.trackDrag ? { ...c, y: ny } : c));
+      setTrack({ checkpoints: cps });
+      return;
+    }
     const p = groundPos(e.clientX, e.clientY, hit);
     if (!p) return;
     const cps = state.track.checkpoints.map((c, i) => (i === state.trackDrag
@@ -2647,19 +2671,21 @@ export function createEditor() {
   // 俯视全览：把整条赛道框进画面（没门时退回地面中心）
   function frameTrackTop() {
     const cps = state.track.checkpoints;
-    let cx = 0, cz = 0, span = 60;
+    let cx = 0, cy = 0, cz = 0, span = 60;
     if (cps.length) {
-      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, sumY = 0;
       for (const c of cps) {
         minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
         minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+        sumY += c.y;
       }
       cx = (minX + maxX) / 2;
       cz = (minZ + maxZ) / 2;
+      cy = sumY / cps.length; // 立体赛道：俯视也要抬到赛道平均高度，否则整条线跑出画面
       span = Math.max(maxX - minX, maxZ - minZ, 40) + 40;
     }
-    camera.position.set(cx, span * 1.15, cz + 0.001);
-    controls.target.set(cx, 0, cz);
+    camera.position.set(cx, cy + span * 1.15, cz + 0.001);
+    controls.target.set(cx, cy, cz);
     controls.update();
   }
 
@@ -2682,6 +2708,13 @@ export function createEditor() {
     if (Number.isFinite(v)) setTrack({ laps: v });
   });
   if (StepUI.tkFocus) StepUI.tkFocus.addEventListener('change', () => applyTrackFocus(StepUI.tkFocus.checked));
+  // 选中门的高度：直接填数字（立体赛道的精确做法；粗略升降用「按住 Shift 拖门」更快）
+  if (StepUI.tkY) StepUI.tkY.addEventListener('input', () => {
+    const v = parseFloat(StepUI.tkY.value);
+    if (!Number.isFinite(v) || state.trackSel < 0) return;
+    const cps = state.track.checkpoints.map((c, i) => (i === state.trackSel ? { ...c, y: v } : c));
+    setTrack({ checkpoints: cps });
+  });
 
   // ---------- 模式切换 ----------
   // ---------- 测距器实现 ----------
