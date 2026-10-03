@@ -102,6 +102,54 @@ export function initMobileControls(input, opts = {}) {
   jumpBtn.addEventListener('pointerup', jumpRelease);
   jumpBtn.addEventListener('pointercancel', jumpRelease);
 
+  // ---- 驾驶键（只在开电动车时显示）：左转 / 刹车 / 右转 ----
+  // 驾驶时跳跃本来就无效，所以直接把右下那颗「跳」临时换成驾驶键组：位置不动、不额外抢屏幕。
+  // 按钮不另设输入通道，直接往 Input 里塞 A / D / 空格 —— 与键盘完全同一套判定（见 Input.setVirtualKey）。
+  const drivePad = document.createElement('div');
+  drivePad.className = 'mc-drive';
+  drivePad.style.cssText =
+    'position:fixed;right:calc(env(safe-area-inset-right, 0px) + 20px);' +
+    'bottom:calc(env(safe-area-inset-bottom, 0px) + 24px);z-index:51;display:none;' +
+    'gap:10px;align-items:center;touch-action:none;user-select:none;-webkit-user-select:none;';
+  const mkDriveBtn = (text, code) => {
+    const b = document.createElement('div');
+    b.className = 'mc-drive-btn';
+    b.textContent = text;
+    b.style.cssText =
+      'width:clamp(56px,15vmin,72px);height:clamp(56px,15vmin,72px);border-radius:50%;' +
+      'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
+      'color:var(--kui-paper);font-size:clamp(13px,3.6vmin,16px);font-weight:600;font-family:var(--kui-font);' +
+      'background:color-mix(in srgb, var(--kui-blue) 30%, transparent);' +
+      'border:2px solid color-mix(in srgb, var(--kui-blue-soft) 75%, transparent);touch-action:none;';
+    const press = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      input.setVirtualKey(code, true);
+      try { b.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+    };
+    const release = (e) => { e.preventDefault(); input.setVirtualKey(code, false); };
+    b.addEventListener('pointerdown', press);
+    b.addEventListener('pointerup', release);
+    b.addEventListener('pointercancel', release);
+    drivePad.appendChild(b);
+    return b;
+  };
+  mkDriveBtn('◀', 'KeyA');   // 左转
+  mkDriveBtn('刹', 'Space'); // 刹车（骑乘时空格就是刹车）
+  mkDriveBtn('▶', 'KeyD');   // 右转
+  document.body.appendChild(drivePad);
+
+  // 进出驾驶：藏「跳」露驾驶键组；退出时把可能卡住的虚拟键一并清掉
+  const setDriving = (on) => {
+    drivePad.style.display = on ? 'flex' : 'none';
+    jumpBtn.style.display = on ? 'none' : '';
+    if (!on) {
+      input.setVirtualKey('KeyA', false);
+      input.setVirtualKey('KeyD', false);
+      input.setVirtualKey('Space', false);
+    }
+  };
+
   // ---- 左下人称切换器（1人称 / 3人称）----
   const viewBox = document.createElement('div');
   viewBox.className = 'mc-view';
@@ -235,6 +283,10 @@ export function initMobileControls(input, opts = {}) {
     knob.style.transform = '';
     input.setJoystick(0, 0);
     input.setJumpHeld(false);
+    // 驾驶虚拟键也一起清（旋转/重排时最容易被落下，表现为「车一直自己转」）
+    input.setVirtualKey('KeyA', false);
+    input.setVirtualKey('KeyD', false);
+    input.setVirtualKey('Space', false);
   };
 
   // 视口尺寸真的变了才清输入（visualViewport 的 scroll 也会触发重排，别把正在拖的摇杆打断）
@@ -249,4 +301,7 @@ export function initMobileControls(input, opts = {}) {
     }
     refreshCenter(); // 摇杆基点随布局重算
   });
+
+  // 供 Game 在上下车时调用：驾驶键组与「跳」互换
+  return { setDriving };
 }

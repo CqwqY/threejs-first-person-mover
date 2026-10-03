@@ -103,6 +103,14 @@ export class Input {
     else this._keys.delete('Space');
   }
 
+  // 手机端「驾驶按钮」（左转 / 右转 / 刹车）：直接往「按住的键」集合里塞同一个键码，
+  // 这样上层（LocalPlayer / PlayerPhysics）完全不用区分键盘还是屏幕按钮 ——
+  // 左转 = 按住 A、右转 = 按住 D、刹车 = 按住空格。
+  setVirtualKey(code, on) {
+    if (on) this._keys.add(code);
+    else this._keys.delete(code);
+  }
+
   // 读取并清零本帧的鼠标移动量（像素）
   // 返回 { x, y }，LocalPlayer 据此更新 yaw / pitch
   takeMouseDelta() {

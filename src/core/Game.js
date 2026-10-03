@@ -1452,8 +1452,9 @@ export class Game {
     this.input.consumeJump(); // 清掉待处理的跳跃请求
     phys.canJump = false;      // 骑乘时不能跳
     if (seat === 1) {
-      phys.speedMult = Config.VEHICLE_SPEED / Config.MOVE_SPEED; // 速度很快
-      this._toast('已上车（驾驶位）：速度很快，但不能跳跃');
+      phys.speedMult = Config.VEHICLE_SPEED / Config.MOVE_SPEED; // 兜底：真实速度由 LocalPlayer._driveVehicle 接管
+      if (this.mobileControls) this.mobileControls.setDriving(true); // 手机：把「跳」换成 左转/刹车/右转
+      this._toast('已上车（驾驶位）：W / 前推前进 · 左右转向 · ' + (this._coarsePointer ? '刹车键' : '空格') + '刹车');
     } else {
       this._vehDriver = driverId || null;
       phys.controlLock = true; // 后座不参与操控
@@ -1470,6 +1471,7 @@ export class Game {
     st.ride = 0;
     st.veh = '';
     this._vehDriver = null;
+    if (this.mobileControls) this.mobileControls.setDriving(false); // 手机：驾驶键组换回「跳」
     const phys = this.localPlayer.physics;
     phys.canJump = true;
     // 别把对话栏的操控锁一起解掉
