@@ -289,6 +289,9 @@ export class Game {
     // 统一走 isCoarsePointer()（多信号 OR，覆盖 WebView / Capacitor / 真机）。
     const coarsePointer = isCoarsePointer();
     this._coarsePointer = coarsePointer; // 提前落定：顶部按钮排布 / 准星 / 攻击键都要读它
+    // 骑车自由视角（鼠标左右转头、不动车头）**只在电脑开**：手机右半屏是视角拖动区，
+    // 那里要留给俯仰，且手机有专门的左右转向键，再加一份自由视角只会互相打架。
+    if (this.localPlayer) this.localPlayer.rideLookEnabled = !coarsePointer;
 
     // ---- 设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
     this.settingsPanel = createSettingsPanel(
@@ -1488,6 +1491,7 @@ export class Game {
     st.veh = '';
     this._vehDriver = null;
     if (this.mobileControls) this.mobileControls.setDriving(false); // 手机：驾驶键组换回「跳」
+    this.localPlayer.resetRideLook(); // 骑行自由视角回正（否则下车后镜头还歪着）
     const phys = this.localPlayer.physics;
     phys.canJump = true;
     // 别把对话栏的操控锁一起解掉
@@ -4347,14 +4351,15 @@ export class Game {
     setModelScale(local.model, size);
     setHeldItem(local.model, s.wep || '', s.hold || '');
 
-    local.model.rotation.set(0, s.yaw, 0);
+    local.model.rotation.set(0, s.yaw, 0); // 模型朝向 = 车头（自由视角只转相机，不转车）
     // 行走动画由主循环里的 tickPlayerModels(dt) 统一驱动（按帧间位移算速度），这里不再单独 update
 
     // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
     // 俯仰（pitch）必须参与：否则鼠标上下拖动在第三人称下毫无反应。
     // 做法：把 pitch 合进「视线方向」，相机沿视线反方向后退，再按视线方向瞄准。
     const eye = new THREE.Vector3(this.localState.x, this.localState.y, this.localState.z);
-    const yaw = this.localState.yaw;
+    // 骑车时用 viewYaw（车头 + 自由视角偏移）：第三人称也要能左右看看
+    const yaw = this.localPlayer.viewYaw;
     const cosP = Math.cos(this.localState.pitch);
     const sinP = Math.sin(this.localState.pitch);
     // 含俯仰的视线单位方向（与第一人称一致：yaw 水平转向 + pitch 俯仰）
@@ -4366,7 +4371,7 @@ export class Game {
     this.camera.position.copy(camPos);
     // 直接用与第一人称相同的欧拉角（pitch, yaw）来定朝向，俯仰一定跟着鼠标走，
     // 不依赖 lookAt 的推算，避免「第三人称锁俯仰」。
-    this.camera.rotation.set(this.localState.pitch, this.localState.yaw, 0);
+    this.camera.rotation.set(this.localState.pitch, yaw, 0);
   }
 
   // 主循环：计算 dt -> 更新玩家 -> 渲染

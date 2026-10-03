@@ -25,6 +25,21 @@ export class LocalPlayer {
     this._prevZ = this.state.z;
     this._vehSpeed = 0; // 电动车驾驶速度（带惯性，见 _driveVehicle）
     this._vehSteer = 0; // 平滑后的方向盘位置（-1 左 / 0 正 / +1 右），见 _driveVehicle
+    // 骑车时的自由视角（仅电脑）：鼠标左右只让**相机**转头，state.yaw（= 车头）不动。
+    // 见 update() 与 Game._thirdPerson 的 viewYaw。0 = 正对车头。
+    this._rideLook = 0;
+    this.rideLookEnabled = false; // 由 Game 按触屏判定设置（手机不开）
+    this._rideLookMax = THREE.MathUtils.degToRad(Config.RIDE_LOOK_MAX_DEG);
+  }
+
+  // 相机实际用的水平朝向 = 车头朝向 + 骑行自由视角偏移（不骑车时偏移恒为 0）
+  get viewYaw() {
+    return this.state.yaw + this._rideLook;
+  }
+
+  // 下车 / 切场景时立刻回正（别等下一帧的 update，免得有一帧歪着看）
+  resetRideLook() {
+    this._rideLook = 0;
   }
 
   // 电动车驾驶：油门（W / 摇杆前推）→ 有惯性地点加速；松油门靠阻力滑行；跳跃键（骑乘时跳跃本来就无效）当刹车；
@@ -81,10 +96,18 @@ export class LocalPlayer {
     const { x, y } = this.input.takeMouseDelta();
     // yaw 的符号约定：**yaw 减小 = 向右转**（前方 = (-sin yaw, -cos yaw)，yaw=0 朝 -Z，yaw 减小转向 +X）。
     // 所以鼠标右移（x>0）要减 —— 这里写 `-=` 是对的，别被"右移该增加"的直觉带反。
-    // 骑电动车时车头由「转向」控制（A/D 或手机左右按钮），鼠标/触屏只负责俯仰 ——
+    // 骑电动车时车头由「转向」控制（A/D 或手机左右按钮），鼠标只负责俯仰 ——
     // 否则一动视角车头就跟着甩，配上惯性根本没法开。
+    // 但电脑上还想「边开边左右看看」，所以给一份**只作用于相机**的自由视角偏移：
+    // 鼠标左右改的是 _rideLook（转头），state.yaw（车头 / 广播给别人的朝向）一点不动。
     if (!this.state.ride) {
       this.state.yaw -= x * Config.MOUSE_SENSITIVITY;
+      this._rideLook = 0; // 下车 → 偏移清零，视角自动回到车后/正前方
+    } else if (this.rideLookEnabled) {
+      this._rideLook = THREE.MathUtils.clamp(
+        this._rideLook - x * Config.MOUSE_SENSITIVITY,
+        -this._rideLookMax, this._rideLookMax
+      );
     }
     // 鼠标上移（y<0）对应 pitch 增加（向上看）；这里为了让“上移=向上看”取负号
     this.state.pitch -= y * Config.MOUSE_SENSITIVITY;
@@ -100,8 +123,9 @@ export class LocalPlayer {
     this.physics.update(dt, this.input, this.state.yaw, this.state, this.colliders);
 
     // ---- 3. 同步相机位置与旋转（从 state 读取） ----
+    // 水平朝向用 viewYaw（= 车头 + 骑行自由视角），所以骑车时能左右转头看而不影响行驶方向。
     this.camera.position.set(this.state.x, this.state.y, this.state.z);
-    this.camera.rotation.y = this.state.yaw;
+    this.camera.rotation.y = this.viewYaw;
     this.camera.rotation.x = this.state.pitch;
 
     // ---- 4. 第一人称走路晃动：按本帧实际移动距离推进相位，叠加轻微上下起伏与左右摇摆 ----
