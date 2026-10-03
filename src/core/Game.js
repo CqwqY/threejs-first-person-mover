@@ -634,6 +634,10 @@ export class Game {
       '   三角形 ' + tris.toLocaleString() + '\n' +
       '绘制 ' + (this.renderer.info.render.calls || 0) + ' 次   三角面 ' +
       (this.renderer.info.render.triangles || 0).toLocaleString() + '\n' +
+      // 实际渲染缓冲的像素数：窗口小时若它也跟着变小、而 FPS 明显回升，
+      // 配合这一格就能判断是「我们画得太满」还是「显示链路按像素限速」。
+      '缓冲 ' + (this.renderer.domElement.width || 0) + '×' + (this.renderer.domElement.height || 0) +
+      '   dpr ' + (this.renderer.getPixelRatio ? this.renderer.getPixelRatio().toFixed(2) : '-') + '\n' +
       'GPU ' + this._gpuName();
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }
