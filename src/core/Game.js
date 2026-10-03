@@ -279,8 +279,14 @@ export class Game {
           this._sharpen = Number(v) || 0;
           this._applyRenderScale();
         },
-        // 手机技能槽排布：切到「2行竖列」时槽位从轮盘搬到网格里，立即生效
+        // 手机技能槽排布：切到「2行竖列」时槽位从轮盘搬到网格里。
+        // 某些 WebView / 壳里 isCoarsePointer() 检测失灵（被当成桌面），构造期 skillSlots 就是桌面模式、
+        // setMobileLayout 会直接 early-return —— 表现就是「轮盘/两列切了没反应」。
+        // 修法：选了手机排布就写入 fpm-touch=1 手动覆盖触屏判定；若本次构造期不是手机模式，
+        // 重载让整套手机 UI（摇杆 + 技能槽）按手机模式重建，一次性根治。
         skillLayout: (v) => {
+          try { localStorage.setItem('fpm-touch', '1'); } catch (e) { /* 忽略 */ }
+          if (!this._coarsePointer) { location.reload(); return; }
           if (this.skillSlots && typeof this.skillSlots.setMobileLayout === 'function') {
             this.skillSlots.setMobileLayout(v === '2行竖列' ? 'grid' : 'wheel');
           }

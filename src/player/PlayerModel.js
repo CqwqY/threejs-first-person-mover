@@ -1,8 +1,9 @@
 // 职责：定义玩家的“外观”。
 
 // 模型 = 人物 GLB（girl/boy，原模型自带正确贴图/UV）+ 头顶名牌。GLB 异步加载，加载前先用缩小版占位身体保证即时可见。
-// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制（原始 boy/girl.glb 肩膀沿 X、髋部沿 Z，
-// 正面朝 -Z；glTF 前进约定也是 -Z，所以 modelDeg=0 即正对移动方向，不再额外旋转）。
+// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制。
+// ⚠ 实测：原始 boy/girl.glb 的「正面」法线朝 +Z（不是 -Z），glTF 前进约定是 -Z，
+//   所以要让角色正对移动方向必须转 180° —— modelDeg=180（设 0 会变成面朝 +Z = 倒着走/看着像偏了 180°）。
 //
 // 骨骼动画：用的是 `${gender}-rig.glb`（由 tools/auto-rig.mjs 离线生成）——
 //   网格沿用带贴图的原 GLB（UV/贴图一个字节没动，二进制手术追加骨骼），骨骼与蒙皮权重
@@ -41,15 +42,20 @@ function drawHpBar(ctx, ratio) {
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
 // modelDeg：模型整体视觉朝向，直接绕 Y 旋转最终模型（安全、不动骨架）。
-// 原始 boy/girl.glb 正面朝 -Z（与游戏前进约定一致），故 0 即可正对移动方向。
-// 若真机上发现角色「面朝后/倒着走」，把 0 改成 180（即朝 +Z）即可，无需其它改动。
-const cfg = { modelDeg: 0, skelDeg: 0 };
+// 原始 boy/girl.glb 正面法线朝 +Z，glTF 前进约定是 -Z，故 180 才能让角色正对移动方向。
+// 若真机上发现角色「面朝后/倒着走」，说明 GLB 朝向变了，把 180 改回 0（或 0↔180 对调）即可。
+// skelDeg：仅旋转「骨架(armature)」节点 —— 骨头经蒙皮带动网格形变，是真正的「转骨骼」；
+//   ⚠ 旧写法直接转 e.rig.root（=整棵 GLB 根，包含网格），会变成「转骨骼=整个人刚性跟着转」，已废弃。
+const cfg = { modelDeg: 180, skelDeg: 0 };
 const models = []; // 已创建模型条目 {group, gender, faceHolder, rig}
 
 // 把给定模型的朝向同步到当前 cfg 配置
 function applyCfg(e) {
-  if (e.faceHolder) e.faceHolder.rotation.y = cfg.modelDeg * DEG; // 模型整体朝向
-  if (e.rig && e.rig.root) e.rig.root.rotation.y = cfg.skelDeg * DEG; // 骨架走向（默认 0，等于不动）
+  if (e.faceHolder) e.faceHolder.rotation.y = cfg.modelDeg * DEG; // 模型整体朝向（刚性）
+  // skelDeg 只转骨架根(armature)：骨头绕自身转 → 蒙皮网格随之形变，不会把整模型当刚体转。
+  // 旧实现 e.rig.root.rotation.y 会把 GLB 根连同网格一起转，表现就是「转骨骼整个人跟着转」。
+  const arm = e.rig && e.rig.root && e.rig.root.getObjectByName ? e.rig.root.getObjectByName('armature') : null;
+  if (arm) arm.rotation.y = cfg.skelDeg * DEG;
 }
 
 // 构建一个模型的“身体”：加载带骨骼的 GLB，接上 AnimationMixer（待机/走/跑），

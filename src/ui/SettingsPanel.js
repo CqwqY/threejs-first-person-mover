@@ -231,8 +231,10 @@ export function createSettingsPanel(binds, opts = {}) {
         const raw = select.value;
         const num = parseFloat(raw);
         settings[f.id] = isFinite(num) ? num : raw;
-        applyOne(f.id, settings[f.id]);
+        // 先持久化再回调：下面 skillLayout 等回调可能触发 location.reload()，
+        // 若后存，重载时读到的还是旧值，用户刚选的排布就丢了。
         saveSettings(settings, storeKey);
+        applyOne(f.id, settings[f.id]);
       });
       row.appendChild(select);
       inputs[f.id] = select;
