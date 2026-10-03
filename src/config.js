@@ -64,6 +64,17 @@ export const Config = {
   // MODEL_SPIN_SPEED: 16,
   // 触发自转的最小移动速度（米/秒）：低于它视为站着不动，停止加速自转
   // MODEL_SPIN_MIN_SPEED: 0.2,
+  // ---- 玩家骨骼动画（boy/girl 的 mixamorig 骨架 + Idle/Walk/Run 三段动画）----
+  // 说明：角色实际移动速度（5 m/s，冲刺 8 m/s）远快于真人走路，若让动画严格跟速度走，
+  // 腿会甩成风车且明显「脚底下打滑」，所以这里只做**观感映射**：速度换成权重与步频，不追求物理准确。
+  ANIM_IDLE_MAX: 0.35,   // 低于该速度视为站立
+  ANIM_WALK_FULL: 1.8,   // 到该速度完全是走路姿态
+  ANIM_WALK_REF: 3.0,    // 走路动画的基准步速：timeScale = speed / 该值
+  ANIM_RUN_START: 4.2,   // 超过该速度开始混入跑步
+  ANIM_RUN_FULL: 6.2,    // 到该速度完全是跑步姿态
+  ANIM_RUN_REF: 6.5,     // 跑步动画的基准步速
+  ANIM_TIMESCALE_MIN: 0.55, // 步频下限（站着将动未动时也在微动，避免突然起停）
+  ANIM_TIMESCALE_MAX: 1.9,  // 步频上限（再快就成风车了）
   // 第一人称走路晃动幅度（米）：上下起伏的峰值；左右摇摆为其 0.6 倍
   BOB_AMPLITUDE: 0.04,
   // 走路晃动相位推进速度（弧度/米）：越大步伐越急促；约每 1.6m 走完一个完整起伏周期

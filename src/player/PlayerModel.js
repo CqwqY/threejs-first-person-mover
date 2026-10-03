@@ -1,10 +1,15 @@
 // 职责：定义玩家的“外观”。
 
 // 模型 = 人物 GLB（girl/boy，原模型自带正确贴图/UV）+ 头顶名牌。GLB 异步加载，加载前先用缩小版占位身体保证即时可见。
-// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；静态模型，不做骨骼动画，朝向由 applyCfg/modelDeg 控制。
+// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制（模型正面朝 +X，转 90° 后朝 -Z）。
+//
+// 骨骼动画：用的是 `${gender}-rig.glb`（由 tools/bake-player-rig.mjs 离线烘焙而来）——
+//   网格沿用带贴图的原 GLB（UV/贴图一个字节没动），骨骼与蒙皮权重取自 Mixamo 绑骨版 FBX，
+//   走/跑/待机动画是从 three.js 官方 Soldier.glb 重定向过来的（已做静止姿态修正与体型缩放）。
+//   旧的 AutoRig.js（靠顶点高度硬分区猜出来的启发式骨架）已删除——那套绑骨会让四肢绕错轴甩，属于屎山。
 import * as THREE from 'three';
-import { instantiate } from '../world/AssetLoader.js';
-// import { Config } from '../config.js'; // （移动时疯狂旋转功能临时注释，重开时取消这行）
+import { instantiate, instantiateRigged } from '../world/AssetLoader.js';
+import { Config } from '../config.js';
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
@@ -34,81 +39,161 @@ function drawHpBar(ctx, ratio) {
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
 // modelDeg：模型整体视觉朝向，直接绕 Y 旋转最终模型（安全、不动骨架）。
-// skelDeg ：骨架绕 Y 的走向。骨架是身体形变的来源，直接转它会把身体一起带走；
-//            因此用「根骨位置」做支点对蒙皮网格反向补偿：骨架转多少、网格绕同一支点反向转多少，
-//            静止时身体纹丝不动，仅走路/摆臂平面随骨架走向变化。
+// 骨架是网格对齐过的（烘焙时已校正），不再需要额外的 skelDeg 反向补偿，字段保留只为兼容旧面板。
 const cfg = { modelDeg: 90, skelDeg: 0 };
-const models = []; // 已创建模型条目 {group, gender, faceHolder, root, pivots}
+const models = []; // 已创建模型条目 {group, gender, faceHolder, rig}
 
 // 把给定模型的朝向同步到当前 cfg 配置
 function applyCfg(e) {
   if (e.faceHolder) e.faceHolder.rotation.y = cfg.modelDeg * DEG; // 模型整体朝向
-  if (e.root) {
-    e.root.rotation.y = cfg.skelDeg * DEG;         // 骨架走向（绕根骨位置）
-    for (const p of e.pivots) p.rotation.y = -cfg.skelDeg * DEG; // 蒙皮网格同支点反向补偿
-  }
-  if (window.__YAW_DEBUG__) {
-    console.log(
-      '[YAW apply]',
-      'model=' + cfg.modelDeg, 'skel=' + cfg.skelDeg,
-      'rootY=' + (e.root ? e.root.rotation.y.toFixed(3) : '-'),
-      'pivotY=' + (e.pivots.length ? e.pivots[0].rotation.y.toFixed(3) : '-'),
-      'pivotCount=' + e.pivots.length,
-      'hasMesh=' + !!e.skinnedMesh
-    );
-  }
+  if (e.rig && e.rig.root) e.rig.root.rotation.y = cfg.skelDeg * DEG; // 骨架走向（默认 0，等于不动）
 }
 
-// 构建一个模型的“身体”：加载 GLB，优先用 AutoRig 绑定骨骼（让角色走/待机），
+// 构建一个模型的“身体”：加载带骨骼的 GLB，接上 AnimationMixer（待机/走/跑），
 // 失败则回退为静态等比缩放；朝向统一由 applyCfg/modelDeg 控制。
 function buildBody(entry) {
-  return instantiate(`/assets/${entry.gender}.glb`)
-    .then((model) => {
-      entry.root = null;
-      entry.pivots = [];
-      entry.skinnedMesh = null;
-      entry.group.userData.rig = null;
+  return instantiateRigged(`/assets/${entry.gender}-rig.glb`)
+    .then(({ root, animations }) => {
+      entry.rig = null;
       entry.faceHolder = null;
 
       const bodyHolder = entry.group.userData.bodyHolder;
       bodyHolder.clear();
 
-      // 静态显示：无骨骼、无动画。按包围盒等比缩放到身高、脚底压到 y=0。
+      // 归一化：按包围盒等比缩放到身高、脚底压到 y=0（bind pose 下量，骨骼与网格一起缩放）
       const box = new THREE.Box3();
-      model.traverse((o) => {
+      root.traverse((o) => {
         if (o.isMesh) {
           o.geometry.computeBoundingBox();
           box.expandByObject(o);
         }
+        // 蒙皮网格动画后顶点会跑出静态包围盒，按包围盒做视锥剔除会出现「走到屏幕边缘整个人消失」；
+        // 玩家数量有限，直接关掉剔除最省心。
+        if (o.isSkinnedMesh) o.frustumCulled = false;
       });
       const sizeY = box.max.y - box.min.y;
       const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
-      model.scale.setScalar(scale);
-      model.position.y = -box.min.y * scale; // 底边压到 y=0
+      root.scale.setScalar(scale);
+      root.position.y = -box.min.y * scale; // 底边压到 y=0
+
       const holder = new THREE.Group();
-      holder.add(model);
+      holder.add(root);
       holder.receiveShadow = true;
       bodyHolder.add(holder);
       entry.faceHolder = holder;
 
+      entry.rig = createAnimRig(root, animations);
+      entry.group.userData.rig = entry.rig;
+
       applyCfg(entry);
+      return true;
     })
     .catch(() => {
-      // 加载失败：保留占位身体即可
+      // 带骨骼的版本加载失败：退回旧的静态模型（至少人还在，不会隐形）
+      return buildStaticBody(entry);
     });
 }
 
-// ---- 移动时让模型疯狂旋转【已临时注释，重开时取消注释并恢复 PlayerModel 的 Config 导入】----
-// // 移动时让模型疯狂旋转：按移动速度推进自转角（弧度），站着不动就冻结在当前角度。
-// // 转过的角度只作为「朝向的临时偏移」叠加，不写回任何状态，所以停下时朝向不会被带偏。
-// export function advanceSpin(group, speed, dt) {
-//   const u = group.userData;
-//   if (speed > Config.MODEL_SPIN_MIN_SPEED) {
-//     const k = Math.min(speed / Config.MOVE_SPEED, 2);
-//     u.spin = (u.spin || 0) + Config.MODEL_SPIN_SPEED * k * dt;
-//   }
-//   return u.spin || 0;
-// }
+// 兜底：静态等比缩放的旧模型（无骨骼无动画）
+function buildStaticBody(entry) {
+  return instantiate(`/assets/${entry.gender}.glb`).then((model) => {
+    const bodyHolder = entry.group.userData.bodyHolder;
+    bodyHolder.clear();
+    const box = new THREE.Box3();
+    model.traverse((o) => {
+      if (o.isMesh) {
+        o.geometry.computeBoundingBox();
+        box.expandByObject(o);
+      }
+    });
+    const sizeY = box.max.y - box.min.y;
+    const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
+    model.scale.setScalar(scale);
+    model.position.y = -box.min.y * scale;
+    const holder = new THREE.Group();
+    holder.add(model);
+    holder.receiveShadow = true;
+    bodyHolder.add(holder);
+    entry.faceHolder = holder;
+    applyCfg(entry);
+    return false;
+  }).catch(() => false);
+}
+
+// ---- 骨骼动画驱动 ----
+// 三段动画同时播放，用权重混合（待机 ↔ 走 ↔ 跑），并用 timeScale 把步频挂到实际速度上。
+// 权重混合比 crossFade 更适合这里：速度是连续量、每帧都在变，crossFade 会在反复起停时抖动。
+function createAnimRig(root, animations) {
+  if (!animations || animations.length === 0) return null;
+  const mixer = new THREE.AnimationMixer(root);
+  const pick = (kw) => animations.find((a) => new RegExp(kw, 'i').test(a.name));
+  const clips = { idle: pick('idle'), walk: pick('walk'), run: pick('run') };
+  if (!clips.walk && !clips.idle) return null;
+
+  const act = {};
+  for (const k of ['idle', 'walk', 'run']) {
+    if (!clips[k]) continue;
+    act[k] = mixer.clipAction(clips[k]);
+    act[k].setLoop(THREE.LoopRepeat, Infinity);
+    act[k].enabled = true;
+    act[k].play();
+    act[k].setEffectiveWeight(k === 'idle' ? 1 : 0);
+  }
+
+  return {
+    root,
+    mixer,
+    actions: act,
+    // dt：本帧时长（秒）；speed：本帧水平速度（米/秒）
+    update(dt, speed) {
+      const s = Number.isFinite(speed) ? Math.max(0, speed) : 0;
+      const wWalk = clamp01((s - Config.ANIM_IDLE_MAX) / Math.max(0.1, Config.ANIM_WALK_FULL - Config.ANIM_IDLE_MAX));
+      const wRun = clamp01((s - Config.ANIM_RUN_START) / Math.max(0.1, Config.ANIM_RUN_FULL - Config.ANIM_RUN_START));
+      if (act.idle) act.idle.setEffectiveWeight(1 - wWalk);
+      if (act.walk) {
+        act.walk.setEffectiveWeight(wWalk * (1 - wRun));
+        act.walk.setEffectiveTimeScale(clamp(s / Config.ANIM_WALK_REF, Config.ANIM_TIMESCALE_MIN, Config.ANIM_TIMESCALE_MAX));
+      }
+      if (act.run) {
+        act.run.setEffectiveWeight(wRun);
+        act.run.setEffectiveTimeScale(clamp(s / Config.ANIM_RUN_REF, Config.ANIM_TIMESCALE_MIN, Config.ANIM_TIMESCALE_MAX));
+      }
+      mixer.update(dt);
+    },
+  };
+}
+
+function clamp(v, a, b) {
+  return v < a ? a : (v > b ? b : v);
+}
+function clamp01(v) {
+  return clamp(v, 0, 1);
+}
+
+// 统一驱动所有玩家模型的骨骼动画：
+// 每个模型自己按「位置帧间位移」算速度（低通滤波平滑），调用方不必逐个传速度，
+// 于是第一人称（本机）/ 第三人称 / 远端玩家三条路径都只需要主循环里这一处调用。
+export function tickPlayerModels(dt) {
+  if (!(dt > 0)) return;
+  for (let i = models.length - 1; i >= 0; i--) {
+    const e = models[i];
+    const g = e.group;
+    // 已经被移出场景（玩家退房）：从列表里剔掉，否则列表会一直变长、每帧白跑一遍。
+    // 用 _hadParent 区分「还没加进场景」和「已经移出场景」，避免刚创建就被误删。
+    if (g.parent) e._hadParent = true;
+    else if (e._hadParent) { models.splice(i, 1); continue; }
+    const rig = e.rig;
+    if (!rig || !g.visible) continue; // 没骨骼 / 不可见（第一人称隐藏自身）不浪费 CPU
+    if (!e._lastPos) e._lastPos = new THREE.Vector3().copy(g.position);
+    const dx = g.position.x - e._lastPos.x;
+    const dz = g.position.z - e._lastPos.z;
+    e._lastPos.copy(g.position);
+    const raw = Math.hypot(dx, dz) / dt;
+    // 低通：网络插值抖动/瞬移修正不该传到腿上
+    e._speed = (e._speed || 0) + (raw - (e._speed || 0)) * Math.min(1, dt * 8);
+    rig.update(dt, e._speed);
+  }
+}
 
 // 供 ?calib 校准面板调用：实时调整所有玩家模型的朝向与骨架走向（后加载模型同样生效）
 export function setDebugYaw(modelDeg, skelDeg) {
@@ -122,20 +207,11 @@ export function getDebugYaw() {
   return { modelDeg: cfg.modelDeg, skelDeg: cfg.skelDeg };
 }
 
-// 校准调试：逐帧打印关键数值，用来定位「改骨架时模型是否跟着动」。
-// 观察：站定时拖 skel，若 meshQ 基本不变且 rootY/pivotY 相加≈0，则补偿生效、身体不动；
-//       若 meshQ 随 skel 明显变化，说明补偿没抵消（pivot 没包上/支点不对）。
+// 校准调试：逐帧打印朝向数值（骨架已在烘焙阶段对齐网格，这里只需要看模型整体朝向）
 export function debugCalibFrame() {
   for (const e of models) {
-    const q = e.skinnedMesh ? e.skinnedMesh.getWorldQuaternion(new THREE.Quaternion()) : null;
-    const rootY = e.root ? e.root.rotation.y.toFixed(3) : '-';
-    const pivY = e.pivots.length ? e.pivots[0].rotation.y.toFixed(3) : '-';
-    const qs = q ? `[${q.x.toFixed(2)},${q.y.toFixed(2)},${q.z.toFixed(2)},${q.w.toFixed(2)}]` : 'no-mesh';
-    console.log(
-      '[YAW frame]', 'skel=' + cfg.skelDeg,
-      'rootY=' + rootY, 'pivotY=' + pivY,
-      'meshQ=' + qs, 'pivotCount=' + e.pivots.length
-    );
+    const q = e.faceHolder ? e.faceHolder.rotation.y.toFixed(3) : '-';
+    console.log('[YAW frame]', 'model=' + cfg.modelDeg, 'skel=' + cfg.skelDeg, 'holderY=' + q, 'hasRig=' + !!e.rig);
   }
 }
 
@@ -189,7 +265,7 @@ export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff')
   drawHpBar(hpBar.ctx, 1); // 初始满血
 
   // 注册本次模型条目，并立即构建身体
-  const entry = { group, gender, faceHolder: null, root: null, pivots: [], skinnedMesh: null };
+  const entry = { group, gender, faceHolder: null, rig: null };
   models.push(entry);
   buildBody(entry);
 

@@ -1,6 +1,7 @@
 // 职责：封装 GLTFLoader，对 GLB 模型做单例加载与 Promise 缓存，并暴露“克隆实例”与“占位兜底”能力。
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { API_BASE } from '../config.js';
 import { track } from './loadTracker.js';
 
@@ -26,7 +27,7 @@ function resolveUrl(url) {
   return normalizeUrl(url);
 }
 
-// 加载并解析一个 GLB，返回解析后的根场景（Object3D）。
+// 加载并解析一个 GLB，返回解析结果 gltf（scene + animations）；同一资源只请求一次。
 // 每个实例需自行 clone，因为解析结果只有一个共享的根节点。
 function loadGLB(url) {
   url = resolveUrl(url);
@@ -36,7 +37,7 @@ function loadGLB(url) {
   const promise = new Promise((resolve, reject) => {
     _loader.load(
       url,
-      (gltf) => resolve(gltf.scene),
+      (gltf) => resolve(gltf),
       undefined,
       (err) => {
         console.warn('[AssetLoader] 加载失败:', url, err);
@@ -52,7 +53,17 @@ function loadGLB(url) {
 // 异步返回一个独立副本（克隆共享 geometry/material），供单个道具使用。
 // 失败时 reject，由调用方继续使用占位模型。
 export function instantiate(url) {
-  return loadGLB(url).then((scene) => scene.clone(true));
+  return loadGLB(url).then((gltf) => gltf.scene.clone(true));
+}
+
+// 带骨骼的模型（boy/girl 的人物模型）：返回 { root, animations }。
+// ⚠ 必须用 SkeletonUtils.clone：Object3D.clone() 不会复制 SkinnedMesh 与骨架的绑定关系，
+// 克隆出来的网格会共用原模型的骨头（动画一播，所有玩家一起动，甚至形变错乱）。
+export function instantiateRigged(url) {
+  return loadGLB(url).then((gltf) => ({
+    root: cloneSkeleton(gltf.scene),
+    animations: gltf.animations || [],
+  }));
 }
 
 // 生成一个简单占位道具：方块，失败兜底，避免场景里出现空缺/白屏。

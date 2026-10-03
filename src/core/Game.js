@@ -25,7 +25,7 @@ import { Input, isEditableTarget } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon } from '../player/PlayerModel.js';
+import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { onRelayout } from '../ui/layout.js';
@@ -4185,20 +4185,8 @@ export class Game {
     setModelScale(local.model, size);
     setHeldItem(local.model, s.wep || '', s.hold || '');
 
-    // 本帧实际移动速度：让骨头动画知道走得多快（「移动时疯狂旋转」已临时注释）
-    const dx = s.x - this._tpPrevX;
-    const dz = s.z - this._tpPrevZ;
-    const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
-    this._tpPrevX = s.x;
-    this._tpPrevZ = s.z;
-
     local.model.rotation.set(0, s.yaw, 0);
-
-    const rig = local.model.userData.rig;
-    if (rig) {
-      this._tpTime += dt;
-      rig.update(this._tpTime, speed);
-    }
+    // 行走动画由主循环里的 tickPlayerModels(dt) 统一驱动（按帧间位移算速度），这里不再单独 update
 
     // 相机：眼睛后上方、朝向玩家头部附近（经典第三人称跟随）
     // 俯仰（pitch）必须参与：否则鼠标上下拖动在第三人称下毫无反应。
@@ -5735,6 +5723,8 @@ export class Game {
     if (!this._soul) this.localPlayer.update(dt);
     const _pt2 = this._perf ? performance.now() : 0; // 物理（含 trimesh 解算）耗时
     this.playerManager.update(dt);
+    // 骨骼动画：本机 + 远端所有玩家模型的待机/走/跑（内部按帧间位移算速度、不可见的跳过）
+    tickPlayerModels(dt);
 
     // 主世界（城市）专属系统：对战中整组跳过，避免城市 NPC/Boss/载具与竞技场互串
     if (!this._combat) {
@@ -5782,7 +5772,7 @@ export class Game {
     this._updateFX(dt);
 
     // 调试骨骼可视化：驱动待机姿态并绘制骨架/坐标轴
-    if (this.debugRig) this.debugRig.update(this.clock.elapsedTime);
+    if (this.debugRig) this.debugRig.update(); // 只挂骨骼辅助线，动画由 tickPlayerModels 驱动
 
     // 训练场：等服务端开房；超时就退回本机单人（老服务端也能用，别让人干等）
     if (this._trainPending) {

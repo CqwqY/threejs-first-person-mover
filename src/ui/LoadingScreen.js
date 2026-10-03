@@ -8,6 +8,11 @@
 //   ls.finish();                   // 淡出并移除（可重复调用，幂等）
 //
 // 遮罩是全屏且吃触摸的：加载期间点击/拖动不会漏进游戏里（视角乱转、误开背包）。
+//
+// 外观统一走素材库（public/ui 的 Kenney UI 套装）：面板用 panel_rectangle、进度条用 bar_round_large_m、
+// 「不等了」按钮用 button_rectangle，都由 theme.js 的 .kui-* 类提供，这里不再自己画一套 CSS，
+// 否则加载屏会跟游戏内其它界面风格对不上。
+import { ensureTheme } from './theme.js';
 
 const KEYFRAMES_ID = 'fpm-loading-kf';
 
@@ -23,7 +28,8 @@ function ensureKeyframes() {
 }
 
 export function createLoadingScreen(opts = {}) {
-  ensureKeyframes();
+  ensureTheme(); // 素材库的 .kui-* 样式要先注入，否则面板/按钮都是裸的
+  ensureKeyframes(); // 转圈/呼吸用到的关键帧（纯 CSS 动画，素材库里没有 spinner 这类素材）
   const title = opts.title || '';
   let skippedResolve = null;
   const skipped = new Promise((res) => { skippedResolve = res; });
@@ -34,14 +40,26 @@ export function createLoadingScreen(opts = {}) {
   root.className = 'fpm-loading';
   root.style.cssText =
     'position:fixed;inset:0;z-index:10000;display:flex;flex-direction:column;' +
-    'align-items:center;justify-content:center;gap:18px;user-select:none;' +
+    'align-items:center;justify-content:center;gap:14px;user-select:none;' +
     'background:radial-gradient(120% 90% at 50% 30%, #2c3350 0%, #171b2b 55%, #0e1120 100%);' +
-    'color:#eef1f8;font-family:var(--kui-font, system-ui, "Microsoft YaHei", sans-serif);' +
     'transition:opacity .45s ease;';
+
+  // ---- 内容面板：Kenney 蓝色九宫格（素材库 panel_rectangle）----
+  // 面板内的文字是浅色（深色背景上），而 .kui-panel 默认文字色是近黑的墨色，这里整体覆盖成亮色。
+  const panel = document.createElement('div');
+  panel.className = 'kui-panel';
+  panel.style.cssText =
+    'display:flex;flex-direction:column;align-items:center;gap:12px;color:#eef1f8;' +
+    'min-width:min(320px,80vw);padding:0;animation:fpm-ld-fade .4s ease both;';
+  const body = document.createElement('div');
+  body.className = 'kui-panel__body';
+  body.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px 22px;';
+  panel.appendChild(body);
+
   // ---- 转圈（三瓣：外环旋转 + 内点呼吸）----
   const ring = document.createElement('div');
   ring.style.cssText =
-    'position:relative;width:76px;height:76px;animation:fpm-ld-fade .4s ease both;';
+    'position:relative;width:64px;height:64px;';
   const arc = document.createElement('div');
   arc.style.cssText =
     'position:absolute;inset:0;border-radius:50%;' +
@@ -55,37 +73,33 @@ export function createLoadingScreen(opts = {}) {
   ring.appendChild(dot);
 
   // ---- 文字 ----
+  // 标题：Kenney 面板原本是深色字，这里在深蓝背景上改亮色 + 描边，保证可读
   const h = document.createElement('div');
-  h.style.cssText = 'font-size:22px;font-weight:700;letter-spacing:.14em;animation:fpm-ld-fade .5s ease both;';
+  h.className = 'kui-title';
+  h.style.cssText = 'font-size:20px;color:#fff;text-shadow:0 2px 0 rgba(9,30,60,.55);';
   h.textContent = title;
 
   const status = document.createElement('div');
+  status.className = 'kui-num';
   status.style.cssText =
-    'font-size:13px;color:#aab2c8;min-height:18px;text-align:center;' +
-    'font-variant-numeric:tabular-nums;';
+    'font-size:12px;color:#d7deef;min-height:16px;text-align:center;';
   status.textContent = '正在准备场景…';
 
-  // ---- 进度条 ----
+  // ---- 进度条：素材库的 bar_round_large_m 平铺填充 ----
   const bar = document.createElement('div');
-  bar.style.cssText =
-    'width:min(260px,62vw);height:6px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden;';
+  bar.className = 'kui-bar';
+  bar.style.cssText = 'width:min(260px,62vw);';
   const fill = document.createElement('div');
-  fill.style.cssText =
-    'width:0%;height:100%;border-radius:99px;background:linear-gradient(90deg,#7fd0ff,#ffd76a);' +
-    'transition:width .3s ease;';
+  fill.className = 'kui-bar__fill';
+  fill.style.width = '0%';
   bar.appendChild(fill);
 
-  // ---- 「不等了」按钮 ----
+  // ---- 「不等了」按钮：素材库的 Kenney 按钮（grey 版，不抢主按钮的注意力）----
   const skip = document.createElement('button');
   skip.type = 'button';
-  skip.className = 'kui-btn';
+  skip.className = 'kui-btn kui-btn--grey';
   skip.textContent = '不等了，直接进';
-  skip.style.cssText =
-    'margin-top:6px;font:inherit;font-size:13px;padding:7px 18px;cursor:pointer;' +
-    'border-radius:99px;border:1px solid rgba(255,255,255,.28);' +
-    'background:rgba(255,255,255,.08);color:#dfe4f2;';
-  skip.addEventListener('pointerenter', () => { skip.style.background = 'rgba(255,255,255,.16)'; });
-  skip.addEventListener('pointerleave', () => { skip.style.background = 'rgba(255,255,255,.08)'; });
+  skip.style.cssText = 'font-size:13px;min-height:32px;';
   let skippedFlag = false;
   const doSkip = () => {
     if (finished) return;
@@ -95,11 +109,12 @@ export function createLoadingScreen(opts = {}) {
   };
   skip.addEventListener('click', doSkip);
 
-  root.appendChild(ring);
-  root.appendChild(h);
-  root.appendChild(status);
-  root.appendChild(bar);
-  root.appendChild(skip);
+  body.appendChild(ring);
+  body.appendChild(h);
+  body.appendChild(status);
+  body.appendChild(bar);
+  body.appendChild(skip);
+  root.appendChild(panel);
   // 加载期间吞掉所有指针事件：不只是挡住画面，也别让点击漏进游戏里（视角乱转、误开背包）。
   // 但必须给「不等了」按钮放行 —— 在捕获阶段 preventDefault 会连浏览器合成的 click 一起掐掉，
   // 按钮就永远点不动了。拦截放在 append 之后，这样能用 skip.contains 精确放行。

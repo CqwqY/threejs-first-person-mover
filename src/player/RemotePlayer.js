@@ -79,11 +79,8 @@ export class RemotePlayer {
     updateNameTag(this.model, text, color || '#ffffff');
   }
 
-  // 每帧：从快照缓冲按时间轴采样插值（缓冲耗尽则外推），写入 state，再同步模型与动画
+  // 每帧：从快照缓冲按时间轴采样插值（缓冲耗尽则外推），写入 state，再同步模型
   update(dt) {
-    const prevX = this.state.x;
-    const prevZ = this.state.z;
-
     if (Config.INTERP_MODE === 'off') {
       // 旧逻辑：指数平滑追最新快照（保留作为一键回退的对比基线）
       const alpha = 1 - Math.exp(-15 * dt);
@@ -137,17 +134,7 @@ export class RemotePlayer {
     }
 
     this.syncModel();
-
-    // 用插值速度驱动骨骼动画（「移动时疯狂旋转」已临时注释，重开时：
-    //   恢复 import 里的 advanceSpin，并把本行 rotation.y 改为 state.yaw + advanceSpin(...)）
-    // 速度做一次低通滤波，避免插值切换/外推修正瞬间抖动传到动画上
-    const rawSpeed = dt > 0 ? Math.hypot(this.state.x - prevX, this.state.z - prevZ) / dt : 0;
-    this._speed = (this._speed || 0) + (rawSpeed - (this._speed || 0)) * Math.min(1, dt * 8);
-
-    const rig = this.model.userData.rig;
-    if (rig) {
-      this._animT = (this._animT || 0) + dt;
-      rig.update(this._animT, this._speed);
-    }
+    // 行走动画由主循环里的 tickPlayerModels(dt) 统一驱动：
+    // 那里按「模型帧间位移」算速度，本机与远端走同一套，避免两处各写一份速度滤波。
   }
 }
