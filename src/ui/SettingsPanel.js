@@ -94,6 +94,15 @@ const FIELDS = [
   { id: 'dayCycle', label: '一昼夜时长(秒)', kind: 'range', min: 60, max: 1200, step: 20 },
   { id: 'bgmVolume', label: '背景音乐音量(0=静音)', kind: 'range', min: 0, max: 1, step: 0.05 },
   { id: 'dayOffset', label: '本地时刻偏移(时)', kind: 'range', min: -12, max: 12, step: 1 },
+  // 动作项：没有「值」可存，只在点的时候回调一次 binds[id]()（清缓存这类一次性动作）。
+  // 它不进 settings，所以初始化与「恢复默认」都不会误触发。
+  {
+    id: 'assetCache',
+    label: '清除模型缓存',
+    kind: 'action',
+    gameOnly: true,
+    hint: '模型/天空贴图下载一次就存在本机，之后不再重下；换了模型或想腾空间时清一下。',
+  },
 ];
 
 function fmt(v) {
@@ -126,6 +135,7 @@ export function createSettingsPanel(binds, opts = {}) {
   const loaded = loadSettings(storeKey);
   const settings = {};
   for (const f of fields) {
+    if (f.kind === 'action') continue; // 动作项没有值，别让它进设置对象（否则初始化时会误触发一次回调）
     settings[f.id] = typeof loaded[f.id] !== 'undefined' ? loaded[f.id] : DEFAULT_SETTINGS[f.id];
   }
 
@@ -243,6 +253,24 @@ export function createSettingsPanel(binds, opts = {}) {
       row.appendChild(lab);
       row.appendChild(cb);
       inputs[f.id] = cb;
+    } else if (f.kind === 'action') {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'kui-btn kui-btn--grey';
+      btn.style.cssText = 'width:100%;margin-top:2px;font:inherit;';
+      btn.textContent = f.label;
+      btn.addEventListener('click', () => {
+        const fn = binds[f.id];
+        if (fn) fn();
+      });
+      inputs[f.id] = btn;
+      row.appendChild(btn);
+      if (f.hint) {
+        const tip = document.createElement('div');
+        tip.style.cssText = 'margin-top:6px;font-size:11px;line-height:1.6;color:var(--kui-ink-soft);';
+        tip.textContent = f.hint;
+        row.appendChild(tip);
+      }
     }
     body.appendChild(row);
   }
@@ -253,9 +281,10 @@ export function createSettingsPanel(binds, opts = {}) {
   reset.style.cssText = 'width:100%;margin-top:12px;';
   reset.textContent = '恢复默认';
   reset.addEventListener('click', () => {
-    for (const f of fields) settings[f.id] = DEFAULT_SETTINGS[f.id];
-    // 同步控件显示
     for (const f of fields) {
+      if (f.kind === 'action') continue; // 动作项不参与「恢复默认」
+      settings[f.id] = DEFAULT_SETTINGS[f.id];
+      // 同步控件显示
       if (f.kind === 'range') {
         inputs[f.id].value = settings[f.id];
         renderValue(f.id);

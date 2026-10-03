@@ -15,13 +15,14 @@ export class PlayerManager {
 
   // 新增/获取一个玩家：创建 RemotePlayer 并把模型加入场景
   // name 用于头顶名牌文字；color 为名牌文字颜色；缺省时由 RemotePlayer 按状态里的 num 推导
-  addPlayer(id, stateData, name, color) {
+  // gender：可选，显式指定人物素材（本地玩家用自己选的性别）；不传则由 RemotePlayer 按序号奇偶兜底
+  addPlayer(id, stateData, name, color, gender) {
     // 已存在则直接返回
     if (this.players.has(id)) {
       return this.players.get(id);
     }
 
-    const remote = new RemotePlayer(id, stateData, name, color);
+    const remote = new RemotePlayer(id, stateData, name, color, gender);
     this.scene.add(remote.model);
 
     // 本地玩家第一人称看不到自己，模型设为不可见

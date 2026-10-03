@@ -32,6 +32,7 @@ import { onRelayout } from '../ui/layout.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 import { setBgmVolume } from '../audio/Bgm.js';
+import { clearAssetCache } from '../world/assetCache.js';
 import { ensureTheme } from '../ui/theme.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
@@ -94,8 +95,11 @@ export class Game {
   static SYNC_DAY_SECONDS = 240;
 
   // token：登录会话 token（游客为空串）；profile：登录成功返回的用户资料（点名牌用）
-  constructor(token = '', profile = null) {
+  constructor(token = '', profile = null, gender = 'boy') {
     this._token = token;
+    // 玩家自己选的性别（登录界面选，持久化在 localStorage 的 fpm-gender）；
+    // 只影响「本机看到的自己」的人物素材，远端玩家仍按各自选择/序号奇偶显示。
+    this._gender = gender === 'girl' ? 'girl' : 'boy';
     this._profile = profile;
     this._placed = false; // 是否已用服务端出生点定位过（断线重连不再重定位，避免被拉回出生点）
 
@@ -206,6 +210,7 @@ export class Game {
 
     // 本地玩家的可序列化状态（id 稍后由 welcome 消息填充）
     this.localState = new PlayerState('', 0, Config.PLAYER_HEIGHT, 0);
+    this.localState.gender = this._gender; // 让本机状态里带上性别（服务端目前不转发，仅本地自用）
 
     // 本地玩家逻辑
     this.localPlayer = new LocalPlayer(this.camera, this.input, this.localState, this.colliders);
@@ -308,9 +313,11 @@ export class Game {
         bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
         dayOffset: (v) => { this._dayOffset = (Number(v) || 0) / 24; }, // 本地时刻偏移（小时→一天比例）
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
+        // 模型/贴图缓存：清掉本机那份，下次进游戏重新下载（换过模型时用）
+        assetCache: () => this._clearAssetCache(),
       },
       {
-        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'skillLayout', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
+        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'skillLayout', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -1040,6 +1047,17 @@ export class Game {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
 
+  // 设置面板里「清除模型缓存」：清掉本机那份 GLB/天空贴图缓存，下次进游戏重新下载
+  // （换过模型 / 想腾空间时用；清空后本次会话内已加载的模型不受影响，下一局才重新拉取）
+  async _clearAssetCache() {
+    try {
+      const ok = await clearAssetCache();
+      console.log('[asset] 模型缓存已清除:', ok);
+    } catch (e) {
+      console.warn('[asset] 清除模型缓存失败:', e);
+    }
+  }
+
   // 处理服务器发来的消息（中继协议）
   _onNetworkMessage(msg) {
     switch (msg.t) {
@@ -1076,7 +1094,7 @@ export class Game {
         // 本地名牌：登录了用昵称，否则游客样式
         const myNick = this._profile ? (this._profile.nickname || this._profile.username || `玩家${msg.num}`) : `玩家${msg.num}`;
         const myColor = this._profile ? (this._profile.nicknameColor || '#ffffff') : '#ffffff';
-        this.playerManager.addPlayer(msg.id, this.localState, myNick, myColor);
+        this.playerManager.addPlayer(msg.id, this.localState, myNick, myColor, this._gender);
         for (const p of msg.players) {
           this.playerManager.addPlayer(p.id, p, p.nick || `玩家${p.num}`, p.color || '#ffffff');
         }

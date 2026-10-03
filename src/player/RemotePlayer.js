@@ -18,8 +18,9 @@ function _approach(cur, target, dt) {
 }
 
 export class RemotePlayer {
-  // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色
-  constructor(id, stateData, name, color) {
+  // id：网络玩家唯一标识；stateData：初始快照（可含 num 用于名牌）；name：可选的名牌文字覆盖；color：名牌文字颜色；
+  // gender：显式指定人物素材（'boy'/'girl'），优先于状态里的 gender / 序号奇偶（本地玩家用自己选的性别）
+  constructor(id, stateData, name, color, gender) {
     this.id = id;
 
     // target：最新网络目标状态；state：用于渲染的插值状态（不断向 target 逼近）
@@ -31,12 +32,12 @@ export class RemotePlayer {
     // 名牌文字：优先用传入 name，其次从状态里的加入序号（num）推导，如"玩家1"
     const label = name || (stateData && stateData.num ? `玩家${stateData.num}` : id);
     this.name = label; // 记下来供界面（如捉迷藏的选人列表）展示，避免到处只能看到 id
-    // 人物素材：仅两份（girl/boy），按加入序号奇偶确定，让不同玩家使用不同模型
+    // 人物素材：仅两份（girl/boy）。优先级：显式指定 > 状态里带的（别人选的）> 序号奇偶兜底
     const num = (stateData && stateData.num) || 0;
-    const gender = num % 2 === 0 ? 'girl' : 'boy';
+    const modelGender = gender || (stateData && stateData.gender) || (num % 2 === 0 ? 'girl' : 'boy');
 
     // 外观模型（人物 GLB + 头顶名牌）
-    this.model = createPlayerModel(label, gender, color || '#ffffff');
+    this.model = createPlayerModel(label, modelGender, color || '#ffffff');
     this.model.visible = true;
 
     // 快照缓冲：时间轴插值 + 外推 + 自适应延迟（INTERP_MODE = 'off' 时退回旧的指数平滑）

@@ -805,6 +805,7 @@ wss.on('connection', (ws) => {
       wep: clampWep(msg.wep),
       ride: clampRide(msg.ride),
       veh: String(msg.veh || '').slice(0, 16),
+      gender: String(msg.gender || '').slice(0, 8), // 玩家自己选的男/女（客户端在本地状态里带，转发给同房其他人）
       room: ws.__room, // 当前所在房间（大厅为 null），快照按房间分组用
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',

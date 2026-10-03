@@ -40,7 +40,9 @@ async function main() {
   // 加载动画：登录完之后才挂遮罩 —— 它是全屏且吃触摸的，挂在登录前会把登录界面整个盖住。
   // 从这一刻起，模型没到位就不放人进来（点「不等了」可立刻进）。
   const loading = createLoadingScreen({ title: '花草中学' });
-  const game = new Game(auth.token, auth.profile);
+  // 性别：登录界面选的优先；缓存令牌直进的那条路径没有 gender 字段，回落到 localStorage 里的偏好
+  const gender = auth.gender || (localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy');
+  const game = new Game(auth.token, auth.profile, gender);
   game.start();
   // 场景/模型加载完成后（或用户点了「不等了」）再撤掉遮罩
   const assetsReady = (async () => {

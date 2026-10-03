@@ -47,6 +47,13 @@ function showModal(done) {
         <input id="au-name" class="kui-input" placeholder="用户名" style="margin-bottom:10px;" />
         <input id="au-nick" class="kui-input" placeholder="昵称（注册时可起，可留空）" style="margin-bottom:10px;display:none;" />
         <input id="au-pass" class="kui-input" type="password" placeholder="密码" style="margin-bottom:10px;" />
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <span style="color:var(--kui-ink-soft);font-size:13px;">角色</span>
+          <div id="au-gender" style="display:flex;gap:8px;flex:1;">
+            <button type="button" class="kui-btn kui-btn--ghost au-g" data-g="boy" style="flex:1;">男生</button>
+            <button type="button" class="kui-btn kui-btn--ghost au-g" data-g="girl" style="flex:1;">女生</button>
+          </div>
+        </div>
         <div id="au-err" style="color:var(--kui-danger);font-size:13px;margin-bottom:10px;min-height:18px;"></div>
         <button id="au-submit" class="kui-btn kui-btn--primary" style="width:100%;">登 录</button>
         <div style="display:flex;justify-content:space-between;margin-top:12px;">
@@ -66,6 +73,17 @@ function showModal(done) {
   const submit = root.querySelector('#au-submit');
   const toggle = root.querySelector('#au-toggle');
   const skip = root.querySelector('#au-skip');
+
+  // 角色性别选择（持久化到 localStorage，下次进入沿用；默认男生）
+  let selectedGender = localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy';
+  const gBtns = [...root.querySelectorAll('.au-g')];
+  const paintGender = () => gBtns.forEach((b) => b.classList.toggle('kui-btn--primary', b.dataset.g === selectedGender));
+  gBtns.forEach((b) => b.addEventListener('click', () => {
+    selectedGender = b.dataset.g;
+    localStorage.setItem('fpm-gender', selectedGender);
+    paintGender();
+  }));
+  paintGender();
 
   function setMode(m) {
     mode = m;
@@ -97,7 +115,7 @@ function showModal(done) {
 
   function finish(token, profile) {
     root.remove();
-    done({ token, profile });
+    done({ token, profile, gender: selectedGender });
   }
 
   submit.addEventListener('click', submitForm);

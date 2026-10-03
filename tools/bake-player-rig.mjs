@@ -184,11 +184,17 @@ async function bake(gender) {
     if (clusterW[i] > 1e-6) cluster[i].multiplyScalar(1 / clusterW[i]);
     else cluster[i].copy(boneWorld[i]); // 没人用的骨（极罕见）保持原位
   });
+  // ⚠ 只用「核心躯干骨」算全局对齐（绕 Y 旋转 + 水平平移）：
+  // 手臂/腿的网格簇中心在「非标准 T-pose」模型上不可靠（女孩有裙子/头发干扰，残差 0.2+），
+  // 若把它们也算进 Kabsch，会把手臂的偏差带进全局 θ，导致整条手臂被旋歪/外撇。
+  // 躯干骨（髋+脊柱）定义身体朝向，四肢靠层级继承同一套旋转即可正确归位。
+  const CORE = new Set(['mixamorigHips', 'mixamorigSpine', 'mixamorigSpine1', 'mixamorigSpine2', 'mixamorigChest']);
+  const coreIdx = bones.map((b, i) => i).filter((i) => CORE.has(bones[i].name));
   const bc = new THREE.Vector3(), cc = new THREE.Vector3();
-  for (let i = 0; i < bones.length; i++) { bc.add(boneWorld[i]); cc.add(cluster[i]); }
-  bc.divideScalar(bones.length); cc.divideScalar(bones.length);
+  for (const i of coreIdx) { bc.add(boneWorld[i]); cc.add(cluster[i]); }
+  bc.divideScalar(coreIdx.length); cc.divideScalar(coreIdx.length);
   let kA = 0, kB = 0, nB = 0, nC = 0;
-  for (let i = 0; i < bones.length; i++) {
+  for (const i of coreIdx) {
     const bx = boneWorld[i].x - bc.x, bz = boneWorld[i].z - bc.z;
     const cx = cluster[i].x - cc.x, cz = cluster[i].z - cc.z;
     // 绕 Y 旋转：x' = c·x + s·z, z' = -s·x + c·z；最大化 Σ(R·B)·C ⇒ θ = atan2(Σ(Bz·Cx - Bx·Cz), Σ(Bx·Cx + Bz·Cz))

@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { Config } from '../config.js';
 import { track } from './loadTracker.js';
+import { assetBlobURL } from './assetCache.js';
 
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
@@ -13,18 +14,22 @@ const CITY_SKY_URL = 'sky/city_sky.jpg';
 export function loadSkyTexture(scene) {
   // 天空贴图也是「进游戏前要等的一件东西」（离线时它会失败并回退程序化天空，同样算完成）
   return track(new Promise((resolve) => {
-    const loader = new THREE.TextureLoader();
-    loader.load(
-      CITY_SKY_URL,
-      (texture) => {
-        texture.mapping = THREE.EquirectangularReflectionMapping;
-        texture.colorSpace = THREE.SRGBColorSpace;
-        scene.background = texture;
-        resolve(true);
-      },
-      undefined,
-      () => resolve(false) // 加载失败（离线/缺失）→ 保留程序化天空
-    );
+    // 走本地缓存：1MB 的贴图每次进游戏都重下一次太亏。拿到的是 blob: URL，用完必须回收
+    assetBlobURL(CITY_SKY_URL).then((url) => {
+      const loader = new THREE.TextureLoader();
+      loader.load(
+        url,
+        (texture) => {
+          URL.revokeObjectURL(url);
+          texture.mapping = THREE.EquirectangularReflectionMapping;
+          texture.colorSpace = THREE.SRGBColorSpace;
+          scene.background = texture;
+          resolve(true);
+        },
+        undefined,
+        () => { URL.revokeObjectURL(url); resolve(false); } // 加载失败（离线/缺失）→ 保留程序化天空
+      );
+    }).catch(() => resolve(false));
   }));
 }
 
@@ -130,22 +135,29 @@ export function createTimeSky(scene) {
     scene.add(mesh);
     domes.set(key, mesh);
 
-    new THREE.TextureLoader().load(
-      SKYBOX_URLS[key],
-      (texture) => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.anisotropy = 4; // 贴图与视线接近平行时（近地平线）少糊一点
-        mat.map = texture;
-        mat.color.setHex(0xffffff);
-        mat.needsUpdate = true;
-        anyLoaded = true;
-        fallback.visible = false;
-      },
-      undefined,
-      () => {
-        console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
-      }
-    );
+    // 四张全景图加起来 4MB 多，同样走本地缓存；blob: URL 用完回收
+    assetBlobURL(SKYBOX_URLS[key]).then((url) => {
+      new THREE.TextureLoader().load(
+        url,
+        (texture) => {
+          URL.revokeObjectURL(url);
+          texture.colorSpace = THREE.SRGBColorSpace;
+          texture.anisotropy = 4; // 贴图与视线接近平行时（近地平线）少糊一点
+          mat.map = texture;
+          mat.color.setHex(0xffffff);
+          mat.needsUpdate = true;
+          anyLoaded = true;
+          fallback.visible = false;
+        },
+        undefined,
+        () => {
+          URL.revokeObjectURL(url);
+          console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
+        }
+      );
+    }).catch(() => {
+      console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
+    });
   }
 
   function update(t, camera) {
