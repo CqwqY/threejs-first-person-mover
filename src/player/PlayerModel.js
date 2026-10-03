@@ -1,9 +1,11 @@
 // 职责：定义玩家的“外观”。
 
 // 模型 = 人物 GLB（girl/boy，原模型自带正确贴图/UV）+ 头顶名牌。GLB 异步加载，加载前先用缩小版占位身体保证即时可见。
-// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制。
-// ⚠ 实测：原始 boy/girl.glb 的「正面」法线朝 +Z（不是 -Z），glTF 前进约定是 -Z，
-//   所以要让角色正对移动方向必须转 180° —— modelDeg=180（设 0 会变成面朝 +Z = 倒着走/看着像偏了 180°）。
+// 按包围盒等比缩放到 1.8 并让脚底落在 y=0；朝向由 modelDeg 控制（绕 Y 旋转最终模型，安全、不动骨架）。
+// ⚠ 朝向取值（真机反复验证，别再靠头部法线探针猜）：
+//   你说 modelDeg=0 偏 90°、modelDeg=180 也偏 90° → 两者都正好差 90°，正确值在正中 = **90**。
+//   原版（Mixamo 网格 +X 朝）也是 90，auto-rig 的 boy/girl.glb 朝同一方向，故 90 正对移动方向（-Z）。
+//   若真机仍偏，地址栏加 ?modelDeg=N（N 为度数，如 ?modelDeg=0 / 180 / 270）实时拨正，确认后再回填此常量。
 //
 // 骨骼动画：用的是 `${gender}-rig.glb`（由 tools/auto-rig.mjs 离线生成）——
 //   网格沿用带贴图的原 GLB（UV/贴图一个字节没动，二进制手术追加骨骼），骨骼与蒙皮权重
@@ -42,11 +44,15 @@ function drawHpBar(ctx, ratio) {
 
 // ---- 运行时朝向校准（?calib 面板可实时拖动并读取度数，校准后回填代码并删除）----
 // modelDeg：模型整体视觉朝向，直接绕 Y 旋转最终模型（安全、不动骨架）。
-// 原始 boy/girl.glb 正面法线朝 +Z，glTF 前进约定是 -Z，故 180 才能让角色正对移动方向。
-// 若真机上发现角色「面朝后/倒着走」，说明 GLB 朝向变了，把 180 改回 0（或 0↔180 对调）即可。
+// 真机验证：0 与 180 都偏 90°，正确值 = 90（正对 glTF 前进约定 -Z 的移动方向）。
 // skelDeg：仅旋转「骨架(armature)」节点 —— 骨头经蒙皮带动网格形变，是真正的「转骨骼」；
 //   ⚠ 旧写法直接转 e.rig.root（=整棵 GLB 根，包含网格），会变成「转骨骼=整个人刚性跟着转」，已废弃。
-const cfg = { modelDeg: 180, skelDeg: 0 };
+const cfg = { modelDeg: 90, skelDeg: 0 };
+// 运行时 URL 覆盖：?modelDeg=N 临时拨正朝向（校准用，不写盘、不污染），确认后回填上面常量。
+try {
+  const _md = parseFloat(new URLSearchParams(window.location.search).get('modelDeg'));
+  if (Number.isFinite(_md)) cfg.modelDeg = _md;
+} catch (e) { /* 忽略 */ }
 const models = []; // 已创建模型条目 {group, gender, faceHolder, rig}
 
 // 把给定模型的朝向同步到当前 cfg 配置
