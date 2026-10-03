@@ -122,6 +122,10 @@ export class Game {
     // 富余时慢慢升回。老卡/入门卡（填充率是真瓶颈）靠这个自动保帧率。
     this._dynScale = 1;
     this._dynLast = 0;
+    // 超分（低分辨率渲染 + 锐化升采样）：_sharpen=0 表示关闭，退回浏览器直接拉伸
+    this._sharpen = 0.6;
+    this._upRT = null; this._upScene = null; this._upCam = null; this._upMat = null;
+    this._upFailed = false;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // 阴影贴图不再每帧全量重渲（GPU 大头），改为主循环里隔帧置 needsUpdate ——
@@ -253,6 +257,11 @@ export class Game {
         // 渲染分辨率：auto = 交给自适应（掉帧自动降、富余自动升）；
         // 手动档则钉死该比例，不再自动调整（给知道自己机器极限的用户兜底）。
         renderScale: (v) => this._setRenderScale(v),
+        // 超分锐化强度：0=关（降分辨率后由浏览器拉伸，会糊）；越大越锐利，过头会有锯齿感
+        sharpen: (v) => {
+          this._sharpen = Number(v) || 0;
+          this._applyRenderScale();
+        },
         shadowR: (v) => {
           const cam = this._sun.shadow.camera;
           cam.left = -v;
@@ -283,7 +292,7 @@ export class Game {
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
       },
       {
-        fields: ['quality', 'renderScale', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
+        fields: ['quality', 'renderScale', 'sharpen', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -630,8 +639,112 @@ export class Game {
   // 传入 w/h 时同时更新 CSS 尺寸（窗口缩放用）；不传则只改 drawingBuffer（改分辨率用）。
   _applyRenderScale(w, h) {
     const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
-    this.renderer.setPixelRatio(base * (this._dynScale || 1));
+    // 走超分时画布保持原生分辨率（最后由升采样那趟铺满屏幕），低分辨率只在 RT 里；
+    // 不超分时才是老做法：直接把 drawingBuffer 压小，让浏览器拉伸。
+    const up = this._useUpscale();
+    this.renderer.setPixelRatio(base * (up ? 1 : (this._dynScale || 1)));
     this.renderer.setSize(w || window.innerWidth, h || window.innerHeight, !!(w && h));
+    if (up) this._ensureRT();
+    else if (this._upRT) { try { this._upRT.dispose(); } catch (e) { /* 忽略 */ } this._upRT = null; }
+  }
+
+  // ---- 超分（低分辨率渲染 + 锐化升采样）----
+  // 降分辨率最直接，但画面会糊。这里把场景渲进低分辨率 RT，再用 5 抽样
+  // 非锐化掩膜（中心放大、四邻负权重）放大到屏幕：边缘重新变利，比浏览器
+  // 的双线性拉伸清楚得多，代价只是一趟很便宜的全屏 quad。
+
+  // 只有「确实在降分辨率」且「用户没把锐化关掉」时才走超分路径
+  _useUpscale() {
+    return !this._upFailed && (this._sharpen || 0) > 0.001 && (this._dynScale || 1) < 0.98;
+  }
+
+  _ensureUpscale() {
+    if (this._upScene) return true;
+    try {
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          tDiffuse: { value: null },
+          uTexel: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
+          uSharp: { value: 0.6 },
+        },
+        vertexShader:
+          'varying vec2 vUv;\n' +
+          'void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }\n',
+        fragmentShader:
+          'uniform sampler2D tDiffuse;\n' +
+          'uniform vec2 uTexel;\n' +
+          'uniform float uSharp;\n' +
+          'varying vec2 vUv;\n' +
+          'void main() {\n' +
+          '  vec3 c = texture2D(tDiffuse, vUv).rgb;\n' +
+          '  vec3 l = texture2D(tDiffuse, vUv - vec2(uTexel.x, 0.0)).rgb;\n' +
+          '  vec3 r = texture2D(tDiffuse, vUv + vec2(uTexel.x, 0.0)).rgb;\n' +
+          '  vec3 u = texture2D(tDiffuse, vUv + vec2(0.0, uTexel.y)).rgb;\n' +
+          '  vec3 d = texture2D(tDiffuse, vUv - vec2(0.0, uTexel.y)).rgb;\n' +
+          '  vec3 blur = (l + r + u + d) * 0.25;\n' +
+          // 非锐化掩膜：把「中心与邻域的差」按比例加回去
+          '  vec3 sharp = c + (c - blur) * uSharp * 2.0;\n' +
+          '  gl_FragColor = vec4(clamp(sharp, 0.0, 1.0), 1.0);\n' +
+          '  #include <colorspace_fragment>\n' +
+          '}\n',
+        depthTest: false,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      mesh.frustumCulled = false;
+      this._upScene = new THREE.Scene();
+      this._upScene.add(mesh);
+      this._upCam = new THREE.Camera();
+      this._upMat = mat;
+      return true;
+    } catch (e) {
+      this._upFailed = true; // 着色器编译失败就永久退回直渲，别每帧重试
+      return false;
+    }
+  }
+
+  _ensureRT() {
+    const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
+    const s = this._dynScale || 1;
+    const w = Math.max(2, Math.floor(window.innerWidth * base * s));
+    const h = Math.max(2, Math.floor(window.innerHeight * base * s));
+    if (this._upRT && this._upRT.width === w && this._upRT.height === h) return true;
+    try {
+      if (this._upRT) this._upRT.dispose();
+      this._upRT = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        type: THREE.HalfFloatType, // 避免线性空间 8bit 在暗部产生色带
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      return true;
+    } catch (e) {
+      this._upFailed = true;
+      return false;
+    }
+  }
+
+  _renderFrame() {
+    const up = this._useUpscale() && this._ensureUpscale() && this._ensureRT();
+    if (!up) {
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+      this._sceneCalls = this.renderer.info.render.calls;
+      this._sceneTris = this.renderer.info.render.triangles;
+      return;
+    }
+    this.renderer.setRenderTarget(this._upRT);
+    this.renderer.render(this.scene, this.camera);
+    // 立刻取走场景那一趟的统计：下一趟升采样会重置 renderer.info
+    this._sceneCalls = this.renderer.info.render.calls;
+    this._sceneTris = this.renderer.info.render.triangles;
+    this.renderer.setRenderTarget(null);
+    const u = this._upMat.uniforms;
+    u.tDiffuse.value = this._upRT.texture;
+    u.uSharp.value = this._sharpen || 0;
+    u.uTexel.value.set(1 / this._upRT.width, 1 / this._upRT.height);
+    this.renderer.render(this._upScene, this._upCam);
   }
 
   // 自适应分辨率：按实测真实帧率动态调整 pixelRatio。
@@ -683,12 +796,13 @@ export class Game {
       ' ms   其他 ' + Math.max(0, frame - phys - rend).toFixed(2) + ' ms\n' +
       '碰撞体 盒' + boxes + ' 凸包' + hulls + ' trimesh' + tms +
       '   三角形 ' + tris.toLocaleString() + '\n' +
-      '绘制 ' + (this.renderer.info.render.calls || 0) + ' 次   三角面 ' +
-      (this.renderer.info.render.triangles || 0).toLocaleString() + '\n' +
+      '绘制 ' + (this._sceneCalls || 0) + ' 次   三角面 ' +
+      (this._sceneTris || 0).toLocaleString() + '\n' +
       // 实际渲染缓冲的像素数：窗口小时若它也跟着变小、而 FPS 明显回升，
       // 配合这一格就能判断是「我们画得太满」还是「显示链路按像素限速」。
       '缓冲 ' + (this.renderer.domElement.width || 0) + '×' + (this.renderer.domElement.height || 0) +
-      '   dpr ' + (this.renderer.getPixelRatio ? this.renderer.getPixelRatio().toFixed(2) : '-') + '\n' +
+      '   内部 ' + (this._dynScale || 1).toFixed(2) + '×' +
+      (this._useUpscale() ? ' 超分锐化' + (this._sharpen || 0).toFixed(1) : '') + '\n' +
       'GPU ' + this._gpuName();
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }
@@ -5686,7 +5800,8 @@ export class Game {
     this._shadowTick = (this._shadowTick + 1) & 1;
     this.renderer.shadowMap.needsUpdate = this._shadowTick === 0;
     const _pt3 = this._perf ? performance.now() : 0;
-    this.renderer.render(this.scene, this.camera);
+    // 超分：分辨率被压低时，先渲进低分辨率 RT，再用锐化着色器放大到屏幕
+    this._renderFrame();
 
     // 自适应分辨率（始终生效，不依赖 ?perf）：每 0.5s 用真实帧率判一次，
     // 掉到 45 以下就降分辨率、回到 57 以上就慢慢升回，让弱卡自动保住帧率。
