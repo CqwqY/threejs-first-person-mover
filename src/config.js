@@ -203,7 +203,7 @@ export const Config = {
   GRAPPLE_SPEED: 25,              // 被拽过去的速度（米/秒）
   GRAPPLE_MAX_TIME: 2.4,          // 单次抓钩最长持续（秒），到时自动松手
   GRAPPLE_STOP_DIST: 1.9,         // 离锚点这么近就松手（米）
-  GRAPPLE_COOLDOWN: 0.5,          // 松手后多久才能再抓（秒）
+  GRAPPLE_COOLDOWN: 0,            // 松手后多久才能再抓（秒）。0 = 无冷却，松开即可立刻再抓
   GRAPPLE_THROW: 26,              // 钩中人时把对方甩出去的水平速度（米/秒）
   GRAPPLE_THROW_UP: 9,            // 钩中人时附加的向上速度（米/秒）
   GRAPPLE_CATCH_ARC: 18,          // 钩人的判定张角（度，以准星为中轴）

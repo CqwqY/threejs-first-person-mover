@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { API_BASE } from '../config.js';
+import { track } from './loadTracker.js';
 
 let _loader = null;
 
@@ -44,8 +45,8 @@ function loadGLB(url) {
     );
   });
 
-  cache.set(url, promise);
-  return promise;
+  cache.set(url, track(promise)); // 登记到加载计数：进游戏前的加载动画据此判断「模型都到了没」
+  return cache.get(url);
 }
 
 // 异步返回一个独立副本（克隆共享 geometry/material），供单个道具使用。

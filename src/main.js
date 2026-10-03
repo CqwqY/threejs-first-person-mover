@@ -6,6 +6,27 @@ import { debugCalibFrame } from './player/PlayerModel.js';
 import { initMobileControls } from './ui/MobileControls.js';
 import { initMobileLayout } from './ui/MobileLayout.js';
 import { initBgm } from './audio/Bgm.js';
+import { createLoadingScreen } from './ui/LoadingScreen.js';
+import { stats, whenIdle } from './world/loadTracker.js';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const withTimeout = (p, ms) => Promise.race([p, sleep(ms)]);
+
+// 等「模型都到位」：远端场景拉取完（它会触发一批 GLB 加载）→ 加载计数归零。
+// 每一段都有超时兜底，且全程可被「不等了」打断（由外层的 race 结束）。
+async function waitAssets(loading) {
+  await sleep(400); // 先给一小段窗口让第一批请求登记进来，否则会误判「都加载完了」
+  const t0 = performance.now();
+  for (;;) {
+    if (loading.done) return;
+    const { pending, total } = stats();
+    loading.setProgress(total - pending, total);
+    if (total > 0 && pending === 0) return;                  // 都到齐了
+    if (total === 0 && performance.now() - t0 > 1600) return; // 一直没有任何模型要加载（离线/纯程序化场景）
+    if (performance.now() - t0 > 25000) return;               // 兜底：再慢也得放人进来
+    await Promise.race([whenIdle(), sleep(250)]);
+  }
+}
 
 // 进游戏前登录/注册（游客可选）；拿到 token 与资料后创建游戏
 async function main() {
@@ -16,8 +37,18 @@ async function main() {
   } catch (e) {
     console.warn('[main] 登录流程失败，以游客身份进入:', e);
   }
+  // 加载动画：登录完之后才挂遮罩 —— 它是全屏且吃触摸的，挂在登录前会把登录界面整个盖住。
+  // 从这一刻起，模型没到位就不放人进来（点「不等了」可立刻进）。
+  const loading = createLoadingScreen({ title: '花草中学' });
   const game = new Game(auth.token, auth.profile);
   game.start();
+  // 场景/模型加载完成后（或用户点了「不等了」）再撤掉遮罩
+  const assetsReady = (async () => {
+    await withTimeout(game.sceneReady(), 12000); // 远端场景拉取（慢/离线都不该无限等）
+    await waitAssets(loading);                   // 它触发的那批模型加载
+  })();
+  await Promise.race([assetsReady, loading.skipped]);
+  loading.finish();
   // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过
   initMobileControls(game.input);
   // 手机触屏：按键布局自适应 + 拖拽摆放。动作注入给「设置」弹窗的「画面元素」区块

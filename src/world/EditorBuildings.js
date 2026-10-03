@@ -9,6 +9,7 @@ import { instantiate } from './AssetLoader.js';
 import { editorMapData } from './editorMapData.js';
 import { API_BASE } from '../config.js';
 import { bakeTriMeshAsync } from './collision/trimesh.js';
+import { track } from './loadTracker.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
 let _addedHolders = [];
@@ -322,8 +323,11 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     if (it.url) {
       instantiate(it.url).then(setupModel).catch(() => {});
     } else if (it.data) {
-      const loader = new GLTFLoader();
-      loader.load(it.data, (gltf) => setupModel(gltf.scene), undefined, () => {});
+      // 旧的内嵌 data URL 记录：不走 AssetLoader 缓存，这里手动登记进加载计数
+      track(new Promise((resolve) => {
+        const loader = new GLTFLoader();
+        loader.load(it.data, (gltf) => { resolve(gltf.scene); setupModel(gltf.scene); }, undefined, () => resolve(null));
+      }));
     }
 
     // 碰撞体：OBB（有向包围盒），把朝向 rotY（Y 轴旋转角）一并给出，使碰撞体随模型旋转。

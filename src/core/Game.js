@@ -69,6 +69,7 @@ const UP_Y = new THREE.Vector3(0, 1, 0);
 
 // 每帧复用的临时向量（抓钩绳索起点 / 光点瞄准方向），避免在热路径里新建对象
 const _gpA = new THREE.Vector3();
+const _gHand = new THREE.Vector3();
 const _gDir = new THREE.Vector3();
 
 // 对战玩法表：新增模式时这里加一条，服务端也要放行同名 mode。
@@ -191,7 +192,9 @@ export class Game {
     // 在线同步：运行时从后端拉取最新场景（编辑器保存的那份），拉到则替换打包数据重建。
     // 拉取失败会自动回退到上面打包的 editorMapData，保证离线时也有内容。
     // 注意：LocalPlayer 持有 this.colliders 的同一条数组引用，因此原地改写而不是整体替换。
-    _fetchRemoteScene(this, this.scene, roots, this.colliders);
+    // 远端场景拉取（含它触发的那些 GLB 加载）：进游戏前的加载动画会等它。
+    // 拉取失败会静默回退打包数据，所以这里不能 reject，否则加载屏会卡住。
+    this._sceneReady = _fetchRemoteScene(this, this.scene, roots, this.colliders);
 
     // ---- 输入 ----
     this.input = new Input();
@@ -5193,26 +5196,39 @@ export class Game {
     this._drawGrapple();
   }
 
-  // 绳索两端：相机（手边）→ 钩爪当前坐标
+  // 绳索两端：自己的手 → 钩爪当前坐标。钩爪同步朝向飞行方向（锥尖朝前）。
   _drawGrapple() {
     const g = this._grapple;
     if (!g || !this._grappleRope || !this._grappleHook) return;
-    this.camera.getWorldPosition(_gpA);
-    const pos = this._grappleRope.geometry.attributes.position;
-    pos.setXYZ(0, _gpA.x, _gpA.y, _gpA.z);
-    pos.setXYZ(1, g.fx, g.fy, g.fz);
-    pos.needsUpdate = true;
-    this._grappleRope.geometry.computeBoundingSphere();
-    this._grappleHook.position.set(g.fx, g.fy, g.fz);
+    this._grappleHandPos(_gHand);
+    _gpA.set(g.fx, g.fy, g.fz);
+    _gDir.subVectors(_gpA, _gHand);
+    const len = _gDir.length();
+    if (len > 1e-4) {
+      _gDir.divideScalar(len);
+      this._grappleRope.position.copy(_gHand);
+      this._grappleRope.quaternion.setFromUnitVectors(UP_Y, _gDir);
+      this._grappleRope.scale.set(1, len, 1);
+      this._grappleHook.quaternion.setFromUnitVectors(UP_Y, _gDir);
+    }
+    this._grappleHook.position.copy(_gpA);
   }
 
+  // 供进游戏前的加载动画等待：远端场景拉取完成（它内部还会触发一批 GLB 加载，
+  // 那些由 loadTracker 计数，调用方再等一次归零即可）。永不 reject——失败会回退打包数据。
+  sceneReady() {
+    return this._sceneReady || Promise.resolve();
+  }
+
+  // 绳索与钩爪。绳索用圆柱 Mesh 而不是 Line：Line 的线宽在绝大多数平台上恒为 1px，
+  // 在 3D 场景里几乎看不见；圆柱有真实粗细，才能看出「一条线连着自己和钩爪」。
   _ensureGrappleViz() {
     if (!this._grappleRope) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-      this._grappleRope = new THREE.Line(
+      const geo = new THREE.CylinderGeometry(0.035, 0.035, 1, 6, 1, true); // 单位高，靠 scale.y 拉到实际长度
+      geo.translate(0, 0.5, 0); // 原点挪到一端，这样 position 直接就是「绳子起点」
+      this._grappleRope = new THREE.Mesh(
         geo,
-        new THREE.LineBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.95, depthWrite: false })
+        new THREE.MeshBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.95, depthWrite: false })
       );
       this._grappleRope.frustumCulled = false; // 两端每帧变，包围球不可靠
       this._grappleRope.visible = false;
@@ -5223,10 +5239,24 @@ export class Game {
         new THREE.ConeGeometry(0.2, 0.5, 8),
         new THREE.MeshStandardMaterial({ color: 0xc9d3e6, emissive: 0x2a3644, metalness: 0.7, roughness: 0.3 })
       );
-      this._grappleHook.rotation.x = Math.PI / 2; // 锥尖朝前
       this._grappleHook.visible = false;
       this.scene.add(this._grappleHook);
     }
+  }
+
+  // 绳索起点：自己的手。原来用的是相机位置，第三视角下绳子从「身后」冒出来、不连人；
+  // 改成按体型与朝向算出的手部世界坐标，第一/第三人称看起来都是从自己身上射出去的。
+  _grappleHandPos(out) {
+    const s = this.localState;
+    const scale = (this.localPlayer && this.localPlayer.physics && this.localPlayer.physics.sizeScale) || 1;
+    const h = Config.PLAYER_HEIGHT * scale;
+    const fx = -Math.sin(s.yaw);
+    const fz = -Math.cos(s.yaw);
+    const rx = Math.cos(s.yaw);
+    const rz = -Math.sin(s.yaw);
+    // 身前 0.35m、右侧 0.22m（右手）、头顶往下 0.62 个身高 ≈ 胸腹高度
+    out.set(s.x + fx * 0.35 + rx * 0.22, s.y - h * 0.62, s.z + fz * 0.35 + rz * 0.22);
+    return out;
   }
 
   // 射线打世界碰撞体，取最近命中：返回 { point, normal } 或 null。

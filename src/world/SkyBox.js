@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { Config } from '../config.js';
+import { track } from './loadTracker.js';
 
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
@@ -10,7 +11,8 @@ const CITY_SKY_URL = 'sky/city_sky.jpg';
 // asyncLoadSky(scene, fin)：异步加载并应用贴图天空，成功时移除程序化 Sky 兜底并设背景。
 // 返回一个 Promise（供需要按时序处理的调用方等待；失败自动静默回退）。
 export function loadSkyTexture(scene) {
-  return new Promise((resolve) => {
+  // 天空贴图也是「进游戏前要等的一件东西」（离线时它会失败并回退程序化天空，同样算完成）
+  return track(new Promise((resolve) => {
     const loader = new THREE.TextureLoader();
     loader.load(
       CITY_SKY_URL,
@@ -23,7 +25,7 @@ export function loadSkyTexture(scene) {
       undefined,
       () => resolve(false) // 加载失败（离线/缺失）→ 保留程序化天空
     );
-  });
+  }));
 }
 
 // createSky(scene, opts)：生成程序化天空立即作为兜底，同时异步加载城市贴图替换。
