@@ -106,10 +106,11 @@ export class Game {
     // MSAA 只在低密度屏（dpr<2，主要是桌面显示器）开：手机 dpr 普遍 2.6~3，像素已经很密，
     // MSAA 在此几乎是纯 GPU 开销（填充率大户），关掉肉眼无差 —— 这是移动端最大的单项省耗。
     // 注意 antialias 无法运行时切换，只能在构造期按设备定死。
-    // MSAA 无法运行时开关，只能构造期定死：低画质档会记一个标记，下次启动时直接不开。
-    // （GT 640 这类老卡上 MSAA 是纯粹的 4 倍片元开销，是最值钱的单项）
+    // MSAA 无法运行时开关（作用于画布），只能构造期定死；走超分时则由 RT 的 samples 决定，
+    // 那个是每帧可改的（RT 重建即可）。设置项写 localStorage，下次启动读它。
     let noAA = false;
     try { noAA = localStorage.getItem('fpm-noaa') === '1'; } catch (e) { /* 隐私模式下忽略 */ }
+    this._aaOn = !noAA;
     this.renderer = new THREE.WebGLRenderer({
       antialias: !noAA && (window.devicePixelRatio || 1) < 2,
       // 双显卡笔记本默认可能选中集成显卡，这里明确要独显
@@ -123,7 +124,7 @@ export class Game {
     this._dynScale = 1;
     this._dynLast = 0;
     // 超分（低分辨率渲染 + 锐化升采样）：_sharpen=0 表示关闭，退回浏览器直接拉伸
-    this._sharpen = 0.6;
+    this._sharpen = 0.5;
     this._upRT = null; this._upScene = null; this._upCam = null; this._upMat = null;
     this._upFailed = false;
     this.renderer.shadowMap.enabled = true;
@@ -257,6 +258,14 @@ export class Game {
         // 渲染分辨率：auto = 交给自适应（掉帧自动降、富余自动升）；
         // 手动档则钉死该比例，不再自动调整（给知道自己机器极限的用户兜底）。
         renderScale: (v) => this._setRenderScale(v),
+        // 抗锯齿：走超分路径时立即生效（RT 会重建）；不降分辨率时是画布的 MSAA，
+        // 那个只能在构造期决定，改完要刷新页面才生效。
+        antiAlias: (v) => {
+          this._aaOn = v !== 'off';
+          try { localStorage.setItem('fpm-noaa', this._aaOn ? '0' : '1'); } catch (e) { /* 忽略 */ }
+          if (this._upRT) { try { this._upRT.dispose(); } catch (e) { /* 忽略 */ } this._upRT = null; }
+          this._applyRenderScale();
+        },
         // 超分锐化强度：0=关（降分辨率后由浏览器拉伸，会糊）；越大越锐利，过头会有锯齿感
         sharpen: (v) => {
           this._sharpen = Number(v) || 0;
@@ -292,7 +301,7 @@ export class Game {
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
       },
       {
-        fields: ['quality', 'renderScale', 'sharpen', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
+        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -684,6 +693,11 @@ export class Game {
           '  vec3 blur = (l + r + u + d) * 0.25;\n' +
           // 非锐化掩膜：把「中心与邻域的差」按比例加回去
           '  vec3 sharp = c + (c - blur) * uSharp * 2.0;\n' +
+          // 限幅到邻域范围（CAS 的做法）：不允许超出局部极值，
+          // 否则过冲会变成亮/暗描边，锯齿和噪点也会被一起放大成毛边。
+          '  vec3 mn = min(min(l, r), min(u, d));\n' +
+          '  vec3 mx = max(max(l, r), max(u, d));\n' +
+          '  sharp = clamp(sharp, mn, mx);\n' +
           '  gl_FragColor = vec4(clamp(sharp, 0.0, 1.0), 1.0);\n' +
           '  #include <colorspace_fragment>\n' +
           '}\n',
@@ -717,6 +731,9 @@ export class Game {
         type: THREE.HalfFloatType, // 避免线性空间 8bit 在暗部产生色带
         depthBuffer: true,
         stencilBuffer: false,
+        // 多重采样：场景渲进 RT 后就没了画布那层 MSAA，必须在 RT 上补回来，
+        // 否则降分辨率 + 锐化会把锯齿放大得很明显。这里按内部分辨率做，比全分辨率便宜。
+        samples: this._aaOn ? 4 : 0,
       });
       return true;
     } catch (e) {
@@ -1004,9 +1021,6 @@ export class Game {
       }
     }
     this._qualityDpr = p.dpr;
-    // 低画质档顺带在下次启动时关掉 MSAA：AA 只能在构造期决定，无法运行时切换。
-    // 老卡上它是最值钱的一项（4 倍片元开销），所以给 low 档配这个副作用。
-    try { localStorage.setItem('fpm-noaa', q === 'low' ? '1' : '0'); } catch (e) { /* 忽略 */ }
     // 画质档变了：自动模式回满重新探测；手动模式保留用户钉的比例
     if (this._autoScale !== false) this._dynScale = 1;
     this.renderer.shadowMap.type = p.type;
