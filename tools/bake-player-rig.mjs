@@ -410,7 +410,6 @@ async function bake(gender) {
         const ARM_KEEP = 0.45;
         for (let k = 0; k < values.length; k += 4) {
           qa.set(values[k], values[k + 1], values[k + 2], values[k + 3]);
-          qa.premultiply(qAlign).multiply(qAlignInv); // 共轭预旋转：抵消 alignM 把「动作方向」转 θ（修移动猎奇）
           qa.premultiply(delta);                       // q_ourRest · q_srcRest⁻¹ · (对齐后的动画)
           if (isArm) qa.slerp(qRestO, 1 - ARM_KEEP);   // 拉回静止态，保留 45% 摆幅
           outVals[k] = qa.x; outVals[k + 1] = qa.y; outVals[k + 2] = qa.z; outVals[k + 3] = qa.w;
