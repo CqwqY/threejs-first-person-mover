@@ -106,7 +106,11 @@ export class Game {
     // MSAA 只在低密度屏（dpr<2，主要是桌面显示器）开：手机 dpr 普遍 2.6~3，像素已经很密，
     // MSAA 在此几乎是纯 GPU 开销（填充率大户），关掉肉眼无差 —— 这是移动端最大的单项省耗。
     // 注意 antialias 无法运行时切换，只能在构造期按设备定死。
-    this.renderer = new THREE.WebGLRenderer({ antialias: (window.devicePixelRatio || 1) < 2 });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: (window.devicePixelRatio || 1) < 2,
+      // 双显卡笔记本默认可能选中集成显卡，这里明确要独显
+      powerPreference: 'high-performance',
+    });
     // dpr 封顶：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
     // 会反复触发 canvas 重算（掉帧/抖动的隐藏来源）
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
@@ -578,7 +582,23 @@ export class Game {
       'text-shadow:0 1px 2px rgba(0,0,0,.85);';
     el.textContent = '性能统计中…';
     document.body.appendChild(el);
-    return { el, frames: 0, phys: 0, render: 0, acc: 0, t: 0, txt: '' };
+    return { el, frames: 0, phys: 0, render: 0, acc: 0, t: 0, txt: '', gpu: null };
+  }
+
+  // GPU 型号（用于判断是否落到软件渲染：SwiftShader / Software 意味着浏览器没开硬件加速，
+  // 此时再怎么优化场景都没用 —— 那是浏览器设置问题，不是代码问题）
+  _gpuName() {
+    const p = this._perf;
+    if (!p) return '-';
+    if (p.gpu !== null) return p.gpu;
+    let name = '未知';
+    try {
+      const gl = this.renderer.getContext();
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      if (ext) name = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '未知';
+    } catch (e) { /* 扩展被禁用时保持“未知” */ }
+    p.gpu = name;
+    return name;
   }
 
   _updatePerfHud(dt, physMs, renderMs, totalMs) {
@@ -612,7 +632,9 @@ export class Game {
       ' ms   其他 ' + Math.max(0, frame - phys - rend).toFixed(2) + ' ms\n' +
       '碰撞体 盒' + boxes + ' 凸包' + hulls + ' trimesh' + tms +
       '   三角形 ' + tris.toLocaleString() + '\n' +
-      '复杂建筑网格数 ' + meshCount.toLocaleString() + '（烘焙时的网格数，合并生效后会很小）';
+      '绘制 ' + (this.renderer.info.render.calls || 0) + ' 次   三角面 ' +
+      (this.renderer.info.render.triangles || 0).toLocaleString() + '\n' +
+      'GPU ' + this._gpuName();
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }
 
