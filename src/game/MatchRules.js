@@ -16,6 +16,8 @@ import { Config } from '../config.js';
 export const MODE_RULES = {
   meteor: { win: 'lastAlive', timed: false },
   grapple: { win: 'mostCoins', timed: true },
+  // 校园狂飙：不开竞技场、不排队判胜负（在校园大世界里各跑各的，用时最短者胜，见 Game._startRace）
+  circuit: { win: 'fastestLaps', timed: false },
 };
 
 export function modeRule(mode) {

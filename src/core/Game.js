@@ -16,7 +16,7 @@ import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
-import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable } from '../world/Track.js';
+import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
@@ -90,6 +90,13 @@ const COMBAT_MODES = {
     tip: '把准星对上柱顶的光点按攻击，钩爪就带你飞过去；在柱子间吃金币，掉进岩浆出局',
     soloTip: '限时 ' + Config.COMBAT_ROUND_SECONDS + ' 秒，自己练抓钩与吃金币',
     win: '限时内吃到金币最多的人获胜',
+  },
+  // 校园狂飙：不开竞技场，直接在校园大世界里跑编辑器画的那条赛道（见 world/Track.js）。
+  circuit: {
+    name: '校园狂飙',
+    tip: '骑上电动车，按顺序穿过 1 → N 号门计圈；跑满圈数、用时最短者获胜',
+    soloTip: '自己跑圈计时，刷自己的最好成绩',
+    win: '跑满圈数用时最短者获胜',
   },
 };
 
@@ -231,6 +238,11 @@ export class Game {
     this.track = defaultTrack();
     this._trackGroup = null;
     this._buildTrackViz();
+    // 校园狂飙：本机正在跑圈时的状态（null = 没在跑）；HUD 元素；「每人一辆车」的载具池
+    this._race = null;
+    this._raceHud = null;
+    this._raceHudLast = '';
+    this._vehPool = null;
 
     // ---- 网络连接 ----
     this.network = new Network(Config.RELAY_URL, this._token);
@@ -1466,6 +1478,18 @@ export class Game {
     this._toast('已下车');
   }
 
+  // 按需给「某个骑手」配一辆车（一辆车一个 mesh，不骑了就隐藏 —— 池化，不销毁）。
+  // 车的模型走资源缓存，重复创建不会重复下载。
+  _vehFor(id) {
+    if (!this._vehPool) this._vehPool = new Map();
+    let v = this._vehPool.get(id);
+    if (!v) {
+      v = createVehicle(this.scene);
+      this._vehPool.set(id, v);
+    }
+    return v;
+  }
+
   _updateVehicle(dt) {
     const st = this.localState;
     const seats = this._vehicleSeats();
@@ -1476,6 +1500,27 @@ export class Game {
       if (d) this.vehicle.setPose(d.x, d.y - Config.PLAYER_HEIGHT * (d.size || 1), d.z, d.yaw);
     } else {
       this.vehicle.park();
+    }
+
+    // 1.2) 其他骑手：每人各一辆车（多人同时骑时用，例如校园狂飙）。
+    // 车体只是视觉，位置从各自的 player state 推出来 —— 所以「每人一辆」不用改网络协议
+    // （ride / veh 本来就在状态广播里，远端玩家照样能看到你骑着车）。
+    const inUse = new Set();
+    const drawDriver = (id, s2) => {
+      if (!s2 || s2.veh !== Config.VEHICLE_ID || s2.ride !== 1) return;
+      inUse.add(id);
+      if (id === seats.driver) return; // 主车上面已经画过这一辆了
+      const v = this._vehFor(id);
+      v.group.visible = true;
+      v.setPose(s2.x, s2.y - Config.PLAYER_HEIGHT * (s2.size || 1), s2.z, s2.yaw);
+    };
+    drawDriver(this.localState.id || '__local', this.localState);
+    for (const [id, rp] of this.playerManager.players) {
+      if (id === this.localState.id) continue;
+      drawDriver(id, rp.state);
+    }
+    if (this._vehPool) {
+      for (const [id, v] of this._vehPool) if (!inUse.has(id)) v.group.visible = false;
     }
 
     // 1.5) 驾驶员：后座乘客由他统一上报，乘客自己不再单独广播。
@@ -4314,65 +4359,241 @@ export class Game {
     if (toast) this._toast(toast);
   }
 
-  // 入口选择：分两组——「训练场」点了立刻单人开打；「玩家匹配」照旧排队。
-  // 分组而不是并排四个按钮，是因为这两件事的成本完全不同（一个是秒进、一个要等人）。
+  // 玩法选择（全屏）：顶部主推「校园狂飙」大卡；下面「更多玩法」放两个老玩法的小卡，
+  // 每张小卡各带「训练场 / 玩家匹配」（这两件事成本完全不同：一个秒进、一个要等人）。
   _showModePicker() {
     if (!this._modePicker) {
       const el = document.createElement('div');
       el.style.cssText =
-        'position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;' +
-        'background:rgba(8,14,24,.55);font-family:var(--kui-font);color:var(--kui-paper);';
-      const card = document.createElement('div');
-      card.className = 'kui-panel';
-      card.style.cssText = 'min-width:330px;max-width:90vw;max-height:88vh;overflow:auto;padding:20px 22px;text-align:center;';
+        'position:fixed;inset:0;z-index:9600;display:none;flex-direction:column;overflow:auto;' +
+        'background:rgba(8,14,24,.82);font-family:var(--kui-font);color:var(--kui-paper);';
+      const wrap = document.createElement('div');
+      wrap.style.cssText =
+        'flex:1 1 auto;width:100%;max-width:940px;margin:0 auto;box-sizing:border-box;' +
+        'padding:calc(env(safe-area-inset-top, 0px) + 20px) 18px 30px;';
 
-      const group = (title, sub) => {
-        const h = document.createElement('div');
-        h.style.cssText = 'text-align:left;margin:14px 0 8px;';
-        h.innerHTML = '<div style="font-weight:700;font-size:15px;">' + title + '</div>' +
-          '<div style="font-size:12px;color:var(--kui-ink-soft);margin-top:2px;">' + sub + '</div>';
-        return h;
-      };
-      const mk = (mode, cls, tipKey, onClick) => {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'kui-btn ' + cls;
-        b.style.cssText = 'width:100%;margin-bottom:8px;text-align:left;line-height:1.5;padding:9px 14px;';
-        b.innerHTML = '<b>' + COMBAT_MODES[mode].name + '</b><br><span style="font-size:12px;opacity:.85;">'
-          + COMBAT_MODES[mode][tipKey] + '</span>';
-        b.addEventListener('click', () => { el.style.display = 'none'; onClick(mode); });
-        return b;
-      };
-
+      const head = document.createElement('div');
+      head.style.cssText = 'display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;';
       const title = document.createElement('div');
       title.className = 'kui-title';
-      title.style.cssText = 'font-size:18px;margin-bottom:2px;';
+      title.style.cssText = 'font-size:20px;';
       title.textContent = '选择玩法';
-      card.appendChild(title);
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'kui-btn kui-btn--grey';
+      back.style.cssText = 'font:inherit;padding:5px 14px;';
+      back.textContent = '返回';
+      back.addEventListener('click', () => { el.style.display = 'none'; });
+      head.appendChild(title);
+      head.appendChild(back);
+      wrap.appendChild(head);
 
-      // —— 训练场：单人、立刻开始、不计输赢（只记自己的成绩）——
-      card.appendChild(group('训练场', '单人立刻开始，不用等人；退出时看成绩与最高记录'));
-      card.appendChild(mk('meteor', 'kui-btn--primary', 'soloTip', (m) => this._startTraining(m)));
-      card.appendChild(mk('grapple', 'kui-btn--green', 'soloTip', (m) => this._startTraining(m)));
+      // ---- 主推大卡：校园狂飙（赛道来自编辑器「赛道」模式，见 world/Track.js）----
+      const hero = document.createElement('div');
+      hero.className = 'kui-panel';
+      hero.style.cssText = 'padding:18px 20px;text-align:left;'
+        + 'border:2px solid color-mix(in srgb, var(--kui-blue) 70%, transparent);';
+      const heroTop = document.createElement('div');
+      heroTop.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+      const heroName = document.createElement('div');
+      heroName.style.cssText = 'font-weight:700;font-size:19px;';
+      heroName.textContent = COMBAT_MODES.circuit.name;
+      const heroTag = document.createElement('div');
+      heroTag.style.cssText = 'font-size:11px;padding:2px 9px;border-radius:999px;'
+        + 'background:color-mix(in srgb, var(--kui-blue) 45%, transparent);';
+      heroTag.textContent = '主推玩法';
+      heroTop.appendChild(heroName);
+      heroTop.appendChild(heroTag);
+      hero.appendChild(heroTop);
+      const heroDesc = document.createElement('div');
+      heroDesc.style.cssText = 'font-size:12.5px;line-height:1.65;color:var(--kui-ink-soft);margin:7px 0 10px;';
+      heroDesc.textContent = COMBAT_MODES.circuit.tip + '。赛道在「编辑器 → 赛道」里画，也可以用编辑器自制地图。';
+      hero.appendChild(heroDesc);
+      const heroState = document.createElement('div');
+      heroState.style.cssText = 'font-size:12px;margin-bottom:12px;';
+      hero.appendChild(heroState);
+      const heroGo = document.createElement('button');
+      heroGo.type = 'button';
+      heroGo.className = 'kui-btn kui-btn--primary';
+      heroGo.style.cssText = 'font:inherit;padding:9px 22px;';
+      heroGo.textContent = '开始狂飙';
+      heroGo.addEventListener('click', () => { el.style.display = 'none'; this._startRace(); });
+      hero.appendChild(heroGo);
+      wrap.appendChild(hero);
 
-      // —— 玩家匹配：照旧排队，2 人即开，分出胜负 ——
-      card.appendChild(group('玩家匹配', '2 人即开；胜负有判定：' + COMBAT_MODES.meteor.win + ' / ' + COMBAT_MODES.grapple.win));
-      card.appendChild(mk('meteor', 'kui-btn--primary', 'tip', (m) => this._startMatch(m)));
-      card.appendChild(mk('grapple', 'kui-btn--green', 'tip', (m) => this._startMatch(m)));
+      // ---- 更多玩法（次要）----
+      const moreTitle = document.createElement('div');
+      moreTitle.style.cssText = 'font-size:13px;margin:18px 0 9px;';
+      moreTitle.textContent = '更多玩法';
+      wrap.appendChild(moreTitle);
 
-      const cancel = document.createElement('button');
-      cancel.type = 'button';
-      cancel.className = 'kui-btn kui-btn--grey';
-      cancel.style.cssText = 'width:100%;margin-top:6px;';
-      cancel.textContent = '先不玩';
-      cancel.addEventListener('click', () => { el.style.display = 'none'; });
-      card.appendChild(cancel);
+      const grid = document.createElement('div');
+      grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;';
+      const mkCard = (mode) => {
+        const c = document.createElement('div');
+        c.className = 'kui-panel';
+        c.style.cssText = 'padding:14px 16px;text-align:left;';
+        const n = document.createElement('div');
+        n.style.cssText = 'font-weight:700;font-size:15px;';
+        n.textContent = COMBAT_MODES[mode].name;
+        const d = document.createElement('div');
+        d.style.cssText = 'font-size:12px;line-height:1.6;color:var(--kui-ink-soft);margin:5px 0 10px;';
+        d.textContent = COMBAT_MODES[mode].tip;
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+        const bTrain = document.createElement('button');
+        bTrain.type = 'button';
+        bTrain.className = 'kui-btn kui-btn--grey';
+        bTrain.style.cssText = 'font:inherit;padding:6px 14px;';
+        bTrain.textContent = '训练场';
+        bTrain.addEventListener('click', () => { el.style.display = 'none'; this._startTraining(mode); });
+        const bMatch = document.createElement('button');
+        bMatch.type = 'button';
+        bMatch.className = 'kui-btn kui-btn--primary';
+        bMatch.style.cssText = 'font:inherit;padding:6px 14px;';
+        bMatch.textContent = '玩家匹配';
+        bMatch.addEventListener('click', () => { el.style.display = 'none'; this._startMatch(mode); });
+        row.appendChild(bTrain);
+        row.appendChild(bMatch);
+        c.appendChild(n);
+        c.appendChild(d);
+        c.appendChild(row);
+        return c;
+      };
+      grid.appendChild(mkCard('meteor'));
+      grid.appendChild(mkCard('grapple'));
+      wrap.appendChild(grid);
 
-      el.appendChild(card);
+      el.appendChild(wrap);
       document.body.appendChild(el);
       this._modePicker = el;
+      this._raceHeroState = heroState; // 每次打开时刷新「赛道状态」那行文案
+    }
+    // 赛道状态：门数 / 圈数 / 个人最好成绩；没赛道就明确让他去编辑器画
+    if (this._raceHeroState) {
+      const t = this.track;
+      const n = (t && Array.isArray(t.checkpoints)) ? t.checkpoints.length : 0;
+      const best = this._raceBest();
+      this._raceHeroState.textContent = isTrackRunnable(t)
+        ? ('当前赛道：' + n + ' 个门 · ' + t.laps + ' 圈' + (best ? ' · 你的最好成绩 ' + (best / 1000).toFixed(2) + ' 秒' : ''))
+        : '还没有赛道 —— 先去「编辑器 → 赛道」画一条（至少 2 个门）';
     }
     this._modePicker.style.display = 'flex';
+  }
+
+  // ---------- 校园狂飙（赛道竞速）----------
+  // 不开竞技场：直接在校园大世界里跑编辑器画的那条赛道（数据/判定都在 world/Track.js）。
+  // 车只是视觉 —— 骑乘语义仍是「ride=1 + 速度倍率」，车体由 _updateVehicle 按司机各自渲染，
+  // 所以「每人一辆」不需要改网络协议（ride / veh 本来就在广播里）。
+  _raceBestKey() {
+    const id = this._profile ? (this._profile.username || this._profile.nickname || '') : '';
+    const t = this.track;
+    const gates = (t && Array.isArray(t.checkpoints)) ? t.checkpoints.length : 0;
+    return 'fp_race_best__' + (id || 'guest') + '__' + gates + 'x' + (t ? t.laps : 0);
+  }
+  _raceBest() {
+    try {
+      const v = Number(localStorage.getItem(this._raceBestKey()));
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    } catch (e) { return 0; }
+  }
+  _raceSaveBest(ms) {
+    try { localStorage.setItem(this._raceBestKey(), String(Math.round(ms))); } catch (e) { /* 忽略 */ }
+  }
+
+  _startRace() {
+    if (this._combat) { this._toast('对战中开不了狂飙'); return; }
+    const t = this.track;
+    if (!isTrackRunnable(t)) { this._toast('还没有赛道：先去「编辑器 → 赛道」画一条（至少 2 个门）'); return; }
+    const sp = startPose(t);
+    if (!sp) return;
+    const st = this.localState;
+    st.x = sp.x;
+    st.z = sp.z;
+    st.yaw = sp.yaw;
+    st.pitch = 0;
+    this.localPlayer.physics.velocity.set(0, 0, 0);
+    if (!st.ride) this._mountVehicle(1); // 比赛用车：直接给一辆，不用先去停车点找
+    this._race = {
+      active: true,
+      startedAt: performance.now(),
+      next: 0,   // 下一个该穿的门（0 起）
+      lap: 0,    // 已完成的圈数
+      laps: t.laps,
+      count: t.checkpoints.length,
+    };
+    this._raceHudShow(true);
+    this._raceHudTick(true);
+    this._toast('出发！按顺序穿过 1 → ' + t.checkpoints.length + ' 号门，跑满 ' + t.laps + ' 圈');
+  }
+
+  _exitRace(toastText) {
+    if (!this._race) return;
+    this._race = null;
+    this._raceHudShow(false);
+    if (toastText) this._toast(toastText);
+  }
+
+  _finishRace() {
+    const r = this._race;
+    if (!r) return;
+    const ms = performance.now() - r.startedAt;
+    this._race = null;
+    this._raceHudShow(false);
+    const prev = this._raceBest();
+    const isNew = !prev || ms < prev;
+    if (isNew) this._raceSaveBest(ms);
+    if (this.localState.ride) this._dismountVehicle();
+    this._toast('完赛！用时 ' + (ms / 1000).toFixed(2) + ' 秒'
+      + (isNew ? ' · 新纪录' : '（你的最好成绩 ' + (prev / 1000).toFixed(2) + ' 秒）'));
+  }
+
+  // 每帧推进：只判「是否穿过了下一个该穿的门」。判定在 Track.inGate 里（水平在门宽内 + 高度差 ≤ 门高）。
+  _updateRace() {
+    const r = this._race;
+    if (!r) return;
+    if (this._combat || this._dead || this._soul) { this._exitRace(null); return; }
+    const cps = this.track.checkpoints;
+    if (!cps.length) { this._exitRace('赛道没了，狂飙结束'); return; }
+    const st = this.localState;
+    const i = r.next;
+    if (inGate(cps[i], st.x, st.y, st.z, Config.PLAYER_RADIUS)) {
+      r.next = nextGateIndex(i, cps.length);
+      if (r.next === 0) { // 刚穿过最后一个门 → 完成一圈
+        r.lap += 1;
+        if (r.lap >= r.laps) { this._finishRace(); return; }
+        this._toast('第 ' + r.lap + ' 圈完成');
+      }
+    }
+    this._raceHudTick();
+  }
+
+  // 赛道 HUD：圈数 / 下一门 / 计时。只在文字真的变了才写 DOM（每帧读比每帧写便宜）
+  _raceHudTick(force) {
+    const r = this._race;
+    const el = this._raceHud;
+    if (!el || !r) return;
+    const txt = '圈 ' + Math.min(r.lap + 1, r.laps) + '/' + r.laps
+      + ' · 门 ' + (r.next + 1) + '/' + r.count
+      + ' · ' + ((performance.now() - r.startedAt) / 1000).toFixed(1) + ' 秒';
+    if (!force && txt === this._raceHudLast) return;
+    this._raceHudLast = txt;
+    el.textContent = txt;
+  }
+
+  _raceHudShow(on) {
+    if (!this._raceHud) {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top, 0px) + 94px);' +
+        'z-index:9400;display:none;background:color-mix(in srgb, var(--kui-ink) 80%, transparent);' +
+        'color:var(--kui-paper);padding:6px 14px;border-radius:999px;font:13px/1.3 var(--kui-font);' +
+        'box-shadow:var(--kui-shadow);pointer-events:none;white-space:nowrap;';
+      document.body.appendChild(el);
+      this._raceHud = el;
+    }
+    this._raceHud.style.display = on ? 'block' : 'none';
+    if (!on) this._raceHudLast = '';
   }
 
   // 真正发起匹配（玩家匹配组）
@@ -5867,6 +6088,7 @@ export class Game {
     if (!this._combat) {
       // 电动车：摆放车体、钉住后座、刷新上下车提示（必须在玩家更新之后）
       this._updateVehicle(dt);
+      this._updateRace(); // 校园狂飙：按顺序过门计圈（不在对战中才跑）
       // AI 商人 NPC：靠近提示 + 可拾取道具的推进
       this.aiNpc.update(dt, this.localState.x, this.localState.z);
       this._updatePickups(dt);
