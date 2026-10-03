@@ -522,18 +522,16 @@ export class Game {
       this._toggleSoul();
     });
 
-    // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
-    // 开了加特林就改成「按住持续扫射」
+    // 攻击键（鼠标左键 / 手机攻击按钮）统一走 _attackDown/_attackUp 这一对，
+    // 因为大世界抓钩要区分「短按/长按」与「按住中瞄准」，必须同时拿到按下与抬起。
     this.renderer.domElement.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       if (document.pointerLockElement !== this.renderer.domElement) return;
-      if (this._gatlingOn) { this._gatlingHeld = true; return; }
-      if (this._ctrlOn) { this._fireCtrlGun(); return; }
-      this._primaryAttack();
+      this._attackDown();
     });
     window.addEventListener('mouseup', (e) => {
       if (e.button !== 0) return;
-      this._gatlingHeld = false;
+      this._attackUp();
     });
 
     // 本地可拾取的「生成物品」发光道具
@@ -592,12 +590,18 @@ export class Game {
     this._pickupTarget = null;  // 当前可拾取的掉落物（离得最近那一件），null 表示够不到
     this._pickupLabel = null;   // 按钮上正在显示哪件物品（避免每帧重写 textContent）
     this._pickupShown = false;  // 「拾取」按钮显隐去抖（避免每帧写 style）
-    // 抓钩（技能槽物品 / 疯狂抓钩模式）：锚点 + 绳索视觉
-    this._grapple = null;       // { x,y,z 锚点, fx,fy,fz 钩爪当前坐标, flying, t 剩余时间 }
+    // 抓钩（技能槽物品 / 疯狂抓钩模式 / 大世界摆荡）：锚点 + 绳索视觉
+    this._grapple = null;       // { x,y,z 锚点, fx,fy,fz 钩爪当前坐标, flying, t 剩余时间,
+                                //   swing?=大世界系绳摆荡, len=绳长, reeling/reelT=收绳勾过去 }
     this._grappleCd = 0;        // 抓钩冷却（秒）
     this._grappleHold = null;   // 我们写进 physics.velocityHold 的那个对象（松手时只清自己那份）
-    this._grappleRope = null;   // 绳索（Line）
+    this._grappleRope = null;   // 绳索（圆柱 Mesh）
     this._grappleHook = null;   // 钩爪（Cone）
+    // 大世界抓钩的输入状态：攻击键按住时长决定「短按=发射 / 长按=瞄准后松手发射」，
+    // 已勾住时「短按=勾过去 / 长按=松绳」
+    this._attackHeld = false;   // 攻击键是否按住（含手机按钮）
+    this._grapplePressAt = 0;   // 本次按下的时刻（performance.now()）
+    this._grappleAiming = false;// 是否已进入「瞄准」态（按住超过阈值）
     this._beacons = null;       // 疯狂抓钩模式的柱顶光点（瞄准靶），仅在该模式下有值
     // 疯狂抓钩模式：金币与岩浆
     this._coins = [];           // 在空中的金币 { id, x,y,z, mesh, life }
@@ -1573,13 +1577,10 @@ export class Game {
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      // 开了加特林就改成按住持续扫射（松手停火）
-      if (this._gatlingOn) { this._gatlingHeld = true; return; }
-      if (this._ctrlOn) { this._fireCtrlGun(); return; }
-      this._primaryAttack();
+      this._attackDown();
     });
-    el.addEventListener('pointerup', () => { this._gatlingHeld = false; });
-    el.addEventListener('pointercancel', () => { this._gatlingHeld = false; });
+    el.addEventListener('pointerup', () => { this._attackUp(); });
+    el.addEventListener('pointercancel', () => { this._attackUp(); });
     document.body.appendChild(el);
     return el;
   }
@@ -2178,6 +2179,31 @@ export class Game {
     });
     this._updateSuperSlot();
     this._updateBossUI();
+  }
+
+  // 攻击键按下：加特林 / 控制枪优先；大世界交给抓钩（按下先只记录时刻，抬起时按按住时长决定）；
+  // 其余走普通攻击（对战能量球 / Boss 粉笔头）。
+  _attackDown() {
+    this._attackHeld = true;
+    if (this._gatlingOn) { this._gatlingHeld = true; return; }
+    if (this._ctrlOn) { this._fireCtrlGun(); return; }
+    if (this._worldGrapple()) { this._grapplePressAt = performance.now(); return; }
+    this._primaryAttack();
+  }
+
+  // 攻击键抬起：大世界抓钩按「按住时长」决定行为——未勾住时长按瞄准、松开发射（短按直接发射）；
+  // 已勾住时短按 = 勾过去、长按 = 松绳脱钩。
+  _attackUp() {
+    this._attackHeld = false;
+    this._gatlingHeld = false;
+    if (this._worldGrapple()) this._grapplePressUp();
+  }
+
+  // 是否处于「大世界」抓钩场景：不在对战、不在打 Boss、活着、未灵魂出窍。
+  // 对战（疯狂抓钩模式）仍走原来的 _fireGrapple；打 Boss 时攻击键仍是粉笔头。
+  _worldGrapple() {
+    if (this._combat || this._dead || this._soul || !this.localPlayer) return false;
+    return !(this.boss && this.boss.mode === 'alive');
   }
 
   // Boss 战基础攻击：朝视线方向投出粉笔头（只对 Boss 结算伤害，不误伤玩家）
@@ -3904,7 +3930,7 @@ export class Game {
       case 'grapple':
         return {
           label: '抓钩',
-          run: () => this._fireGrapple(),
+          run: () => this._useGrappleSkill(),
         };
       case 'gatling':
         return {
@@ -5071,6 +5097,62 @@ export class Game {
     this._grappleHook.visible = true;
   }
 
+  // ---- 大世界抓钩：系绳摆荡（仅大世界，不改对战里的「疯狂抓钩」）----
+  // 抬起时才决定行为：未勾住 → 发射（长按=先瞄准再发，短按=直接发，飞行结果相同）；
+  // 已勾住 → 短按「勾过去」（收绳把自己拉向钩点），长按「松绳」（保留速度脱钩）。
+  _grapplePressUp() {
+    const held = performance.now() - (this._grapplePressAt || 0);
+    const long = held >= Config.GRAPPLE_AIM_HOLD_MS;
+    this._grappleAiming = false;
+    const g = this._grapple;
+    if (g && g.swing && !g.flying) {
+      if (long) { this._endGrapple(); }                          // 长按 → 松绳
+      else { g.reeling = true; g.reelT = Config.GRAPPLE_REEL_MAX_TIME; } // 短按 → 勾过去
+      return;
+    }
+    if (g) return;                 // 钩爪在飞 / 旧路径进行中：忽略本次抬起
+    this._fireGrappleSwing();
+  }
+
+  // 大世界抓钩发射：朝准星甩出钩爪；勾到后不「直接把自己拽过去」，而是系住——
+  // 玩家被限制在绳长范围内，靠重力自然摆荡（见 PlayerPhysics 的 rope 约束）。
+  _fireGrappleSwing() {
+    if (this._dead || this._soul) return;
+    if (this.localState.ride) { this._toast('骑车时用不了抓钩'); return; }
+    if (this._grappleCd > 0) return;
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
+    const origin = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.6);
+    const hit = this._rayHitWorld(origin, dir, Config.GRAPPLE_RANGE);
+    this._grappleCd = Config.GRAPPLE_COOLDOWN;
+    if (!hit) { this._toast('抓钩没勾到东西'); return; }
+    const p = hit.point.addScaledVector(dir, -(Config.PLAYER_RADIUS + 0.35)); // 锚点回退一点，别嵌进墙
+    this._grapple = {
+      x: p.x, y: p.y, z: p.z,
+      fx: origin.x, fy: origin.y, fz: origin.z, // 钩爪从手边飞出去
+      flying: true,
+      swing: true,          // 大世界：系绳摆荡
+      reeling: false,
+      reelT: 0,
+      t: Config.GRAPPLE_MAX_TIME, // 仅限制「钩爪飞行」阶段
+      len: 0,               // 飞行到位后按当时「玩家→锚点」距离算出绳长
+    };
+    this._ensureGrappleViz();
+    this._grappleRope.visible = true;
+    this._grappleHook.visible = true;
+  }
+
+  // 技能槽 / 物品触发的抓钩：对战中沿用原「拽过去」；大世界走新的「系绳摆荡」。
+  _useGrappleSkill() {
+    if (this._combat) { this._fireGrapple(); return; }
+    const g = this._grapple;
+    if (g && g.swing && !g.flying) { g.reeling = true; g.reelT = Config.GRAPPLE_REEL_MAX_TIME; return; }
+    if (g) return;
+    this._fireGrappleSwing();
+  }
+
   // 光点瞄准判定：疯狂抓钩模式下，准星中轴 GRAPPLE_BEACON_ARC 度内、GRAPPLE_RANGE 内最近的那颗柱顶光点。
   // 返回光点对象（含 x/y/z 锚点）或 null。非抓钩模式 this._beacons 为 null，直接返回 null。
   _pickBeacon(s, dir) {
@@ -5148,80 +5230,163 @@ export class Game {
     this._grappleHold = null;
     // 抓钩一结束就恢复碰撞，别把「无视碰撞」漏到落地之后的正常移动里
     this.localPlayer.physics.noClip = false;
+    // 大世界摆荡的绳索约束也要一起清，否则松钩后还会被「绳长」拽着
+    this.localPlayer.physics.rope = null;
     this._grapple = null;
+    this._grappleAiming = false;
     if (this._grappleRope) this._grappleRope.visible = false;
     if (this._grappleHook) this._grappleHook.visible = false;
     this._grappleCd = Config.GRAPPLE_COOLDOWN;
   }
 
-  // 每帧推进：钩爪飞出 → 按锚点方向拽人 → 到位/超时/松手结束
+  // 每帧推进：钩爪飞出 → （大世界）系绳摆荡 / 收绳勾过去 /（对战）按锚点方向拽人 → 到位/超时/松手结束
   _updateGrapple(dt) {
     if (this._grappleCd > 0) this._grappleCd = Math.max(0, this._grappleCd - dt);
+    this._updateGrappleAim(); // 大世界：按住攻击键超过阈值时的瞄准预览（无抓钩时才有意义）
     const g = this._grapple;
-    if (!g) return;
+    if (!g) {
+      // 防御：抓钩一旦没了，绳索约束也必须没了（正常路径由 _endGrapple 清）
+      const p = this.localPlayer && this.localPlayer.physics;
+      if (p && p.rope) p.rope = null;
+      return;
+    }
     if (this._dead || this._soul || this.localState.ride) { this._endGrapple(); return; }
-    g.t -= dt;
     const s = this.localState;
+    const phys = this.localPlayer.physics;
+    if (!g.swing) g.t -= dt; // 旧路径按原逻辑倒计时；摆荡只在「钩爪飞行」阶段倒计时
+
     if (g.flying) {
+      if (g.swing) g.t -= dt;
       // 钩爪以固定速度飞向锚点（视觉上「甩出去」而不是瞬间贴住）
       const to = new THREE.Vector3(g.x - g.fx, g.y - g.fy, g.z - g.fz);
       const step = Config.GRAPPLE_SPEED * 3 * dt;
-      if (to.length() <= step) {
+      if (to.length() <= step || (g.swing && g.t <= 0)) {
         g.fx = g.x; g.fy = g.y; g.fz = g.z;
         g.flying = false;
+        if (g.swing) {
+          // 绳长 = 挂钩那一刻「玩家 → 锚点」的距离（乘系数略绷紧，摆荡更跟手）
+          const d = Math.hypot(g.x - s.x, g.y - s.y, g.z - s.z);
+          g.len = Math.max(Config.GRAPPLE_SWING_MIN_LEN, d * Config.GRAPPLE_SWING_TAUT);
+        }
       } else {
         to.normalize();
         g.fx += to.x * step; g.fy += to.y * step; g.fz += to.z * step;
       }
-    } else {
-      const dx = g.x - s.x;
-      const dy = g.y - s.y;
-      const dz = g.z - s.z;
-      const dist = Math.hypot(dx, dy, dz);
-      const stop = g.stop || Config.GRAPPLE_STOP_DIST;
-      // 光点锚点收得比抓墙更紧（g.stop），否则会在柱子斜上方就松手 → 落在柱外掉进岩浆
-      if (dist <= stop || g.t <= 0) {
-        // 到点了把速度收住：拽人时每帧速度都被覆盖成 25m/s，直接松手会带着这股冲劲
-        // 冲过柱子（锚点在半空中，没有墙挡）再掉下去。收住后靠重力自然落到柱顶。
-        this.localPlayer.physics.velocity.multiplyScalar(0.1);
-        // 光点抓钩：直接站到柱顶。超时（t<=0）时人还在半空，不能凭空瞬移过去，所以只在正常到点时生效。
-        if (g.landY != null && dist <= stop) {
-          this.localState.x = g.landX;
-          this.localState.z = g.landZ;
-          this.localState.y = g.landY;
-          this.localPlayer.physics.velocity.set(0, 0, 0);
-        }
-        this._endGrapple();
-        return;
-      }
-      // 用 velocityHold 每帧覆盖速度：重力与输入都被覆盖，拽得干脆且仍会被墙挡住
-      const k = Config.GRAPPLE_SPEED / Math.max(0.001, dist);
-      const hold = { x: dx * k, y: dy * k, z: dz * k, t: 0.3 };
-      this.localPlayer.physics.velocityHold = hold;
-      this._grappleHold = hold;
-      // 疯狂抓钩模式：拽人期间无视碰撞（被柱身卡住或被侧向弹开都很难受，柱子密起来尤甚）。
-      // 主世界勾墙保持原手感——那里穿墙就等于穿模，必须挡住。
-      this.localPlayer.physics.noClip = !!(this._combat && this._combat.mode === 'grapple');
+      this._drawGrapple();
+      return;
     }
+
+    // ---- 大世界：系绳摆荡 / 收绳「勾过去」----
+    if (g.swing) {
+      if (g.reeling) {
+        g.reelT -= dt;
+        const dx = g.x - s.x;
+        const dy = g.y - s.y;
+        const dz = g.z - s.z;
+        const dist = Math.hypot(dx, dy, dz);
+        if (dist <= Config.GRAPPLE_REEL_STOP || g.reelT <= 0) {
+          phys.velocity.multiplyScalar(0.25); // 收到底把冲劲收一收，免得越过锚点再飞出去
+          this._endGrapple();
+          return;
+        }
+        phys.rope = null; // 收绳期间改用速度覆盖（像旧版那样干脆），不再施加绳长约束
+        const k = Config.GRAPPLE_SPEED / Math.max(0.001, dist);
+        const hold = { x: dx * k, y: dy * k, z: dz * k, t: 0.3 };
+        phys.velocityHold = hold;
+        this._grappleHold = hold;
+      } else {
+        // 摆荡：绳长交给物理（位置约束 + 去径向速度 → 钟摆），玩家仍可用 WASD/摇杆荡
+        phys.rope = { x: g.x, y: g.y, z: g.z, len: g.len };
+      }
+      this._drawGrapple();
+      return;
+    }
+
+    // ---- 旧路径（对战「疯狂抓钩」/ 技能槽）：直接朝锚点拽人 ----
+    const dx = g.x - s.x;
+    const dy = g.y - s.y;
+    const dz = g.z - s.z;
+    const dist = Math.hypot(dx, dy, dz);
+    const stop = g.stop || Config.GRAPPLE_STOP_DIST;
+    // 光点锚点收得比抓墙更紧（g.stop），否则会在柱子斜上方就松手 → 落在柱外掉进岩浆
+    if (dist <= stop || g.t <= 0) {
+      // 到点了把速度收住：拽人时每帧速度都被覆盖成 25m/s，直接松手会带着这股冲劲
+      // 冲过柱子（锚点在半空中，没有墙挡）再掉下去。收住后靠重力自然落到柱顶。
+      this.localPlayer.physics.velocity.multiplyScalar(0.1);
+      // 光点抓钩：直接站到柱顶。超时（t<=0）时人还在半空，不能凭空瞬移过去，所以只在正常到点时生效。
+      if (g.landY != null && dist <= stop) {
+        this.localState.x = g.landX;
+        this.localState.z = g.landZ;
+        this.localState.y = g.landY;
+        this.localPlayer.physics.velocity.set(0, 0, 0);
+      }
+      this._endGrapple();
+      return;
+    }
+    // 用 velocityHold 每帧覆盖速度：重力与输入都被覆盖，拽得干脆且仍会被墙挡住
+    const k = Config.GRAPPLE_SPEED / Math.max(0.001, dist);
+    const hold = { x: dx * k, y: dy * k, z: dz * k, t: 0.3 };
+    this.localPlayer.physics.velocityHold = hold;
+    this._grappleHold = hold;
+    // 疯狂抓钩模式：拽人期间无视碰撞（被柱身卡住或被侧向弹开都很难受，柱子密起来尤甚）。
+    // 主世界勾墙保持原手感——那里穿墙就等于穿模，必须挡住。
+    this.localPlayer.physics.noClip = !!(this._combat && this._combat.mode === 'grapple');
     this._drawGrapple();
   }
 
-  // 绳索两端：自己的手 → 钩爪当前坐标。钩爪同步朝向飞行方向（锥尖朝前）。
+  // 绳索两端：自己的手 → 目标点。钩爪同步朝向该方向（锥尖朝前）。
+  _drawRopeTo(from, to) {
+    _gDir.subVectors(to, from);
+    const len = _gDir.length();
+    if (len > 1e-4) {
+      _gDir.divideScalar(len);
+      this._grappleRope.position.copy(from);
+      this._grappleRope.quaternion.setFromUnitVectors(UP_Y, _gDir);
+      this._grappleRope.scale.set(1, len, 1);
+      this._grappleHook.quaternion.setFromUnitVectors(UP_Y, _gDir);
+    }
+    this._grappleHook.position.copy(to);
+  }
+
   _drawGrapple() {
     const g = this._grapple;
     if (!g || !this._grappleRope || !this._grappleHook) return;
     this._grappleHandPos(_gHand);
     _gpA.set(g.fx, g.fy, g.fz);
-    _gDir.subVectors(_gpA, _gHand);
-    const len = _gDir.length();
-    if (len > 1e-4) {
-      _gDir.divideScalar(len);
-      this._grappleRope.position.copy(_gHand);
-      this._grappleRope.quaternion.setFromUnitVectors(UP_Y, _gDir);
-      this._grappleRope.scale.set(1, len, 1);
-      this._grappleHook.quaternion.setFromUnitVectors(UP_Y, _gDir);
+    this._drawRopeTo(_gHand, _gpA);
+  }
+
+  // 大世界：按住攻击键超过阈值、且还没勾住时的「瞄准」预览——
+  // 沿准星打一条射线，把绳索画到落点，玩家据此判断「会勾到哪、绳大概多长」。
+  _updateGrappleAim() {
+    const aiming = this._attackHeld && this._worldGrapple() && !this._grapple &&
+      (performance.now() - (this._grapplePressAt || 0) >= Config.GRAPPLE_AIM_HOLD_MS);
+    this._grappleAiming = aiming;
+    if (aiming && (!this._grappleRope || !this._grappleHook)) this._ensureGrappleViz();
+    if (!this._grappleRope || !this._grappleHook) return;
+    if (!aiming) {
+      // 只在「当前还显示着」时才写，避免每帧改 visible
+      if (!this._grapple && this._grappleRope && this._grappleRope.visible) {
+        this._grappleRope.visible = false;
+        this._grappleHook.visible = false;
+      }
+      return;
     }
-    this._grappleHook.position.copy(_gpA);
+    const s = this.localState;
+    const cosP = Math.cos(s.pitch);
+    const sinP = Math.sin(s.pitch);
+    _gDir.set(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP).normalize();
+    const ox = s.x + _gDir.x * 0.6, oy = s.y + _gDir.y * 0.6, oz = s.z + _gDir.z * 0.6;
+    const hit = this._rayHitWorld({ x: ox, y: oy, z: oz }, _gDir, Config.GRAPPLE_RANGE);
+    _gpA.set(
+      hit ? hit.point.x : ox + _gDir.x * Config.GRAPPLE_RANGE,
+      hit ? hit.point.y : oy + _gDir.y * Config.GRAPPLE_RANGE,
+      hit ? hit.point.z : oz + _gDir.z * Config.GRAPPLE_RANGE,
+    );
+    this._grappleHandPos(_gHand);
+    this._grappleRope.visible = true;
+    this._grappleHook.visible = true;
+    this._drawRopeTo(_gHand, _gpA);
   }
 
   // 供进游戏前的加载动画等待：远端场景拉取完成（它内部还会触发一批 GLB 加载，
