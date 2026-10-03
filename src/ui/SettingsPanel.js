@@ -226,11 +226,14 @@ export function createSettingsPanel(binds, opts = {}) {
         'width:100%;background:var(--kui-paper);color:var(--kui-ink);' +
         'border:2px solid var(--kui-blue-dark);border-radius:10px;padding:3px 6px;font-family:var(--kui-font);';
       select.addEventListener('change', () => {
-        // 非数字选项（如画质档的 'low'/'mid'、渲染分辨率的 'auto'）不能被 parseFloat 吃成 NaN ——
-        // 之前所有 select 都走 parseFloat，字符串档位存进去就成了 NaN（画质档因此等于没生效）。
+        // ⚠ 必须用 Number()，不能用 parseFloat()：
+        //   parseFloat('2行竖列') = 2（吃掉前导数字）→ 存成数字 2，字符串比较全失效
+        //   （「手机技能槽=2行竖列」因此永远落回 wheel，表现为"设置里切了没反应"）。
+        //   Number() 要求整串都是数字才转：'2行竖列'/'low'/'auto'/'on' 保持字符串，
+        //   只有 '2048'/'1024' 这种纯数字档位才转成数字。
         const raw = select.value;
-        const num = parseFloat(raw);
-        settings[f.id] = isFinite(num) ? num : raw;
+        const num = Number(raw);
+        settings[f.id] = (raw !== '' && Number.isFinite(num)) ? num : raw;
         // 先持久化再回调：下面 skillLayout 等回调可能触发 location.reload()，
         // 若后存，重载时读到的还是旧值，用户刚选的排布就丢了。
         saveSettings(settings, storeKey);
