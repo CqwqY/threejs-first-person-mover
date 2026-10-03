@@ -10,16 +10,15 @@
 // 是覆盖面最广的兜底信号。UA / Capacitor / cordova / userAgentData.mobile 作为补充。
 // Node 环境（自检脚本）里 window 未定义直接返回 false，不影响渲染。
 //
-// 手动覆盖（检测仍翻车时兜底）：URL 加 ?touch=1 / ?touch=0，或 localStorage 设 fpm-touch='1'/'0'。
+// 手动覆盖（检测仍翻车时兜底）：只认 URL 上的 ?touch=1 / ?touch=0（显式、不写盘、不串设备）。
+// 绝不用 localStorage 当覆盖位——写进 localStorage 会粘在所有同域浏览器（含电脑）上，
+// 表现就是「电脑也变手机、判定直接没了」。要持久化手机模式请用 ?touch=1（钉在地址栏，随标签页走）。
 export function isCoarsePointer() {
   if (typeof window === 'undefined') return false;
   try {
     const q = new URLSearchParams(window.location.search).get('touch');
     if (q === '1') return true;
     if (q === '0') return false;
-    const ls = (typeof localStorage !== 'undefined') ? localStorage.getItem('fpm-touch') : null;
-    if (ls === '1') return true;
-    if (ls === '0') return false;
   } catch (e) { /* 隐私模式等拿不到，忽略，走下面的信号判定 */ }
   const mq = (name) => !!(window.matchMedia && window.matchMedia(name).matches);
   const ont = 'ontouchstart' in window;
@@ -32,3 +31,11 @@ export function isCoarsePointer() {
   // (hover: none) 是触屏设备最稳的信号：鼠标设备 hover 永远可用，触屏设备没有 → 为 none
   return mq('(pointer: coarse)') || mq('(any-pointer: coarse)') || mq('(hover: none)') || ont || mtp || uaMobile || ua || cap;
 }
+
+// 一次性迁移：旧版本把 fpm-touch 写进 localStorage 当触屏覆盖位，会粘在电脑上让判定永久失效
+// （表现就是「电脑也是手机」）。新版不再读取它，这里顺手清掉，让残留位立即失效、刷新即恢复桌面。
+try {
+  if (typeof localStorage !== 'undefined' && localStorage.getItem('fpm-touch') !== null) {
+    localStorage.removeItem('fpm-touch');
+  }
+} catch (e) { /* 隐私模式下拿不到，忽略 */ }
