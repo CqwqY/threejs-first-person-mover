@@ -122,11 +122,12 @@ export const Config = {
   VEHICLE_YAW: 0,                 // 停放时的朝向（弧度）
   VEHICLE_HEIGHT: 1.15,           // 归一化后的模型高度（米），按包围盒等比缩放
   VEHICLE_YAW_OFFSET: Math.PI,    // 模型自带朝向与"车头朝 -Z"之间的补偿角（弧度），必要时调这个
-  VEHICLE_SPEED: 16,              // 骑乘时的最高前进速度（米/秒）
-  VEHICLE_ACCEL: 9,               // 油门加速度（米/秒²）：越高起步越快
+  VEHICLE_SPEED: 26,              // 骑乘时的最高前进速度（米/秒）
+  VEHICLE_ACCEL: 20,              // 油门加速度（米/秒²）：越高起步越快（太小会感觉「车速缓慢上升」）
   VEHICLE_DRAG: 0.9,              // 松油门后的惯性阻力系数（越大滑得越短、越小越"溜"）
-  VEHICLE_BRAKE: 26,              // 刹车减速度（米/秒²）
-  VEHICLE_TURN: 1.9,              // 转向角速度（弧度/秒，满速时）
+  VEHICLE_BRAKE: 30,              // 刹车减速度（米/秒²）
+  VEHICLE_TURN: 2.1,              // 转向角速度（弧度/秒，满舵时）
+  VEHICLE_STEER_SMOOTH: 14,       // 方向打进去 / 回正的平滑速度（越大越跟手、越小越"绵"）
   VEHICLE_REVERSE_RATIO: 0.45,    // 倒车最高速度 = 前进 × 它
   VEHICLE_KEY: 'KeyF',            // 上车/下车键
   VEHICLE_PROXIMITY: 2.6,         // 距离多远内可以上车（米）

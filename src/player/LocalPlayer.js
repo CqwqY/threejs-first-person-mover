@@ -24,6 +24,7 @@ export class LocalPlayer {
     this._prevX = this.state.x;
     this._prevZ = this.state.z;
     this._vehSpeed = 0; // 电动车驾驶速度（带惯性，见 _driveVehicle）
+    this._vehSteer = 0; // 平滑后的方向盘位置（-1 左 / 0 正 / +1 右），见 _driveVehicle
   }
 
   // 电动车驾驶：油门（W / 摇杆前推）→ 有惯性地点加速；松油门靠阻力滑行；跳跃键（骑乘时跳跃本来就无效）当刹车；
@@ -60,9 +61,14 @@ export class LocalPlayer {
     sp = Math.max(-maxR, Math.min(maxF, sp));
     this._vehSpeed = sp;
 
-    // 转向：抓地力随速度上来（静止/极慢时打方向不动），倒车时方向反过来
-    const grip = Math.min(1, Math.abs(sp) / 4) * (sp < -0.01 ? -1 : 1);
-    if (steer) this.state.yaw -= steer * Config.VEHICLE_TURN * dt * grip;
+    // 转向：把「按钮的一开一关」平滑成渐进的方向盘 —— 否则按下/松开都是一瞬间满舵，
+    // 车头会「咔」地扭一下，手感很不顺滑（手机上尤其明显）。
+    // 抓地力随速度上来（静止/极慢时打方向不动），倒车时方向反过来。
+    const k = 1 - Math.exp(-dt * Config.VEHICLE_STEER_SMOOTH);
+    this._vehSteer = (this._vehSteer || 0) + (steer - (this._vehSteer || 0)) * k;
+    if (Math.abs(this._vehSteer) < 0.01) this._vehSteer = 0;
+    const grip = Math.min(1, Math.abs(sp) / 2.5) * (sp < -0.01 ? -1 : 1);
+    if (this._vehSteer) this.state.yaw -= this._vehSteer * Config.VEHICLE_TURN * dt * grip;
 
     const fx = -Math.sin(this.state.yaw);
     const fz = -Math.cos(this.state.yaw);
@@ -88,7 +94,7 @@ export class LocalPlayer {
 
     // ---- 1.5 驾驶位：接管水平速度（惯性 + 刹车 + 转向）----
     if (this.state.ride === 1) this._driveVehicle(dt);
-    else this._vehSpeed = 0;
+    else { this._vehSpeed = 0; this._vehSteer = 0; }
 
     // ---- 2. 驱动物理：把 yaw、state 与世界碰撞体一并传入，物理直接写 state 的 x/y/z/onGround ----
     this.physics.update(dt, this.input, this.state.yaw, this.state, this.colliders);
