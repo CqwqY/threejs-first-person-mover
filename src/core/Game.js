@@ -413,6 +413,9 @@ export class Game {
     this._bossBar = this._createBossBar();
     this._redOverlay = this._createRedOverlay();
     this._flashEl = this._createFlashOverlay();
+    // 被控制枪抓住时的全屏蓝色滤镜（只有「被控的那个人」自己看得到）
+    this._ctrlOverlayShown = false;
+    this._ctrlOverlay = this._createCtrlOverlay();
     this._chalkAt = 0;
     this._shieldUntil = 0;      // 护盾生效截止时间（performance.now）
     this._shieldReadyAt = 0;    // 护盾冷却结束时间
@@ -1904,6 +1907,26 @@ export class Game {
     return el;
   }
 
+  // 被控制枪抓住时的全屏蓝色滤镜（只有被控者自己看得到，pointer-events:none 只做视觉）。
+  // z-index 比红光滤镜(56)低一档：万一打 Boss 的世界变红期间又被控制，红光仍在上层。
+  _createCtrlOverlay() {
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:fixed;inset:0;z-index:55;pointer-events:none;opacity:0;' +
+      'transition:opacity .35s ease;' +
+      'background:radial-gradient(circle at 50% 45%, rgba(110,190,255,.12) 0%, rgba(18,88,210,.58) 100%);';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  // 只在状态翻转时写 DOM（_applyCtrlMsg 会被 20Hz 的锚点同步反复调用）
+  _setCtrlOverlay(on) {
+    const v = !!on;
+    if (this._ctrlOverlayShown === v) return;
+    this._ctrlOverlayShown = v;
+    if (this._ctrlOverlay) this._ctrlOverlay.style.opacity = v ? '1' : '0';
+  }
+
   // 全屏闪一下（老师阶段切换 / 被击败时的白光）
   _flash(color, ms) {
     const el = this._flashEl;
@@ -2861,7 +2884,8 @@ export class Game {
     const a = this._ctrlAnchor();
     this._ctrl = {
       id: hitId,
-      until: performance.now() + Config.CTRL_MAX_TIME * 1000,
+      // 控制不设时长上限（用户要求「时间无限」）：一直抓到你主动松手 / 对方按跳跃挣脱 / 对方离线
+      until: Infinity,
       acc: 0,
       sent: false,
     };
@@ -2895,14 +2919,19 @@ export class Game {
       this.network.sendCtrl(msg.from, false, 0, 0, 0);
       return;
     }
+    // 同一控制者的锚点同步会以 CTRL_RATE(20Hz) 反复进来：首次被抓才提示，之后静默刷新
+    const firstGrab = !this._ctrlBy || this._ctrlBy.from !== msg.from;
     this._ctrlBy = {
       from: msg.from,
-      until: nowMs + Config.CTRL_MAX_TIME * 1000,
+      // 不设时长上限，只做「掉线看门狗」：控制者还在同步锚点时 until 每次都被顺延；
+      // 一旦 CTRL_WATCHDOG 秒收不到同步（对方掉线/崩溃），才自行松手。
+      until: nowMs + Config.CTRL_WATCHDOG * 1000,
       ax: Number(msg.x) || 0,
       ay: Number(msg.y) || 0,
       az: Number(msg.z) || 0,
     };
-    this._toast('被控制枪抓住了！按跳跃挣脱');
+    this._setCtrlOverlay(true); // 被控的人：屏幕变蓝
+    if (firstGrab) this._toast('被控制枪抓住了！按跳跃挣脱');
   }
 
   // 挣脱：通知控制者并进入短时免疫
@@ -2917,6 +2946,7 @@ export class Game {
 
   // 结束被控状态：清掉速度覆盖，否则会带着控制时的速度继续飞
   _endControlled() {
+    this._setCtrlOverlay(false); // 无论走哪条路（主动挣脱 / 对方松手 / 看门狗超时）都先把蓝屏收掉
     if (!this._ctrlBy) return;
     this._ctrlBy = null;
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.velocityHold = null;
@@ -2942,12 +2972,9 @@ export class Game {
 
     // ---- 控制者侧 ----
     if (this._ctrl) {
-      const now = performance.now();
       const target = this.playerManager.players.get(this._ctrl.id);
       if (!target) {
         this._releaseCtrl(null); // 目标已离线：静默收枪
-      } else if (now >= this._ctrl.until) {
-        this._releaseCtrl('控制超时，已松开');
       } else {
         this._ctrl.acc += dt;
         if (!this._ctrl.sent || this._ctrl.acc >= 1 / Config.CTRL_RATE) {
@@ -2962,8 +2989,10 @@ export class Game {
 
     // ---- 被控侧：朝锚点移动（用 velocityHold 覆盖输入与重力）----
     if (this._ctrlBy) {
+      // 控制者一直在同步锚点 → until 每次都被顺延；走到这里 = CTRL_WATCHDOG 秒没消息（对方掉线）
       if (performance.now() >= this._ctrlBy.until) {
         this._endControlled();
+        this._toast('与控制者失去联系，已松手');
       } else {
         const c = this._ctrlBy;
         const s = this.localState;
@@ -5028,6 +5057,16 @@ export class Game {
 
   // ============ 抓钩：朝准星甩出钩爪，勾住就拽自己过去 ============
 
+  // 抓钩的「最长持续时间」按实际距离算：飞行段（钩爪以 GRAPPLE_SPEED×3 飞出去）+ 拽人段（GRAPPLE_SPEED 拉人）
+  // + 余量。之前写死 GRAPPLE_MAX_TIME=2.4s，钩爪距离拉到 92m 后「飞行 + 拽人」早就超过 2.4s，
+  // 表现就是「勾到一半绳子/钩爪没了」。现在时间跟着距离走。
+  _grappleTimeFor(dist) {
+    const d = Math.max(0, dist);
+    const fly = d / (Config.GRAPPLE_SPEED * 3);
+    const pull = d / Config.GRAPPLE_SPEED;
+    return Math.max(Config.GRAPPLE_MAX_TIME, (fly + pull) * 1.3 + 0.5);
+  }
+
   // 再按一次 = 松手；未抓住时按 = 甩钩
   _fireGrapple() {
     if (this._grapple) { this._endGrapple(); return; } // 已经抓着 → 松开
@@ -5048,7 +5087,8 @@ export class Game {
         x: beacon.x, y: beacon.y, z: beacon.z,
         fx: origin.x, fy: origin.y, fz: origin.z,
         flying: true,
-        t: Config.GRAPPLE_MAX_TIME,
+        // 时间跟着「手→光点」的距离走，别再写死 2.4s（远距离会中途断掉）
+        t: this._grappleTimeFor(Math.hypot(beacon.x - origin.x, beacon.y - origin.y, beacon.z - origin.z)),
         stop: Config.GRAPPLE_BEACON_STOP, // 收得比抓墙紧，落点才压在柱顶
         // 光点在柱顶上方 1m、松手点还要再退 0.9m，靠碰撞解算会把人嵌进柱子再侧向弹出去
         // （柱顶是这里唯一的落脚点，弹出去就是掉岩浆），所以直接记下「柱顶站立点」，
@@ -5084,7 +5124,8 @@ export class Game {
       x: p.x, y: p.y, z: p.z,
       fx: origin.x, fy: origin.y, fz: origin.z, // 钩爪从手边飞出去
       flying: true,
-      t: Config.GRAPPLE_MAX_TIME,
+      // 时间跟着「手→锚点」的距离走（飞行 + 拽人两段都算进去），远距离不再中途断掉
+      t: this._grappleTimeFor(Math.hypot(p.x - origin.x, p.y - origin.y, p.z - origin.z)),
     };
     this._ensureGrappleViz();
     this._grappleRope.visible = true;
