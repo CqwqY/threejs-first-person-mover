@@ -22,6 +22,7 @@ import {
 import {
   defaultTrack, normalizeTrack, gateSpecs, trackSummary, TRACK_GATE_W_DEF,
 } from '../world/Track.js';
+import { buildTrackPath, disposeTrackViz } from '../world/TrackViz.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
@@ -2494,6 +2495,8 @@ export function createEditor() {
     return g;
   }
   const tkGates = []; // 池子：长度始终与门数一致
+  let tkPath = null;      // 贝塞尔路面 + 方向箭头（与游戏共用 world/TrackViz.js）
+  let tkPathSig = '';     // 门的坐标指纹：没变就不重建路面（拖拽时每帧都会走到这里）
 
   function syncTrackPanel() {
     const t = state.track;
@@ -2558,6 +2561,17 @@ export function createEditor() {
       u.label.material.map = tkNumberTexture(i + 1, i === 0);
       u.label.material.needsUpdate = true;
     });
+    // 贝塞尔路面 + 方向箭头（与游戏共用同一份几何）。只在门的坐标真的变了时重建 ——
+    // 拖门时每帧都会调到这里，无条件重建会白白造上千个顶点。
+    const sig = state.track.checkpoints.map((c) => c.x.toFixed(2) + ',' + c.z.toFixed(2)).join(';');
+    if (sig !== tkPathSig) {
+      tkPathSig = sig;
+      if (tkPath) { disposeTrackViz(tkPath); tkPath = null; }
+      if (state.track.checkpoints.length >= 2) {
+        tkPath = buildTrackPath(state.track, { arrowCount: 14 });
+        trackGroup.add(tkPath);
+      }
+    }
     syncTrackPanel();
   }
 

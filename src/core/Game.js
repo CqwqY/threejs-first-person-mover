@@ -17,6 +17,7 @@ import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
+import { buildTrackPath } from '../world/TrackViz.js';
 import { buildArena } from '../world/CombatArena.js';
 import { buildGrappleArena } from '../world/GrappleArena.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
@@ -4391,8 +4392,11 @@ export class Game {
       // ---- 主推大卡：校园狂飙（赛道来自编辑器「赛道」模式，见 world/Track.js）----
       const hero = document.createElement('div');
       hero.className = 'kui-panel';
+      // ⚠ 别用 border 做「主推」高亮：.kui-panel 的底色来自 border-image 的 fill，
+      //   写 border 会连 border-image 一起顶掉 → 整张卡片变透明（踩过）。
+      //   要描边就加在 box-shadow 上（不占边框）。
       hero.style.cssText = 'padding:18px 20px;text-align:left;'
-        + 'border:2px solid color-mix(in srgb, var(--kui-blue) 70%, transparent);';
+        + 'box-shadow:0 0 0 3px color-mix(in srgb, var(--kui-blue) 78%, transparent);';
       const heroTop = document.createElement('div');
       heroTop.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
       const heroName = document.createElement('div');
@@ -5880,6 +5884,8 @@ export class Game {
       add(sp.w + 0.35, 0.35, 0.35, 0, sp.h, 0);      // 横梁
       group.add(g);
     }
+    // 贝塞尔路面 + 中线 + 方向箭头（与编辑器预览共用同一份几何，见 world/TrackViz.js）
+    group.add(buildTrackPath(t, { arrowCount: 16 }));
     this.scene.add(group);
     this._trackGroup = group;
   }

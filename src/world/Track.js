@@ -139,6 +139,82 @@ export function nextGateIndex(i, total) {
   return (i + 1) % total;
 }
 
+// ---------------------------------------------------------------------------
+// 贝塞尔赛道线：把门按顺序用**闭合三次贝塞尔**连成一条平滑赛道，并给出方向。
+// 控制点用 Catmull-Rom → 贝塞尔的经典换算（每段过两个相邻门），所以曲线**一定穿过每一个门**，
+// 不会像"随手连点"那样飘到门外面去。首尾相连 = 一条闭合的赛道。
+// ---------------------------------------------------------------------------
+
+// 每段的四个控制点 { p0, c1, c2, p1 }（p0 / p1 是端点 = 两个相邻门）
+export function curveSegments(t) {
+  const cps = (t && Array.isArray(t.checkpoints)) ? t.checkpoints : [];
+  const n = cps.length;
+  if (n < 2) return [];
+  const at = (i) => cps[((i % n) + n) % n]; // 环形取点（首尾相接）
+  const segs = [];
+  for (let i = 0; i < n; i++) {
+    const a = at(i - 1), b = at(i), c = at(i + 1), d = at(i + 2);
+    segs.push({
+      p0: { x: b.x, z: b.z },
+      c1: { x: b.x + (c.x - a.x) / 6, z: b.z + (c.z - a.z) / 6 },
+      c2: { x: c.x - (d.x - b.x) / 6, z: c.z - (d.z - b.z) / 6 },
+      p1: { x: c.x, z: c.z },
+    });
+  }
+  return segs;
+}
+
+const _bez = (a, b, c, d, u) => {
+  const m = 1 - u;
+  return m * m * m * a + 3 * m * m * u * b + 3 * m * u * u * c + u * u * u * d;
+};
+
+// 采样成折线（画线 / 铺路面都用它）；闭合，首尾同点
+export function curvePoints(t, per = 16) {
+  const segs = curveSegments(t);
+  if (!segs.length) return [];
+  const out = [];
+  for (const s of segs) {
+    for (let k = 0; k < per; k++) {
+      const u = k / per;
+      out.push({
+        x: _bez(s.p0.x, s.c1.x, s.c2.x, s.p1.x, u),
+        z: _bez(s.p0.z, s.c1.z, s.c2.z, s.p1.z, u),
+      });
+    }
+  }
+  out.push({ x: out[0].x, z: out[0].z });
+  return out;
+}
+
+// 沿曲线按**弧长均匀**取 count 个「方向箭头」的落点与朝向：{ x, z, dx, dz }
+// （按弧长而不是按参数 u，才能让箭头之间等距，不会在转弯处挤成一堆）
+export function curveArrows(t, count = 10) {
+  const pts = curvePoints(t, 20);
+  if (pts.length < 3) return [];
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+  }
+  const total = cum[cum.length - 1];
+  if (!(total > 0.5)) return [];
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    const target = (total * k) / count;
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < target) i++;
+    const a = pts[i - 1];
+    const b = pts[i];
+    const segLen = Math.max(1e-6, cum[i] - cum[i - 1]);
+    const u = (target - cum[i - 1]) / segLen;
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const len = Math.hypot(dx, dz) || 1;
+    out.push({ x: a.x + dx * u, z: a.z + dz * u, dx: dx / len, dz: dz / len });
+  }
+  return out;
+}
+
 // 赛道规模提示（几处文案共用）
 export function trackSummary(t) {
   if (!t || !Array.isArray(t.checkpoints)) return { gates: 0, laps: 0 };
