@@ -5,8 +5,11 @@
 //  - 原 GLB 的 BIN chunk（含贴图/UV/法线/索引）一字不动，只在尾部追加 JOINTS_0 / WEIGHTS_0 /
 //    inverseBindMatrices / 骨架节点 / 动画 → 贴图 100% 保真（不依赖 Node 解码贴图，也不走 GLTFExporter 重排）。
 //  - 骨架基于 AABB 程序化放置（模型已归一化到 y∈[-0.5,0.5]），bind pose 为直立、手臂贴体侧（非 T-pose）。
+//    ⚠ 网格朝向（用 tools/probe-axis.mjs 实测 boy-rig）：网格的「左右」是 **Z 轴**（两层腿/脚的 Z 跨度
+//      0.256 > X 0.161），「前后」是 **X 轴**（正面朝 +X）。所以骨架的左右/手臂/腿必须摆在 ±Z 上，
+//      摆腿也要绕 Z（脚才能沿 X 前后摆）。曾把左右放在 ±X → 骨架相对网格整体差 90°（身子正、走路侧甩）。
 //  - 蒙皮权重：每顶点到各骨「线段」距离的倒数，取最近 4 根归一化。
-//  - 动画：同坐标系程序化生成 Idle/Walk/Run，绕局部 X 摆腿（=前后走）、绕局部 X 摆臂（反相）、
+//  - 动画：同坐标系程序化生成 Idle/Walk/Run，绕局部 Z 摆腿（脚沿 X 前后摆）、绕局部 Z 摆臂（反相）、
 //    脊柱/头/髋绕 Y 小幅交替摆动。因为骨与动画同坐标系（无 alignM 之类的 90° 重定向），不会出现侧躺/猎奇。
 //
 // 用法：node tools/auto-rig.mjs [boy girl]
@@ -67,18 +70,18 @@ const BONE_DEF = [
   ['chest', 'spine', [0, 0.06, 0]],
   ['neck', 'chest', [0, 0.18, 0]],
   ['head', 'neck', [0, 0.34, 0]],
-  ['l_shoulder', 'chest', [0.15, 0.16, 0]],
-  ['l_elbow', 'l_shoulder', [0.23, 0.02, 0]],
-  ['l_wrist', 'l_elbow', [0.25, -0.10, 0]],
-  ['r_shoulder', 'chest', [-0.15, 0.16, 0]],
-  ['r_elbow', 'r_shoulder', [-0.23, 0.02, 0]],
-  ['r_wrist', 'r_elbow', [-0.25, -0.10, 0]],
-  ['l_hip', 'hips', [0.09, -0.17, 0]],
-  ['l_knee', 'l_hip', [0.10, -0.32, 0]],
-  ['l_ankle', 'l_hip', [0.10, -0.49, 0]],
-  ['r_hip', 'hips', [-0.09, -0.17, 0]],
-  ['r_knee', 'r_hip', [-0.10, -0.32, 0]],
-  ['r_ankle', 'r_hip', [-0.10, -0.49, 0]],
+  ['l_shoulder', 'chest', [0, 0.16, -0.15]],
+  ['l_elbow', 'l_shoulder', [0, 0.02, -0.23]],
+  ['l_wrist', 'l_elbow', [0, -0.10, -0.25]],
+  ['r_shoulder', 'chest', [0, 0.16, 0.15]],
+  ['r_elbow', 'r_shoulder', [0, 0.02, 0.23]],
+  ['r_wrist', 'r_elbow', [0, -0.10, 0.25]],
+  ['l_hip', 'hips', [0, -0.17, -0.09]],
+  ['l_knee', 'l_hip', [0, -0.32, -0.10]],
+  ['l_ankle', 'l_hip', [0, -0.49, -0.10]],
+  ['r_hip', 'hips', [0, -0.17, 0.09]],
+  ['r_knee', 'r_hip', [0, -0.32, 0.10]],
+  ['r_ankle', 'r_hip', [0, -0.49, 0.10]],
 ];
 const N_BONES = BONE_DEF.length;
 
@@ -198,7 +201,7 @@ function bake(gender) {
   meshNode.children.push(armatureIdx);
 
   // ---------------- 程序化动画（同坐标系）----------------
-  const X = new THREE.Vector3(1, 0, 0), Y = new THREE.Vector3(0, 1, 0);
+  const X = new THREE.Vector3(1, 0, 0), Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
   const FR = 33; // 每 clip 帧数
   // 每运动骨：轴 + 幅度函数(相位 s∈[0,1))
   function legAng(s, amp) { return amp * Math.sin(2 * Math.PI * s); }
@@ -213,18 +216,18 @@ function bake(gender) {
   function boneMotion(name, s, clip) {
     const ph = s; // 相位
     switch (name) {
-      case 'l_hip': return { axis: X, ang: legAng(ph, clip.A) };
-      case 'r_hip': return { axis: X, ang: -legAng(ph, clip.A) };
-      case 'l_knee': return clip.knee ? { axis: X, ang: kneeAng(ph, clip.A) } : null;
-      case 'r_knee': return clip.knee ? { axis: X, ang: kneeAng(ph + 0.5, clip.A) } : null;
-      case 'l_shoulder': return { axis: X, ang: -legAng(ph, clip.A2) };
-      case 'r_shoulder': return { axis: X, ang: legAng(ph, clip.A2) };
-      case 'l_elbow': return { axis: X, ang: 0.22 + 0.06 * Math.sin(2 * Math.PI * ph) };
-      case 'r_elbow': return { axis: X, ang: 0.22 + 0.06 * Math.sin(2 * Math.PI * ph) };
+      case 'l_hip': return { axis: Z, ang: legAng(ph, clip.A) };
+      case 'r_hip': return { axis: Z, ang: -legAng(ph, clip.A) };
+      case 'l_knee': return clip.knee ? { axis: Z, ang: -kneeAng(ph, clip.A) } : null;
+      case 'r_knee': return clip.knee ? { axis: Z, ang: -kneeAng(ph + 0.5, clip.A) } : null;
+      case 'l_shoulder': return { axis: Z, ang: -legAng(ph, clip.A2) };
+      case 'r_shoulder': return { axis: Z, ang: legAng(ph, clip.A2) };
+      case 'l_elbow': return { axis: Z, ang: 0.22 + 0.06 * Math.sin(2 * Math.PI * ph) };
+      case 'r_elbow': return { axis: Z, ang: 0.22 + 0.06 * Math.sin(2 * Math.PI * ph) };
       case 'chest': return { axis: Y, ang: clip.A3 * Math.sin(2 * Math.PI * ph) };
       case 'head': return { axis: Y, ang: -clip.A3 * 0.5 * Math.sin(2 * Math.PI * ph) };
       case 'hips': return { axis: Y, ang: clip.A3 * 0.3 * Math.sin(2 * Math.PI * ph) };
-      case 'spine': return { axis: X, ang: 0.02 * Math.sin(2 * Math.PI * ph) };
+      case 'spine': return { axis: Z, ang: 0.02 * Math.sin(2 * Math.PI * ph) };
       default: return null;
     }
   }
