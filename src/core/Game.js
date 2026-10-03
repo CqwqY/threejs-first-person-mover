@@ -244,6 +244,16 @@ export class Game {
     this._raceHud = null;
     this._raceHudLast = '';
     this._vehPool = null;
+    // 车速表（骑电动车时才显示）：元素与「上次写进 DOM 的读数」缓存
+    this._spdHud = null;
+    this._spdNum = null;
+    this._spdUnit = null;
+    this._spdVal = null;
+    this._spdNeedle = null;
+    this._spdLast = -1;      // 上次显示的整数 km/h（-1 = 还没写过）
+    this._spdRev = false;    // 上次是不是倒车态（用于单位文案切换）
+    // 表盘满量程：按最高车速换算成 km/h 再向上取整到 10 —— 改 VEHICLE_SPEED 后表盘自动跟着走
+    this._spdMax = Math.max(10, Math.ceil(Config.VEHICLE_SPEED * 3.6 / 10) * 10);
 
     // ---- 网络连接 ----
     this.network = new Network(Config.RELAY_URL, this._token);
@@ -1468,6 +1478,10 @@ export class Game {
 
   _dismountVehicle() {
     const st = this.localState;
+    // 比赛用车：一弃车就等于弃赛 —— 狂飙用的那辆车是发给你专门跑圈的，下车就别继续计时了。
+    // （完赛的 _finishRace 会先把 this._race 置空再调本函数，所以正常冲线不会被这里当成中途弃赛。）
+    const quitRace = !!(this._race && st.ride === 1);
+    if (quitRace) this._exitRace(null); // 文案并到下面那条 toast，别让两条互相顶掉
     st.ride = 0;
     st.veh = '';
     this._vehDriver = null;
@@ -1478,7 +1492,7 @@ export class Game {
     phys.controlLock = !!(this.aiChat && this.aiChat.isOpen());
     phys.speedMult = 1;
     phys.speedMode = 'walk';
-    this._toast('已下车');
+    this._toast(quitRace ? '已下车，狂飙结束' : '已下车');
   }
 
   // 按需给「某个骑手」配一辆车（一辆车一个 mesh，不骑了就隐藏 —— 池化，不销毁）。
@@ -1582,6 +1596,14 @@ export class Game {
       this._vehHint.style.opacity = full ? '0.55' : '1';
     } else {
       this._vehHint.style.display = 'none';
+    }
+
+    // 4) 车速表：只有自己坐在驾驶位时才显示（后座 / 走路 / 对战中都不露）
+    if (st.ride === 1) {
+      this._speedHudShow(true);
+      this._speedHudTick(this.localPlayer._vehSpeed || 0);
+    } else {
+      this._speedHudShow(false);
     }
   }
 
@@ -4569,6 +4591,9 @@ export class Game {
     const r = this._race;
     if (!r) return;
     if (this._combat || this._dead || this._soul) { this._exitRace(null); return; }
+    // 弃车即弃赛：比赛用车是发给你跑圈的，下车（或任何把 ride 清掉的路径）就结束计时。
+    // 主路径已在 _dismountVehicle 里退出，这里是兜底 —— 防别处直接把 ride 置 0 而绕过它。
+    if (!this.localState.ride) { this._exitRace('已下车，狂飙结束'); return; }
     const cps = this.track.checkpoints;
     if (!cps.length) { this._exitRace('赛道没了，狂飙结束'); return; }
     const st = this.localState;
@@ -4610,6 +4635,107 @@ export class Game {
     }
     this._raceHud.style.display = on ? 'block' : 'none';
     if (!on) this._raceHudLast = '';
+  }
+
+  // ---------- 车速表（骑电动车时才显示）----------
+  // 造型：270° 圆弧表盘 + 指针 + 数字读数 + 单位。纯内联 SVG（不额外发请求），配色走主题 CSS 变量。
+  // ⚠ 只改「几何」用 setAttribute；颜色一律用 el.style（CSS 属性）——
+  //   演示属性里写 var() 在各浏览器上不完全可靠，写进 style 才能吃到主题变量。
+  _ensureSpeedHud() {
+    if (this._spdHud) return this._spdHud;
+    const NS = 'http://www.w3.org/2000/svg';
+    const coarse = !!this._coarsePointer;
+    const box = document.createElement('div');
+    box.className = 'spd-box';
+    // 位置：右下角；手机端抬高到驾驶键组（左转/刹车/右转）之上，否则会压住它们
+    box.style.cssText =
+      'position:fixed;z-index:9400;display:none;pointer-events:none;user-select:none;-webkit-user-select:none;' +
+      (coarse
+        ? 'right:calc(env(safe-area-inset-right, 0px) + 20px);bottom:calc(env(safe-area-inset-bottom, 0px) + 108px);'
+        : 'right:22px;bottom:22px;') +
+      'width:clamp(84px,20vmin,116px);color:var(--kui-paper);font-family:var(--kui-font);' +
+      'text-shadow:0 1px 3px rgba(0,0,0,.55);' +
+      'background:radial-gradient(circle at 50% 54%, rgba(11,21,34,.62) 0 50%, rgba(11,21,34,0) 72%);';
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:relative;';
+
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 120 104');
+    svg.style.cssText = 'display:block;width:100%;height:auto;';
+    // 圆心 (60,56)、半径 46，从 135° 顺时针扫 270° 到 45°（SVG 里 y 向下，正角度 = 顺时针）
+    const ARC = 'M27.473 88.527 A46 46 0 1 1 92.527 88.527';
+    const ARC_LEN = 216.77; // 2π·46·(270/360)
+    const mk = (name, attrs) => {
+      const n = document.createElementNS(NS, name);
+      for (const k in attrs) n.setAttribute(k, attrs[k]);
+      return n;
+    };
+    const bg = mk('path', { d: ARC, fill: 'none', 'stroke-width': '9', 'stroke-linecap': 'round' });
+    bg.style.stroke = 'rgba(255,255,255,.18)';
+    const val = mk('path', { d: ARC, fill: 'none', 'stroke-width': '9', 'stroke-linecap': 'round' });
+    val.style.stroke = 'var(--kui-blue)';
+    val.setAttribute('stroke-dasharray', String(ARC_LEN));
+    val.setAttribute('stroke-dashoffset', String(ARC_LEN)); // 起始为空
+    const needle = mk('line', { x1: '60', y1: '56', x2: '60', y2: '24', 'stroke-width': '3', 'stroke-linecap': 'round' });
+    needle.style.stroke = 'var(--kui-paper)';
+    needle.setAttribute('transform', 'rotate(-135 60 56)');
+    const hub = mk('circle', { cx: '60', cy: '56', r: '5' });
+    hub.style.fill = 'var(--kui-paper)';
+    svg.appendChild(bg); svg.appendChild(val); svg.appendChild(needle); svg.appendChild(hub);
+
+    const num = document.createElement('div');
+    num.style.cssText =
+      'position:absolute;left:50%;top:57%;transform:translate(-50%,-50%);' +
+      'font:700 clamp(16px,4.4vmin,22px)/1 var(--kui-font-num);font-variant-numeric:tabular-nums;';
+    num.textContent = '0';
+    const unit = document.createElement('div');
+    unit.style.cssText =
+      'position:absolute;left:50%;top:76%;transform:translateX(-50%);' +
+      'font:600 clamp(8px,2.2vmin,10px)/1 var(--kui-font);opacity:.72;letter-spacing:.5px;white-space:nowrap;';
+    unit.textContent = 'km/h';
+
+    wrap.appendChild(svg);
+    wrap.appendChild(num);
+    wrap.appendChild(unit);
+    box.appendChild(wrap);
+    document.body.appendChild(box);
+
+    this._spdHud = box;
+    this._spdNum = num;
+    this._spdUnit = unit;
+    this._spdVal = val;
+    this._spdNeedle = needle;
+    this._spdArcLen = ARC_LEN;
+    return box;
+  }
+
+  _speedHudShow(on) {
+    if (!on && !this._spdHud) return; // 从没骑过车 → 连元素都不建
+    const el = this._ensureSpeedHud();
+    const disp = on ? 'block' : 'none';
+    if (el.style.display !== disp) el.style.display = disp; // 只在翻转时写 DOM
+    if (!on) { this._spdLast = -1; this._spdRev = false; }
+  }
+
+  // sp = LocalPlayer._vehSpeed（米/秒，倒车为负）。只在读数（整数 km/h）或倒车态变化时才写 DOM。
+  _speedHudTick(sp) {
+    if (!this._spdHud) return;
+    const spd = sp || 0;
+    const kmh = Math.abs(spd) * 3.6;
+    const t = Math.max(0, Math.min(1, kmh / this._spdMax));
+    const shown = Math.round(kmh);
+    const rev = spd < -0.3;
+    if (shown === this._spdLast && rev === this._spdRev) return;
+    this._spdLast = shown;
+    this._spdRev = rev;
+    this._spdNum.textContent = String(shown);
+    this._spdUnit.textContent = rev ? '倒车' : 'km/h';
+    this._spdVal.setAttribute('stroke-dashoffset', String(this._spdArcLen * (1 - t)));
+    this._spdNeedle.setAttribute('transform', 'rotate(' + (-135 + 270 * t).toFixed(1) + ' 60 56)');
+    // 表盘分档配色：常态蓝 → 60% 起金 → 85% 起红（倒车统一金）
+    this._spdVal.style.stroke =
+      rev ? 'var(--kui-gold)' : (t >= 0.85 ? 'var(--kui-danger)' : (t >= 0.6 ? 'var(--kui-gold)' : 'var(--kui-blue)'));
   }
 
   // 真正发起匹配（玩家匹配组）
@@ -4771,6 +4897,7 @@ export class Game {
     if (this.vehicle) this.vehicle.group.visible = false;
     // 狂飙的池子车也一起藏（竞技场里不该出现它们；退出对战后由 _updateVehicle 按需重新露出来）
     if (this._vehPool) for (const v of this._vehPool.values()) v.group.visible = false;
+    this._speedHudShow(false); // 车速表同理：竞技场里不露（_updateVehicle 在对战中不跑）
     if (this.boss && this.boss.group) this.boss.group.visible = false;
     if (this.boss && this.boss.portalGroup) this.boss.portalGroup.visible = false;
     this._syncBoundary(); // 边界让位：竞技场自带一圈墙，大厅边界在这局里不生效
