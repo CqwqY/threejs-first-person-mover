@@ -11,7 +11,7 @@
 
 // ⚠ 模型/贴图换过内容就把这个版本号 +1，否则玩家会一直拿到本地那份旧的
 // 本轮重烘焙了 boy/girl-rig.glb（修正站姿），升到 v2 强制重新下载
-const CACHE_NAME = 'fpm-assets-v2';
+const CACHE_NAME = 'fpm-assets-v3';
 const PREFIX = 'fpm-assets-';
 
 // 单件上限：超过就不缓存（正常模型最多几 MB，这里是防异常大文件把配额撑爆）

@@ -184,12 +184,10 @@ async function bake(gender) {
     if (clusterW[i] > 1e-6) cluster[i].multiplyScalar(1 / clusterW[i]);
     else cluster[i].copy(boneWorld[i]); // 没人用的骨（极罕见）保持原位
   });
-  // ⚠ 只用「核心躯干骨」算全局对齐（绕 Y 旋转 + 水平平移）：
-  // 手臂/腿的网格簇中心在「非标准 T-pose」模型上不可靠（女孩有裙子/头发干扰，残差 0.2+），
-  // 若把它们也算进 Kabsch，会把手臂的偏差带进全局 θ，导致整条手臂被旋歪/外撇。
-  // 躯干骨（髋+脊柱）定义身体朝向，四肢靠层级继承同一套旋转即可正确归位。
-  const CORE = new Set(['mixamorigHips', 'mixamorigSpine', 'mixamorigSpine1', 'mixamorigSpine2', 'mixamorigChest']);
-  const coreIdx = bones.map((b, i) => i).filter((i) => CORE.has(bones[i].name));
+  // ⚠ 用「全部骨骼」算全局对齐（绕 Y 旋转 + 水平平移）：
+  // 实测只用核心躯干骨会让 θ 算歪（手臂/腿的簇中心不可靠，但躯干骨近似共线、角向杠杆不足），
+  // 反而把整套骨架旋成不对称（静止态一只手甩出、一只收着）。全骨骼 Kabsch 给的 θ 才是对称的。
+  const coreIdx = bones.map((b, i) => i);
   const bc = new THREE.Vector3(), cc = new THREE.Vector3();
   for (const i of coreIdx) { bc.add(boneWorld[i]); cc.add(cluster[i]); }
   bc.divideScalar(coreIdx.length); cc.divideScalar(coreIdx.length);
@@ -400,9 +398,14 @@ async function bake(gender) {
         const delta = qRestO.clone().multiply(qRestS.clone().invert()); // q_ourRest * q_srcRest⁻¹
         outVals = new Float32Array(values.length);
         const qa = new THREE.Quaternion();
+        // 手臂相关骨：把动画旋转往「静止态」拉回 ARM_KEEP 比例，消除 Idle/Walk 把胳膊甩成 T-pose 的外撇
+        // （源 Soldier 手臂偏长，重定向后摆幅被放大；腿/脊柱不动，保证走路仍正常）。
+        const isArm = /(shoulder|clavicle|upperarm|lowerarm|forearm|arm|hand|wrist)/i.test(mapped);
+        const ARM_KEEP = 0.45;
         for (let k = 0; k < values.length; k += 4) {
           qa.set(values[k], values[k + 1], values[k + 2], values[k + 3]);
           qa.premultiply(delta);
+          if (isArm) qa.slerp(qRestO, 1 - ARM_KEEP); // 拉回静止态，保留 55% 摆幅
           outVals[k] = qa.x; outVals[k + 1] = qa.y; outVals[k + 2] = qa.z; outVals[k + 3] = qa.w;
         }
       } else { // translation
