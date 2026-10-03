@@ -6049,14 +6049,31 @@ export class Game {
     this._trackGroup = group;
   }
 
-  // 赛道可视化（路面 + 中线 + 方向箭头 + 门框）的显隐。门框是实体网格，收起来后连影子一起没了。
+  // 赛道可视化（路面 + 中线 + 方向箭头 + 门框）的显隐。
+  // ⚠ **视觉和碰撞必须同进同出**：只藏了路面却把碰撞留着，校园里就会撞到一堵看不见的墙
+  //   （用户 2026-10-03 报「没玩狂飙的时候赛道碰撞要取消掉」）。所以这里一并切碰撞体。
   _setTrackVisible(on) {
-    if (this._trackGroup) this._trackGroup.visible = !!on;
+    const v = !!on;
+    if (this._trackGroup) this._trackGroup.visible = v;
+    this._syncTrackCollider(v);
   }
 
-  // 赛道路面的碰撞体：把「与视觉路面同一条曲线、同半宽」的实体板烘成 trimesh，塞进世界碰撞体。
+  // 把缓存好的那块赛道碰撞体加进 / 移出世界碰撞体。
+  // 原地改写数组（splice/push）：LocalPlayer 持有的是同一条数组引用，换数组它读不到。
+  _syncTrackCollider(on) {
+    const c = this._trackCollider;
+    if (!c) return;
+    const i = this.colliders.indexOf(c);
+    if (on) {
+      if (i < 0) this.colliders.push(c);
+    } else if (i >= 0) {
+      this.colliders.splice(i, 1);
+    }
+  }
+
+  // 赛道路面的碰撞体：把「与视觉路面同一条曲线、同半宽」的实体板烘成 trimesh 缓存起来。
   // 于是门被抬高时（立体赛道），玩家/车能真的开上去、也能被路沿挡住，而不是穿过去。
-  // 重建赛道（编辑器保存后拉到新场景）时会先摘掉旧的，避免碰撞体越积越多。
+  // 重建赛道（编辑器保存后拉到新场景）时先摘掉旧的；**平时不挂进世界**，只有跑狂飙时才挂上。
   _applyTrackCollider() {
     if (this._trackCollider) {
       const i = this.colliders.indexOf(this._trackCollider);
@@ -6071,7 +6088,7 @@ export class Game {
     mesh.geometry.dispose();       // 碰撞体内部已复制三角形，渲染几何没用了
     if (!col) return;
     this._trackCollider = col;
-    this.colliders.push(col);
+    this._syncTrackCollider(!!this._race); // 烘好先缓存着；要不要生效看现在有没有在跑狂飙
   }
 
   // 边界要同步到两处：① 物理夹取（真正挡人的是它）② 可选的可视半透明墙。
