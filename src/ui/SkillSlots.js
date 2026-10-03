@@ -101,54 +101,11 @@ export function createSkillSlots(opts = {}) {
     document.body.appendChild(wheel);
   }
 
-  // 手机端：技能槽排布切换（轮盘 / 2行）——参考「人称切换器(.mc-view)」的两段式屏幕按钮做法，
-  // 直接摆出来、用 pointerdown 触发，不走设置面板的 <select>（某些手机浏览器上 select 的 change 不可靠，
-  // 用户反馈"设置里切了完全没反应"多半就是它）。放在左下角人称切换器正上方。
-  const modeSwitch = coarse ? document.createElement('div') : null;
-  let syncModeSwitch = () => {};
-  if (modeSwitch) {
-    modeSwitch.className = 'sk-mode';
-    modeSwitch.style.cssText =
-      'position:fixed;z-index:62;display:flex;align-items:center;gap:2px;padding:3px;' +
-      'left:calc(env(safe-area-inset-left, 0px) + 20px);' +
-      'bottom:calc(env(safe-area-inset-bottom, 0px) + 26px + clamp(92px,26vmin,124px) + 14px + 44px);' +
-      'border-radius:999px;box-sizing:border-box;box-shadow:var(--kui-shadow);' +
-      'background:color-mix(in srgb, var(--kui-ink) 46%, transparent);' +
-      'border:2px solid color-mix(in srgb, var(--kui-blue-soft) 55%, transparent);' +
-      'touch-action:none;user-select:none;-webkit-user-select:none;';
-    const mkSeg = (txt) => {
-      const b = document.createElement('b');
-      b.textContent = txt;
-      b.style.cssText =
-        'flex:0 0 auto;padding:6px 10px;border-radius:999px;cursor:pointer;' +
-        'font:600 clamp(11px,2.9vmin,13px)/1 var(--kui-font);color:var(--kui-paper);';
-      return b;
-    };
-    const segWheel = mkSeg('轮盘');
-    const segGrid = mkSeg('2行');
-    modeSwitch.appendChild(segWheel);
-    modeSwitch.appendChild(segGrid);
-    document.body.appendChild(modeSwitch);
-    // 高亮以真实 mobileMode 为准重画（设置面板改了也同步）
-    syncModeSwitch = () => {
-      const grid = mobileMode === 'grid';
-      segWheel.style.opacity = grid ? '.6' : '1';
-      segGrid.style.opacity = grid ? '1' : '.6';
-      segWheel.style.background = grid ? 'transparent' : 'color-mix(in srgb, var(--kui-blue) 85%, transparent)';
-      segGrid.style.background = grid ? 'color-mix(in srgb, var(--kui-blue) 85%, transparent)' : 'transparent';
-    };
-    const bindSeg = (el, mode) => {
-      el.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation(); // 别漏给下面的摇杆区
-        ensureCur();
-        setMobileLayout(mode);
-      });
-    };
-    bindSeg(segWheel, 'wheel');
-    bindSeg(segGrid, 'grid');
-    syncModeSwitch();
-  }
+  // 手机端「轮盘 / 2行」排布切换：**只保留设置面板里那一处入口**（设置 → 画面元素上方「手机技能槽」）。
+  // 屏幕上不再放切换按钮——之前参考人称切换器加过一个 .sk-mode 两段按钮，用户要求移除
+  //（屏幕按钮挤在左下角、还和设置里的选项重复）。设置那条链路的真 bug（parseFloat 吃前导数字）已修，
+  // 所以设置里现在能可靠切换。
+  const syncModeSwitch = () => {};
 
   const slots = [];
   let dropHandler = null; // 由 Game 注入：丢弃第 index 个槽位的物品
@@ -727,7 +684,6 @@ export function createSkillSlots(opts = {}) {
     window.removeEventListener('keyup', keyUpHandler);
     window.removeEventListener('blur', blurHandler);
     if (wheel) wheel.remove();
-    if (modeSwitch) modeSwitch.remove();
     box.remove();
   }
 

@@ -210,7 +210,7 @@ export const Config = {
   DROP_PICKUP_RANGE: 2.8,         // 离掉落物多少米内出现「拾取」按钮（水平距离）
   DROP_PICKUP_HEIGHT: 2.6,        // 拾取的高度余量：物品比这还高/低就够不到（米）
   // 抓钩（技能槽物品「抓钩」，也是「疯狂抓钩」模式的基础移动手段）
-  GRAPPLE_RANGE: 46,              // 钩爪最远能抓到的距离（米）
+  GRAPPLE_RANGE: 92,              // 钩爪最远能抓到的距离（米）——用户要求延长到 2 倍（原 46）
   GRAPPLE_SPEED: 25,              // 被拽过去的速度（米/秒）
   GRAPPLE_MAX_TIME: 2.4,          // 单次抓钩最长持续（秒），到时自动松手
   GRAPPLE_STOP_DIST: 1.9,         // 离锚点这么近就松手（米）
