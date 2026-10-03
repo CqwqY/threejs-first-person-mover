@@ -29,7 +29,7 @@ import { LocalPlayer } from '../player/LocalPlayer.js';
 import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
-import { onRelayout } from '../ui/layout.js';
+import { onRelayout, readLayout, currentMode, viewportSize } from '../ui/layout.js';
 import { Network } from '../net/Network.js';
 import { addDebugRig } from '../debug/SkeletonDebug.js';
 import { setBgmVolume } from '../audio/Bgm.js';
@@ -1585,7 +1585,9 @@ export class Game {
   }
 
   // 手机端：把圆形攻击键摆到跳跃键正上方（与跳跃键同一条竖线，留一点缝）。
-  // 跳跃键支持在「按键布局」里拖动，所以不能写死 CSS，得按它的实际矩形算。
+  // 跳跃键支持在「画面元素」里拖动，所以不能写死 CSS，得按它的实际矩形算。
+  // 攻击键**自己也**可以在「画面元素」里拖动（LAYOUT_ITEMS 里 key='attack'）：一旦用户摆过，
+  // 就以保存的位置为准（只夹进屏幕），不再贴跳跃键——否则每次它一出现就把用户摆好的位置冲掉。
   _placeAttackBtn() {
     const el = this._attackBtn;
     if (!el || !this._attackCoarse) return;
@@ -1595,13 +1597,32 @@ export class Game {
     const jr = j.getBoundingClientRect();
     const r = el.getBoundingClientRect();
     if (!jr.width || !r.width) return;
-    const gap = Math.max(6, Math.round(Math.min(18, jr.height * 0.16)));
-    const cx = jr.left + jr.width / 2;
-    const top = Math.max(4, jr.top - gap - r.height); // 夹住顶部，别被挤出屏幕
+
+    let cx = null;
+    let cy = null;
+    // 用户是否在「画面元素」里摆过攻击键？（按横竖屏分别存，跟技能槽同一套）
+    const conf = readLayout(currentMode()) || {};
+    const p = conf.attack;
+    if (p && Number.isFinite(p.cx) && Number.isFinite(p.cy)) {
+      const { width: vw, height: vh } = viewportSize();
+      cx = p.cx * vw;
+      cy = p.cy * vh;
+    }
+    if (cx === null) {
+      // 没摆过：默认贴着跳跃键正上方（同一条竖线，间距按跳跃键直径算）
+      const gap = Math.max(6, Math.round(Math.min(18, jr.height * 0.16)));
+      cx = jr.left + jr.width / 2;
+      cy = jr.top - gap - r.height / 2;
+    }
+    // 夹进屏幕，避免按钮被挤出可视区
+    const { width: vw, height: vh } = viewportSize();
+    cx = Math.max(4 + r.width / 2, Math.min(vw - 4 - r.width / 2, cx));
+    cy = Math.max(4 + r.height / 2, Math.min(vh - 4 - r.height / 2, cy));
     el.style.left = Math.round(cx - r.width / 2) + 'px';
-    el.style.top = Math.round(top) + 'px';
+    el.style.top = Math.round(cy - r.height / 2) + 'px';
     el.style.right = 'auto';
     el.style.bottom = 'auto';
+    el.style.transform = 'none';
     // 技能键默认也排在跳跃键上方，这里要让它改挂到攻击键上方，避免两个圆叠在一起
     this._relayoutSkillBtn();
   }

@@ -16,6 +16,9 @@ const MARGIN = 4; // 贴边最小留白（px）
 // 可摆放的控件：key 存储键、sel 选择器、label 提示、showAs 编辑期间临时显示用的 display
 export const LAYOUT_ITEMS = [
   { key: 'jump', sel: '.mc-jump', label: '跳跃键', showAs: 'flex' },
+  // 攻击键平时是隐藏的（只有对战/打 Boss/开了加特林·控制枪才出现），编辑期间用 showAs 临时显示出来才能拖。
+  // 它默认贴着跳跃键正上方自动排；一旦用户拖过，就以保存的位置为准（见 Game._placeAttackBtn）。
+  { key: 'attack', sel: '.mc-atk', label: '攻击键', showAs: 'block' },
   { key: 'view', sel: '.mc-view', label: '人称切换', showAs: 'flex' },
   { key: 'skill', sel: '.sk-box', label: '技能槽', showAs: 'flex' },
   { key: 'health', sel: '.hp-box', label: '血条', showAs: 'block' },

@@ -281,13 +281,20 @@ export function createSkillSlots(opts = {}) {
     let cx = null;
     let cy = null;
     if (savedPos) { cx = savedPos.cx * vw; cy = savedPos.cy * vh; }
+    // 旧数据可能存的是「圆弧圆心」（＝跳跃键中心），那会让按钮压在跳跃键上 → 视为失效，走默认位。
+    // ⚠ 这个校验只能拿「跳跃键」当参照，**绝不能用上面的 anchorRect()**（它会优先取攻击键）：
+    //   攻击键是按状态出现/消失的，参照点一变，就会把「用户合法保存的位置」误判成失效、强行弹回默认位——
+    //   表现就是「调好技能槽位置后，一用加特林/控制枪让攻击键出来，技能槽位置就被挪走」。
+    if (cx !== null) {
+      const ju = jumpRect();
+      if (ju) {
+        const d = Math.hypot(cx - (ju.left + ju.width / 2), cy - (ju.top + ju.height / 2));
+        if (d < ju.height / 2 + H / 2) { cx = null; cy = null; } // 压住跳跃键 → 旧数据，走默认位
+      }
+    }
     if (cx === null) {
       if (jr) { cx = jr.left + jr.width / 2; cy = jr.top + jr.height / 2 - R; }
       else { cx = vw - 56; cy = vh - 60 - R; }
-    } else if (jr) {
-      // 旧数据可能存的是「圆弧圆心」（＝跳跃键中心），那会让按钮压在跳跃键上 → 视为失效，走默认位
-      const d = Math.hypot(cx - (jr.left + jr.width / 2), cy - (jr.top + jr.height / 2));
-      if (d < jr.height / 2 + H / 2) { cx = jr.left + jr.width / 2; cy = jr.top + jr.height / 2 - R; }
     }
     // 夹进屏幕，避免按钮（及其外面的轮盘）被挤出可视区
     cx = Math.max(4 + W / 2, Math.min(vw - 4 - W / 2, cx));

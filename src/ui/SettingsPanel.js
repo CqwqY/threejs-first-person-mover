@@ -315,7 +315,7 @@ export function createSettingsPanel(binds, opts = {}) {
     '<div class="gx-lbl" style="font-weight:600;margin-bottom:8px;">画面元素（手机）</div>' +
     '<div class="gx-layout-actions" style="display:flex;gap:6px;flex-wrap:wrap;"></div>' +
     '<div style="margin-top:8px;font-size:11px;line-height:1.6;color:var(--kui-ink-soft);">' +
-    '可拖拽摆放跳跃键、技能槽、血条、对话选项卡；横竖屏各存一套位置。' +
+    '可拖拽摆放跳跃键、攻击键、技能槽、血条、对话选项卡；横竖屏各存一套位置。' +
     '</div>';
   card.appendChild(layoutBox);
 
