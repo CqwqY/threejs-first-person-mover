@@ -36,6 +36,8 @@ export class LocalPlayer {
     const joyY = inp.joyY || 0;
     const thr = Math.min(1, Math.max(0, joyY) + fwd);
     const rev = Math.min(1, Math.max(0, -joyY) + back);
+    // 转向：右为正。⚠ yaw 的符号约定是「yaw 减小 = 向右转」（与鼠标视角的 `yaw -= x` 一致），
+    // 所以这里必须用 `-=`；写成 `+=` 会让 A / D 整个反过来。
     const steer = (inp.strafeRight && inp.strafeRight() ? 1 : 0) - (inp.strafeLeft && inp.strafeLeft() ? 1 : 0);
     const braking = !!(inp.isDown && inp.isDown('Space'));
     // 刹车用的就是空格（骑乘时跳跃本来就无效）——顺手把它消费掉，免得攒到下车那一瞬间蹦一下
@@ -60,7 +62,7 @@ export class LocalPlayer {
 
     // 转向：抓地力随速度上来（静止/极慢时打方向不动），倒车时方向反过来
     const grip = Math.min(1, Math.abs(sp) / 4) * (sp < -0.01 ? -1 : 1);
-    if (steer) this.state.yaw += steer * Config.VEHICLE_TURN * dt * grip;
+    if (steer) this.state.yaw -= steer * Config.VEHICLE_TURN * dt * grip;
 
     const fx = -Math.sin(this.state.yaw);
     const fz = -Math.cos(this.state.yaw);
@@ -71,6 +73,8 @@ export class LocalPlayer {
   update(dt) {
     // ---- 1. 从鼠标移动量更新视角（yaw / pitch），写入 state ----
     const { x, y } = this.input.takeMouseDelta();
+    // yaw 的符号约定：**yaw 减小 = 向右转**（前方 = (-sin yaw, -cos yaw)，yaw=0 朝 -Z，yaw 减小转向 +X）。
+    // 所以鼠标右移（x>0）要减 —— 这里写 `-=` 是对的，别被"右移该增加"的直觉带反。
     // 骑电动车时车头由「转向」控制（A/D 或手机左右按钮），鼠标/触屏只负责俯仰 ——
     // 否则一动视角车头就跟着甩，配上惯性根本没法开。
     if (!this.state.ride) {
