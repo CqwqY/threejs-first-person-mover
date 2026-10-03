@@ -553,10 +553,20 @@ export class Game {
   // 直接把一帧拆成物理 / 渲染 / 其他三段摆在屏幕上，一眼就能定位。
   _createPerfHud() {
     const el = document.createElement('div');
+    // z-index 必须压过所有游戏 UI（顶部按钮行 9500 / 学币牌 9500 / 校卡 900 / 编辑模式完成条 9700），
+    // 否则 HUD 会被它们盖住 —— 而 HUD 恰恰是「渲染压力大」时唯一的诊断入口，被挡住等于工具失效。
+    // 位置：左侧中部（top 50% 垂直居中）。
+    // 屏幕四边都被占了，逐个排除：顶部=校卡(窄屏156/展开268, top14~382) + 按钮行(左172起)；
+    // 底部=摇杆(118, left20/bottom26) + 血条(底边居中)；右侧=视角触控区(50vw)。
+    // 左边从校卡下沿(382)到血条上沿之间是唯一整片空白，故垂直居中贴左。
+    // 另加 max-width 防止长数字换行，max-height 防止横屏超出屏幕。
     el.style.cssText =
-      'position:fixed;right:8px;top:8px;z-index:70;pointer-events:none;' +
+      'position:fixed;left:calc(env(safe-area-inset-left, 0px) + 8px);top:50%;' +
+      'transform:translateY(-50%);z-index:9900;pointer-events:none;' +
       'font:11px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre;' +
-      'background:rgba(0,0,0,.58);color:#7CFFB0;padding:6px 8px;border-radius:6px;' +
+      'max-width:min(78vw,340px);max-height:calc(var(--app-vh,100vh) - 24px);overflow:hidden;' +
+      'background:rgba(0,0,0,.72);color:#7CFFB0;padding:6px 8px;border-radius:6px;' +
+      'border:1px solid rgba(124,255,176,.35);' +
       'text-shadow:0 1px 2px rgba(0,0,0,.85);';
     el.textContent = '性能统计中…';
     document.body.appendChild(el);
