@@ -114,6 +114,10 @@ export class Game {
     // dpr 封顶：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
     // 会反复触发 canvas 重算（掉帧/抖动的隐藏来源）
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
+    // 自适应分辨率系数：1 = 画质档封顶值；帧率不够时自动往下压（最低 0.6），
+    // 富余时慢慢升回。老卡/入门卡（填充率是真瓶颈）靠这个自动保帧率。
+    this._dynScale = 1;
+    this._dynLast = 0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // 阴影贴图不再每帧全量重渲（GPU 大头），改为主循环里隔帧置 needsUpdate ——
@@ -601,6 +605,26 @@ export class Game {
     return name;
   }
 
+  // 自适应分辨率：按实测真实帧率动态调整 pixelRatio。
+  // 老卡/入门卡（如 640 级）是真·填充率瓶颈，画面分辨率是唯一有效杠杆 ——
+  // 与其让用户手动调画质档，不如自动保帧率：掉帧就降，富余就慢慢升回。
+  // 节流 1.5s：改 pixelRatio 会重建 drawingBuffer，频繁做本身就会卡顿。
+  _adaptResolution(fps) {
+    const now = performance.now();
+    if (now - this._dynLast < 1500) return;
+    const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
+    let s = this._dynScale;
+    if (fps < 45 && s > 0.6) s = Math.max(0.6, s - 0.2);
+    else if (fps > 57 && s < 1) s = Math.min(1, s + 0.1);
+    else return;
+    if (Math.abs(s - this._dynScale) < 0.01) return;
+    this._dynScale = s;
+    this._dynLast = now;
+    this.renderer.setPixelRatio(base * s);
+    // 只改 drawingBuffer，不动 CSS 尺寸（第三个参数 false），否则布局会被撑变形
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+  }
+
   _updatePerfHud(dt, physMs, renderMs, totalMs) {
     const p = this._perf;
     if (!p) return;
@@ -818,7 +842,8 @@ export class Game {
     const h = vv && vv.height ? vv.height : window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr)); // dpr 封顶跟随画质档，且缩放后重新夹一次
+    // dpr 封顶跟随画质档，再乘自适应系数（缩放/切画质档后都不能把它丢了）
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr) * (this._dynScale || 1));
     this.renderer.setSize(w, h);
   }
 
@@ -839,6 +864,7 @@ export class Game {
       }
     }
     this._qualityDpr = p.dpr;
+    this._dynScale = 1; // 画质档变了，自适应系数回满（重新从封顶值开始探测）
     this.renderer.shadowMap.type = p.type;
     this.renderer.shadowMap.needsUpdate = true; // 类型变了要重渲
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
@@ -5631,6 +5657,15 @@ export class Game {
     this.renderer.shadowMap.needsUpdate = this._shadowTick === 0;
     const _pt3 = this._perf ? performance.now() : 0;
     this.renderer.render(this.scene, this.camera);
+
+    // 自适应分辨率（始终生效，不依赖 ?perf）：每 0.5s 用真实帧率判一次，
+    // 掉到 45 以下就降分辨率、回到 57 以上就慢慢升回，让弱卡自动保住帧率。
+    this._fpsAcc += dt; this._fpsN++;
+    if (this._fpsAcc >= 0.5) {
+      const fps = this._fpsN / this._fpsAcc;
+      this._fpsAcc = 0; this._fpsN = 0;
+      this._adaptResolution(fps);
+    }
 
     // 性能 HUD（#perf）：把一帧拆成 物理 / 渲染 / 其他 三段，每 0.25s 刷一次
     if (this._perf) {
