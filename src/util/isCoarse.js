@@ -8,21 +8,25 @@
 //   带触摸屏的笔记本这两者都为真（触摸屏只是「次要」输入），会把桌面误判成手机
 //   （用户报「电脑也是手机」就是这么来的）。判定一律以「主指针」类型为准。
 //
-// 手动覆盖：URL 加 ?touch=1 / ?touch=0（不写盘、不串设备）。
-// 诊断：URL 加 ?diag，把各信号实际取值打在屏幕上。
+// ⚠ 覆盖参数 ?touch=1 极易"粘住"地址栏（历史版本会自动 replaceState 写它），一旦残留就把
+//   桌面永久锁成手机。所以现在规定：**?touch=1 只在「主指针不是鼠标」时才生效**；
+//   鼠标为主（pointer:fine）的电脑即使地址栏带 ?touch=1 也照样判桌面。
+//
+// 覆盖：?touch=0 永远强制桌面；?touch=1 在主指针非鼠标时强制手机。
+// 诊断：?diag 把各信号实际取值打在屏幕上。
 export function isCoarsePointer() {
   if (typeof window === 'undefined') return false;
 
-  // 显式覆盖优先
-  try {
-    const q = new URLSearchParams(window.location.search).get('touch');
-    if (q === '1') return true;
-    if (q === '0') return false;
-  } catch (e) { /* 隐私模式等拿不到，忽略 */ }
-
   const mq = (name) => !!(window.matchMedia && window.matchMedia(name).matches);
 
-  // 回到最朴素、最稳的判定（≈项目原来的写法），只多一层「主指针是鼠标 → 桌面」的保险：
+  // 1. 显式覆盖（按上面的规则，防残留参数锁死桌面）
+  try {
+    const q = new URLSearchParams(window.location.search).get('touch');
+    if (q === '0') return false;                              // 永远强制桌面
+    if (q === '1' && !mq('(pointer: fine)')) return true;     // 主指针非鼠标时才强制手机
+  } catch (e) { /* 隐私模式等拿不到，忽略 */ }
+
+  // 2. 以「主指针」类型为准（≈项目原来的朴素判定 + 一层鼠标优先保险）
   if (mq('(pointer: coarse)')) return true;  // 主指针是触屏 → 手机
   if (mq('(pointer: fine)')) return false;   // 主指针是鼠标 → 桌面（触摸屏笔记本在此正确归桌面）
   return 'ontouchstart' in window;           // 两者都拿不到时，退回原有兜底
@@ -33,7 +37,14 @@ export function showCoarseDiag() {
   try {
     const mq = (n) => (window.matchMedia ? window.matchMedia(n).matches : 'n/a');
     const nav = (typeof navigator !== 'undefined') ? navigator : {};
+    let touchParam = null;
+    try { touchParam = new URLSearchParams(window.location.search).get('touch'); } catch (e) { /* 忽略 */ }
+    const fine = mq('(pointer: fine)');
+    const honored = touchParam === '0' ? '强制桌面' : (touchParam === '1' ? (fine ? '忽略(主指针是鼠标)' : '强制手机') : '—');
     const rows = {
+      'URL 里的 touch 参数': touchParam,
+      'touch 参数是否生效': honored,
+      '完整 URL': window.location.href,
       'pointer: coarse': mq('(pointer: coarse)'),
       'pointer: fine': mq('(pointer: fine)'),
       'hover: none': mq('(hover: none)'),
@@ -59,7 +70,7 @@ export function showCoarseDiag() {
   } catch (e) { /* 忽略 */ }
 }
 
-// 模块加载时：清理旧版本残留的覆盖位；?diag 时显示诊断。
+// 模块加载时：清理旧版本残留的 localStorage 覆盖位；?diag 时显示诊断。
 try {
   if (typeof localStorage !== 'undefined' && localStorage.getItem('fpm-touch') !== null) {
     localStorage.removeItem('fpm-touch');

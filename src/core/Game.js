@@ -280,23 +280,13 @@ export class Game {
           this._applyRenderScale();
         },
         // 手机技能槽排布：切到「2行竖列」时槽位从轮盘搬到网格里。
-        // 已按手机构建（isCoarsePointer 为真）→ setMobileLayout 即时切换，无需重载。
-        // 某些 WebView / 壳里检测失灵、构造期被当桌面 → setMobileLayout 会 early-return 切不动；
-        // 此时把 ?touch=1 钉进地址栏（history.replaceState，不写 localStorage、不污染电脑）后整页重载，
-        // 让整套手机 UI（摇杆 + 技能槽）按手机模式重建。重载后地址栏仍带 ?touch=1，后续刷新保持手机。
+        // ⚠ 这里只切技能槽排布，**绝不因此把整个 App 强推成手机模式**。
+        //   旧版曾在此 replaceState 往地址栏塞 ?touch=1 再重载 → 只要在电脑上点过这个设置，
+        //   地址栏就永久带上 ?touch=1（= 强制手机，优先级高于一切媒体查询）→ 电脑变手机。
+        //   技能槽切不动时用 URL ?touch=1 手动开手机分支即可，不要在代码里自动塞参数。
         skillLayout: (v) => {
-          const mode = v === '2行竖列' ? 'grid' : 'wheel';
           if (this.skillSlots && typeof this.skillSlots.setMobileLayout === 'function') {
-            this.skillSlots.setMobileLayout(mode); // 已按手机构建 → 即时切换
-          }
-          if (!isCoarsePointer()) {
-            // 检测失灵：强制手机模式并重建（仅本标签页地址栏，不动 localStorage，电脑不受影响）
-            try {
-              const u = new URL(location.href);
-              u.searchParams.set('touch', '1');
-              history.replaceState(null, '', u.toString());
-            } catch (e) { /* 忽略 */ }
-            location.reload();
+            this.skillSlots.setMobileLayout(v === '2行竖列' ? 'grid' : 'wheel');
           }
         },
         shadowR: (v) => {
