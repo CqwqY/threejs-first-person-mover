@@ -16,6 +16,7 @@ const MARGIN = 4; // 贴边最小留白（px）
 // 可摆放的控件：key 存储键、sel 选择器、label 提示、showAs 编辑期间临时显示用的 display
 export const LAYOUT_ITEMS = [
   { key: 'jump', sel: '.mc-jump', label: '跳跃键', showAs: 'flex' },
+  { key: 'view', sel: '.mc-view', label: '人称切换', showAs: 'flex' },
   { key: 'skill', sel: '.sk-box', label: '技能槽', showAs: 'flex' },
   { key: 'health', sel: '.hp-box', label: '血条', showAs: 'block' },
   { key: 'chat', sel: '.chat-tab', label: '对话选项卡', showAs: 'block' },

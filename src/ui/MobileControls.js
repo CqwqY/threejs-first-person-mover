@@ -1,7 +1,12 @@
 // 职责：手机触屏适配。在触屏设备上追加两套覆盖控件，把触摸输入翻译成 Input 的摇杆轴与视角增量：
 //   左侧虚拟摇杆 -> 移动（前后/左右，推满触发冲刺）
 //   右侧拖动区   -> 转视角（yaw/pitch，复用鼠标视角的累计入口）
+//   左下人称切换 -> 第一/第三人称（手机上没有 F5，必须有实体入口）
 // 非触屏设备（粗指针）不创建任何 DOM，保持桌面体验不变。
+//
+// opts 由 main.js 注入（本模块不认识 Game，别直接 import）：
+//   onToggleView()          切一次人称
+//   isThirdPerson()         现在是不是第三人称（切换后据此重画，旁路改动也能同步）
 import { Config } from '../config.js';
 import { onRelayout, viewportSize } from './layout.js';
 import { ensureTheme } from './theme.js';
@@ -12,7 +17,7 @@ export function resetTouchState() {
   if (_resetTouchState) _resetTouchState();
 }
 
-export function initMobileControls(input) {
+export function initMobileControls(input, opts = {}) {
   ensureTheme(); // 配色/字体统一取自主题变量，本模块不再自带一套颜色
   const coarse =
     (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
@@ -58,6 +63,19 @@ export function initMobileControls(input) {
       border:2px solid color-mix(in srgb, var(--kui-blue-soft) 75%, transparent);
       touch-action:none;user-select:none;-webkit-user-select:none}
     .mc-jump:active{background:color-mix(in srgb, var(--kui-blue) 62%, transparent)}
+    /* 人称切换器：摇杆正上方（摇杆半径 26px + 直径 clamp(92,26vmin,124) + 14px 间距）。
+       做成两段而不是单键：单键只能靠文字猜当前是第几人称，两段一眼能看出在哪一档。
+       z-index 52 高过触控区（50）与跳跃键（51），否则点上去会先被摇杆吃掉。 */
+    .mc-view{position:fixed;z-index:52;display:flex;align-items:center;gap:2px;padding:3px;
+      left:calc(env(safe-area-inset-left, 0px) + 20px);
+      bottom:calc(env(safe-area-inset-bottom, 0px) + 26px + clamp(92px,26vmin,124px) + 14px);
+      border-radius:999px;box-sizing:border-box;box-shadow:var(--kui-shadow);
+      background:color-mix(in srgb, var(--kui-ink) 46%, transparent);
+      border:2px solid color-mix(in srgb, var(--kui-blue-soft) 55%, transparent);
+      touch-action:none;user-select:none;-webkit-user-select:none}
+    .mc-view > b{flex:0 0 auto;padding:6px 10px;border-radius:999px;cursor:pointer;
+      font:600 clamp(11px,2.9vmin,13px)/1 var(--kui-font);color:var(--kui-paper);opacity:.6}
+    .mc-view > b.on{background:color-mix(in srgb, var(--kui-blue) 85%, transparent);opacity:1}
   `;
   document.head.appendChild(style);
 
@@ -82,6 +100,41 @@ export function initMobileControls(input) {
   jumpBtn.addEventListener('pointerdown', jumpPress);
   jumpBtn.addEventListener('pointerup', jumpRelease);
   jumpBtn.addEventListener('pointercancel', jumpRelease);
+
+  // ---- 左下人称切换器（1人称 / 3人称）----
+  const viewBox = document.createElement('div');
+  viewBox.className = 'mc-view';
+  const seg1 = document.createElement('b');
+  seg1.textContent = '1人称';
+  const seg3 = document.createElement('b');
+  seg3.textContent = '3人称';
+  viewBox.appendChild(seg1);
+  viewBox.appendChild(seg3);
+  document.body.appendChild(viewBox);
+
+  const isThird = () => !!(typeof opts.isThirdPerson === 'function' && opts.isThirdPerson());
+  // 高亮永远以「真实状态」为准重画，这样别处（键鼠、以后加的设置项）改了人称也不会显示反
+  const syncView = () => {
+    const t = isThird();
+    seg1.classList.toggle('on', !t);
+    seg3.classList.toggle('on', t);
+  };
+  const pickView = (wantThird) => {
+    if (wantThird === isThird()) return; // 已经在这一档就别切，免得把别处的状态又翻回去
+    if (typeof opts.onToggleView === 'function') opts.onToggleView();
+    syncView();
+  };
+  // 用 pointerdown 而不是 click：触屏上 click 有 ~300ms 的合成延迟，点了要过一会才有反应
+  const bindSeg = (el, wantThird) => {
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation(); // 别让这一次按下漏给下面的摇杆区
+      pickView(wantThird);
+    });
+  };
+  bindSeg(seg1, false);
+  bindSeg(seg3, true);
+  syncView();
 
   // ---- 左侧摇杆 ----
   const zone = document.createElement('div');

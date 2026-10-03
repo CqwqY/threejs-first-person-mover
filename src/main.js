@@ -49,8 +49,12 @@ async function main() {
   })();
   await Promise.race([assetsReady, loading.skipped]);
   loading.finish();
-  // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过
-  initMobileControls(game.input);
+  // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过。
+  // 人称切换器只认注入进来的这一对回调，不认识 Game 本身（模块之间靠注入解耦）
+  initMobileControls(game.input, {
+    onToggleView: () => game.toggleThirdPerson(),
+    isThirdPerson: () => !!game.thirdPerson,
+  });
   // 手机触屏：按键布局自适应 + 拖拽摆放。动作注入给「设置」弹窗的「画面元素」区块
   // （非触屏时返回 null，桌面端因此不会出现那组按钮，弹窗里也不会留空区块）
   const layoutApi = initMobileLayout();
