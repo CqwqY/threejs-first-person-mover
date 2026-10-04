@@ -10,11 +10,29 @@ import * as THREE from 'three';
 import { instantiate } from './AssetLoader.js';
 import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
+import { Config } from '../config.js';
 
 const DEG = Math.PI / 180;
-const CLAMP = 24; // 放置区域钳制在 ±24（地面尺寸 50，半径 25）
+const CLAMP = 24; // 无配置范围时的兜底：钳制在 ±24（地面尺寸 50，半径 25）
+// 允许建造的矩形区域（= 场景里「编号 92 / 104」两栋教学楼的占地范围）。取自 Config.BUILD_AREAS。
+const AREAS = (Config && Array.isArray(Config.BUILD_AREAS)) ? Config.BUILD_AREAS.filter(
+  (a) => a && Number.isFinite(a.minX) && Number.isFinite(a.maxX) && Number.isFinite(a.minZ) && Number.isFinite(a.maxZ)
+) : [];
+// 把点夹进「允许建造区域」：落在任一矩形内原样返回；否则吸附到最近矩形的边缘。
+function clampToAreas(x, z) {
+  if (!AREAS.length) return { x: THREE.MathUtils.clamp(x, -CLAMP, CLAMP), z: THREE.MathUtils.clamp(z, -CLAMP, CLAMP) };
+  for (const a of AREAS) if (x >= a.minX && x <= a.maxX && z >= a.minZ && z <= a.maxZ) return { x, z };
+  let best = null, bd = Infinity;
+  for (const a of AREAS) {
+    const cx = Math.min(Math.max(x, a.minX), a.maxX);
+    const cz = Math.min(Math.max(z, a.minZ), a.maxZ);
+    const d = (cx - x) * (cx - x) + (cz - z) * (cz - z);
+    if (d < bd) { bd = d; best = { x: cx, z: cz }; }
+  }
+  return best || { x, z };
+}
 export const HAMMER_ID = 'hammer';    // 建造锤商品 id
-const EDIT_KEY = 'KeyF';              // PC：编辑 / 完成
+const EDIT_KEY = 'KeyG';              // PC：编辑 / 完成（避开 F：NPC 对话 / 上下车）
 const ROTATE_KEY = 'KeyR';            // PC：编辑中旋转 45°
 const DELETE_KEY = 'KeyX';            // PC：编辑中删除
 
@@ -140,7 +158,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     raycaster.setFromCamera({ x: 0, y: 0 }, camera);
     const p = raycaster.ray.intersectPlane(groundPlane, hit);
     if (!p) return null;
-    return { x: THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP), z: THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP) };
+    return clampToAreas(p.x, p.z); // 只允许落在教学楼区域内（落外面就吸到最近楼边）
   }
   function aimedEntry() {
     raycaster.setFromCamera({ x: 0, y: 0 }, camera);
@@ -380,6 +398,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     state.itemId = list.length ? list[0].it.id : null;
     onActiveChange(true);
     refreshStrip();
+    onToast(coarse
+      ? '建造模式：只能摆在教学楼范围内 · 攻击键=放置 · 右侧「编辑」键'
+      : '建造模式：左键=放置 · G=编辑（对准家具后） · 编辑中 R=旋转 X=删除 · 仅限教学楼范围内');
     return true;
   }
   function exit() {
