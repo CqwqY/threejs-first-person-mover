@@ -55,6 +55,12 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   placedGroup.name = 'shared-buildings';
   scene.add(placedGroup);
 
+  // 放置预览（幽灵）：跟随准星的半透明家具，让玩家看得见"会摆在哪、摆出什么形状"
+  const ghostGroup = new THREE.Group();
+  ghostGroup.name = 'build-ghost';
+  scene.add(ghostGroup);
+  let ghost = null, ghostItemId = null;
+
   const raycaster = new THREE.Raycaster();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const hit = new THREE.Vector3();
@@ -65,7 +71,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     itemId: null,    // 放置模式下当前选中的家具商品 id
     editId: null,    // 编辑模式下正在编辑的已摆家具 id
     rotY: 0,         // 放置 / 编辑时的朝向（度）
-    pendingMesh: null,
+    pending: [],     // 待服务端确认的乐观网格（FIFO，被 rejected 时按序回滚）
   };
 
   const rendered = new Map();  // id -> { mesh, rec, mine }
@@ -112,7 +118,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const onLoaded = (g) => {
       if (!g) return;
       protoCache.set(itemId, g);
-      if (state.ghost && state.itemId === itemId) attachProto(state.ghost, g); // 幽灵换成真模型
+      if (ghostItemId === itemId) { ghostItemId = null; refreshGhostProto(); } // 幽灵换成真模型
       // 已摆出的同名家具也一并换成真模型（否则早摆的会一直停留在占位方块）
       for (const e of rendered.values()) {
         if (!e.rec || e.rec.itemId !== itemId || !e.mesh) continue;
@@ -224,26 +230,87 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     return null;
   }
 
+  // ---------- 放置预览（幽灵）：跟随准星的半透明家具 ----------
+  function makeGhost(proto) {
+    const g = proto.clone(true);
+    g.traverse((o) => {
+      if (o.isLight) { o.visible = false; return; } // 幽灵不照亮周围
+      if (!o.isMesh) return;
+      o.castShadow = false; o.receiveShadow = false;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      const ghostMats = mats.map((m) => {
+        if (!m) return m;
+        const c = m.clone();
+        c.transparent = true; c.opacity = 0.5; c.depthWrite = false;
+        if ('emissive' in c) { c.emissive = new THREE.Color(0x5fb0ff); c.emissiveIntensity = 0.35; }
+        return c;
+      });
+      o.material = Array.isArray(o.material) ? ghostMats : ghostMats[0];
+    });
+    return g;
+  }
+  // 按当前选中的家具重建幽灵；原型没就绪时先触发加载，加载完再回来重建
+  function refreshGhostProto() {
+    const id = (state.active && state.mode === 'place') ? state.itemId : null;
+    if (id === ghostItemId && ghost) return;
+    ghostItemId = id;
+    if (ghost) { ghostGroup.remove(ghost); ghost = null; }
+    if (!id) return;
+    const proto = getProto(id);
+    if (!proto) { ensureProto(id, () => { if (state.itemId === id) { ghostItemId = null; refreshGhostProto(); } }); return; }
+    ghost = makeGhost(proto);
+    ghost.visible = false;
+    ghostGroup.add(ghost);
+  }
+  function updateGhost() {
+    if (!state.active || state.mode !== 'place') { if (ghost) ghost.visible = false; return; }
+    refreshGhostProto();
+    if (!ghost) return;
+    const pt = groundPoint();
+    if (!pt) { ghost.visible = false; return; }
+    ghost.visible = true;
+    ghost.position.set(pt.x, 0, pt.z);
+    ghost.rotation.y = state.rotY * DEG;
+  }
+
+  // 进建造模式 / 拉到目录后：把所有「有额度」的家具原型预取一遍（进模式即可见方块、可摆）
+  function prefetchAll() {
+    const p = getProfile();
+    if (!p) return;
+    for (const it of getCatalog()) {
+      if (it.kind !== 'building') continue;
+      if (unplacedCount(p, it.id) > 0) ensureProto(it.id, () => {});
+    }
+  }
+
   // ---------- 放置 ----------
+  // 关键：走 ensureProto（缓存没有时会**立刻**塞占位方块并同步回调），所以永远不会再卡在"模型还没加载好"。
+  function spawn(pt, itemId, rotY) {
+    ensureProto(itemId, (proto) => {
+      if (!proto) return;
+      const profile = getProfile();
+      // 异步期间额度可能已被消耗（或这件家具已换掉）
+      if (profile && unplacedCount(profile, itemId) <= 0) { refreshStrip(); return; }
+      const mesh = meshFrom(proto, { x: pt.x, y: 0, z: pt.z, rotY, scale: 1 });
+      placedGroup.add(mesh);
+      state.pending.push(mesh);
+      network.sendBuildAdd({ itemId, x: pt.x, y: 0, z: pt.z, rotY, scale: 1 });
+    });
+  }
   function place() {
     if (state.mode === 'edit') { commitEdit(); return; }
     if (!state.itemId) { onToast('先在下面家具条里选一件家具'); return; }
     const profile = getProfile();
     const avail = profile ? unplacedCount(profile, state.itemId) : 0;
     if (avail <= 0) { onToast('这件家具没有可摆数量了，去商店「家具」页再买一件'); return; }
-    const proto = getProto(state.itemId);
-    if (!proto) { onToast('模型还没加载好，稍等'); return; }
     const pt = groundPoint();
-    if (!pt) return;
-    const mesh = meshFrom(proto, { x: pt.x, y: 0, z: pt.z, rotY: state.rotY, scale: 1 });
-    placedGroup.add(mesh);
-    state.pendingMesh = mesh;
-    network.sendBuildAdd({ itemId: state.itemId, x: pt.x, y: 0, z: pt.z, rotY: state.rotY, scale: 1 });
+    if (!pt) { onToast('把准星对准地面再放置'); return; }
+    spawn(pt, state.itemId, state.rotY);
   }
 
   function onAdded(rec) {
     if (rendered.has(rec.id)) return;
-    let mesh = state.pendingMesh; state.pendingMesh = null;
+    let mesh = state.pending.shift() || null;
     if (!mesh) {
       ensureProto(rec.itemId, (p) => {
         if (rendered.has(rec.id)) return;
@@ -258,7 +325,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     onCoins(); refreshStrip();
   }
   function onRejected(reason) {
-    if (state.pendingMesh) { placedGroup.remove(state.pendingMesh); state.pendingMesh = null; }
+    const mesh = state.pending.shift();
+    if (mesh) placedGroup.remove(mesh);
+    refreshStrip(); // 回滚后余额可能变了，刷新家具条上的 ×N
     onToast(reason || '被服务器拒绝');
   }
   function onAdd(rec) {
@@ -347,12 +416,14 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   function update() {
     if (!state.active) return;
     if (state.mode === 'edit') {
+      if (ghost) ghost.visible = false; // 编辑模式不显示放置幽灵
       const e = rendered.get(state.editId);
       if (!e) return;
       const pt = groundPoint();
       if (pt) e.mesh.position.set(pt.x, e.mesh.position.y, pt.z);
       return;
     }
+    updateGhost();
     const a = aimedEntry();
     const newId = a ? a.id : null;
     if (newId !== aimId) { clearAim(); if (newId != null) { aimId = newId; setHighlight(aimId, true); } }
@@ -445,17 +516,25 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     state.rotY = 0;
     const list = available();
     state.itemId = list.length ? list[0].it.id : null;
+    prefetchAll();            // 预取可用家具原型：进模式即有方块可摆、可预览
+    ghostItemId = null;
+    refreshGhostProto();
     onActiveChange(true);
     refreshStrip();
-    onToast(coarse
-      ? '建造模式：攻击键=放置 · 右侧「编辑」/「退出建造」· 只能摆教学楼范围内'
-      : '建造模式：左键=放置 · G=编辑 · R=旋转 X=删除 · B=退出 · 仅限教学楼范围内');
+    const noStock = !list.length;
+    onToast(noStock
+      ? '建造模式：还没有可摆的家具 —— 去商店「家具」页买一件'
+      : (coarse
+        ? '建造模式：攻击键=放置 · 右侧「编辑」/「退出建造」· 只能摆教学楼范围内'
+        : '建造模式：左键=放置 · G=编辑 · R=旋转 X=删除 · B=退出 · 仅限教学楼范围内'));
     return true;
   }
   function exit() {
     if (!state.active) return;
     clearAim();
-    if (state.pendingMesh) { placedGroup.remove(state.pendingMesh); state.pendingMesh = null; }
+    while (state.pending.length) placedGroup.remove(state.pending.pop());
+    if (ghost) { ghostGroup.remove(ghost); ghost = null; }
+    ghostItemId = null;
     state.active = false;
     state.mode = 'place';
     state.editId = null;
@@ -492,7 +571,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     setActive: (v) => { if (v) enter(); else exit(); },
     hasHammer,
     handleBuild,
-    refresh: () => { refreshStrip(); fetchAll(); },
+    refresh: () => { refreshStrip(); fetchAll(); prefetchAll(); },
     update,
     place,
   };
