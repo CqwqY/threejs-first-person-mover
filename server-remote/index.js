@@ -677,6 +677,44 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 加特林开火：每一发广播一次「起点 + 方向 + 飞多远」，别人据此复刻同一颗子弹。
+    // 服务器不做命中判定（伤害是开火者本地算的），也不做限流：射速由客户端的 GATLING_INTERVAL 决定（10 发/秒）。
+    if (msg.t === 'shot') {
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      roomBroadcast(ws.__room, {
+        t: 'shot',
+        from: id,
+        x: num(msg.x, 0, -1000, 1000),
+        y: num(msg.y, 0, -100, 500),
+        z: num(msg.z, 0, -1000, 1000),
+        // 方向分量只允许 [-1,1]：客户端发的是单位向量，这里只是防越界
+        dx: num(msg.dx, 0, -1, 1),
+        dy: num(msg.dy, 0, -1, 1),
+        dz: num(msg.dz, 0, -1, 1),
+        d: num(msg.d, 0, 0, 120), // 飞行距离上限略大于 GATLING_RANGE(60)，留点余量
+      }, ws);
+      return;
+    }
+
+    // 抓钩：ev='on' 甩出（锚点 + 出手点 + 时长）/ 'off' 收回。
+    // 服务器不模拟绳索，只转发：各端按自己的玩家位置自己画绳子。
+    if (msg.t === 'grapple') {
+      const ev = msg.ev === 'off' ? 'off' : 'on';
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const out = { t: 'grapple', from: id, ev };
+      if (ev === 'on') {
+        out.x = num(msg.x, 0, -1000, 1000);
+        out.y = num(msg.y, 0, -100, 500);
+        out.z = num(msg.z, 0, -1000, 1000);
+        out.ox = num(msg.ox, 0, -1000, 1000);
+        out.oy = num(msg.oy, 0, -100, 500);
+        out.oz = num(msg.oz, 0, -1000, 1000);
+        out.dur = num(msg.dur, 1, 0.2, 8); // 抓钩最长 8 秒足够（距离 92m 也够飞+拉）
+      }
+      roomBroadcast(ws.__room, out, ws);
+      return;
+    }
+
     // 捉迷藏：开始 / 方向提示 / 结束，广播给所有人（只有相关的人会响应）
     if (msg.t === 'hide') {
       const ev = String(msg.ev || '');

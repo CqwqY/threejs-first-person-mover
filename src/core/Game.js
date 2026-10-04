@@ -31,7 +31,7 @@ import { Input, isEditableTarget } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels } from '../player/PlayerModel.js';
+import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels, spinHeldBarrels } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { onRelayout, readLayout, currentMode, viewportSize } from '../ui/layout.js';
@@ -75,10 +75,11 @@ function perfEnabled() {
 // 圆锥几何默认朝 +Y，制导导弹用它转到飞行方向
 const UP_Y = new THREE.Vector3(0, 1, 0);
 
-// 每帧复用的临时向量（抓钩绳索起点 / 光点瞄准方向），避免在热路径里新建对象
+// 每帧复用的临时向量（抓钩绳索起点 / 光点瞄准方向 / 子弹朝向），避免在热路径里新建对象
 const _gpA = new THREE.Vector3();
 const _gHand = new THREE.Vector3();
 const _gDir = new THREE.Vector3();
+const _bDir = new THREE.Vector3();
 
 // 对战玩法表：新增模式时这里加一条，服务端也要放行同名 mode。
 // tip 给「玩家匹配」用，soloTip 给「训练场」用；win 文案由 MatchRules.MODE_RULES 决定判定方式。
@@ -525,8 +526,11 @@ export class Game {
     this._gatlingOverheated = false;
     this._gatlingCd = 0;
     this._bullets = [];             // 在飞的子弹（只做视觉，命中是瞬时判定）
-    this._bulletGeo = new THREE.SphereGeometry(0.08, 8, 6);
-    this._bulletMat = new THREE.MeshBasicMaterial({ color: 0xffd76a });
+    // 弹道做成「一小段亮黄色曳光条」而不是一个小球：直径 16cm 的球飞出几米外就剩一个像素，
+    // 隔远了谁都看不见（自己打出去的那几发同样遭殃，别人更是完全看不到）。
+    // 圆柱高 1m 靠 scale.y 拉成实际长度，沿飞行方向摆好 → 任何距离都读得出弹道走向。
+    this._bulletGeo = new THREE.CylinderGeometry(0.05, 0.05, 1, 6);
+    this._bulletMat = new THREE.MeshBasicMaterial({ color: 0xffe27a });
 
     // ---- 控制枪：抓住一个玩家吊在视线前方，移动视角拖着走；对方按空格挣脱 ----
     this._ctrl = null;              // 控制者侧：{ id, until, acc, lastAx, lastAy, lastAz }
@@ -643,6 +647,9 @@ export class Game {
     this._grappleHold = null;   // 我们写进 physics.velocityHold 的那个对象（松手时只清自己那份）
     this._grappleRope = null;   // 绳索（Line）
     this._grappleHook = null;   // 钩爪（Cone）
+    // 别人的抓钩：id → { rope, hook, ax,ay,az 锚点, fx,fy,fz 钩爪, flying, t }
+    // 只画别人甩出的那一条（自己的由 _grappleRope/_grappleHook 负责），两端共用同一套画法。
+    this._remoteGrapples = new Map();
     this._beacons = null;       // 疯狂抓钩模式的柱顶光点（瞄准靶），仅在该模式下有值
     // 疯狂抓钩模式：金币与岩浆
     this._coins = [];           // 在空中的金币 { id, x,y,z, mesh, life }
@@ -1235,6 +1242,16 @@ export class Game {
       case 'hide': {
         // 别人的捉迷藏事件：开始 / 方向提示 / 结束
         this._onHideNet(msg);
+        break;
+      }
+      case 'shot': {
+        // 别人的加特林开了一枪：在同一位置复刻一颗子弹，并让他手里的枪管转起来
+        this._onRemoteShot(msg);
+        break;
+      }
+      case 'grapple': {
+        // 别人的抓钩：甩出 / 收回
+        this._onRemoteGrapple(msg);
         break;
       }
       case 'proj': {
@@ -3228,6 +3245,9 @@ export class Game {
     // 子弹视觉：从枪口沿射线飞出去，打到墙或目标就消失
     const travel = Math.min(Number.isFinite(hitT) ? hitT : Config.GATLING_RANGE, clear);
     this._spawnBullet(s.x, s.y, s.z, dx, dy, dz, travel);
+    // 广播这一发：别人那里按同样的「起点 + 方向 + 距离」复刻一颗，才看得见我在开枪。
+    // 注意起点传 s（眼睛）而不是枪口——_spawnBullet 自己会往前挪 0.6m，两端要完全一致。
+    this.network.sendShot({ x: s.x, y: s.y, z: s.z, dx, dy, dz, d: travel });
     this._gatlingHeat = Math.min(100, this._gatlingHeat + Config.GATLING_HEAT_PER_SHOT);
   }
 
@@ -3252,11 +3272,17 @@ export class Game {
 
   _spawnBullet(ox, oy, oz, dx, dy, dz, maxDist) {
     const mesh = new THREE.Mesh(this._bulletGeo, this._bulletMat);
-    mesh.position.set(ox + dx * 0.6, oy + dy * 0.6, oz + dz * 0.6);
+    const sx = ox + dx * 0.6, sy = oy + dy * 0.6, sz = oz + dz * 0.6; // 枪口：从眼睛往前挪一点
+    mesh.position.set(sx, sy, sz);
+    // 圆柱默认沿 Y，转到飞行方向：曳光条是「顺着弹道飞」的一小段线，不是一根朝天的棍子
+    _bDir.set(dx, dy, dz);
+    if (_bDir.lengthSq() > 1e-8) mesh.quaternion.setFromUnitVectors(UP_Y, _bDir.normalize());
+    // 长度取 0.9m 上限并夹在飞行距离内：近距离打墙时不至于穿出一截
+    mesh.scale.set(1, Math.max(0.25, Math.min(0.9, maxDist)), 1);
     this.scene.add(mesh);
     this._bullets.push({
       mesh, dx, dy, dz,
-      ox: ox + dx * 0.6, oy: oy + dy * 0.6, oz: oz + dz * 0.6,
+      ox: sx, oy: sy, oz: sz,
       traveled: 0,
       maxDist: Math.max(0.6, maxDist),
     });
@@ -5525,6 +5551,8 @@ export class Game {
     this._missiles.length = 0;
     this._clearDrops(); // 掉落物属于当前场景，切换场景时清掉
     this._endGrapple(); // 抓钩状态/绳索不跨场景
+    // 别人的绳索同样不跨场景：它们挂在 scene 上，不清会拖着一条线跟着进竞技场
+    for (const id of Array.from(this._remoteGrapples.keys())) this._removeRemoteGrapple(id);
     this._clearCoins(); // 金币属于当前对战场景
   }
 
@@ -5573,6 +5601,7 @@ export class Game {
       this._ensureGrappleViz();
       this._grappleRope.visible = true;
       this._grappleHook.visible = true;
+      this._sendGrappleOn();
       return;
     }
     // 其次判「钩到人」：勾中别人就不拽自己，而是把他朝视线方向甩出去
@@ -5603,6 +5632,18 @@ export class Game {
     this._ensureGrappleViz();
     this._grappleRope.visible = true;
     this._grappleHook.visible = true;
+    this._sendGrappleOn();
+  }
+
+  // 把「我甩出了抓钩」广播出去：别人据此在自己的场景里画一条连着我飞出去的绳子。
+  // 只发锚点/出手点/时长，不发逐帧坐标——我的位置本来就由 20Hz 快照同步过去了，
+  // 绳子那端跟着我的模型走就行，省掉一路高频广播。
+  _sendGrappleOn() {
+    const g = this._grapple;
+    if (!g || !this.network) return;
+    this.network.sendGrapple({
+      ev: 'on', x: g.x, y: g.y, z: g.z, ox: g.fx, oy: g.fy, oz: g.fz, dur: g.t,
+    });
   }
 
   // 光点瞄准判定：疯狂抓钩模式下，准星中轴 GRAPPLE_BEACON_ARC 度内、GRAPPLE_RANGE 内最近的那颗柱顶光点。
@@ -5679,6 +5720,9 @@ export class Game {
     if (this._grappleHold && this.localPlayer.physics.velocityHold === this._grappleHold) {
       this.localPlayer.physics.velocityHold = null;
     }
+    // 抓着一钩才广播「收回」：_endGrapple 也被切场景/超时等路径调用，没有活钩就别发。
+    // 少发一条只是别人那边绳子多留一会儿（他们自己有时长兜底），多发会让绳子乱闪。
+    const wasOn = !!this._grapple;
     this._grappleHold = null;
     // 抓钩一结束就恢复碰撞，别把「无视碰撞」漏到落地之后的正常移动里
     this.localPlayer.physics.noClip = false;
@@ -5686,6 +5730,7 @@ export class Game {
     if (this._grappleRope) this._grappleRope.visible = false;
     if (this._grappleHook) this._grappleHook.visible = false;
     this._grappleCd = Config.GRAPPLE_COOLDOWN;
+    if (wasOn && this.network) this.network.sendGrapple({ ev: 'off' });
   }
 
   // 每帧推进：钩爪飞出 → 按锚点方向拽人 → 到位/超时/松手结束
@@ -5791,9 +5836,136 @@ export class Game {
   // 绳索起点：自己的手。原来用的是相机位置，第三视角下绳子从「身后」冒出来、不连人；
   // 改成按体型与朝向算出的手部世界坐标，第一/第三人称看起来都是从自己身上射出去的。
   _grappleHandPos(out) {
-    const s = this.localState;
     const scale = (this.localPlayer && this.localPlayer.physics && this.localPlayer.physics.sizeScale) || 1;
-    const h = Config.PLAYER_HEIGHT * scale;
+    return this._handPosFrom(this.localState, scale, out);
+  }
+
+  // ============ 别人的抓钩：收到广播后在他身上画一条同样的绳子 ============
+  //
+  // 为什么不逐帧同步钩爪坐标：那是 20~60Hz 的高频广播，而绳子的一端（人）本来就靠快照同步了，
+  // 另一端（钩爪）是按「出手点 → 锚点」匀速飞过去的固定路线。所以一次 'on' 带上锚点/出手点/时长就够了，
+  // 各端自己推，位置还完全一致。
+
+  // 收到别人的抓钩广播：'on' 起一条、'off' 收掉。
+  _onRemoteGrapple(msg) {
+    const id = String(msg.from || '');
+    if (!id || id === this.localState.id) return; // 自己那条由本地逻辑画，别重复
+    if (msg.ev === 'off') { this._removeRemoteGrapple(id); return; }
+    const x = Number(msg.x), y = Number(msg.y), z = Number(msg.z);
+    const ox = Number(msg.ox), oy = Number(msg.oy), oz = Number(msg.oz);
+    const dur = Number(msg.dur);
+    if (![x, y, z, ox, oy, oz, dur].every(Number.isFinite)) return;
+    let g = this._remoteGrapples.get(id);
+    if (!g) {
+      g = this._createRemoteGrappleViz();
+      if (!g) return;
+      this._remoteGrapples.set(id, g);
+    }
+    g.ax = x; g.ay = y; g.az = z;
+    g.fx = ox; g.fy = oy; g.fz = oz;
+    g.flying = true;
+    g.t = dur;
+    g.rope.visible = true;
+    g.hook.visible = true;
+  }
+
+  // 一份远端绳索视觉：与本地那条同样的圆柱 + 锥体，只是坐标来源换成网络消息
+  _createRemoteGrappleViz() {
+    if (!this.scene) return null;
+    const geo = new THREE.CylinderGeometry(0.035, 0.035, 1, 6, 1, true);
+    geo.translate(0, 0.5, 0); // 原点挪到一端，position 直接就是绳子起点
+    const rope = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.95, depthWrite: false })
+    );
+    rope.frustumCulled = false;
+    rope.visible = false;
+    const hook = new THREE.Mesh(
+      new THREE.ConeGeometry(0.2, 0.5, 8),
+      new THREE.MeshStandardMaterial({ color: 0xc9d3e6, emissive: 0x2a3644, metalness: 0.7, roughness: 0.3 })
+    );
+    hook.visible = false;
+    this.scene.add(rope);
+    this.scene.add(hook);
+    return { rope, hook, ax: 0, ay: 0, az: 0, fx: 0, fy: 0, fz: 0, flying: true, t: 0 };
+  }
+
+  _removeRemoteGrapple(id) {
+    const g = this._remoteGrapples.get(id);
+    if (!g) return;
+    this.scene.remove(g.rope);
+    this.scene.remove(g.hook);
+    g.rope.geometry.dispose();
+    g.rope.material.dispose();
+    g.hook.geometry.dispose();
+    g.hook.material.dispose();
+    this._remoteGrapples.delete(id);
+  }
+
+  // 每帧推进别人的钩爪与绳子。人不见了（掉线/退房）或时长到点就收掉，
+  // 这样即使 'off' 丢包，绳子也不会永远挂在天上。
+  _updateRemoteGrapples(dt) {
+    if (!this._remoteGrapples.size) return;
+    for (const [id, g] of this._remoteGrapples) {
+      const rp = this.playerManager ? this.playerManager.players.get(id) : null;
+      g.t -= dt;
+      if (!rp || !rp.state || g.t <= 0) { this._removeRemoteGrapple(id); continue; }
+      if (g.flying) {
+        const step = Config.GRAPPLE_SPEED * 3 * dt; // 与本地钩爪同一个飞行速度
+        const dx = g.ax - g.fx, dy = g.ay - g.fy, dz = g.az - g.fz;
+        const len = Math.hypot(dx, dy, dz);
+        if (len <= step) {
+          g.fx = g.ax; g.fy = g.ay; g.fz = g.az;
+          g.flying = false;
+        } else {
+          g.fx += (dx / len) * step; g.fy += (dy / len) * step; g.fz += (dz / len) * step;
+        }
+      }
+      // 绳子起点 = 那个人的手（用他自己同步过来的位置/朝向/体型算）
+      this._handPosFrom(rp.state, rp.state.size || 1, _gHand);
+      _gpA.set(g.fx, g.fy, g.fz);
+      _gDir.subVectors(_gpA, _gHand);
+      const len = _gDir.length();
+      if (len > 1e-4) {
+        _gDir.divideScalar(len);
+        g.rope.position.copy(_gHand);
+        g.rope.quaternion.setFromUnitVectors(UP_Y, _gDir);
+        g.rope.scale.set(1, len, 1);
+        g.hook.quaternion.setFromUnitVectors(UP_Y, _gDir);
+      }
+      g.hook.position.copy(_gpA);
+    }
+  }
+
+  // ============ 别人的加特林：收到开火广播后复刻一颗子弹 ============
+
+  // 每发一条（射速 GATLING_INTERVAL = 0.1s）。除了复刻子弹，顺带让开火者手里的枪管转一小会儿——
+  // 远端模型没有逐帧动画来源，只能靠这条消息推，否则别人看到的加特林是一把「不动的枪」。
+  _onRemoteShot(msg) {
+    const x = Number(msg.x), y = Number(msg.y), z = Number(msg.z);
+    const dx = Number(msg.dx), dy = Number(msg.dy), dz = Number(msg.dz);
+    const d = Number(msg.d);
+    if (![x, y, z, dx, dy, dz, d].every(Number.isFinite)) return;
+    this._spawnBullet(x, y, z, dx, dy, dz, d);
+    const rp = this.playerManager ? this.playerManager.players.get(String(msg.from || '')) : null;
+    if (rp && rp.model) rp._gunSpin = 0.2; // 秒：这段时间内枪管持续转，比单帧转一下更接近「在扫射」
+  }
+
+  // 远端枪管转动的倒计时驱动：收到开火消息时置 0.2s，期间持续转。
+  // 停火后（不再收到消息）自然衰减到 0，不需要额外的「停火」消息。
+  _spinRemoteGuns(dt) {
+    if (!this.playerManager) return;
+    for (const rp of this.playerManager.players.values()) {
+      if (!rp || !rp._gunSpin || !rp.model) continue;
+      rp._gunSpin = Math.max(0, rp._gunSpin - dt);
+      spinHeldBarrels(rp.model, dt);
+    }
+  }
+
+  // 手部世界坐标的通用算法：本地玩家与**远端玩家**共用一份（远端用他自己同步过来的 size），
+  // 否则别人甩出的绳子会从脚底或头顶冒出来。
+  _handPosFrom(s, scale, out) {
+    const h = Config.PLAYER_HEIGHT * (scale || 1);
     const fx = -Math.sin(s.yaw);
     const fz = -Math.cos(s.yaw);
     const rx = Math.cos(s.yaw);
@@ -6416,6 +6588,10 @@ export class Game {
     this._updateAimUI();
     // 抓钩：钩爪飞行 + 拽人（必须放在玩家物理更新之后，用最新的自身坐标算方向）
     this._updateGrapple(dt);
+    // 别人的抓钩：绳索两端每帧重画（终点跟着各自的模型走）
+    this._updateRemoteGrapples(dt);
+    // 别人的加特林：开火后的一小段时间内让他手里的枪管转起来
+    this._spinRemoteGuns(dt);
     // 疯狂抓钩：房主生成金币、全场吃金币、掉进岩浆判负
     this._updateCoinMode(dt);
     // 爆炸特效：推进动画

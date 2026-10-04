@@ -409,6 +409,7 @@ export function createHeldWeapon(kind) {
       barrels.add(tube);
     }
     rig.add(barrels);
+    rig.userData.barrels = barrels; // 供 spinHeldBarrels 转枪管（远端玩家开火时由 Game 驱动）
   } else if (kind === 'ctrlgun') {
     // 控制枪：科幻手枪/发射器（枪身 + 较长细枪管 + 前端发光环），青蓝色调
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0x31506b, roughness: 0.5, metalness: 0.45 });
@@ -436,6 +437,16 @@ export function createHeldWeapon(kind) {
 // 兼容旧入口：设置手持物文字（内部转调 setHeldItem，武器优先于文字）
 export function setHeldText(group, text) {
   setHeldItem(group, group.userData.heldWep || '', text);
+}
+
+// 远端玩家开火期间把他手里加特林的枪管转起来。
+// 本地那把由 Game._updateGatling 直接驱动（它握在第一人称 rig 上），这里只服务「别人手里的枪」——
+// 远端模型没有逐帧动画来源，只能靠收到的开火消息推一小段。
+export function spinHeldBarrels(group, dt) {
+  const hand = group && group.userData ? group.userData.handAnchor : null;
+  const rig = hand && hand.children.length ? hand.children[0] : null;
+  const barrels = rig && rig.userData ? rig.userData.barrels : null;
+  if (barrels) barrels.rotation.z += dt * 22; // 与本地枪管同一个转速常量
 }
 
 // 生成一个始终面向相机的文字名牌 Sprite（Canvas 文本贴图）；color 控制昵称文字颜色（默认白）

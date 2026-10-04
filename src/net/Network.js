@@ -158,6 +158,34 @@ export class Network {
     this.send({ t: 'proj', ...info });
   }
 
+  // 加特林开火广播：每发一条，让其他人在同一位置看到同一颗子弹飞出去。
+  // 只带「起点 + 方向 + 飞多远」——命中判定是开火者本地算的，服务器不参与，
+  // 别人那边纯粹是画面复刻（走得慢一点/快一点都不影响伤害）。
+  sendShot(info) {
+    if (!info) return;
+    const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+    this.send({
+      t: 'shot',
+      x: num(info.x, 0), y: num(info.y, 0), z: num(info.z, 0),
+      dx: num(info.dx, 0), dy: num(info.dy, 0), dz: num(info.dz, 0),
+      d: num(info.d, 0), // 飞行距离（米）：撞墙/命中目标就到头
+    });
+  }
+
+  // 抓钩广播：ev='on' 甩出钩爪（带锚点、出手点与本次时长）/ 'off' 收回。
+  // 绳子靠各端自己画：一端跟着那个玩家的模型（位置本来就由快照同步），另一端是钩爪。
+  sendGrapple(info) {
+    if (!info || !info.ev) return;
+    const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+    this.send({
+      t: 'grapple',
+      ev: info.ev === 'off' ? 'off' : 'on',
+      x: num(info.x, 0), y: num(info.y, 0), z: num(info.z, 0),     // 锚点
+      ox: num(info.ox, 0), oy: num(info.oy, 0), oz: num(info.oz, 0), // 出手点（钩爪从这里飞出去）
+      dur: num(info.dur, 1),                                        // 本次抓钩最长持续（秒）
+    });
+  }
+
   // 丢弃物品广播：让同场所有人看到同一个物品以同样的物理掉在地上
   sendDrop(info) {
     if (!info || !info.item) return;
