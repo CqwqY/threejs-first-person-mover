@@ -103,6 +103,12 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (protoCache.has(itemId)) { cb(protoCache.get(itemId)); return; }
     const it = findItem(itemId);
     if (!it) return;
+    // 组合家具：拼多个模型 + 灯
+    if (it.combo && Array.isArray(it.combo.parts)) {
+      buildComboProto(it).then((g) => { protoCache.set(itemId, g); cb(g); })
+        .catch(() => { onToast('组合模型加载失败：' + itemId); });
+      return;
+    }
     if (!it.url || it.url === 'placeholder') {
       const box = makePlaceholderBox(it);
       protoCache.set(itemId, box);
@@ -111,6 +117,36 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     }
     instantiate(it.url).then((m) => { protoCache.set(itemId, m); cb(m); })
       .catch(() => { onToast('模型加载失败：' + (it.url || itemId)); });
+  }
+
+  // 组合家具：多个模型 + 灯拼成一个 Group。
+  // 灯 = 点光源（照亮周围）+ 一个自发光小球（看起来就是个亮着的灯泡），两者都要。
+  function buildComboProto(item) {
+    const c = item.combo || {};
+    const parts = Array.isArray(c.parts) ? c.parts : [];
+    const lightDefs = Array.isArray(c.lights) ? c.lights : [];
+    const loads = parts.map((p) => instantiate(p.url).then((m) => {
+      const s = (p.scale && typeof p.scale === 'object') ? p.scale : { x: p.scale || 1, y: p.scale || 1, z: p.scale || 1 };
+      m.scale.set(Number(s.x) || 1, Number(s.y) || 1, Number(s.z) || 1);
+      m.rotation.y = (Number(p.rotY) || 0) * DEG;
+      m.position.set(Number(p.x) || 0, Number(p.y) || 0, Number(p.z) || 0);
+      return m;
+    }).catch(() => null));
+    return Promise.all(loads).then((models) => {
+      const g = new THREE.Group();
+      for (const m of models) { if (m) { touchShadow(m); g.add(m); } }
+      for (const l of lightDefs) {
+        const col = new THREE.Color(l.color || '#ffffff');
+        const pos = new THREE.Vector3(Number(l.x) || 0, Number(l.y) || 3, Number(l.z) || 0);
+        const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);
+        pl.position.copy(pos);
+        g.add(pl);
+        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), new THREE.MeshBasicMaterial({ color: col }));
+        bulb.position.copy(pos);
+        g.add(bulb);
+      }
+      return g;
+    });
   }
   function meshFrom(proto, rec) {
     const m = proto.clone(true); touchShadow(m);

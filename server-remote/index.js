@@ -224,6 +224,49 @@ let SHOP = (() => {
   const h = seedShop().find((x) => x.id === 'hammer');
   if (h) { SHOP.push(h); saveShop(SHOP); }
 })();
+// 组合家具的部件 / 灯光消毒：只放行已知字段并逐项钳制（防脏数据 / 超大对象）
+function sanitizeCombo(c) {
+  const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+  const hex = (v) => (/^#[0-9a-fA-F]{3,8}$/.test(String(v || '')) ? String(v) : '#ffffff');
+  const out = { parts: [], lights: [] };
+  if (!c || typeof c !== 'object') return out;
+  if (Array.isArray(c.parts)) {
+    for (const p of c.parts.slice(0, 40)) {
+      if (!p || typeof p !== 'object') continue;
+      const u = String(p.url || '');
+      if (!/^\/(assets|models)\//.test(u)) continue;
+      const s = p.scale;
+      const sc = (s && typeof s === 'object')
+        ? { x: num(s.x, 1, 0.01, 20), y: num(s.y, 1, 0.01, 20), z: num(s.z, 1, 0.01, 20) }
+        : { x: num(s, 1, 0.01, 20), y: num(s, 1, 0.01, 20), z: num(s, 1, 0.01, 20) };
+      out.parts.push({
+        url: u,
+        x: num(p.x, 0, -400, 400), y: num(p.y, 0, -100, 300), z: num(p.z, 0, -400, 400),
+        rotY: num(p.rotY, 0, -Math.PI * 4, Math.PI * 4),
+        scale: sc,
+      });
+    }
+  }
+  if (Array.isArray(c.lights)) {
+    for (const l of c.lights.slice(0, 20)) {
+      if (!l || typeof l !== 'object') continue;
+      const type = l.type === 'area' ? 'area' : 'point';
+      const o = {
+        type,
+        x: num(l.x, 0, -400, 400), y: num(l.y, 3, -100, 300), z: num(l.z, 0, -400, 400),
+        color: hex(l.color), intensity: num(l.intensity, 1, 0, 300),
+      };
+      if (type === 'area') {
+        o.width = num(l.width, 4, 0.1, 80); o.height = num(l.height, 3, 0.1, 80);
+        o.rotY = num(l.rotY, 0, -Math.PI * 4, Math.PI * 4); o.rotX = num(l.rotX, 0, -Math.PI * 2, Math.PI * 2);
+      } else {
+        o.distance = num(l.distance, 12, 0, 400); o.decay = num(l.decay, 2, 0, 10);
+      }
+      out.lights.push(o);
+    }
+  }
+  return out;
+}
 function saveShop(items) { fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2)); }
 function loadBuildings() {
   try { return JSON.parse(fs.readFileSync(BUILD_FILE, 'utf8')); } catch { return []; }
@@ -410,14 +453,18 @@ const httpServer = http.createServer(async (req, res) => {
           if (!id) return bad('id 非法');
           if (op === 'add' && SHOP.find((x) => x.id === id)) return bad('id 已存在');
           const price = Math.max(0, Math.min(100000, Math.floor(Number(it.price) || 0)));
-          const u = String(it.url || '');
-          if (u && !/^\/(assets|models)\//.test(u) && u !== 'placeholder') return bad('url 必须是 /assets/ 或 /models/ 下的模型，或填 placeholder（占位方块）');
           const kind = it.kind === 'building' ? 'building' : 'item';
+          const u = String(it.url || '');
+          // 组合家具：kind=building + url='combo'（或直接带 combo 字段），部件/灯光单独消毒
+          const comboWanted = kind === 'building' && (u === 'combo' || (it.combo && typeof it.combo === 'object'));
+          if (!comboWanted && u && !/^\/(assets|models)\//.test(u) && u !== 'placeholder') return bad('url 必须是 /assets/ 或 /models/ 下的模型，或 placeholder / combo');
           const name = String(it.name || id).slice(0, 40);
           const desc = String(it.desc || '').slice(0, 200);
           const existing = SHOP.find((x) => x.id === id);
           const rec = existing ? { ...existing } : { id, kind };
-          rec.name = name; rec.price = price; rec.url = (kind === 'building' && !u) ? 'placeholder' : u; rec.desc = desc;
+          rec.name = name; rec.price = price; rec.desc = desc;
+          if (comboWanted) { rec.url = 'combo'; rec.combo = sanitizeCombo(it.combo); }
+          else { rec.url = (kind === 'building' && !u) ? 'placeholder' : u; rec.combo = null; }
           if (kind === 'item') rec.effect = (it.effect && typeof it.effect === 'object') ? it.effect : null;
           if (op === 'add') SHOP.push(rec);
           else SHOP = SHOP.map((x) => (x.id === id ? rec : x));

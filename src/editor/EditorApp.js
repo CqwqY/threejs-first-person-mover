@@ -211,6 +211,9 @@ export function createEditor() {
     trackSel: -1,       // 当前选中的门（右侧列表与 3D 高亮共用；-1 = 没选）
     trackDragPx: 0,     // 拖门起始的屏幕 y 像素（按 Shift 调高度时的基准）
     trackDragY0: 0,     // 拖门起始时这个门的高度（同上）
+    // 组合家具：进入「空白场景」拼装（主场景临时隐藏、placed/lights/scenery 换成空草稿），存成商店商品
+    comboMode: false,
+    comboBackup: null,  // { placed, lights, scenery } 主场景的备份
   };
   // 物体 id：全局唯一的纯数字 id，随场景一起保存/还原。
   // 编号顺序：景物先按 buildScenery 顺序占 1..N（key 固定 → id 固定），摆放物体接续往后排。
@@ -301,6 +304,17 @@ export function createEditor() {
     btnEmptyCollider: document.getElementById('btnEmptyCollider'),
     btnShop: document.getElementById('tShop'),
     shopPanel: document.getElementById('shopPanel'),
+    btnCombo: document.getElementById('tCombo'),
+    comboPanel: document.getElementById('comboPanel'),
+    comboName: document.getElementById('comboName'),
+    comboPrice: document.getElementById('comboPrice'),
+    comboId: document.getElementById('comboId'),
+    comboToken: document.getElementById('comboToken'),
+    comboInfo: document.getElementById('comboInfo'),
+    comboHint: document.getElementById('comboHint'),
+    comboClear: document.getElementById('comboClear'),
+    comboSave: document.getElementById('comboSave'),
+    comboExit: document.getElementById('comboExit'),
     shopToken: document.getElementById('shopToken'),
     shopRefresh: document.getElementById('shopRefresh'),
     shopList: document.getElementById('shopList'),
@@ -2097,6 +2111,7 @@ export function createEditor() {
   }
 
   function markDirty() {
+    if (state.comboMode) refreshComboInfo(); // 组合草稿有变动 → 刷新部件/灯计数
     if (!StepUI.status) return;
     StepUI.status.textContent = '有未保存变更（点“保存场景”）';
     StepUI.status.className = 'save-status dirty';
@@ -2205,6 +2220,10 @@ export function createEditor() {
 
   // 「保存场景」：把当前用户摆放清单 POST 到服务器写入编辑器场景文件
   async function saveToFile() {
+    if (state.comboMode) { // 组合编辑时草稿会顶替主场景，别把它当场景存了
+      if (StepUI.status) { StepUI.status.textContent = '组合编辑中：请先「退出组合」再保存场景'; StepUI.status.className = 'save-status err'; }
+      return;
+    }
     if (!StepUI.status) return;
     try {
       const r = await fetch(SAVE_URL, {
@@ -2799,6 +2818,8 @@ export function createEditor() {
   rm.dist = document.getElementById('status');
 
   function setMode(m) {
+    // 切到「边界 / 赛道 / 道具」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
+    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop')) exitComboMode();
     state.mode = m;
     ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
@@ -3086,6 +3107,123 @@ export function createEditor() {
   if (StepUI.shopRefresh) StepUI.shopRefresh.onclick = () => fetchShop();
   if (StepUI.shopSave) StepUI.shopSave.onclick = () => saveShopItem();
   if (StepUI.shopCancel) StepUI.shopCancel.onclick = () => resetShopForm();
+
+  // ---------- 组合家具：空白场景拼装 + 存成商店商品 ----------
+  function setComboHint(text, cls) {
+    if (!StepUI.comboHint) return;
+    StepUI.comboHint.textContent = text || '';
+    StepUI.comboHint.style.color = cls === 'err' ? '#ff8a8a' : '#9fe0a8';
+  }
+  function refreshComboInfo() {
+    if (!StepUI.comboInfo) return;
+    StepUI.comboInfo.textContent = '草稿：' + state.placed.length + ' 个模型 · ' + state.lights.length + ' 个灯';
+  }
+  // 进入「空白场景」：把主场景（摆放/景物/光源）临时藏起、数组换成空草稿，用现有放置/加灯工具拼装
+  function enterComboMode() {
+    if (state.comboMode) return;
+    state.comboBackup = { placed: state.placed, lights: state.lights, scenery: state.scenery };
+    for (const r of state.placed) if (r.obj) r.obj.visible = false;
+    for (const r of state.lights) { if (r.obj) r.obj.visible = false; if (r.helper) r.helper.visible = false; }
+    for (const r of state.scenery) if (r.obj) r.obj.visible = false;
+    if (boundaryGroup) boundaryGroup.visible = false;
+    if (trackGroup) trackGroup.visible = false;
+    if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = 'none';
+    if (StepUI.trackPanel) StepUI.trackPanel.style.display = 'none';
+    if (StepUI.shopPanel) StepUI.shopPanel.style.display = 'none';
+    state.placed = [];   // 空草稿
+    state.lights = [];
+    state.scenery = [];
+    state.comboMode = true;
+    select(null);
+    if (StepUI.comboPanel) StepUI.comboPanel.style.display = 'block';
+    try { controls.target.set(0, 0, 0); camera.position.set(0, 45, 45); camera.lookAt(0, 0, 0); } catch (e) { /* ignore */ }
+    outlinerUpdate();
+    refreshComboInfo();
+    setComboHint('已进入空白场景：左侧「放置」摆模型、「加点光源」加灯，摆好点「保存为商品」。', '');
+    if (StepUI.hint) StepUI.hint.textContent = '组合编辑：空白场景 · 摆模型/加灯 · 保存为商品';
+  }
+  // 退出组合：删掉草稿，还原主场景
+  function exitComboMode() {
+    if (!state.comboMode) return;
+    for (const r of state.placed) if (r.obj) scene.remove(r.obj);
+    for (const r of state.lights) { if (r.obj) scene.remove(r.obj); if (r.helper) scene.remove(r.helper); }
+    state.placed = state.comboBackup.placed;
+    state.lights = state.comboBackup.lights;
+    state.scenery = state.comboBackup.scenery;
+    for (const r of state.placed) if (r.obj) r.obj.visible = true;
+    for (const r of state.lights) { if (r.obj) r.obj.visible = true; if (r.helper) r.helper.visible = true; }
+    for (const r of state.scenery) if (r.obj) r.obj.visible = true;
+    state.comboMode = false;
+    state.comboBackup = null;
+    if (StepUI.comboPanel) StepUI.comboPanel.style.display = 'none';
+    setMode(state.mode); // 恢复当前模式的边界/赛道可视化与右侧面板
+    outlinerUpdate();
+  }
+  function clearComboDraft() {
+    for (const r of state.placed) if (r.obj) scene.remove(r.obj);
+    for (const r of state.lights) { if (r.obj) scene.remove(r.obj); if (r.helper) scene.remove(r.helper); }
+    state.placed = [];
+    state.lights = [];
+    select(null);
+    outlinerUpdate();
+    refreshComboInfo();
+    setComboHint('草稿已清空。', '');
+  }
+  async function saveComboItem() {
+    const token = (StepUI.comboToken && StepUI.comboToken.value) || '';
+    if (!token) { setComboHint('请先填管理员密钥（与「道具」页同一个）', 'err'); return; }
+    const name = ((StepUI.comboName && StepUI.comboName.value) || '').trim();
+    if (!name) { setComboHint('请填组合名称', 'err'); return; }
+    if (!state.placed.length) { setComboHint('组合里至少放一个模型', 'err'); return; }
+    const price = Math.max(0, Math.min(100000, Math.floor(Number(StepUI.comboPrice && StepUI.comboPrice.value) || 0)));
+    const parts = state.placed.map((rec) => {
+      const s = normScale(rec.scale ?? rec.obj.scale);
+      return {
+        url: rec.url,
+        x: rec.x ?? rec.obj.position.x, y: rec.y ?? rec.obj.position.y, z: rec.z ?? rec.obj.position.z,
+        rotY: rec.rotY ?? 0,
+        scale: { x: s.x, y: s.y, z: s.z },
+      };
+    }).filter((p) => /^\/(assets|models)\//.test(p.url));
+    if (!parts.length) { setComboHint('草稿里的模型没有有效路径（需要 /assets 或 /models 的 glb）', 'err'); return; }
+    const lights = state.lights.map((rec) => {
+      const out = { type: rec.type === 'area' ? 'area' : 'point', x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0, color: lightColorHex(rec), intensity: rec.intensity ?? 1 };
+      if (out.type === 'area') { out.width = rec.width ?? 4; out.height = rec.height ?? 3; out.rotY = rec.rotY ?? 0; out.rotX = rec.rotX ?? 0; }
+      else { out.distance = rec.distance ?? 12; out.decay = rec.decay ?? 2; }
+      return out;
+    });
+    const id = ((StepUI.comboId && StepUI.comboId.value) || '').trim() || ('combo-' + Date.now());
+    setComboHint('保存中…', '');
+    try {
+      const r = await fetch(shopApiUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token, op: 'add',
+          item: {
+            id, name, kind: 'building', price, url: 'combo',
+            desc: '组合家具（' + parts.length + ' 个部件 · ' + lights.length + ' 个灯）',
+            combo: { parts, lights },
+          },
+        }),
+      });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body || !body.ok) { setComboHint('保存失败：HTTP ' + r.status + (body && body.error ? ' · ' + body.error : ''), 'err'); return; }
+      if (StepUI.comboId) StepUI.comboId.value = id;
+      setComboHint('已保存为商品：' + name + '（id=' + id + '）。到游戏商店「家具」页即可购买。', '');
+    } catch (e) {
+      setComboHint('保存失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  if (StepUI.btnCombo) StepUI.btnCombo.onclick = () => { if (state.comboMode) exitComboMode(); else enterComboMode(); };
+  if (StepUI.comboToken) {
+    StepUI.comboToken.value = localStorage.getItem(SHOP_TOKEN_KEY) || '';
+    StepUI.comboToken.addEventListener('input', () => localStorage.setItem(SHOP_TOKEN_KEY, StepUI.comboToken.value || ''));
+  }
+  if (StepUI.comboClear) StepUI.comboClear.onclick = () => clearComboDraft();
+  if (StepUI.comboSave) StepUI.comboSave.onclick = () => saveComboItem();
+  if (StepUI.comboExit) StepUI.comboExit.onclick = () => exitComboMode();
+
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');
 

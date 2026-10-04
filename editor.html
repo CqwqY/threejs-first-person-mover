@@ -184,6 +184,7 @@
         <button class="tool" id="tBound"><span class="ico">⛶</span><span class="lbl">边界</span></button>
         <button class="tool" id="tTrack"><span class="ico">⚑</span><span class="lbl">赛道</span></button>
         <button class="tool" id="tShop"><span class="ico">🛒</span><span class="lbl">道具</span></button>
+        <button class="tool" id="tCombo"><span class="ico">▦</span><span class="lbl">组合</span></button>
         <hr />
         <button class="tool" id="tRuler"><span class="ico">↔</span><span class="lbl">测距</span></button>
         <button class="tool" id="tDel"><span class="ico">✕</span><span class="lbl">删除</span></button>
@@ -253,6 +254,27 @@
             <button id="shopSave" class="import-btn" type="button" style="flex:1">保存</button>
             <button id="shopCancel" class="import-btn" type="button" style="flex:1;background:#444">取消编辑</button>
           </div>
+        </div>
+        <div id="comboPanel" style="display:none">
+          <div class="panel-title">组合家具（预设）</div>
+          <div id="comboTop" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
+            进入空白场景拼组合：用左侧「放置」摆模型、顶栏「加点光源」加灯，摆好后点「保存为商品」。
+            之后在游戏商店的「家具」页购买，摆放时会一次摆出整组（灯 = 发光灯泡 + 点光源照亮）。
+          </div>
+          <div class="field"><label>名称</label><input id="comboName" type="text" maxlength="40" placeholder="如：带灯书桌组" /></div>
+          <div class="field"><label>价格</label><input id="comboPrice" type="number" step="1" min="0" max="100000" value="500" /></div>
+          <div class="field"><label>编号</label><input id="comboId" type="text" placeholder="留空=自动生成" /></div>
+          <div class="field">
+            <label>密钥</label>
+            <input id="comboToken" type="password" placeholder="管理员密钥（同「道具」页）" style="flex:1" />
+          </div>
+          <div id="comboInfo" style="color:#cfe0f5;font-size:12px;line-height:1.7;margin:6px 0"></div>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <button id="comboClear" class="import-btn" type="button">清空草稿</button>
+            <button id="comboSave" class="import-btn" type="button">保存为商品</button>
+            <button id="comboExit" class="import-btn" type="button" style="background:#444">退出组合</button>
+          </div>
+          <div id="comboHint" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
         </div>
         <div id="colliderPanel" style="display:none">
           <div class="panel-title">碰撞体</div>
@@ -351,6 +373,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261004e"></script>
+  <script type="module" src="./src/editor/main.js?v=20261004n"></script>
 </body>
 </html>

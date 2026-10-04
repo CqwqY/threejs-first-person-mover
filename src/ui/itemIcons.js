@@ -73,6 +73,11 @@ export const ITEM_ICONS = {
     <rect x="-2.5" y="0" width="5" height="14" rx="2" fill="currentColor"/>
     <rect x="-12" y="14" width="24" height="6" rx="3" fill="currentColor"/>
   ` },
+  // 组合家具：两个叠放的方块
+  combo: { viewBox: '-28 -28 56 56', body: `
+    <rect x="-21" y="-21" width="24" height="24" rx="4" fill="none" stroke="currentColor" stroke-width="4.5"/>
+    <rect x="-3" y="-3" width="24" height="24" rx="4" fill="currentColor"/>
+  ` },
   // 兜底：问号方块
   box: { viewBox: '-28 -28 56 56', body: `
     <rect x="-18" y="-18" width="36" height="36" rx="6" fill="none" stroke="currentColor" stroke-width="4.5"/>
@@ -90,6 +95,7 @@ export function itemIconSvg(name, { size = '1.6em' } = {}) {
 // 目录项 → 图标 key。商店有完整 item，背包只存名字（传 {name} 即可），两边共用这一套映射。
 export function itemIconKeyFor(item) {
   if (!item) return 'box';
+  if (item.url === 'combo' || item.combo) return 'combo'; // 组合家具
   if (item.kind === 'building') {
     const n = item.name || '';
     if (/椅|凳/.test(n)) return 'chair';
