@@ -105,6 +105,57 @@ try {
   console.log('== A. 桌面态：设置是居中弹窗 ==');
   await send('Page.navigate', { url: APP });
   await enterGame();
+
+  // ---- 顶部按钮：结构必须是「图标键 + 外置文字」，文字不在按钮里（2026-10-04 用户要求）----
+  const top = await evaluate(`(() => {
+    const g = window.__game;
+    const out = [];
+    for (const [name, b] of [['背包', g._btnBag], ['设置', g._btnSettings], ['对战', g._btnCombat]]) {
+      if (!b) { out.push({ name, missing: true }); continue; }
+      const wrap = b.parentElement;
+      const lbl = b._label;
+      out.push({
+        name,
+        tag: b.tagName,
+        // 按钮自己的文字（应为空，文字全在外置 label 上）
+        ownText: (b.textContent || '').trim(),
+        // 外置标签必须是按钮的**兄弟节点**，不是子节点
+        labelOutside: !!(lbl && lbl !== b && wrap && wrap.contains(lbl) && !b.contains(lbl)),
+        labelText: lbl ? lbl.textContent : '',
+        hasSvg: !!b.querySelector('svg'),
+        title: b.title,
+        // 图标键的实际尺寸（方形，约 36px）
+        w: Math.round(b.getBoundingClientRect().width),
+        h: Math.round(b.getBoundingClientRect().height),
+        inViewport: b.getBoundingClientRect().right <= innerWidth + 1,
+      });
+    }
+    return out;
+  })()`);
+  for (const t of top) {
+    ok(!t.missing, `桌面：${t.name} 按钮存在`);
+    if (t.missing) continue;
+    ok(t.hasSvg, `桌面：${t.name} 按钮里有图标`);
+    ok(t.ownText === '', `桌面：${t.name} 按钮内无文字（实际「${t.ownText}」）`);
+    ok(t.labelOutside, `桌面：${t.name} 文字在按钮外（label 是兄弟节点）`);
+    ok(t.labelText.length > 0, `桌面：${t.name} 外置文字非空（实际「${t.labelText}」）`);
+    ok(t.w > 0 && Math.abs(t.w - t.h) <= 2, `桌面：${t.name} 是方形图标键（${t.w}x${t.h}）`);
+    ok(t.inViewport, `桌面：${t.name} 未溢出屏幕`);
+  }
+  // 文案切换不能把图标抹掉（外置 label 结构就是为了这个）
+  const keepIcon = await evaluate(`(() => {
+    const g = window.__game;
+    g._setCombatBtnText('退出对战');
+    const hasIcon = !!g._btnCombat.querySelector('svg');
+    const txt = g._btnCombat._label ? g._btnCombat._label.textContent : '';
+    const title = g._btnCombat.title;
+    g._setCombatBtnText('对战匹配');
+    return { hasIcon, txt, title };
+  })()`);
+  ok(keepIcon.hasIcon, '桌面：切换文案后图标仍在（没被 textContent 抹掉）');
+  ok(keepIcon.txt === '退出对战', `桌面：外置文字跟着变（实际「${keepIcon.txt}」）`);
+  ok(keepIcon.title === '退出对战', '桌面：title 也跟着变（图标化后悬停提示要准）');
+
   await evaluate('window.__game.settingsPanel.open(); true');
   await sleep(350);
   const desk = await evaluate(`(() => {
@@ -238,10 +289,16 @@ try {
     bar: !!document.querySelector('.ml-edit-bar'),
     barButton: (document.querySelector('.ml-edit-bar button') || {}).textContent || '',
     barTop: (() => { const b = document.querySelector('.ml-edit-bar'); return b ? b.getBoundingClientRect().top : -1; })(),
+    // 期望把手数 = LAYOUT_ITEMS 里在当前页面上真实存在元素的项数
+    expected: ['.mc-jump','.mc-drive','.mc-atk','.mc-view','.sk-box','.hp-box','.chat-tab']
+      .filter((s) => !!document.querySelector(s)).length,
   }))()`);
   ok(!edit.panelOpen, '「调整位置」自动收起设置弹窗（否则弹窗盖住要摆的控件）');
-  ok(edit.handles === 4, `4 个可摆控件都浮出把手（实际 ${edit.handles}）`);
-  ok(edit.tags.length === 4, `每个把手带标签（${edit.tags.length} 个）`);
+  // ⚠ 别硬编码 4：LAYOUT_ITEMS 现在是 7 项（跳/驾驶/攻击/人称/技能槽/血条/对话选项卡），
+  // 实际把手数 = 「列表里有、且当前页面上确实有元素」的项数（有些控件按状态才创建）。
+  // 早先断言写死 4 是因为那时列表更短，改布局项后没跟着改。
+  ok(edit.handles === edit.expected, `每个可摆控件都浮出把手（实际 ${edit.handles}，期望 ${edit.expected}）`);
+  ok(edit.tags.length === edit.expected, `每个把手带标签（${edit.tags.length}，期望 ${edit.expected}）`);
   ok(edit.bar && edit.barButton === '完成', '编辑器顶部条 + 「完成」按钮出现');
   ok(edit.barTop === 0, '顶部条贴在屏幕顶（top=0）');
 
@@ -262,7 +319,8 @@ try {
     b.click(); return true;
   })()`);
   await sleep(400);
-  ok(await evaluate('document.querySelectorAll(".ml-handle").length === 4'), '可反复进出（第二次仍是 4 个把手）');
+  ok(await evaluate(`document.querySelectorAll('.ml-handle').length === ${edit.expected}`),
+    '可反复进出（第二次把手数与第一次一致）');
   await evaluate('document.querySelector(".ml-edit-bar button").click(); true');
   await sleep(300);
 

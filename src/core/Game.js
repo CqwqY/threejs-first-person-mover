@@ -3380,28 +3380,43 @@ export class Game {
   }
 
   // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
-  // 每个按钮是「图标 + 文字」并排 —— 图标只是辅助记忆，**文字必须留着**：
-  // 「对战匹配」这种词，光看交叉的剑认不出来，全砍成图标反而更难用。
+  //
+  // 结构（2026-10-04 按用户要求改）：**按钮里只放图标，文字放在按钮外面**。
+  //   <span class="kui-topbtn">
+  //     <i class="kui-iconbtn"><svg/></i>   ← 只有方形图标键，可点区域大
+  //     <b>背包</b>                        ← 外置文字标签，不在按钮里
+  //   </span>
+  // 为什么文字还要留：光看交叉的剑认不出「对战匹配」。但塞进按钮里会让键面变宽、挤掉顶部空间，
+  // 所以文字移到按钮外侧 —— 图标负责点得准，文字负责看得懂。
   _createTopButtons() {
     const coarse = !!this._coarsePointer;
-    // 图标在前、文字在后。icon() 出的是内联 SVG（fill=currentColor），跟着 color 走。
-    // ⚠ 文字放在**独立的 span** 里，别直接用 el.textContent ——
-    //   对战按钮的文案会随状态改（textContent = '退出对战'），那样会把图标一起抹掉。
-    const withIcon = (el, name) => {
-      el.insertAdjacentHTML('afterbegin', icon(name, { size: '1.05em' }));
-      el.style.display = 'inline-flex';
-      el.style.alignItems = 'center';
-      el.style.justifyContent = 'center';
-      el.style.gap = '5px';
-      // 图标要跟着按钮底色走：Kenney 素材原色是白，深色描边按钮上就得反色
-      el.querySelector('svg').style.color = 'var(--kui-ink)';
-      // 把裸文本节点包进 span，后续改文案只动这个 span（_setCombatBtnText）
-      const label = document.createElement('span');
-      while (el.lastChild && el.lastChild.nodeType === 3) label.appendChild(el.lastChild);
-      el.appendChild(label);
-      el._label = label;
-      return el;
+
+    // 建「图标键 + 外置标签」这一组，返回 { wrap, btn, label }
+    // btn 上挂 _label 供 _setCombatBtnText 改文案（外置标签不是按钮的子节点，改它不会动按钮）
+    // 外观全在 theme.js 的 .kui-topbtn 里，这里只补动态部分（定位、图标反色、事件）
+    const mkIconLabel = (text, ic, onClick) => {
+      const wrap = document.createElement('span');
+      wrap.className = 'kui-topbtn';
+
+      const btn = document.createElement('i');
+      btn.className = 'kui-iconbtn';
+      btn.title = text; // 悬停给全称，图标化之后这个更重要
+      btn.insertAdjacentHTML('afterbegin', icon(ic, { size: '1.05em' }));
+      // Kenney 素材原色是白，方形键是深底 → 图标要反成浅色才看得见
+      btn.querySelector('svg').style.color = 'var(--kui-paper)';
+      btn.addEventListener('click', onClick);
+
+      const label = document.createElement('b');
+      label.textContent = text;
+      // 点文字等同于点按钮（小键不好点）
+      label.addEventListener('click', onClick);
+
+      wrap.appendChild(btn);
+      wrap.appendChild(label);
+      btn._label = label; // 供 _setCombatBtnText 用
+      return { wrap, btn, label };
     };
+
     if (coarse) {
       // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐。
       // 三处基础值都要加上安全区：横屏时刘海在左右两侧，不减掉 inset 的话校卡会被切、
@@ -3412,54 +3427,61 @@ export class Game {
         'left:calc(env(safe-area-inset-left, 0px) + 172px);' +
         'right:calc(env(safe-area-inset-right, 0px) + 8px);' +
         'top:calc(env(safe-area-inset-top, 0px) + 12px);' +
-        'display:flex;gap:6px;' +
+        'display:flex;gap:10px;' +
         'justify-content:flex-end;align-items:center;flex-wrap:nowrap;';
       document.body.appendChild(row);
       const mk = (text, ic, onClick) => {
-        const b = document.createElement('div');
-        b.className = 'kui-btn kui-btn--grey';
-        b.textContent = text;
-        b.style.cssText = 'cursor:pointer;user-select:none;-webkit-user-select:none;' +
-          'padding:6px 8px;font-size:12px;white-space:nowrap;';
-        b.addEventListener('click', onClick);
-        withIcon(b, ic);
-        row.appendChild(b);
-        return b;
-      };
-      this._topRow = row;
+        const g = mkIconLabel(text, ic, onClick);
+        row.appendChild(g.wrap);
+        return g.btn;
+      };      this._topRow = row;
       this._btnBag = mk('背包', 'bag', () => this._toggleBag());
       this._btnSettings = mk('设置', 'settings', () => this.settingsPanel.toggle());
       this._btnCombat = mk('对战匹配', 'combat', () => this._toggleCombat());
       this._buildBag();
       return;
     }
+
+    // PC：每个是「图标键 + 文字」一组，整组按 posCss 固定定位
+    // ⚠ 别写 `wrap.style.cssText += posCss` —— cssText 一旦被赋值就会**整条替换**，
+    //   把 .kui-topbtn 里的 display/flex/gap 全冲掉。这里只逐个设定位属性。
     const mkBtn = (text, ic, posCss, onClick) => {
-      const b = document.createElement('div');
-      b.className = 'kui-btn kui-btn--grey';
-      b.textContent = text;
-      b.style.cssText =
-        'position:fixed;z-index:9500;cursor:pointer;user-select:none;padding:7px 10px;' + posCss;
-      b.addEventListener('click', onClick);
-      withIcon(b, ic);
-      document.body.appendChild(b);
-      return b;
+      const g = mkIconLabel(text, ic, onClick);
+      // posCss 形如 'right:calc(50% + 208px);top:14px;'
+      for (const decl of posCss.split(';')) {
+        const i = decl.indexOf(':');
+        if (i < 0) continue;
+        g.wrap.style.setProperty(decl.slice(0, i).trim(), decl.slice(i + 1).trim());
+      }
+      g.wrap.style.position = 'fixed';
+      g.wrap.style.zIndex = '9500';
+      document.body.appendChild(g.wrap);
+      return g.btn;
     };
-    // 校卡展开时最宽 268px，按钮让它贴着卡左右两侧（50% + 134 再留 10px 间距）
-    this._btnBag = mkBtn('背包', 'bag', 'right:calc(50% + 144px);top:14px;', () => this._toggleBag());
-    this._btnSettings = mkBtn('设置', 'settings', 'left:calc(50% + 144px);top:14px;', () => this.settingsPanel.toggle());
-    // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化）
-    this._btnCombat = mkBtn('对战匹配', 'combat', 'right:14px;top:14px;', () => this._toggleCombat());
+    // 校卡展开时最宽 268px（居中 → 右边缘在 50% + 134）。按钮改成「图标键 + 外置文字」后
+    // 一组宽约 64px（36 键 + 4 间隙 + 2 字 + 余量），所以锚点要放到 134 + 64 + 10 = 208，
+    // 否则收起态没问题、展开态文字会压到卡上。ui-browser-check 有 1280 宽的展开态用例。
+    this._btnBag = mkBtn('背包', 'bag', 'right:calc(50% + 208px);top:14px;', () => this._toggleBag());
+    this._btnSettings = mkBtn('设置', 'settings', 'left:calc(50% + 208px);top:14px;', () => this.settingsPanel.toggle());
+    // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化 → 两字/四字宽度不同，
+    // 边距给到 10px 才不会被「退出对战」顶出屏幕）
+    this._btnCombat = mkBtn('对战匹配', 'combat', 'right:10px;top:14px;', () => this._toggleCombat());
     this._buildBag();
   }
 
   // 改「对战匹配」按钮的文案。
-  // ⚠ 不能用 this._btnCombat.textContent = ... —— 那会把并排的图标一起抹掉，
-  //   对战一进场按钮就变成光秃秃两个字。withIcon() 建按钮时把文字包进了 _label span。
+  // ⚠ 文字不在按钮里（按钮只有图标），而是外置的 <b> 标签 —— 建按钮时挂在 btn._label 上。
+  //   早先那版文字在按钮内，用 textContent 改会把图标一起抹掉；现在改成 label 后同样不能用
+  //   textContent 写按钮本身，得写到 _label 上。挂 _label 时有 updateTitle 兜底同步 title。
   _setCombatBtnText(text) {
     const b = this._btnCombat;
     if (!b) return;
-    if (b._label) b._label.textContent = text;
-    else b.textContent = text; // 万一按钮是别处造的，退回旧行为
+    if (b._label) {
+      b._label.textContent = text;
+      b.title = text; // 悬停提示跟着变，否则图标化之后 title 还是旧的「对战匹配」
+    } else {
+      b.textContent = text; // 万一按钮是别处造的，退回旧行为
+    }
   }
 
   _buildBag() {

@@ -262,6 +262,29 @@ export function ensureTheme() {
     .kui-tag--warn { background: color-mix(in srgb, var(--kui-warn) 38%, transparent); color: #2b1f05; }
     .kui-tag--danger { background: color-mix(in srgb, var(--kui-danger) 40%, transparent); }
 
+    /* ---- 顶部「图标键 + 外置文字」按钮组（2026-10-04）----
+       用户要求文字不在按钮里：按钮只放方形图标键（点得准），文字并在外侧（看得懂）。
+       文字带阴影是为了在浅色天空/建筑上也读得清 —— 顶部背景是 3D 画面，不受控。 */
+    .kui-topbtn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .kui-topbtn > .kui-iconbtn { flex: 0 0 auto; font-style: normal; }
+    .kui-topbtn > b {
+      font: 600 12px/1 var(--kui-font);
+      color: var(--kui-paper);
+      white-space: nowrap;
+      cursor: pointer;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, .75);
+    }
+    /* 悬停/按下时整组一起变，视觉上是一个东西 */
+    .kui-topbtn:hover > .kui-iconbtn { filter: brightness(1.12); }
+    .kui-topbtn:active > .kui-iconbtn { transform: translateY(1px); filter: brightness(.94); }
+    .kui-topbtn:hover > b { color: var(--kui-blue-soft); }
+
     /* ---- 键位提示（Kenney Input Prompts Pixel）----
        图块是 16px 像素画，**不要平滑缩放**，否则糊成一团；用 image-rendering: pixelated。
        尺寸用 em，跟着所在文字一起缩放。 */
