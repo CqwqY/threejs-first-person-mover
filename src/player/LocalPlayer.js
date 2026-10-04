@@ -35,6 +35,7 @@ export class LocalPlayer {
     // 骑车相机（仅电脑）拆成两层，见 update()：
     //   _camYaw  = 相机自己的水平朝向，按 RIDE_CAM_LAG 缓动追车头 → 转弯时视角是「被一股力慢慢拖过去」的
     //   _rideLook = 鼠标掰出来的自由视角偏移，按 RIDE_CAM_RECENTER 慢慢回正（随时可以再掰）
+    //   这两层拉力在**车停住时都停掉**（见 update 里的 stopped）
     this._camYaw = state.yaw;
     this._rideLook = 0;
     this.rideLookEnabled = false; // 由 Game 按触屏判定设置（手机不开）
@@ -110,7 +111,8 @@ export class LocalPlayer {
     // 否则一动视角车头就跟着甩，配上惯性根本没法开。
     // 电脑上另给一层「软跟随相机」（只影响相机，state.yaw / 广播 / 车头一点不动）：
     //   ① 转弯时相机不是瞬间锁死在车头上，而是按 RIDE_CAM_LAG 缓动跟过去 → 视角像被一股力慢慢拖过去；
-    //   ② 鼠标可以随时把它掰开（自由视角），松手后按 RIDE_CAM_RECENTER 慢慢回正。
+    //   ② 鼠标可以随时把它掰开（自由视角），松手后按 RIDE_CAM_RECENTER 慢慢回正；
+    //   ③ 车停住（速度 ≤ RIDE_CAM_MIN_SPEED）时 ①② 都不施加，视角停在哪就是哪。
     if (!this.state.ride) {
       this.state.yaw -= x * Config.MOUSE_SENSITIVITY;
       // 不在车上：两层都对齐朝向，相机行为与改动前完全一致
@@ -121,12 +123,21 @@ export class LocalPlayer {
         this._rideLook - x * Config.MOUSE_SENSITIVITY,
         -this._rideLookMax, this._rideLookMax
       );
-      // 「回正力」：指数衰减，松手后会自己回到车头方向（越小回得越慢，0 = 不回）
-      this._rideLook *= Math.exp(-dt * Config.RIDE_CAM_RECENTER);
-      if (Math.abs(this._rideLook) < 1e-4) this._rideLook = 0;
-      // 「跟随拉力」：把相机朝向按最短角缓动到车头方向
-      const d = wrapPi(this.state.yaw - this._camYaw);
-      this._camYaw += d * (1 - Math.exp(-dt * Config.RIDE_CAM_LAG));
+      // 「回正力」和「跟随拉力」只在车真的在动的时候才施加 ——
+      // 停着的时候没有「车头方向」可追，再拽就只是把玩家刚掰过去的视角硬拉回来
+      // （等红灯/停车时想转头看四周，结果视角自己往回爬，很烦）。
+      // ⚠ 只对**驾驶位**判静止：乘客（ride === 2）拿不到车速，不能当成静止把他甩在原地不跟车头转。
+      // ⚠ 用的是上一帧的速度（_driveVehicle 在下面第 1.5 步才更新），差一帧无所谓。
+      const stopped = this.state.ride === 1
+        && Math.abs(this._vehSpeed || 0) <= Config.RIDE_CAM_MIN_SPEED;
+      if (!stopped) {
+        // 「回正力」：指数衰减，松手后会自己回到车头方向（越小回得越慢，0 = 不回）
+        this._rideLook *= Math.exp(-dt * Config.RIDE_CAM_RECENTER);
+        if (Math.abs(this._rideLook) < 1e-4) this._rideLook = 0;
+        // 「跟随拉力」：把相机朝向按最短角缓动到车头方向
+        const d = wrapPi(this.state.yaw - this._camYaw);
+        this._camYaw += d * (1 - Math.exp(-dt * Config.RIDE_CAM_LAG));
+      }
     } else {
       // 手机：不做软跟随相机，两层对齐（行为与改动前一致）
       this._camYaw = this.state.yaw;
