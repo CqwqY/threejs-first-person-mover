@@ -381,8 +381,15 @@ export class Game {
     // ---- AI 商人 NPC：出生点旁喷泉处的阿花，靠近按 F 或点右侧选项卡打开对话栏 ----
     this.aiChat = createNpcChat();
     this.aiChat.setOnSend((text) => this._npcSend(text));
-    this.aiChat.setOnOpen(() => { this._setChatLock(true); });
-    this.aiChat.setOnClose(() => { this._setChatLock(false); });
+    // NPC 对话（跟阿花说话）也要打字：同样把手机控件整组藏掉，免得边聊边走
+    this.aiChat.setOnOpen(() => {
+      this._setChatLock(true);
+      if (this.mobileControls) this.mobileControls.setHidden(true);
+    });
+    this.aiChat.setOnClose(() => {
+      this._setChatLock(false);
+      if (this.mobileControls) this.mobileControls.setHidden(false);
+    });
     this.aiNpc = createAiNpc();
     this.aiNpc.setInteract(() => this._openChat());
     this.scene.add(this.aiNpc.group);
@@ -410,6 +417,11 @@ export class Game {
     this.chat.setOnOpen(() => {
       document.exitPointerLock && document.exitPointerLock(); // 打字时别让鼠标继续转视角
       if (this.input) this.input.clearKeys();                 // 丢掉打开前按住的键，免得边打字边走路
+      // 手机：把摇杆/按键整组藏起来（独立输入界面本身有遮罩，但看不见的控件仍会被摸到）
+      if (this.mobileControls) this.mobileControls.setHidden(true);
+    });
+    this.chat.setOnClose(() => {
+      if (this.mobileControls) this.mobileControls.setHidden(false);
     });
     this.chat.add({ sys: true, text: coarsePointer ? '点左下角「聊」可以和大家说话' : ('按 ' + Config.CHAT_KEY.slice(-1) + ' 键可以和大家说话') });
     window.addEventListener('keydown', (e) => {

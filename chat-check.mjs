@@ -199,33 +199,39 @@ eq(textOf(sysLine), '系统提示', '系统提示不带昵称前缀');
 
 // ---------------------------------------------------------------------------
 console.log('== 3. 开关与发送 ==');
-eq(bar.style.display, 'none', '初始输入条是收起的');
+// ⚠ 手机端（coarse）已经不用左下角那条小输入条了，改用**独立输入界面**
+//   （全屏遮罩 + 底部整条输入）：那块遮罩把触摸全吃掉，打字时游戏收不到任何操作。
+//   所以下面这些开关/发送断言走 sheet 自己的输入框；bar/input 那条路径仍由 desk 用例覆盖。
+eq(bar.style.display, 'none', '手机端：左下角小输入条一直收着（改走独立输入界面）');
 eq(fab.style.display, 'flex', '手机端按钮默认可见');
+const sheet = box.sheet;
+const sInput = sheet && sheet.input;
+ok(!!(sheet && sInput), '手机端建了独立输入界面');
 box.open();
-eq(bar.style.display, 'flex', '打开后输入条显示');
+eq(sheet.isOpen(), true, '打开后独立输入界面显示');
+eq(sheet.root.style.display, 'flex', '独立输入界面铺满屏幕（触摸全被它吃掉，不会边打字边走）');
 eq(fab.style.display, 'none', '打开后收起按钮（避免和输入条抢位置）');
-eq(doc.activeElement, input, '打开后输入框自动聚焦（手机即弹键盘）');
 ok(box.isOpen(), 'isOpen() 返回 true');
 
-input.value = '  大家好  ';
-input.fire('keydown', { key: 'Enter', preventDefault() {}, stopPropagation() {} });
+sInput.value = '  大家好  ';
+sInput.fire('keydown', { key: 'Enter', preventDefault() {}, stopPropagation() {} });
 eq(sent.length, 1, '回车发送了一次');
 eq(sent[0], '大家好', '发送前已清洗（去空白）');
-eq(input.value, '', '发送后清空输入框');
+eq(sInput.value, '', '发送后清空输入框');
 ok(!box.isOpen(), '手机上发完自动收起');
 
-input.value = '被拦住';
+sInput.value = '被拦住';
 box.setSendBlocked(() => true);
 box.open();
-input.fire('keydown', { key: 'Enter', preventDefault() {}, stopPropagation() {} });
+sInput.fire('keydown', { key: 'Enter', preventDefault() {}, stopPropagation() {} });
 eq(sent.length, 1, 'sendBlocked 为真时不发送');
 box.close();
 
-input.value = '不要发出去';
+sInput.value = '不要发出去';
 box.open();
-input.fire('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
+sInput.fire('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
 ok(!box.isOpen(), 'Esc 关闭输入条');
-eq(input.value, '', '关闭时丢弃未发送的内容');
+eq(sInput.value, '', '关闭时丢弃未发送的内容');
 eq(fab.style.display, 'flex', '关闭后按钮重新出现');
 
 // 「打开输入时消息不淡出」：开一条长命消息，打开面板等一段时间，它必须还在

@@ -6,6 +6,7 @@
 import { ensureTheme } from './theme.js';
 import { viewportSize } from './layout.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
+import { createMobileInputSheet } from './MobileInputSheet.js';
 
 const SEND_MAX = 60;      // 自己发出去的字数上限（服务端另有 80 字硬上限）
 const DISPLAY_MAX = 120;  // 别人发来的字数上限（只是兜底，服务端已经截到 80）
@@ -203,6 +204,32 @@ export function createChatBox(opts = {}) {
     return el;
   }
 
+  // 手机端那块独立输入界面（桌面端不用，仍是左下角小输入条）
+  let sheet = null;
+  if (coarse) {
+    // 手机不用左下角那条小输入条，改用**独立输入界面**（全屏遮罩 + 底部整条输入）：
+    // 那块遮罩会把触摸全吃掉，所以打字时游戏收不到任何操作，也不会误触摇杆。
+    sheet = createMobileInputSheet({
+      placeholder: '说点什么…',
+      maxLength: SEND_MAX,
+      onSubmit: (text) => {
+        const t = cleanChatText(text, SEND_MAX);
+        if (!t) return;
+        if (sendBlocked && sendBlocked()) return;
+        if (onSend) onSend(t);
+      },
+      onOpen: () => { setHeld(true); if (onOpen) onOpen(); },
+      // ⚠ 界面可能从里面自己关掉（点遮罩 / × / 发完），必须把 shown 同步回来，
+      //    否则再点「聊」时 show() 会以为还开着、直接 return，就再也打不开了。
+      onClose: () => {
+        shown = false;
+        fab.style.display = 'flex';
+        setHeld(false);
+        if (onClose) onClose();
+      },
+    });
+  }
+
   // ---- 开 / 关 ----
   let onSend = null;
   let onOpen = null;
@@ -213,6 +240,13 @@ export function createChatBox(opts = {}) {
   function show() {
     if (shown) return;
     shown = true;
+    if (sheet) {
+      // 手机：走独立界面。它内部关掉（点遮罩 / × / 发完）时会自己回调 onClose，
+      // 那里负责把 shown 归位、恢复「聊」按钮、通知外部，这里别再重复收尾。
+      fab.style.display = 'none';
+      sheet.open();
+      return;
+    }
     bar.style.display = 'flex';
     if (coarse) fab.style.display = 'none';
     setHeld(true);
@@ -224,6 +258,7 @@ export function createChatBox(opts = {}) {
   function hide() {
     if (!shown) return;
     shown = false;
+    if (sheet) { sheet.close(); return; }
     input.value = '';
     input.blur();
     bar.style.display = 'none';
@@ -279,6 +314,7 @@ export function createChatBox(opts = {}) {
 
   return {
     root,
+    sheet, // 手机端那块独立输入界面（桌面端为 null）；自检要拿它直接敲键盘
     add,
     open: show,
     close: hide,

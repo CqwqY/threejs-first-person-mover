@@ -47,6 +47,16 @@ export function initMobileControls(input, opts = {}) {
         bottom:calc(env(safe-area-inset-bottom, 0px) + 26px)}
       .mc-jump{right:calc(env(safe-area-inset-right, 0px) + 20px)}
     }
+    /* 独立输入界面（打字）打开时整组藏起来：只让玩家"看不见"是不够的 ——
+       看不见却还摸得到，照样会误触摇杆把人走飞。
+       ⚠ 用 visibility 而不是 display：display:none 会让技能槽/刹车的
+       getBoundingClientRect 归零，驾驶时「刹车对齐技能槽」的位置计算就崩了（踩过这个坑）。 */
+    body.mc-hidden .mc-zone, body.mc-hidden .mc-joy, body.mc-hidden .mc-jump,
+    body.mc-hidden .mc-drive, body.mc-hidden .mc-gear, body.mc-hidden .mc-brake,
+    body.mc-hidden .mc-view, body.mc-hidden .sk-box {
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
     /* 摇杆：半径/厚度/位置一律不动，只把白色前景换成主题蓝（透明度由主题变量混出） */
     .mc-joy{position:absolute;left:20px;bottom:26px;width:118px;height:118px;border-radius:50%;
       border:2px solid color-mix(in srgb, var(--kui-blue-soft) 70%, transparent);
@@ -486,6 +496,13 @@ export function initMobileControls(input, opts = {}) {
     if (driving) placeBrakeAtSkillSlot(); // 刹车键贴着技能槽，技能槽挪了它也得挪
   });
 
+  // 打字（手机端独立输入界面）时整组隐藏；同时清掉触摸残留 ——
+  // 否则「按住摇杆 → 点开聊天」会因为收不到配对的 up 而一直往前走。
+  const setHidden = (on) => {
+    document.body.classList.toggle('mc-hidden', !!on);
+    if (on && _resetTouchState) _resetTouchState();
+  };
+
   // 供 Game 在上下车时调用：驾驶键组与「跳」互换、技能槽被刹车顶替
-  return { setDriving };
+  return { setDriving, setHidden };
 }
