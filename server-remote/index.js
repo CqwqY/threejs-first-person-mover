@@ -183,6 +183,7 @@ function seedShop() {
     { id: 'gatling', name: '加特林', price: 200, desc: '按住左键持续扫射，单发 30 点伤害。', kind: 'item', effect: { k: 'gatling' } },
     { id: 'ctrlgun', name: '控制枪', price: 180, desc: '激光抓住别人，移动视角拖着走；对方按空格挣脱。', kind: 'item', effect: { k: 'control' } },
     { id: 'grapple', name: '抓钩', price: 160, desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去。', kind: 'item', effect: { k: 'grapple' } },
+    { id: 'hammer', name: '建造锤', price: 300, desc: '装备到技能槽，按对应数字键（手机点技能键）进入建造模式：攻击键变放置，血条变家具条。', kind: 'item', effect: { k: 'hammer' } },
     { id: 'furn_chair', name: '木椅', url: 'placeholder', price: 80, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [0.5, 0.9, 0.5] },
     { id: 'furn_table', name: '木桌', url: 'placeholder', price: 120, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.2, 0.8, 0.8] },
     { id: 'furn_sofa', name: '布艺沙发', url: 'placeholder', price: 200, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.8, 0.8, 0.9] },
@@ -216,6 +217,12 @@ let SHOP = (() => {
     const bs = loadBuildings().filter((x) => !String(x.itemId || '').startsWith('build_'));
     saveBuildings(bs);
   } catch (e) { /* ignore */ }
+})();
+// 确保「建造锤」在售（老 shop.json 已存在时不会自动带上新种子）
+(function ensureHammer() {
+  if (SHOP.some((x) => x.effect && x.effect.k === 'hammer')) return;
+  const h = seedShop().find((x) => x.id === 'hammer');
+  if (h) { SHOP.push(h); saveShop(SHOP); }
 })();
 function saveShop(items) { fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2)); }
 function loadBuildings() {
@@ -1009,10 +1016,32 @@ wss.on('connection', (ws) => {
       const list = loadBuildings();
       const idx = list.findIndex((b) => b.id === id);
       if (idx < 0) return;
-      if (list[idx].owner !== owner) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '只能移除自己摆的楼' })); return; }
+      if (list[idx].owner !== owner) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '只能移除自己摆的家具' })); return; }
       list.splice(idx, 1);
       saveBuildings(list);
       broadcastAll({ t: 'build', ev: 'del', id });
+      return;
+    }
+
+    // 移动/旋转自己摆的家具：原地改坐标，不新增也不消耗摆放额度
+    if (msg.t === 'build_move') {
+      const owner = ownerKeyOf(ws);
+      const id = String(msg.id || '').slice(0, 48);
+      if (!id) return;
+      const list = loadBuildings();
+      const rec = list.find((b) => b.id === id);
+      if (!rec) return;
+      if (rec.owner !== owner) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '只能编辑自己摆的家具' })); return; }
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      rec.x = num(msg.x, rec.x, -BUILD_CLAMP, BUILD_CLAMP);
+      rec.y = num(msg.y, rec.y, -2, 10);
+      rec.z = num(msg.z, rec.z, -BUILD_CLAMP, BUILD_CLAMP);
+      rec.rotY = num(msg.rotY, rec.rotY, -Math.PI * 4, Math.PI * 4);
+      rec.scale = num(msg.scale, rec.scale, BUILD_SCALE_MIN, BUILD_SCALE_MAX);
+      saveBuildings(list);
+      const out = { t: 'build', ev: 'move', id: rec.id, x: rec.x, y: rec.y, z: rec.z, rotY: rec.rotY, scale: rec.scale };
+      roomBroadcast(ws.__room, out, ws);   // 通知别人
+      ws.send(JSON.stringify(out));        // 回执自己
       return;
     }
 

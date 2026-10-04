@@ -263,6 +263,18 @@ export class Network {
     this.send({ t: 'build_del', id: String(id).slice(0, 48) });
   }
 
+  // sendBuildMove 发 {id, x,y,z,rotY,scale}：仅能移动自己摆的家具（服务端校验 owner）
+  sendBuildMove(info) {
+    if (!info || !info.id) return;
+    const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+    this.send({
+      t: 'build_move',
+      id: String(info.id).slice(0, 48),
+      x: num(info.x, 0), y: num(info.y, 0), z: num(info.z, 0),
+      rotY: num(info.rotY, 0), scale: num(info.scale, 1),
+    });
+  }
+
   // 驾驶员上报后座乘客位置：只有驾驶员发，乘客自己不再单独上报，
   // 否则两个冲量在不同客户端独立推进，乘客会相对车身乱抖。
   sendVehPax(pax, x, y, z, yaw) {

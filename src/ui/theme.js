@@ -345,6 +345,13 @@ export function ensureTheme() {
     body.kui-immersive #idc-layout,
     body.kui-immersive .spd-box { display: none !important; }
 
+    /* ---- 建造模式（锤子触发）----
+       body.kui-build 由 Game 在进入/退出建造模式时切换。只藏顶栏按钮行、校卡、技能槽；
+       血条被家具条顶替（由 Game 单独隐藏 .hp-box），攻击键改语义为「放置」。 */
+    body.kui-build .kui-toprow,
+    body.kui-build #idc-layout,
+    body.kui-build .sk-box { display: none !important; }
+
     /* ---- 键位提示（Kenney Input Prompts Pixel）----
        图块是 16px 像素画，**不要平滑缩放**，否则糊成一团；用 image-rendering: pixelated。
        尺寸用 em，跟着所在文字一起缩放。 */

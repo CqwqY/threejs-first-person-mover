@@ -50,6 +50,13 @@ export const SHOP_ITEMS = [
     desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去；空中再按一次即可松手。',
     effect: { k: 'grapple' },
   },
+  {
+    id: 'hammer',
+    name: '建造锤',
+    price: 300,
+    desc: '装备到技能槽，按对应数字键（手机点技能键）进入建造模式：攻击键变「放置」，血条变可滚动家具条，另有「编辑」键。',
+    effect: { k: 'hammer' },
+  },
 ];
 
 // 目录可被服务端覆盖：GET /api/shop 拉到的最新商品表。为 null 时回退到上面写死的 SHOP_ITEMS。

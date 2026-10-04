@@ -1,27 +1,37 @@
-// 职责：玩家的「家具摆放工具」。必须是**在家具商店买过的家具**（kind:'building'）才能摆；
-// 摆放联机共享——发到服务端校验 + 限流后持久化（data/buildings.json）并广播给所有人，刷新/重进仍在。
-// 限流由服务端权威执行（个人≤5 / 全局≤50 / 冷却3s / 缩放封顶 / 坐标钳制），本地只做体验与额度提示。
-// 消耗式：买 1 件得 1 个摆放额度，摆出成功后从钱包 owned 消耗 1 个；再买再摆。
+// 职责：建造模式（锤子触发）。买「建造锤」→ 装备到技能槽 → 用技能键进入建造模式：
+//   · 隐藏顶栏 / 校卡 / 技能槽（body.kui-build，由 Game 切换）
+//   · 攻击键语义变成「放置」
+//   · 血条位置换成可横向滚动的「家具条」（选一件已买且有额度的家具）
+//   · 新增「编辑」键：对准的已摆家具发白光，按编辑选中后可 移动(对准地面)/旋转/删除
+// 摆放联机共享：build_add（放置）/ build_del（删除）/ build_move（移动旋转），服务端权威校验+限流后持久化并广播。
+// 消耗式：买 1 件得 1 个摆放额度，放置成功后从钱包 owned 消耗 1 个；移动/旋转不消耗。
 // 模型：商品 url 为 'placeholder'（或空）时用占位方块渲染；编辑器导入真模型后自动换成 GLB。
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { instantiate } from './AssetLoader.js';
 import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
+import { isCoarsePointer } from '../util/isCoarse.js';
 
 const DEG = Math.PI / 180;
 const CLAMP = 24; // 放置区域钳制在 ±24（地面尺寸 50，半径 25）
+export const HAMMER_ID = 'hammer';    // 建造锤商品 id
+const EDIT_KEY = 'KeyF';              // PC：编辑 / 完成
+const ROTATE_KEY = 'KeyR';            // PC：编辑中旋转 45°
+const DELETE_KEY = 'KeyX';            // PC：编辑中删除
 
 // initBuildingTool(scene, camera, domElement, network, opts)：
-//   opts.getProfile   () => profile|null   （钱包按账号；摆放额度以此计）
-//   opts.serverBase   'https://host:9000'  （联机服务端基址，用于拉 /api/build）
-//   opts.onToast      (msg) => void
-//   opts.onCoins      () => void              （消耗额度后刷新商店/学币显示）
-// 返回 { state, setActive, toggle, handleBuild, refresh }，handleBuild 供 Game 转发服务端 build 消息。
+//   opts.getProfile    () => profile|null
+//   opts.serverBase    'https://host:9000'
+//   opts.onToast       (msg) => void
+//   opts.onCoins       () => void              （放置消耗额度后刷新钱包/商店）
+//   opts.onActiveChange(active) => void        （进入/退出建造模式时通知 Game 切 UI）
+// 返回 { state, isActive, enter, exit, toggle, setActive, hasHammer, handleBuild, refresh, update, place }
 export function initBuildingTool(scene, camera, domElement, network, opts = {}) {
   const getProfile = opts.getProfile || (() => null);
   const serverBase = (opts.serverBase || '').replace(/\/+$/, '');
   const onToast = opts.onToast || (() => {});
   const onCoins = opts.onCoins || (() => {});
+  const onActiveChange = opts.onActiveChange || (() => {});
+  const coarse = isCoarsePointer();
 
   const placedGroup = new THREE.Group();
   placedGroup.name = 'shared-buildings';
@@ -29,39 +39,32 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
 
   const raycaster = new THREE.Raycaster();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  const ndc = new THREE.Vector2();
   const hit = new THREE.Vector3();
 
   const state = {
     active: false,
-    pick: false,
-    itemId: null,
-    ghost: null,
-    scale: 1, rotY: 0, yOff: 0,
-    x: 3, z: 3,
-    pendingMesh: null, // 乐观渲染、待服务端回执确认的家具
+    mode: 'place',   // 'place' | 'edit'
+    itemId: null,    // 放置模式下当前选中的家具商品 id
+    editId: null,    // 编辑模式下正在编辑的已摆家具 id
+    rotY: 0,         // 放置 / 编辑时的朝向（度）
+    pendingMesh: null,
   };
 
-  // id -> { mesh, rec, mine }
-  const rendered = new Map();
-  const myIds = loadMine();   // 我摆过的家具 id（本地记录，用于显示「移除」按钮）
-  const protoCache = new Map(); // itemId -> 已加载的模型原型（切换素材不重复下）
+  const rendered = new Map();  // id -> { mesh, rec, mine }
+  const protoCache = new Map();// itemId -> 模型原型（占位方块或 GLB）
+  const myIds = loadMine();    // 我摆过的家具 id（本地记录，判断「我的」）
 
   function mineKey() {
     const p = getProfile();
     const id = p ? (p.username || p.nickname || '') : '';
     return 'fp_build_mine__' + (id || 'guest');
   }
-  function loadMine() {
-    try { return new Set(JSON.parse(localStorage.getItem(mineKey()) || '[]')); } catch { return new Set(); }
-  }
-  function saveMine() {
-    try { localStorage.setItem(mineKey(), JSON.stringify([...myIds])); } catch { /* ignore */ }
-  }
+  function loadMine() { try { return new Set(JSON.parse(localStorage.getItem(mineKey()) || '[]')); } catch { return new Set(); } }
+  function saveMine() { try { localStorage.setItem(mineKey(), JSON.stringify([...myIds])); } catch (e) { /* ignore */ } }
 
-  function touchShadow(m) {
-    m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  }
+  function hasHammer() { return loadWallet(getProfile()).owned.includes(HAMMER_ID); }
+
+  function touchShadow(m) { m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } }); }
 
   // 占位方块：url 为 'placeholder'/空 时绘制一个木色 Box（尺寸取商品 size）
   function makePlaceholderBox(item) {
@@ -77,142 +80,140 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     return g;
   }
 
-  // ---------- 幽灵预览 ----------
-  function getProto(itemId) {
-    return protoCache.get(itemId) || null;
-  }
+  function getProto(itemId) { return protoCache.get(itemId) || null; }
   function ensureProto(itemId, cb) {
     if (protoCache.has(itemId)) { cb(protoCache.get(itemId)); return; }
     const it = findItem(itemId);
     if (!it) return;
-    // 占位方块：不下载模型，直接按 size 画 Box
     if (!it.url || it.url === 'placeholder') {
       const box = makePlaceholderBox(it);
       protoCache.set(itemId, box);
       cb(box);
       return;
     }
-    instantiate(it.url).then((m) => {
-      protoCache.set(itemId, m);
-      cb(m);
-    }).catch(() => { onToast('模型加载失败：' + (it.url || itemId)); });
+    instantiate(it.url).then((m) => { protoCache.set(itemId, m); cb(m); })
+      .catch(() => { onToast('模型加载失败：' + (it.url || itemId)); });
+  }
+  function meshFrom(proto, rec) {
+    const m = proto.clone(true); touchShadow(m);
+    m.scale.setScalar(rec && rec.scale ? rec.scale : 1);
+    m.rotation.y = ((rec && rec.rotY) ? rec.rotY : 0) * DEG;
+    m.position.set(rec ? rec.x : 0, (rec && rec.y) || 0, rec ? rec.z : 0);
+    return m;
   }
 
-  function resetGhost() {
-    if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
-    if (!state.active || !state.itemId) return;
-    const ghost = new THREE.Group();
-    ghost.add(makeRing());
-    scene.add(ghost);
-    state.ghost = ghost;
-    const proto = getProto(state.itemId);
-    if (proto) attachProto(ghost, proto);
-    else ensureProto(state.itemId, (p) => { if (state.ghost && state.itemId) attachProto(state.ghost, p); });
-    syncGhost();
-    positionGhost();
-  }
-  function attachProto(ghost, proto) {
-    // 清掉旧模型（保留 ring）
-    for (let i = ghost.children.length - 1; i >= 0; i--) {
-      if (ghost.children[i].userData.isRing) continue;
-      ghost.remove(ghost.children[i]);
-    }
-    const m = proto.clone(true);
-    touchShadow(m);
-    ghost.add(m);
-  }
-  function makeRing() {
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.55, 0.95, 32),
-      new THREE.MeshBasicMaterial({ color: 0x4aa3ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.02;
-    ring.userData.isRing = true;
-    return ring;
-  }
-  function syncGhost() {
-    if (!state.ghost) return;
-    for (const c of state.ghost.children) {
-      if (c.userData.isRing) continue;
-      c.scale.setScalar(state.scale);
-      c.rotation.y = state.rotY * DEG;
-      c.position.y = state.yOff;
+  // ---------- 对准高亮（发白光） ----------
+  let aimId = null;              // 当前对准的已摆家具 id
+  const hlStore = new Map();     // mesh -> 原始 emissive 记录
+  function setHighlight(id, on) {
+    const e = id != null ? rendered.get(id) : null;
+    const mesh = e && e.mesh;
+    if (!mesh) return;
+    if (on) {
+      if (hlStore.has(mesh)) return;
+      const saved = [];
+      mesh.traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (const mat of mats) {
+          if (!mat || !('emissive' in mat)) continue;
+          saved.push({ mat, emissive: mat.emissive ? mat.emissive.clone() : null, intensity: mat.emissiveIntensity });
+          mat.emissive = new THREE.Color(0xffffff);
+          mat.emissiveIntensity = 1.15;
+        }
+      });
+      hlStore.set(mesh, saved);
+    } else {
+      const saved = hlStore.get(mesh);
+      if (!saved) return;
+      for (const s of saved) {
+        if (s.emissive) s.mat.emissive.copy(s.emissive);
+        s.mat.emissiveIntensity = s.intensity;
+      }
+      hlStore.delete(mesh);
     }
   }
-  function positionGhost() {
-    if (state.ghost) state.ghost.position.set(state.x, 0, state.z);
+  function clearAim() { if (aimId != null) setHighlight(aimId, false); aimId = null; }
+
+  // ---------- 射线：准星中心 ----------
+  function groundPoint() {
+    raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+    const p = raycaster.ray.intersectPlane(groundPlane, hit);
+    if (!p) return null;
+    return { x: THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP), z: THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP) };
+  }
+  function aimedEntry() {
+    raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+    const hits = raycaster.intersectObjects(placedGroup.children, true);
+    for (const h of hits) {
+      let o = h.object;
+      while (o && o.parent !== placedGroup) o = o.parent;
+      if (!o) continue;
+      for (const [id, e] of rendered) if (e.mesh === o) return { id, entry: e };
+    }
+    return null;
   }
 
-  // ---------- 摆放 ----------
+  // ---------- 放置 ----------
   function place() {
+    if (state.mode === 'edit') { commitEdit(); return; }
+    if (!state.itemId) { onToast('先在下面家具条里选一件家具'); return; }
     const profile = getProfile();
-    if (!state.itemId) { onToast('先在家具商店买家具，再到这里摆'); return; }
     const avail = profile ? unplacedCount(profile, state.itemId) : 0;
-    if (avail <= 0) { onToast('该家具已无摆放额度，去家具商店再买一件'); return; }
-
+    if (avail <= 0) { onToast('这件家具没有可摆数量了，去商店「家具」页再买一件'); return; }
     const proto = getProto(state.itemId);
     if (!proto) { onToast('模型还没加载好，稍等'); return; }
-
-    // 乐观渲染（待服务端回执给 id）
-    const mesh = proto.clone(true);
-    touchShadow(mesh);
-    mesh.scale.setScalar(state.scale);
-    mesh.rotation.y = state.rotY * DEG;
-    mesh.position.set(state.x, state.yOff, state.z);
+    const pt = groundPoint();
+    if (!pt) return;
+    const mesh = meshFrom(proto, { x: pt.x, y: 0, z: pt.z, rotY: state.rotY, scale: 1 });
     placedGroup.add(mesh);
     state.pendingMesh = mesh;
-
-    network.sendBuildAdd({
-      itemId: state.itemId,
-      x: state.x, y: state.yOff, z: state.z,
-      rotY: state.rotY, scale: state.scale,
-    });
+    network.sendBuildAdd({ itemId: state.itemId, x: pt.x, y: 0, z: pt.z, rotY: state.rotY, scale: 1 });
   }
 
-  // 服务端回执：摆成功（带 id）
   function onAdded(rec) {
     if (rendered.has(rec.id)) return;
-    let mesh = state.pendingMesh;
-    state.pendingMesh = null;
+    let mesh = state.pendingMesh; state.pendingMesh = null;
     if (!mesh) {
-      // 兜底：没乐观网格（理论上不会），按 rec 重新加载
       ensureProto(rec.itemId, (p) => {
-        const m = p.clone(true); touchShadow(m);
-        m.scale.setScalar(rec.scale); m.rotation.y = rec.rotY * DEG; m.position.set(rec.x, rec.y, rec.z);
+        if (rendered.has(rec.id)) return;
+        const m = meshFrom(p, rec);
         placedGroup.add(m); rendered.set(rec.id, { mesh: m, rec, mine: true });
       });
       return;
     }
     rendered.set(rec.id, { mesh, rec, mine: true });
     myIds.add(rec.id); saveMine();
-    const profile = getProfile();
-    if (profile) consumeOwned(profile, rec.itemId);
-    onCoins();
-    refreshSel();
-    renderList();
+    const profile = getProfile(); if (profile) consumeOwned(profile, rec.itemId);
+    onCoins(); refreshStrip();
   }
-  // 服务端拒绝（额度/上限/冷却）
   function onRejected(reason) {
     if (state.pendingMesh) { placedGroup.remove(state.pendingMesh); state.pendingMesh = null; }
-    onToast(reason || '摆放被服务器拒绝');
+    onToast(reason || '被服务器拒绝');
   }
-  // 别人摆的（自己收到 add）
   function onAdd(rec) {
     if (rendered.has(rec.id)) return;
     ensureProto(rec.itemId, (p) => {
       if (rendered.has(rec.id)) return;
-      const m = p.clone(true); touchShadow(m);
-      m.scale.setScalar(rec.scale); m.rotation.y = rec.rotY * DEG; m.position.set(rec.x, rec.y, rec.z);
+      const m = meshFrom(p, rec);
       placedGroup.add(m);
       rendered.set(rec.id, { mesh: m, rec, mine: myIds.has(rec.id) });
     });
   }
   function onDel(id) {
+    if (aimId === id) clearAim();
     const e = rendered.get(id);
     if (e) { placedGroup.remove(e.mesh); rendered.delete(id); }
     myIds.delete(id); saveMine();
-    renderList();
+    if (state.editId === id) { state.mode = 'place'; state.editId = null; refreshStrip(); }
+  }
+  function onMove(rec) {
+    const e = rendered.get(rec.id);
+    if (!e) return;
+    e.rec = Object.assign({}, e.rec, rec);
+    e.mesh.position.set(rec.x, rec.y || 0, rec.z);
+    e.mesh.rotation.y = rec.rotY * DEG;
+    if (rec.scale) e.mesh.scale.setScalar(rec.scale);
   }
 
   // Game 转发：msg = {t:'build', ev, ...}
@@ -221,6 +222,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (msg.ev === 'added') onAdded(msg);
     else if (msg.ev === 'add') onAdd(msg);
     else if (msg.ev === 'del') onDel(msg);
+    else if (msg.ev === 'move') onMove(msg);
     else if (msg.ev === 'rejected') onRejected(msg.reason);
   }
 
@@ -233,202 +235,194 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       .catch(() => {});
   }
 
-  // ---------- 位置拾取 ----------
-  function pointerOnGround(clientX, clientY) {
-    const rect = domElement.getBoundingClientRect();
-    ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    ndc.y = -(((clientY - rect.top) / rect.height) * 2 - 1);
-    raycaster.setFromCamera(ndc, camera);
-    return raycaster.ray.intersectPlane(groundPlane, hit);
+  // ---------- 编辑 ----------
+  function startEdit() {
+    if (!state.active) return;
+    const a = aimedEntry();
+    if (!a) { onToast('先用准星对准一件家具，再按「编辑」'); return; }
+    if (!a.entry.mine) { onToast('只能编辑自己摆的家具'); return; }
+    state.mode = 'edit';
+    state.editId = a.id;
+    state.rotY = Math.round(((a.entry.rec.rotY || 0) / DEG) / 45) * 45; // 吸附到 45° 便于旋转
+    clearAim();
+    refreshStrip();
+    onToast('编辑中：对准地面移动 · 旋转/删除/完成在下方');
   }
-  function onMouseMove(e) {
-    if (!state.active || !state.pick || !state.ghost) return;
-    const p = pointerOnGround(e.clientX, e.clientY);
-    if (p) { state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP); state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP); positionGhost(); }
+  function exitEdit() { state.mode = 'place'; state.editId = null; refreshStrip(); }
+  function rotateEdit() {
+    if (state.mode !== 'edit') return;
+    state.rotY = (state.rotY + 45) % 360;
+    const e = rendered.get(state.editId);
+    if (e) e.mesh.rotation.y = state.rotY * DEG;
   }
-  function onMouseDown(e) {
-    if (!state.active || !state.pick || !state.ghost) return;
-    e.preventDefault(); e.stopPropagation();
-    const p = pointerOnGround(e.clientX, e.clientY);
-    if (p) { state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP); state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP); positionGhost(); place(); }
+  function deleteEdit() {
+    if (state.mode !== 'edit') return;
+    network.sendBuildDel(state.editId);
+    exitEdit();
   }
-
-  // ---------- UI（家具摆放面板） ----------
-  const toggleBtn = document.createElement('button');
-  toggleBtn.textContent = '家具摆放 (B)';
-  toggleBtn.style.cssText =
-    'position:fixed;left:12px;bottom:12px;z-index:99998;background:rgba(15,15,15,.85);color:#fff;' +
-    'font:12px/1 sans-serif;padding:8px 12px;border:1px solid #333;border-radius:6px;cursor:pointer;';
-  document.body.appendChild(toggleBtn);
-
-  const panel = document.createElement('div');
-  panel.style.cssText =
-    'position:fixed;left:12px;bottom:48px;z-index:99999;background:rgba(15,15,15,.92);color:#fff;' +
-    'font:12px/1.6 sans-serif;padding:14px 16px;border-radius:8px;width:300px;user-select:none;display:none;';
-  document.body.appendChild(panel);
-
-  const box = panel;
-  {
-    const title = document.createElement('div');
-    title.textContent = '家具摆放';
-    title.style.cssText = 'font-weight:bold;margin-bottom:6px;';
-    box.appendChild(title);
-
-    const sel = document.createElement('select');
-    sel.style.cssText = 'width:100%;background:#222;color:#fff;border:1px solid #444;border-radius:4px;';
-    box.appendChild(sel);
-    sel.addEventListener('change', () => { state.itemId = sel.value || null; resetGhost(); });
-
-    const hint = document.createElement('div');
-    hint.style.cssText = 'color:#ffd479;margin:6px 0;';
-    box.appendChild(hint);
-
-    const sc = slider(box, '缩放', 0.1, 3, 0.05, 1, (v) => { state.scale = v; syncGhost(); });
-    const rot = slider(box, '旋转(°)', 0, 360, 1, 0, (v) => { state.rotY = v; syncGhost(); });
-    const yo = slider(box, '离地高度', -1, 4, 0.05, 0, (v) => { state.yOff = v; syncGhost(); });
-
-    const xr = numField(box, 'X');
-    const zr = numField(box, 'Z');
-
-    const btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
-    const pickBtn = mkBtn('鼠标拾取位置', '#4aa3ff');
-    const placeBtn = mkBtn('摆出', '#2b6f5f');
-    const clearBtn = mkBtn('移除我摆的', '#a33');
-    btnRow.appendChild(pickBtn); btnRow.appendChild(placeBtn); btnRow.appendChild(clearBtn);
-    box.appendChild(btnRow);
-
-    pickBtn.addEventListener('click', () => {
-      state.pick = !state.pick;
-      pickBtn.textContent = state.pick ? '停止拾取' : '鼠标拾取位置';
-      if (state.pick && document.exitPointerLock) document.exitPointerLock();
+  function commitEdit() {
+    if (state.mode !== 'edit') return;
+    const e = rendered.get(state.editId);
+    if (!e) { exitEdit(); return; }
+    network.sendBuildMove({
+      id: state.editId,
+      x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z,
+      rotY: state.rotY, scale: 1,
     });
-    placeBtn.addEventListener('click', place);
-    clearBtn.addEventListener('click', () => {
-      for (const id of [...myIds]) network.sendBuildDel(id);
-      onToast('已请求移除你摆的家具');
-    });
+    onToast('已更新位置');
+    exitEdit();
+  }
 
-    box.appendChild(sectionLabel('我摆的家具（点击移除）'));
-    const listBox = document.createElement('div');
-    listBox.style.cssText = 'max-height:150px;overflow:auto;margin-top:4px;';
-    box.appendChild(listBox);
-
-    function renderList() {
-      listBox.innerHTML = '';
-      const mine = [...rendered.values()].filter((e) => e.mine);
-      if (!mine.length) {
-        const e = document.createElement('div'); e.textContent = '（暂无）'; e.style.cssText = 'color:#667;';
-        listBox.appendChild(e); return;
-      }
-      mine.forEach((e) => {
-        const r = document.createElement('div');
-        r.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:2px 0;';
-        const labelEl = document.createElement('span');
-        labelEl.textContent = (findItem(e.rec.itemId)?.name || e.rec.itemId) + ` (${e.rec.x | 0},${e.rec.z | 0})`;
-        labelEl.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-        const del = document.createElement('button');
-        del.textContent = '移除';
-        del.style.cssText = 'background:#a33;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;';
-        del.addEventListener('click', () => network.sendBuildDel(e.rec.id));
-        r.appendChild(labelEl); r.appendChild(del);
-        listBox.appendChild(r);
-      });
+  // ---------- 每帧 ----------
+  function update() {
+    if (!state.active) return;
+    if (state.mode === 'edit') {
+      const e = rendered.get(state.editId);
+      if (!e) return;
+      const pt = groundPoint();
+      if (pt) e.mesh.position.set(pt.x, e.mesh.position.y, pt.z);
+      return;
     }
+    const a = aimedEntry();
+    const newId = a ? a.id : null;
+    if (newId !== aimId) { clearAim(); if (newId != null) { aimId = newId; setHighlight(aimId, true); } }
+  }
 
-    // 刷新素材下拉：只列「已买且还有额度」的家具
-    function refreshSel() {
-      const profile = getProfile();
-      const items = getCatalog().filter((it) => it.kind === 'building');
-      sel.innerHTML = '';
-      let any = false;
-      for (const it of items) {
-        const avail = profile ? unplacedCount(profile, it.id) : 0;
-        if (avail <= 0) continue;
-        any = true;
-        const o = document.createElement('option');
-        o.value = it.id;
-        o.textContent = `${it.name}（剩 ${avail}）`;
-        sel.appendChild(o);
-      }
-      if (!any) {
-        const o = document.createElement('option'); o.value = ''; o.textContent = '（先在家具商店买家具）';
-        sel.appendChild(o);
-        state.itemId = null;
-      } else if (!state.itemId || !getCatalog().some((it) => it.id === state.itemId && (profile ? unplacedCount(profile, it.id) : 0) > 0)) {
-        state.itemId = sel.value || null;
-      }
-      hint.textContent = any ? '选好家具 → 拾取位置 → 摆出' : '去家具商店买家具后才能摆（消耗式：买1件摆1件）';
-      resetGhost();
+  // ---------- 家具条 / 编辑键 UI ----------
+  function available() {
+    const p = getProfile();
+    const out = [];
+    for (const it of getCatalog()) {
+      if (it.kind !== 'building') continue;
+      const n = p ? unplacedCount(p, it.id) : 0;
+      if (n > 0) out.push({ it, n });
     }
-    state._refreshSel = refreshSel;
-    state._renderList = renderList;
-    // 初次填充
-    refreshSel();
+    return out;
   }
 
-  function slider(parent, txt, min, max, step, val, onInput) {
-    const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;gap:8px;';
-    const lab = document.createElement('span'); lab.style.cssText = 'color:#c7d0da;flex:1;'; lab.textContent = txt;
-    const valEl = document.createElement('span'); valEl.style.cssText = 'color:#ffd479;';
-    head.appendChild(lab); head.appendChild(valEl);
-    const s = document.createElement('input');
-    s.type = 'range'; s.style.cssText = 'width:100%;accent-color:#4aa3ff;margin:2px 0;';
-    s.min = String(min); s.max = String(max); s.step = String(step); s.value = String(val);
-    valEl.textContent = String(val);
-    s.addEventListener('input', () => { const v = parseFloat(s.value); valEl.textContent = v.toFixed(2); onInput(v); });
-    const el = document.createElement('div'); el.style.cssText = 'margin-top:6px;';
-    el.appendChild(head); el.appendChild(s); parent.appendChild(el);
-    return { s, valEl };
-  }
-  function numField(parent, txt) {
-    const d = document.createElement('div');
-    d.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;';
-    const lab = document.createElement('span'); lab.textContent = txt; lab.style.cssText = 'color:#c7d0da;width:18px;';
-    const input = document.createElement('input');
-    input.style.cssText = 'flex:1;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:2px 6px;';
-    input.type = 'number'; input.min = '-24'; input.max = '24'; input.step = '0.1';
-    d.appendChild(lab); d.appendChild(input); parent.appendChild(d);
-    input.addEventListener('change', () => {
-      const v = parseFloat(input.value);
-      if (!Number.isNaN(v)) { if (txt === 'X') state.x = THREE.MathUtils.clamp(v, -CLAMP, CLAMP); else state.z = THREE.MathUtils.clamp(v, -CLAMP, CLAMP); positionGhost(); }
-    });
-    return { input };
-  }
-  function sectionLabel(t) { const d = document.createElement('div'); d.textContent = t; d.style.cssText = 'color:#c7d0da;margin-top:8px;'; return d; }
-  function mkBtn(t, color) {
-    const b = document.createElement('button'); b.textContent = t;
-    b.style.cssText = `flex:1;padding:6px 0;border:0;border-radius:4px;cursor:pointer;background:${color};color:#fff;`;
+  const strip = document.createElement('div');
+  strip.className = 'build-strip';
+  strip.style.cssText = coarse
+    ? 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 8px);' +
+      'z-index:64;display:none;gap:8px;align-items:center;width:min(340px,88vw);overflow-x:auto;' +
+      'padding:6px 8px;border-radius:999px;pointer-events:none;' +
+      'background:color-mix(in srgb, var(--kui-ink) 48%, transparent);'
+    : 'position:fixed;left:18px;bottom:22px;z-index:64;display:none;gap:8px;align-items:center;' +
+      'width:min(400px,46vw);overflow-x:auto;padding:6px 8px;border-radius:12px;pointer-events:none;' +
+      'background:color-mix(in srgb, var(--kui-ink) 42%, transparent);';
+  document.body.appendChild(strip);
+
+  const editBtn = document.createElement('div');
+  editBtn.textContent = '编辑';
+  editBtn.style.cssText = coarse
+    ? 'position:fixed;right:20px;bottom:42%;z-index:64;cursor:pointer;box-sizing:border-box;' +
+      'width:clamp(56px,15vmin,78px);height:clamp(56px,15vmin,78px);border-radius:50%;' +
+      'display:none;align-items:center;justify-content:center;text-align:center;padding:0;' +
+      'color:var(--kui-paper);font:600 clamp(13px,3.6vmin,16px)/1 var(--kui-font);' +
+      'background:color-mix(in srgb, var(--kui-blue) 42%, transparent);' +
+      'border:2px solid color-mix(in srgb, var(--kui-blue) 85%, transparent);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;'
+    : 'position:fixed;right:24px;bottom:42%;z-index:64;display:none;cursor:pointer;box-sizing:border-box;' +
+      'min-width:76px;height:36px;line-height:36px;text-align:center;padding:0 16px;border-radius:8px;' +
+      'color:#fff;font:600 13px var(--kui-font);background:color-mix(in srgb, var(--kui-blue) 72%, transparent);' +
+      'border:0;user-select:none;-webkit-user-select:none;touch-action:none;';
+  document.body.appendChild(editBtn);
+  editBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); startEdit(); });
+
+  function mkChip(text, onClick, bg, active) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = text;
+    b.style.cssText =
+      'flex:0 0 auto;box-sizing:border-box;padding:6px 12px;border-radius:999px;cursor:pointer;' +
+      'font:600 12px/1.2 var(--kui-font);white-space:nowrap;pointer-events:auto;touch-action:manipulation;' +
+      'color:#fff;border:2px solid ' + (active ? 'var(--kui-gold-hi-2)' : 'rgba(255,255,255,.4)') + ';' +
+      'background:' + (bg || (active ? 'var(--kui-blue-dark)' : 'rgba(11,21,34,.72)')) + ';';
+    b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
     return b;
   }
-
-  // ---------- 开关 ----------
-  function setActive(v) {
-    state.active = v;
-    window.__BUILD_TOOL_ACTIVE__ = v;
-    state.pick = false;
-    panel.style.display = v ? 'block' : 'none';
-    toggleBtn.style.background = v ? 'rgba(42,111,95,.95)' : 'rgba(15,15,15,.85)';
-    if (v) { state._refreshSel && state._refreshSel(); resetGhost(); }
-    else { if (document.exitPointerLock) document.exitPointerLock(); if (state.ghost) { scene.remove(state.ghost); state.ghost = null; } }
+  function mkLabel(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    d.style.cssText = 'flex:0 0 auto;white-space:nowrap;color:var(--kui-paper);font:600 12px/1.2 var(--kui-font);opacity:.9;';
+    return d;
   }
-  toggleBtn.addEventListener('click', () => setActive(!state.active));
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'b' || e.key === 'B') setActive(!state.active);
-  });
 
-  domElement.addEventListener('mousemove', onMouseMove);
-  domElement.addEventListener('mousedown', onMouseDown);
+  function refreshStrip() {
+    if (!state.active) { strip.style.display = 'none'; editBtn.style.display = 'none'; return; }
+    strip.style.display = 'flex';
+    // 编辑模式隐藏「编辑」键（此时动作用条上的按钮）；放置模式显示
+    editBtn.style.display = (state.mode === 'place') ? (coarse ? 'flex' : 'block') : 'none';
+    strip.innerHTML = '';
+    if (state.mode === 'edit') {
+      strip.appendChild(mkLabel('编辑：'));
+      strip.appendChild(mkChip('旋转 45°', rotateEdit));
+      strip.appendChild(mkChip('删除', deleteEdit, '#a33'));
+      strip.appendChild(mkChip('完成', commitEdit, '#2b6f5f'));
+      return;
+    }
+    const list = available();
+    if (!list.length) { strip.appendChild(mkLabel('没有可摆的家具 · 去商店「家具」页买')); return; }
+    for (const entry of list) {
+      strip.appendChild(mkChip(entry.it.name + ' ×' + entry.n, () => { state.itemId = entry.it.id; refreshStrip(); }, null, entry.it.id === state.itemId));
+    }
+  }
+
+  // ---------- 进入 / 退出 ----------
+  function enter() {
+    if (state.active) return true;
+    if (!hasHammer()) { onToast('先在小满杂货铺买「建造锤」，再用技能槽里的它进入建造模式'); return false; }
+    state.active = true;
+    state.mode = 'place';
+    state.editId = null;
+    state.rotY = 0;
+    const list = available();
+    state.itemId = list.length ? list[0].it.id : null;
+    onActiveChange(true);
+    refreshStrip();
+    return true;
+  }
+  function exit() {
+    if (!state.active) return;
+    clearAim();
+    if (state.pendingMesh) { placedGroup.remove(state.pendingMesh); state.pendingMesh = null; }
+    state.active = false;
+    state.mode = 'place';
+    state.editId = null;
+    onActiveChange(false);
+    refreshStrip();
+  }
+  function toggle() { if (state.active) exit(); else enter(); }
+
+  // PC 键盘：F 编辑/完成 · R 旋转 · X 删除 · 数字键选家具
+  window.addEventListener('keydown', (e) => {
+    if (!state.active) return;
+    const el = document.activeElement;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+    if (e.code === EDIT_KEY) { if (state.mode === 'edit') commitEdit(); else startEdit(); return; }
+    if (e.code === ROTATE_KEY && state.mode === 'edit') { rotateEdit(); return; }
+    if (e.code === DELETE_KEY && state.mode === 'edit') { deleteEdit(); return; }
+    const m = /^Digit([1-9])$/.exec(e.code);
+    if (m && state.mode === 'place') {
+      const list = available();
+      const pick = list[Number(m[1]) - 1];
+      if (pick) { state.itemId = pick.it.id; refreshStrip(); }
+    }
+  });
 
   fetchAll();
 
   return {
     state,
-    setActive,
-    toggle: () => setActive(!state.active),
+    isActive: () => state.active,
+    enter,
+    exit,
+    toggle,
+    setActive: (v) => { if (v) enter(); else exit(); },
+    hasHammer,
     handleBuild,
-    // 登录/目录变化后刷新下拉与已摆列表
-    refresh: () => { state._refreshSel && state._refreshSel(); state._renderList && state._renderList(); fetchAll(); },
+    refresh: () => { refreshStrip(); fetchAll(); },
+    update,
+    place,
   };
 }

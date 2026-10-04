@@ -144,7 +144,7 @@ export function createShopPanel({ onBuy, onRedeem, onPlace }) {
     // 兑换码与说明只在「道具」页签显示；家具页签换成家具说明
     redeemRow.style.display = isFurn ? 'none' : 'flex';
     intro.textContent = isFurn
-      ? '花学币买家具，买了在「家具摆放工具(B)」里摆到场景里。占位方块可先在编辑器导入真实模型替换。'
+      ? '花学币买家具；买「建造锤」后按技能键进入建造模式即可摆放。占位方块可先在编辑器导入真实模型替换。'
       : '用学币换点好玩的东西。击败一次老师拿 50 学币。';
 
     grid.innerHTML = '';

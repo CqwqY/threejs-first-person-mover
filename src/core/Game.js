@@ -526,7 +526,10 @@ export class Game {
     this.shop = createShopPanel({
       onBuy: (id) => this._buyShopItem(id),
       onRedeem: (code) => this._redeemCode(code),
-      onPlace: () => { this.shop.close(); if (this._buildTool) this._buildTool.setActive(true); },
+      onPlace: () => {
+        if (this._buildTool && this._buildTool.hasHammer()) { this.shop.close(); this._buildTool.enter(); }
+        else this._toast('先在小满杂货铺的「道具」页买「建造锤」，再用技能槽里的它进入建造模式');
+      },
     });
     this.shop.setState(() => loadWallet(this._profile));
     // 学币不再单独挂一块牌：余额并进校卡（小牌右端 + 展开后资料里的一行），顶部只留校卡一个入口。
@@ -539,6 +542,16 @@ export class Game {
       serverBase: shopBase,
       onToast: (m) => this._toast(m),
       onCoins: () => { this._refreshCoins(); if (this.shop) this.shop.render(); },
+      // 进入/退出建造模式：切 body 类（隐藏顶栏/校卡/技能槽）、血条换成家具条位、攻击键改文案
+      onActiveChange: (active) => {
+        document.body.classList.toggle('kui-build', !!active);
+        if (this._hpBox) this._hpBox.style.display = active ? 'none' : '';
+        if (this._attackBtnLabel) this._attackBtnLabel.textContent = active ? '放置' : '攻击';
+        this._bossUiKey = null;           // 强制重算攻击键显隐
+        this._updateBossUI();
+        this._updateSkillBarVisibility();
+        if (active && this._attackCoarse && this._attackBtn) { this._attackBtn.style.display = ''; this._placeAttackBtn(); }
+      },
     });
     // 拉服务端商店目录（含最新价格与教学楼），覆盖本地写死的 SHOP_ITEMS；失败则回退本地。
     fetch(shopBase + '/api/shop')
@@ -983,6 +996,7 @@ export class Game {
     box.appendChild(row);
     box.appendChild(track);
     document.body.appendChild(box);
+    this._hpBox = box; // 建造模式要把血条整块换成家具条 → 需要句柄
     this._hpNum = num;
     this._hpFill = fill;
   }
@@ -1750,9 +1764,11 @@ export class Game {
     const atkLabel = document.createElement('span');
     atkLabel.textContent = '攻击';
     el.appendChild(atkLabel);
+    this._attackBtnLabel = atkLabel; // 建造模式下要把它改成「放置」
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (this._isBuildActive()) { this._buildTool.place(); return; } // 建造模式：攻击键=放置
       // 开了加特林就改成按住持续扫射（松手停火）
       if (this._gatlingOn) { this._gatlingHeld = true; return; }
       if (this._ctrlOn) { this._fireCtrlGun(); return; }
@@ -2295,6 +2311,14 @@ export class Game {
   // 每帧刷新 Boss 相关 UI：传送门按钮、攻击/护盾按钮、顶部血条。
   // 用一个状态串做去重，避免每帧重复写 DOM。
   _updateBossUI() {
+    // 建造模式：攻击键常显且语义为「放置」，护盾 / 传送门 / Boss 条全部收起
+    if (this._isBuildActive()) {
+      if (this._attackBtn) { this._attackBtn.style.display = ''; this._attackShown = true; }
+      if (this._attackBtnLabel) this._attackBtnLabel.textContent = '放置';
+      if (this._shieldBtn) this._shieldBtn.style.display = 'none';
+      if (this._portalHint) this._portalHint.style.display = 'none';
+      return;
+    }
     const mode = this.boss.mode;
     const phase = this.boss.phase;
     const P = Config.PORTAL_POS;
@@ -2399,6 +2423,7 @@ export class Game {
   // 主攻击入口：对战中丢能量球（打人），否则走 Boss 战的粉笔头。
   // 左键与手机「攻击」按钮都走这里，保证两端口径一致。
   _primaryAttack() {
+    if (this._isBuildActive()) { this._buildTool.place(); return; } // 建造模式：左键=放置
     if (this._soul) return; // 灵魂出窍时肉身不可攻击
     if (this._combat) { this._combatAttack(); return; }
     this._attackBoss();
@@ -4301,6 +4326,11 @@ export class Game {
           label: '加特林',
           run: () => this._toggleGatling(),
         };
+      case 'hammer':
+        return {
+          label: '建造锤',
+          run: () => { if (this._buildTool) this._buildTool.toggle(); },
+        };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
         const dmg = (v && v > 0) ? v : 40;
@@ -5094,9 +5124,14 @@ export class Game {
   // 技能栏显隐：对战（竞技场）与灵魂出窍下不显示——这两个场景里技能栏无意义
   _updateSkillBarVisibility() {
     if (!this.skillSlots || typeof this.skillSlots.setVisible !== 'function') return;
-    this.skillSlots.setVisible(!this._combat && !this._soul);
+    this.skillSlots.setVisible(!this._combat && !this._soul && !this._isBuildActive());
     // 显隐翻转后位置可能要变（攻击键显示/隐藏会改变技能键的挂靠对象）
     this._relayoutSkillBtn();
+  }
+
+  // 是否处于建造模式（锤子触发）
+  _isBuildActive() {
+    return !!(this._buildTool && typeof this._buildTool.isActive === 'function' && this._buildTool.isActive());
   }
 
   _updateCombatHUD(res) {
@@ -6686,6 +6721,8 @@ export class Game {
     if (!this._soul) this.localPlayer.update(dt);
     const _pt2 = this._perf ? performance.now() : 0; // 物理（含 trimesh 解算）耗时
     this.playerManager.update(dt);
+    // 建造模式：对准高亮 + 编辑中的家具跟随准星（在相机/玩家更新之后跑）
+    if (this._buildTool) this._buildTool.update();
     // 骨骼动画：本机 + 远端所有玩家模型的待机/走/跑（内部按帧间位移算速度、不可见的跳过）
     tickPlayerModels(dt);
 
