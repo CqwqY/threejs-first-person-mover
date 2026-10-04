@@ -69,6 +69,21 @@ function keyEl(name) {
   return s;
 }
 
+// 导出给 HUD 用：把键位图块**贴到按钮上**（「攻击」贴左键、「护盾」贴 Q…）。
+//
+// 为什么不在设置面板里列一张表就完事：玩家在打 Boss 的那一刻，眼睛看的是屏幕中间那颗按钮，
+// 不是设置面板——键位得写在按钮本身上才叫说明。面板里那份完整键位表是「回头查」用的，两者互补。
+//
+// 用法：btn.appendChild(keyBadge('mouseL')); btn.appendChild(文字 span)
+// 外观在 theme.js 的 .kui-btn--key 里（横排居中），这里只管图块本体。
+export function keyBadge(name, { size = '1.5em' } = {}) {
+  const s = keyEl(name);
+  s.style.width = size;
+  s.style.height = size;
+  s.style.flex = '0 0 auto';
+  return s;
+}
+
 // 造「[W][A][S][D] 前后左右」这样一行
 function bindRow(keys, label) {
   const row = document.createElement('div');

@@ -6,6 +6,7 @@ import { createTimeSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
+import { keyBadge } from '../ui/KeyHints.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createChatBox } from '../ui/ChatBox.js';
@@ -1666,7 +1667,7 @@ export class Game {
         'bottom:calc(env(safe-area-inset-bottom, 0px) + 24px + clamp(56px,15vmin,78px) + clamp(10px,2.6vmin,16px));' +
         'user-select:none;-webkit-user-select:none;touch-action:none;';
     } else {
-      el.className = 'kui-btn kui-btn--red';
+      el.className = 'kui-btn kui-btn--red kui-btn--key';
       el.style.cssText =
         'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
         'bottom:calc(env(safe-area-inset-bottom, 0px) + 27%);' +
@@ -1674,7 +1675,14 @@ export class Game {
         'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
         'user-select:none;-webkit-user-select:none;touch-action:none;';
     }
-    el.textContent = '攻击';
+    // 电脑端这颗按钮只是**提示**：真正的攻击是鼠标左键，所以把「左键」图块直接贴上去，
+    // 玩家不用去设置面板查「攻击是按哪个」。手机端那颗圆键本身就是操作入口，贴鼠标没意义。
+    // ⚠ 别把文字塞回 el.textContent：那会把图块一起抹掉（按钮内容现在是 [图块][文字] 两个节点）。
+    el.textContent = '';
+    if (!this._attackCoarse) el.appendChild(keyBadge('mouseL'));
+    const atkLabel = document.createElement('span');
+    atkLabel.textContent = '攻击';
+    el.appendChild(atkLabel);
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -1777,17 +1785,23 @@ export class Game {
     }
   }
 
-  // 三阶段的「护盾」按钮（手机没有 Q 键）
+  // 三阶段的「护盾」按钮（手机没有 Q 键，靠点它；电脑端贴 Q 图块提示真按键）
   _createShieldButton() {
     const el = document.createElement('div');
-    el.className = 'kui-btn kui-btn--green';
+    el.className = 'kui-btn kui-btn--green' + (this._coarsePointer ? '' : ' kui-btn--key');
     el.style.cssText =
       'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 37%);' +
       'min-width:clamp(54px,15vmin,86px);box-sizing:border-box;text-align:center;' +
       'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
-    el.textContent = '护盾';
+    // 电脑端贴「Q」图块：盾是按 Q 开的，按钮只是提示（和攻击按钮贴左键一个道理）。
+    // 手机端没有 Q，这颗按钮就是操作入口本身，不贴图块。
+    el.textContent = '';
+    if (!this._coarsePointer) el.appendChild(keyBadge('q'));
+    const shieldLabel = document.createElement('span');
+    shieldLabel.textContent = '护盾';
+    el.appendChild(shieldLabel);
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();

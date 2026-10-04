@@ -302,6 +302,16 @@ export function ensureTheme() {
       filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .45));
     }
 
+    /* 带键位图块的提示按钮（[左键] 攻击、[Q] 护盾…）：图块与文字横排居中。
+       ⚠ display 只能落在 class 上 —— 这些按钮靠 el.style.display = 'none' / '' 切显隐，
+       '' 会把行内 display 一起清掉，写进行内样式的话一显示就丢掉 flex。 */
+    .kui-btn--key {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
     /* ---- 准星 ----
        用 CSS 画而不是贴图：素材是纯黑 PNG，在紫柱子/岩浆/夜景里基本看不见；
        这里每条线都带 1px 深色描边，任何背景上都读得出来。
