@@ -164,6 +164,7 @@ fs.mkdirSync(ASSETS_DIR, { recursive: true }); // 启动即确保目录存在
 // 玩家建造：买来的家具（kind:'building'，先用占位方块）才能摆，摆放持久化到 data/buildings.json 并广播给所有人。
 const SHOP_FILE = path.join(DATA_DIR, 'shop.json');
 const BUILD_FILE = path.join(DATA_DIR, 'buildings.json');
+const AREAS_FILE = path.join(DATA_DIR, 'buildareas.json');
 const SHOP_ADMIN_TOKEN = process.env.SHOP_ADMIN_TOKEN || 'fpm-shop-admin'; // 改价格用管理员密钥；生产请用 env 覆盖
 
 // 建造限流（防爆服务器）：个人上限 / 全局上限 / 放置冷却 / 缩放封顶 / 坐标钳制
@@ -272,6 +273,36 @@ function loadBuildings() {
   try { return JSON.parse(fs.readFileSync(BUILD_FILE, 'utf8')); } catch { return []; }
 }
 function saveBuildings(list) { fs.writeFileSync(BUILD_FILE, JSON.stringify(list, null, 2)); }
+
+// ---- 建造范围（可摆家具的矩形区域，AABB）：编辑器可改，全服即时生效 ----
+// 默认 = 场景里「编号 92 / 104」两栋教学楼的占地范围（与客户端 Config.BUILD_AREAS 一致）。
+const DEFAULT_AREAS = [
+  { name: '教学楼111', minX: -63.2, maxX: 24.8, minZ: 51.5, maxZ: 130.4 },
+  { name: '行政楼', minX: -5.7, maxX: 59.1, minZ: 44.8, maxZ: 131.8 },
+];
+function sanitizeAreas(list) {
+  const out = [];
+  for (const a of (Array.isArray(list) ? list : []).slice(0, 20)) {
+    if (!a) continue;
+    const n = (v, d) => { const x = Number(v); return Number.isFinite(x) ? x : d; };
+    const minX = n(a.minX, NaN), maxX = n(a.maxX, NaN), minZ = n(a.minZ, NaN), maxZ = n(a.maxZ, NaN);
+    if (![minX, maxX, minZ, maxZ].every(Number.isFinite)) continue;
+    out.push({
+      name: String(a.name || '').slice(0, 24),
+      minX: Math.min(minX, maxX), maxX: Math.max(minX, maxX),
+      minZ: Math.min(minZ, maxZ), maxZ: Math.max(minZ, maxZ),
+    });
+  }
+  return out;
+}
+function loadAreas() {
+  try {
+    const a = JSON.parse(fs.readFileSync(AREAS_FILE, 'utf8'));
+    if (Array.isArray(a) && a.length) return a;
+  } catch (e) { /* 没配过 → 用默认 */ }
+  return DEFAULT_AREAS.map((x) => ({ ...x }));
+}
+function saveAreas(list) { fs.writeFileSync(AREAS_FILE, JSON.stringify(list, null, 2)); }
 // 归属键：登录账号用 userId；游客用 IP（同机重连仍算同一人，避免刷上限）
 function ownerKeyOf(ws) {
   if (ws.__profile && ws.__profile.userId) return 'u:' + ws.__profile.userId;
@@ -521,6 +552,35 @@ const httpServer = http.createServer(async (req, res) => {
       broadcastAll({ t: 'build', ev: 'reload' }); // 让所有在线客户端重新拉取（清掉场上的旧家具）
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, count: list.length }));
+    });
+    return;
+  }
+
+  // 建造范围：公开读（客户端进游戏时拉取，覆盖本地 Config.BUILD_AREAS）
+  if (req.method === 'GET' && url.pathname === '/api/buildareas') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, areas: loadAreas() }));
+    return;
+  }
+
+  // 建造范围：管理员改（需要密钥）
+  if (req.method === 'POST' && url.pathname === '/api/buildareas') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 1e5) req.destroy(); });
+    req.on('end', () => {
+      const bad = (m, code = 400) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: m }));
+      };
+      let data;
+      try { data = JSON.parse(body || '{}'); } catch (e) { return bad('bad json'); }
+      if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return bad('管理员密钥错误', 403);
+      const areas = sanitizeAreas(data.areas);
+      if (!areas.length) return bad('至少保留一个有效范围');
+      saveAreas(areas);
+      broadcastAll({ t: 'build', ev: 'areas', areas }); // 在线客户端即时更新建造范围
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, areas }));
     });
     return;
   }

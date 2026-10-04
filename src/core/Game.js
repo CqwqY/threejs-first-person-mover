@@ -18,7 +18,7 @@ import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
-import { initBuildingTool } from '../world/BuildingTool.js';
+import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
 import { buildTrackPath, buildTrackCollision } from '../world/TrackViz.js';
@@ -566,6 +566,11 @@ export class Game {
           this._buildTool.refresh();
         }
       })
+      .catch(() => {});
+    // 建造范围：服务端配置优先（编辑器里改、全服即时生效）；拉不到就用 Config.BUILD_AREAS 兜底
+    fetch(shopBase + '/api/buildareas')
+      .then((r) => r.json())
+      .then((d) => { if (d && d.ok && Array.isArray(d.areas)) setBuildAreas(d.areas); })
       .catch(() => {});
 
     // 背包云存档：登录后把背包同步到账号（换设备也是同一份）。游客不参与（没有账号可挂）。

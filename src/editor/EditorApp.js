@@ -314,6 +314,11 @@ export function createEditor() {
     furnDelSel: document.getElementById('furnDelSel'),
     furnClearAll: document.getElementById('furnClearAll'),
     furnMsg: document.getElementById('furnMsg'),
+    areaList: document.getElementById('areaList'),
+    areaAdd: document.getElementById('areaAdd'),
+    areaSave: document.getElementById('areaSave'),
+    areaFit: document.getElementById('areaFit'),
+    areaMsg: document.getElementById('areaMsg'),
     btnCombo: document.getElementById('tCombo'),
     comboPanel: document.getElementById('comboPanel'),
     comboName: document.getElementById('comboName'),
@@ -2492,6 +2497,17 @@ export function createEditor() {
   trackGroup.visible = false;
   scene.add(trackGroup);
 
+  // 已摆家具 / 建造范围 的编辑器可视化（进入「家具」模式时显示）。
+  // 声明放在 setMode 之前，避免 setMode 早期执行时命中 TDZ。
+  const buildVizGroup = new THREE.Group();
+  buildVizGroup.name = 'editor-buildings';
+  buildVizGroup.visible = false;
+  scene.add(buildVizGroup);
+  const areaVizGroup = new THREE.Group();
+  areaVizGroup.name = 'editor-build-areas';
+  areaVizGroup.visible = false;
+  scene.add(areaVizGroup);
+
   const TK_COLOR = 0xffc14d;        // 普通门（琥珀）
   const TK_START_COLOR = 0x5ddc7a;  // 起终点 = 0 号门（绿）
   const TK_SEL_COLOR = 0x4ea1ff;    // 选中（蓝）
@@ -2863,7 +2879,9 @@ export function createEditor() {
     if (StepUI.trackPanel) StepUI.trackPanel.style.display = isTrack ? 'block' : 'none';
     if (StepUI.shopPanel) StepUI.shopPanel.style.display = isShop ? 'block' : 'none';
     if (StepUI.furnPanel) StepUI.furnPanel.style.display = isFurn ? 'block' : 'none';
-    if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具
+    buildVizGroup.visible = isFurn;
+    areaVizGroup.visible = isFurn;
+    if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具 + 建造范围
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -3171,6 +3189,42 @@ export function createEditor() {
     const body = await r.json().catch(() => null);
     return { ok: !!(r.ok && body && body.ok), status: r.status, body };
   }
+  // 拉一次商品目录（拿模型 url / 名称），供场景里渲染家具用
+  async function ensureCatalog() {
+    if ((lastShopItems || []).length) return;
+    try {
+      const r = await fetch(shopApiUrl());
+      const b = await r.json();
+      if (b && Array.isArray(b.items)) lastShopItems = b.items;
+    } catch (e) { /* 拉不到就用占位方块 */ }
+  }
+  function addBuildBox(host, item) {
+    const s = (item && Array.isArray(item.size) && item.size.length === 3) ? item.size : [1, 1, 1];
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(Number(s[0]) || 1, Number(s[1]) || 1, Number(s[2]) || 1),
+      new THREE.MeshStandardMaterial({ color: 0xb98a4b, roughness: 0.85 })
+    );
+    m.castShadow = true; m.receiveShadow = true;
+    host.add(m);
+  }
+  // 把全服已摆家具渲染进编辑器场景（独立 group，不参与编辑器的选中 / 碰撞逻辑）
+  function renderBuildsInScene() {
+    for (let i = buildVizGroup.children.length - 1; i >= 0; i--) buildVizGroup.remove(buildVizGroup.children[i]);
+    for (const b of lastBuilds) {
+      const item = (lastShopItems || []).find((x) => x.id === b.itemId);
+      const host = new THREE.Group();
+      host.position.set(Number(b.x) || 0, Number(b.y) || 0, Number(b.z) || 0);
+      host.rotation.y = (Number(b.rotY) || 0) * DEG;
+      host.scale.setScalar(Number(b.scale) || 1);
+      buildVizGroup.add(host);
+      const url = item && item.url;
+      if (url && url !== 'placeholder') {
+        instantiate(url).then((m) => { host.add(m); enableShadows(m); }).catch(() => addBuildBox(host, item));
+      } else {
+        addBuildBox(host, item);
+      }
+    }
+  }
   async function fetchBuilds() {
     setFurnMsg('拉取中…', '');
     try {
@@ -3178,9 +3232,12 @@ export function createEditor() {
       const body = await r.json().catch(() => null);
       if (!r.ok || !body || !body.ok) { setFurnMsg('拉取失败：HTTP ' + r.status, 'err'); return; }
       lastBuilds = body.items || [];
+      await ensureCatalog();
       renderFurnList();
+      renderBuildsInScene();
       setFurnMsg('共 ' + lastBuilds.length + ' 件已摆家具', '');
     } catch (e) { setFurnMsg('拉取失败：' + (e && e.message ? e.message : e), 'err'); }
+    fetchAreas(); // 顺带刷新建造范围
   }
   function checkedIds() {
     if (!StepUI.furnList) return [];
@@ -3214,6 +3271,111 @@ export function createEditor() {
   if (StepUI.furnNone) StepUI.furnNone.onclick = () => { if (StepUI.furnList) StepUI.furnList.querySelectorAll('input[type=checkbox]').forEach((c) => { c.checked = false; }); };
   if (StepUI.furnDelSel) StepUI.furnDelSel.onclick = () => deleteSelectedBuilds();
   if (StepUI.furnClearAll) StepUI.furnClearAll.onclick = () => clearAllBuilds();
+
+  // ---------- 建造范围（家具只能摆在这些矩形内）：编辑器可改，保存后全服即时生效 ----------
+  let buildAreas = [];
+  function setAreaMsg(text, cls) {
+    if (!StepUI.areaMsg) return;
+    StepUI.areaMsg.textContent = text || '';
+    StepUI.areaMsg.style.color = cls === 'err' ? '#ff8888' : '#9fe0a8';
+  }
+  function drawAreaViz() {
+    for (let i = areaVizGroup.children.length - 1; i >= 0; i--) areaVizGroup.remove(areaVizGroup.children[i]);
+    for (const a of buildAreas) {
+      const w = Math.max(0.1, a.maxX - a.minX), d = Math.max(0.1, a.maxZ - a.minZ);
+      const cx = (a.minX + a.maxX) / 2, cz = (a.minZ + a.maxZ) / 2;
+      const fill = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, d),
+        new THREE.MeshBasicMaterial({ color: 0x3fd07a, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false })
+      );
+      fill.rotation.x = -Math.PI / 2;
+      fill.position.set(cx, 0.06, cz);
+      areaVizGroup.add(fill);
+      const pts = [
+        new THREE.Vector3(a.minX, 0.08, a.minZ), new THREE.Vector3(a.maxX, 0.08, a.minZ),
+        new THREE.Vector3(a.maxX, 0.08, a.maxZ), new THREE.Vector3(a.minX, 0.08, a.maxZ),
+        new THREE.Vector3(a.minX, 0.08, a.minZ),
+      ];
+      areaVizGroup.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color: 0x3fd07a })
+      ));
+    }
+  }
+  function renderAreaList() {
+    if (!StepUI.areaList) return;
+    StepUI.areaList.innerHTML = '';
+    buildAreas.forEach((a, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:3px;align-items:center;margin:3px 0';
+      const name = document.createElement('input');
+      name.type = 'text'; name.value = a.name || ''; name.placeholder = '名称';
+      name.style.cssText = 'width:58px';
+      name.oninput = () => { buildAreas[i].name = name.value; };
+      row.appendChild(name);
+      const mk = (key, title) => {
+        const inp = document.createElement('input');
+        inp.type = 'number'; inp.step = '1'; inp.title = title; inp.value = String(a[key]);
+        inp.style.cssText = 'width:52px';
+        inp.oninput = () => { const v = Number(inp.value); if (Number.isFinite(v)) { buildAreas[i][key] = v; drawAreaViz(); } };
+        return inp;
+      };
+      row.appendChild(mk('minX', 'X 最小'));
+      row.appendChild(mk('maxX', 'X 最大'));
+      row.appendChild(mk('minZ', 'Z 最小'));
+      row.appendChild(mk('maxZ', 'Z 最大'));
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'import-btn'; del.textContent = '✕';
+      del.style.cssText = 'flex:0 0 auto;padding:2px 6px';
+      del.onclick = () => { buildAreas.splice(i, 1); renderAreaList(); drawAreaViz(); };
+      row.appendChild(del);
+      StepUI.areaList.appendChild(row);
+    });
+    if (!buildAreas.length) StepUI.areaList.innerHTML = '<div style="color:#7d8894">（没有范围 —— 点「加一个范围」）</div>';
+  }
+  async function fetchAreas() {
+    try {
+      const r = await fetch(API_ROOT + '/api/buildareas');
+      const body = await r.json().catch(() => null);
+      if (body && body.ok && Array.isArray(body.areas)) {
+        buildAreas = body.areas.map((a) => ({ ...a }));
+        renderAreaList(); drawAreaViz();
+      }
+    } catch (e) { /* 拿不到就保持现状 */ }
+  }
+  async function saveAreas() {
+    if (!furnToken()) { setAreaMsg('请先填管理员密钥（上面那一栏）', 'err'); return; }
+    if (!buildAreas.length) { setAreaMsg('至少要有一个范围', 'err'); return; }
+    setAreaMsg('保存中…', '');
+    try {
+      const r = await fetch(API_ROOT + '/api/buildareas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: furnToken(), areas: buildAreas }),
+      });
+      const b = await r.json().catch(() => null);
+      if (r.ok && b && b.ok) {
+        buildAreas = b.areas.map((a) => ({ ...a }));
+        renderAreaList(); drawAreaViz();
+        setAreaMsg('已保存 ' + buildAreas.length + ' 个范围（在线玩家即时生效）', '');
+      } else {
+        setAreaMsg('保存失败：HTTP ' + r.status + (b && b.error ? ' · ' + b.error : ''), 'err');
+      }
+    } catch (e) { setAreaMsg('保存失败：' + (e && e.message ? e.message : e), 'err'); }
+  }
+  if (StepUI.areaAdd) StepUI.areaAdd.onclick = () => {
+    buildAreas.push({ name: '新范围', minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
+    renderAreaList(); drawAreaViz();
+  };
+  if (StepUI.areaSave) StepUI.areaSave.onclick = () => saveAreas();
+  if (StepUI.areaFit) StepUI.areaFit.onclick = () => {
+    const a = buildAreas[0];
+    if (!a) return;
+    const cx = (a.minX + a.maxX) / 2, cz = (a.minZ + a.maxZ) / 2;
+    controls.target.set(cx, 0, cz);
+    camera.position.set(cx, 130, cz + 100);
+    controls.update();
+  };
 
   // ---------- 组合家具：空白场景拼装 + 存成商店商品 ----------
   function setComboHint(text, cls) {

@@ -14,10 +14,24 @@ import { Config } from '../config.js';
 
 const DEG = Math.PI / 180;
 const CLAMP = 24; // 无配置范围时的兜底：钳制在 ±24（地面尺寸 50，半径 25）
-// 允许建造的矩形区域（= 场景里「编号 92 / 104」两栋教学楼的占地范围）。取自 Config.BUILD_AREAS。
-const AREAS = (Config && Array.isArray(Config.BUILD_AREAS)) ? Config.BUILD_AREAS.filter(
-  (a) => a && Number.isFinite(a.minX) && Number.isFinite(a.maxX) && Number.isFinite(a.minZ) && Number.isFinite(a.maxZ)
-) : [];
+// 允许建造的矩形区域（默认取 Config.BUILD_AREAS = 场景里「编号 92 / 104」两栋教学楼的占地）。
+// 运行时可由服务端下发的范围覆盖（编辑器里改、全服即时生效），见 setBuildAreas()。
+function normAreas(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((a) => a && Number.isFinite(Number(a.minX)) && Number.isFinite(Number(a.maxX))
+      && Number.isFinite(Number(a.minZ)) && Number.isFinite(Number(a.maxZ)))
+    .map((a) => ({
+      name: String(a.name || ''),
+      minX: Number(a.minX), maxX: Number(a.maxX), minZ: Number(a.minZ), maxZ: Number(a.maxZ),
+    }));
+}
+let AREAS = normAreas(Config && Config.BUILD_AREAS);
+// 用服务端下发的范围覆盖本地的 BUILD_AREAS（编辑器改完即时生效）
+export function setBuildAreas(list) {
+  if (!Array.isArray(list)) return;
+  AREAS = normAreas(list);
+}
+export function getBuildAreas() { return AREAS.map((a) => ({ ...a })); }
 // 把点夹进「允许建造区域」：落在任一矩形内原样返回；否则吸附到最近矩形的边缘。
 function clampToAreas(x, z) {
   if (!AREAS.length) return { x: THREE.MathUtils.clamp(x, -CLAMP, CLAMP), z: THREE.MathUtils.clamp(z, -CLAMP, CLAMP) };
@@ -72,6 +86,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     editId: null,    // 编辑模式下正在编辑的已摆家具 id
     rotY: 0,         // 放置 / 编辑时的朝向（度）
     pending: [],     // 待服务端确认的乐观摆放：[{ mesh, itemId }]（FIFO，被 rejected 时按序回滚）
+    nudgeStep: 0.5,  // 编辑模式三轴微调的步长（米），可在工具条上循环切换
   };
 
   const rendered = new Map();  // id -> { mesh, rec, mine }
@@ -452,6 +467,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     else if (msg.ev === 'move') onMove(msg);
     else if (msg.ev === 'owner') setOwnerKey(msg.key);
     else if (msg.ev === 'reload') reloadAll();
+    else if (msg.ev === 'areas') setBuildAreas(msg.areas); // 管理员在编辑器改了建造范围
     else if (msg.ev === 'rejected') onRejected(msg.reason);
   }
 
@@ -475,25 +491,40 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     state.rotY = Math.round(((a.entry.rec.rotY || 0) / DEG) / 45) * 45; // 吸附到 45° 便于旋转
     clearAim();
     refreshStrip();
-    onToast('编辑中：对准地面移动 · 旋转/删除/完成在下方');
+    onToast('编辑中：下方可微调 X/Y/Z（长按连发，可切步长）· 「移到准星」吸附 · 完成在下方');
   }
   function exitEdit() { state.mode = 'place'; state.editId = null; refreshStrip(); }
-  // 三轴位置微调：axis 0=X 左右 / 1=Y 上下 / 2=Z 前后；dir ±1；每次 NUDGE_STEP 米
-  const NUDGE_STEP = 0.5;
+  // 三轴位置微调：axis 0=X 左右 / 1=Y 上下 / 2=Z 前后；dir ±1；步长 = state.nudgeStep
   function nudge(axis, dir) {
     if (state.mode !== 'edit') return;
     const e = rendered.get(state.editId);
     if (!e) return;
-    const d = dir * NUDGE_STEP;
+    const d = dir * (state.nudgeStep || 0.5);
     if (axis === 0) e.mesh.position.x += d;
     else if (axis === 1) e.mesh.position.y += d;
     else e.mesh.position.z += d;
     if (axis === 1) {
       e.mesh.position.y = THREE.MathUtils.clamp(e.mesh.position.y, -2, 10); // 与服务端 build_move 的 y 钳制一致
     } else {
-      const c = clampToAreas(e.mesh.position.x, e.mesh.position.z); // 水平仍限制在教学楼范围内
+      const c = clampToAreas(e.mesh.position.x, e.mesh.position.z); // 水平仍限建造范围内
       e.mesh.position.x = c.x; e.mesh.position.z = c.z;
     }
+  }
+  const NUDGE_STEPS = [0.1, 0.25, 0.5, 1, 2, 5];
+  function cycleNudgeStep() {
+    const i = NUDGE_STEPS.indexOf(state.nudgeStep);
+    state.nudgeStep = NUDGE_STEPS[(i < 0 ? 2 : i + 1) % NUDGE_STEPS.length];
+    refreshStrip();
+    onToast('微调步长：' + state.nudgeStep + ' 米');
+  }
+  // 把正在编辑的家具吸附到准星指到的表面（想要「对准哪就摆哪」时用）
+  function snapToAim() {
+    if (state.mode !== 'edit') return;
+    const e = rendered.get(state.editId);
+    if (!e) return;
+    const pt = groundPoint(true);
+    if (!pt) { onToast('准星没对准地面'); return; }
+    e.mesh.position.set(pt.x, pt.y || 0, pt.z);
   }
   function rotateEdit() {
     if (state.mode !== 'edit') return;
@@ -523,11 +554,10 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   function update() {
     if (!state.active) return;
     if (state.mode === 'edit') {
-      if (ghost) ghost.visible = false; // 编辑模式不显示放置幽灵
-      const e = rendered.get(state.editId);
-      if (!e) return;
-      const pt = groundPoint();
-      if (pt) e.mesh.position.set(pt.x, e.mesh.position.y, pt.z);
+      // 编辑模式：家具停在原地，**不再每帧自动跟随准星** ——
+      // 否则刚用三轴微调挪动的位置，下一帧就被 groundPoint() 覆盖（表现为「怎么调都没用 / 跳回原处」）。
+      // 需要挪位置就用「移到准星」按钮或三轴微调。
+      if (ghost) ghost.visible = false;
       return;
     }
     updateGhost();
@@ -576,13 +606,27 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   exitBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); exit(); });
   actions.appendChild(exitBtn);
 
-  function mkChip(text, onClick, variant, active) {
+  function mkChip(text, onClick, variant, active, repeat) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'kui-btn ' + (active ? 'kui-btn--primary' : ('kui-btn--' + (variant || 'grey')));
     b.textContent = text;
     b.style.cssText = 'flex:0 0 auto;white-space:nowrap;';
-    b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
+    if (repeat) {
+      // 长按连续微调：按下立即触发一次；按住 300ms 后每 70ms 重复；松手 / 移出 / 取消即停
+      let t1 = null, t2 = null;
+      const stop = () => { if (t1) clearTimeout(t1); if (t2) clearInterval(t2); t1 = t2 = null; };
+      b.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        onClick();
+        t1 = setTimeout(() => { t2 = setInterval(onClick, 70); }, 300);
+      });
+      b.addEventListener('pointerup', stop);
+      b.addEventListener('pointerleave', stop);
+      b.addEventListener('pointercancel', stop);
+    } else {
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
+    }
     return b;
   }
   function mkLabel(text) {
@@ -601,13 +645,15 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     strip.innerHTML = '';
     if (state.mode === 'edit') {
       strip.appendChild(mkLabel('编辑：'));
-      // 三轴位置微调（每次 0.5m）：X 左右 · Y 上下 · Z 前后
-      strip.appendChild(mkChip('X−', () => nudge(0, -1), 'grey'));
-      strip.appendChild(mkChip('X+', () => nudge(0, 1), 'grey'));
-      strip.appendChild(mkChip('Y−', () => nudge(1, -1), 'grey'));
-      strip.appendChild(mkChip('Y+', () => nudge(1, 1), 'grey'));
-      strip.appendChild(mkChip('Z−', () => nudge(2, -1), 'grey'));
-      strip.appendChild(mkChip('Z+', () => nudge(2, 1), 'grey'));
+      strip.appendChild(mkChip('步长 ' + state.nudgeStep + 'm', cycleNudgeStep, 'grey'));
+      // 三轴位置微调（长按连续）：X 左右 · Y 上下 · Z 前后
+      strip.appendChild(mkChip('X−', () => nudge(0, -1), 'grey', false, true));
+      strip.appendChild(mkChip('X+', () => nudge(0, 1), 'grey', false, true));
+      strip.appendChild(mkChip('Y−', () => nudge(1, -1), 'grey', false, true));
+      strip.appendChild(mkChip('Y+', () => nudge(1, 1), 'grey', false, true));
+      strip.appendChild(mkChip('Z−', () => nudge(2, -1), 'grey', false, true));
+      strip.appendChild(mkChip('Z+', () => nudge(2, 1), 'grey', false, true));
+      strip.appendChild(mkChip('移到准星', snapToAim, 'primary'));
       strip.appendChild(mkChip('旋转 45°', rotateEdit, 'grey'));
       strip.appendChild(mkChip('删除', deleteEdit, 'red'));
       strip.appendChild(mkChip('完成', commitEdit, 'green'));
