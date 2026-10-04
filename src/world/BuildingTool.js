@@ -99,24 +99,40 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
 
   function getProto(itemId) { return protoCache.get(itemId) || null; }
+
+  // 取原型：**先立刻塞一个占位方块**（保证「永远有原型可摆」，不会再卡在「模型还没加载好」），
+  // 真模型/组合在后台加载，加载好后再替换缓存并刷新幽灵。这样即使某个 GLB 下载卡住也不会卡住整个摆放。
   function ensureProto(itemId, cb) {
     if (protoCache.has(itemId)) { cb(protoCache.get(itemId)); return; }
     const it = findItem(itemId);
     if (!it) return;
-    // 组合家具：拼多个模型 + 灯
-    if (it.combo && Array.isArray(it.combo.parts)) {
-      buildComboProto(it).then((g) => { protoCache.set(itemId, g); cb(g); })
-        .catch(() => { onToast('组合模型加载失败：' + itemId); });
-      return;
+    const placeholder = makePlaceholderBox(it);
+    protoCache.set(itemId, placeholder);
+    cb(placeholder);
+    const onLoaded = (g) => {
+      if (!g) return;
+      protoCache.set(itemId, g);
+      if (state.ghost && state.itemId === itemId) attachProto(state.ghost, g); // 幽灵换成真模型
+      // 已摆出的同名家具也一并换成真模型（否则早摆的会一直停留在占位方块）
+      for (const e of rendered.values()) {
+        if (!e.rec || e.rec.itemId !== itemId || !e.mesh) continue;
+        const m = g.clone(true); touchShadow(m);
+        m.scale.setScalar(e.rec.scale || 1);
+        m.rotation.y = (e.rec.rotY || 0) * DEG;
+        m.position.set(e.rec.x, e.rec.y || 0, e.rec.z);
+        placedGroup.remove(e.mesh);
+        placedGroup.add(m);
+        e.mesh = m;
+      }
+    };
+    const hasCombo = it.combo && Array.isArray(it.combo.parts);
+    if (hasCombo) {
+      buildComboProto(it).then(onLoaded).catch((e) => { console.warn('[build] 组合加载失败:', itemId, e); });
+    } else if (it.url && it.url !== 'placeholder') {
+      instantiate(it.url).then(onLoaded)
+        .catch((e) => { console.warn('[build] 模型加载失败:', it.url, e); onToast('模型加载失败（先用方块代替）：' + (it.url || itemId)); });
     }
-    if (!it.url || it.url === 'placeholder') {
-      const box = makePlaceholderBox(it);
-      protoCache.set(itemId, box);
-      cb(box);
-      return;
-    }
-    instantiate(it.url).then((m) => { protoCache.set(itemId, m); cb(m); })
-      .catch(() => { onToast('模型加载失败：' + (it.url || itemId)); });
+    // 否则（无 url / 'placeholder'）：就用刚塞的占位方块，到此为止
   }
 
   // 组合家具：多个模型 + 灯拼成一个 Group。
@@ -131,7 +147,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       m.rotation.y = (Number(p.rotY) || 0) * DEG;
       m.position.set(Number(p.x) || 0, Number(p.y) || 0, Number(p.z) || 0);
       return m;
-    }).catch(() => null));
+    }).catch((e) => { console.warn('[build] 组合部件加载失败:', p.url, e); return null; }));
     return Promise.all(loads).then((models) => {
       const g = new THREE.Group();
       for (const m of models) { if (m) { touchShadow(m); g.add(m); } }
