@@ -139,6 +139,13 @@ export function initAuth(dbPath) {
       rev INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL
     );
+    -- 账号通用存档（学币 / 已购道具 / 兑换码 / 技能槽 / 性别）：整包 JSON + 修订号，多端后写覆盖
+    CREATE TABLE IF NOT EXISTS user_state(
+      user_id INTEGER PRIMARY KEY,
+      data TEXT NOT NULL DEFAULT '{}',
+      rev INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS sessions(
       token TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
@@ -171,6 +178,10 @@ export function initAuth(dbPath) {
     bagMeta: db.prepare('SELECT rev FROM bag_meta WHERE user_id = ?'),
     setBagMeta: db.prepare(`INSERT INTO bag_meta(user_id, rev, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET rev = excluded.rev, updated_at = excluded.updated_at`),
+    // 通用存档读写（/api/state）
+    getState: db.prepare('SELECT data, rev FROM user_state WHERE user_id = ?'),
+    setState: db.prepare(`INSERT INTO user_state(user_id, data, rev, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, rev = excluded.rev, updated_at = excluded.updated_at`),
   };
 
   const bagOf = (userId) => {
@@ -401,6 +412,61 @@ export function initAuth(dbPath) {
         replaceBag(user.id, bag);
         stmts.setBagMeta.run(user.id, rev, Date.now());
         sendJSON(res, 200, { ok: true, rev, count: n });
+        return true;
+      }
+      sendJSON(res, 405, { ok: false, error: 'method not allowed' });
+      return true;
+    }
+
+    // 账号通用存档（学币 / 已购道具 / 兑换码 / 技能槽 / 性别）：GET 拉取、POST 整包覆盖。
+    // 策略与 /api/bag 完全一致：按修订号后写覆盖；只放行白名单字段并逐项钳制。
+    if (p === '/api/state') {
+      const user = userFromAuth(req);
+      if (!user) { sendJSON(res, 401, { ok: false, error: '未登录或已过期' }); return true; }
+
+      if (req.method === 'GET') {
+        const row = stmts.getState.get(user.id);
+        let data = {};
+        if (row && row.data) { try { data = JSON.parse(row.data) || {}; } catch { data = {}; } }
+        sendJSON(res, 200, { ok: true, data, rev: row ? row.rev : 0 });
+        return true;
+      }
+      if (req.method === 'POST') {
+        let body;
+        try { body = JSON.parse((await readBody(req, 128 * 1024)) || '{}'); }
+        catch { sendJSON(res, 400, { ok: false, error: 'invalid body' }); return true; }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) body = {};
+
+        const row = stmts.getState.get(user.id) || { rev: 0 };
+        const givenRev = Number.isFinite(body.rev) ? Math.max(0, Math.floor(body.rev)) : 0;
+        if (givenRev < row.rev) {
+          let srv = {};
+          if (row.data) { try { srv = JSON.parse(row.data) || {}; } catch { srv = {}; } }
+          sendJSON(res, 200, { ok: false, error: 'stale', data: srv, rev: row.rev });
+          return true;
+        }
+
+        // 只放行已知字段并逐项钳制，避免脏数据 / 超大对象
+        const src = (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) ? body.data : {};
+        const strArr = (v, max) => Array.isArray(v)
+          ? v.filter((x) => typeof x === 'string').map((x) => cleanText(x, 32)).filter(Boolean).slice(0, max)
+          : [];
+        const coins = Math.max(0, Math.min(1000000000, Math.floor(Number(src.coins)) || 0));
+        const skillMap = {};
+        if (src.skillMap && typeof src.skillMap === 'object' && !Array.isArray(src.skillMap)) {
+          for (const k of Object.keys(src.skillMap)) {
+            const idx = Number(k);
+            if (!Number.isInteger(idx) || idx < 0 || idx > 15) continue;
+            const nm = cleanText(src.skillMap[k], 32);
+            if (nm) skillMap[String(idx)] = nm;
+          }
+        }
+        const gender = src.gender === 'girl' ? 'girl' : 'boy';
+        const data = { coins, owned: strArr(src.owned, 200), redeemed: strArr(src.redeemed, 200), skillMap, gender };
+
+        const rev = Math.max(row.rev, givenRev) + 1;
+        stmts.setState.run(user.id, JSON.stringify(data), rev, Date.now());
+        sendJSON(res, 200, { ok: true, rev });
         return true;
       }
       sendJSON(res, 405, { ok: false, error: 'method not allowed' });

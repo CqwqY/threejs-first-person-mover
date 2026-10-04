@@ -3,6 +3,7 @@
 // 都是同一份（这就是「一个账户互联」）；游客用独立的 guest 键，不与任何账号混用。
 import { Config } from '../config.js';
 import { getBagKey, loadBag, addToBag, removeFromBag } from './Inventory.js';
+import { markSaveDirty } from './CloudSave.js';
 
 const KEY_PREFIX = 'fp_wallet__';
 
@@ -134,6 +135,7 @@ function saveWallet(profile, w) {
   } catch (e) {
     /* 存储不可用：本次会话内仍然是同一个对象，界面照常工作 */
   }
+  markSaveDirty(); // 学币/已购是账号存档的一部分 → 触发云同步
 }
 
 // 加/扣学币。返回变动后的余额。

@@ -35,6 +35,7 @@ import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels, spinHeldBarrels } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag, setBagAccount, bagCloudEnabled, syncBag, takeGuestBag } from '../player/Inventory.js';
+import { markSaveDirty } from '../player/CloudSave.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { onRelayout, readLayout, currentMode, viewportSize } from '../ui/layout.js';
 import { Network } from '../net/Network.js';
@@ -4471,6 +4472,7 @@ export class Game {
   }
   _saveSkillSlots(map) {
     try { localStorage.setItem(this._skillStoreKey(), JSON.stringify(map)); } catch (e) { /* 忽略 */ }
+    markSaveDirty(); // 技能槽是账号存档的一部分 → 触发云同步
   }
 
   // 背包「使用」：指定槽位则先装备到该槽，再触发效果（与技能槽同源）。

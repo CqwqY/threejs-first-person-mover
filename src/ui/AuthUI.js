@@ -76,10 +76,12 @@ function showModal(done) {
 
   // 角色性别选择（持久化到 localStorage，下次进入沿用；默认男生）
   let selectedGender = localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy';
+  let genderChosen = false; // 本次是否明确点过（决定云同步时用不用本地这份性别）
   const gBtns = [...root.querySelectorAll('.au-g')];
   const paintGender = () => gBtns.forEach((b) => b.classList.toggle('kui-btn--primary', b.dataset.g === selectedGender));
   gBtns.forEach((b) => b.addEventListener('click', () => {
     selectedGender = b.dataset.g;
+    genderChosen = true;
     localStorage.setItem('fpm-gender', selectedGender);
     paintGender();
   }));
@@ -115,7 +117,7 @@ function showModal(done) {
 
   function finish(token, profile) {
     root.remove();
-    done({ token, profile, gender: selectedGender });
+    done({ token, profile, gender: selectedGender, genderChosen });
   }
 
   submit.addEventListener('click', submitForm);

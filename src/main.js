@@ -7,6 +7,7 @@ import { initMobileControls } from './ui/MobileControls.js';
 import { initMobileLayout } from './ui/MobileLayout.js';
 import { initBgm } from './audio/Bgm.js';
 import { createLoadingScreen } from './ui/LoadingScreen.js';
+import { initSaveSync } from './player/CloudSave.js';
 import { stats, whenIdle } from './world/loadTracker.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,11 +38,17 @@ async function main() {
   } catch (e) {
     console.warn('[main] 登录流程失败，以游客身份进入:', e);
   }
+  // 账号存档云同步（学币 / 已购 / 兑换码 / 技能槽 / 性别）：必须在 new Game 之前拉一次，
+  // 因为 Game 构造时会直接从 localStorage 读这些值。登录界面当场选的性别优先于云端旧值。
+  if (auth.token && auth.profile) {
+    try { await initSaveSync(auth.token, auth.profile, { forceGender: !!auth.genderChosen }); }
+    catch (e) { console.warn('[main] 账号存档同步失败（按本地继续）:', e); }
+  }
   // 加载动画：登录完之后才挂遮罩 —— 它是全屏且吃触摸的，挂在登录前会把登录界面整个盖住。
   // 从这一刻起，模型没到位就不放人进来（点「不等了」可立刻进）。
   const loading = createLoadingScreen({ title: '花草中学' });
-  // 性别：登录界面选的优先；缓存令牌直进的那条路径没有 gender 字段，回落到 localStorage 里的偏好
-  const gender = auth.gender || (localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy');
+  // 性别以本地为准（刚可能已被云端存档覆盖；当场选过则保留本次选择）
+  const gender = localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy';
   const game = new Game(auth.token, auth.profile, gender);
   game.start();
   // 场景/模型加载完成后（或用户点了「不等了」）再撤掉遮罩
