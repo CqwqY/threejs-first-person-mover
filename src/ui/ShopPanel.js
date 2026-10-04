@@ -3,6 +3,7 @@
 // 商品卡片：图标、名称、说明、价格、购买按钮；家具额外显示「剩 N 可摆」与「买了去摆放」。
 import { getCatalog, unplacedCount } from '../player/Shop.js';
 import { ensureTheme } from './theme.js';
+import { itemIconSvg, itemIconKeyFor } from './itemIcons.js';
 
 export function createShopPanel({ onBuy, onRedeem, onPlace, getProfile }) {
   const prof = getProfile || (() => null);
@@ -76,10 +77,10 @@ export function createShopPanel({ onBuy, onRedeem, onPlace, getProfile }) {
     const head = document.createElement('div');
     head.style.cssText = 'display:flex;align-items:center;gap:10px;';
     const icon = document.createElement('div');
-    icon.textContent = item.name.charAt(0);
+    icon.innerHTML = itemIconSvg(itemIconKeyFor(item), { size: '26px' });
     icon.style.cssText =
       'width:42px;height:42px;border-radius:var(--kui-radius);display:flex;align-items:center;justify-content:center;' +
-      'background:var(--kui-blue);color:var(--kui-paper);font-weight:700;font-size:19px;flex:0 0 auto;';
+      'background:var(--kui-blue);color:var(--kui-paper);flex:0 0 auto;';
     const title = document.createElement('div');
     title.textContent = item.name;
     title.style.cssText = 'font-weight:700;font-size:15px;color:var(--kui-ink);';

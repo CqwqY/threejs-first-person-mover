@@ -36,6 +36,7 @@ import { LocalPlayer } from '../player/LocalPlayer.js';
 import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels, spinHeldBarrels } from '../player/PlayerModel.js';
 import { getBagKey, addToBag, loadBag, removeFromBag, setBagAccount, bagCloudEnabled, syncBag, takeGuestBag } from '../player/Inventory.js';
 import { markSaveDirty } from '../player/CloudSave.js';
+import { itemIconSvg, itemIconKeyFor } from '../ui/itemIcons.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { onRelayout, readLayout, currentMode, viewportSize } from '../ui/layout.js';
 import { Network } from '../net/Network.js';
@@ -3761,12 +3762,12 @@ export class Game {
       const cardBody = document.createElement('div');
       cardBody.className = 'kui-panel__body';
       cardBody.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:8px;';
-      // 图标：带颜色的圆角方块 + 一眼能认出的 emoji（比首字好分辨）
+      // 图标：带颜色的圆角方块 + 手绘 SVG 图标（与 Kenney 图标同款渲染：currentColor）
       const icon = document.createElement('div');
-      icon.textContent = this._itemEmoji(name);
+      icon.innerHTML = itemIconSvg(this._itemIconKey(name), { size: '32px' });
       icon.style.cssText =
         'width:52px;height:52px;border-radius:var(--kui-radius);display:flex;align-items:center;justify-content:center;' +
-        'background:' + this._itemColor(name) + ';font-size:27px;line-height:1;';
+        'background:' + this._itemColor(name) + ';color:var(--kui-paper);';
       const meta = document.createElement('div');
       meta.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center;';
       const nameEl = document.createElement('div');
@@ -4482,24 +4483,9 @@ export class Game {
     eff.run();
   }
 
-  // 物品图标：按效果类型 / 家具名给一个一眼能认出的 emoji（比「首字 + 随机色方块」好分辨）
-  _itemEmoji(name) {
-    const it = itemByName(name);
-    if (it && it.kind === 'building') {
-      if (/椅|凳/.test(name)) return '🪑';
-      if (/桌|台|几/.test(name)) return '🪵';
-      if (/沙发|床|垫/.test(name)) return '🛋️';
-      if (/柜|架|箱/.test(name)) return '🗄️';
-      if (/灯/.test(name)) return '💡';
-      return '🧱';
-    }
-    const k = it && it.effect ? it.effect.k : '';
-    const byKind = {
-      club: '🏏', blackhole: '🕳️', hide: '👻', gatling: '🔫',
-      control: '🎮', grapple: '🪝', hammer: '🔨',
-      throw: '💥', heal: '🧪', jetpack: '🚀', speed: '👟', jump: '🦵', size: '📏',
-    };
-    return byKind[k] || '📦';
+  // 物品图标 key：背包只存名字 → 反查目录项，再套用 itemIcons 的映射（不用 emoji）
+  _itemIconKey(name) {
+    return itemIconKeyFor(itemByName(name) || { name });
   }
 
   // 给物品挑一个图标色：按名字散列到一个固定色板，保证同名拿到同色。
