@@ -1052,7 +1052,7 @@ wss.on('connection', (ws) => {
       ws.__lastBuild = now;
       const out = { t: 'build', ev: 'add', id: rec.id, owner, itemId: rec.itemId, url: rec.url, x: rec.x, y: rec.y, z: rec.z, rotY: rec.rotY, scale: rec.scale };
       roomBroadcast(ws.__room, out, ws);              // 通知别人
-      ws.send(JSON.stringify({ t: 'build', ev: 'added', ...out })); // 通知自己（带 id 确认）
+      ws.send(JSON.stringify({ ...out, ev: 'added' })); // 通知自己：展开后再覆盖 ev='added'（否则被 out.ev='add' 盖掉 → 客户端当成「别人摆的」，不消耗也不可编辑）
       return;
     }
 

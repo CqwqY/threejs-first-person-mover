@@ -71,11 +71,14 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     itemId: null,    // 放置模式下当前选中的家具商品 id
     editId: null,    // 编辑模式下正在编辑的已摆家具 id
     rotY: 0,         // 放置 / 编辑时的朝向（度）
-    pending: [],     // 待服务端确认的乐观网格（FIFO，被 rejected 时按序回滚）
+    pending: [],     // 待服务端确认的乐观摆放：[{ mesh, itemId }]（FIFO，被 rejected 时按序回滚）
   };
 
   const rendered = new Map();  // id -> { mesh, rec, mine }
   const protoCache = new Map();// itemId -> 模型原型（占位方块或 GLB）
+  // itemId -> 模型状态：'placeholder'（本来就没真模型）| 'loading' | 'ready' | 'failed'
+  // 家具条上会据此标注，玩家一眼能看出「这件是占位块 / 正在下模型 / 模型失败了」
+  const protoState = new Map();
   const myIds = loadMine();    // 我摆过的家具 id（本地记录，判断「我的」）
 
   function mineKey() {
@@ -106,39 +109,60 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
 
   function getProto(itemId) { return protoCache.get(itemId) || null; }
 
-  // 取原型：**先立刻塞一个占位方块**（保证「永远有原型可摆」，不会再卡在「模型还没加载好」），
-  // 真模型/组合在后台加载，加载好后再替换缓存并刷新幽灵。这样即使某个 GLB 下载卡住也不会卡住整个摆放。
+  // 取原型：**先立刻塞一个占位方块**（保证「永远有原型可摆」），真模型/组合在后台加载完再替换。
+  // 状态记在 protoState：'placeholder'（本来就没真模型）/ 'loading' / 'ready' / 'failed'（失败可重试）。
   function ensureProto(itemId, cb) {
-    if (protoCache.has(itemId)) { cb(protoCache.get(itemId)); return; }
+    const st = protoState.get(itemId);
+    if (protoCache.has(itemId) && st !== 'failed') { cb(protoCache.get(itemId)); return; } // 已有原型直接用（failed 允许重试）
     const it = findItem(itemId);
     if (!it) return;
-    const placeholder = makePlaceholderBox(it);
-    protoCache.set(itemId, placeholder);
-    cb(placeholder);
+    if (!protoCache.has(itemId)) protoCache.set(itemId, makePlaceholderBox(it)); // 占位方块兜底
+    protoState.set(itemId, 'placeholder');
+    cb(protoCache.get(itemId)); // 同步回调：调用方立刻拿到「可摆」的原型，不会再卡
+
+    const isCombo = !!(it.combo && Array.isArray(it.combo.parts));
+    const hasUrl = !!(it.url && it.url !== 'placeholder');
+    if (!isCombo && !hasUrl) return; // 本来就是占位商品（无真模型），到此为止
+
+    protoState.set(itemId, 'loading');
     const onLoaded = (g) => {
       if (!g) return;
       protoCache.set(itemId, g);
+      protoState.set(itemId, 'ready');
       if (ghostItemId === itemId) { ghostItemId = null; refreshGhostProto(); } // 幽灵换成真模型
-      // 已摆出的同名家具也一并换成真模型（否则早摆的会一直停留在占位方块）
-      for (const e of rendered.values()) {
-        if (!e.rec || e.rec.itemId !== itemId || !e.mesh) continue;
-        const m = g.clone(true); touchShadow(m);
-        m.scale.setScalar(e.rec.scale || 1);
-        m.rotation.y = (e.rec.rotY || 0) * DEG;
-        m.position.set(e.rec.x, e.rec.y || 0, e.rec.z);
-        placedGroup.remove(e.mesh);
-        placedGroup.add(m);
-        e.mesh = m;
-      }
+      swapRealModel(itemId, g); // 已摆出 / 待确认的同名家具一并换成真模型
+      refreshStrip();           // 条上标注由「加载中」变「就绪」
     };
-    const hasCombo = it.combo && Array.isArray(it.combo.parts);
-    if (hasCombo) {
-      buildComboProto(it).then(onLoaded).catch((e) => { console.warn('[build] 组合加载失败:', itemId, e); });
-    } else if (it.url && it.url !== 'placeholder') {
-      instantiate(it.url).then(onLoaded)
-        .catch((e) => { console.warn('[build] 模型加载失败:', it.url, e); onToast('模型加载失败（先用方块代替）：' + (it.url || itemId)); });
+    const onFail = (e) => {
+      protoState.set(itemId, 'failed');
+      console.warn('[build] 模型加载失败:', itemId, it.url || '(combo)', e);
+      onToast('模型加载失败（先用方块代替）：' + (it.url || itemId));
+      refreshStrip();
+    };
+    if (isCombo) buildComboProto(it).then(onLoaded).catch(onFail);
+    else instantiate(it.url).then(onLoaded).catch(onFail);
+  }
+
+  // 真模型到位后，把「已确认(rendered)」与「待确认(pending)」的同名家具都换成真模型。
+  // pending 那批也要换：否则真模型若在服务端 added 回执到达之前就加载好，刚摆的那件会永远停在占位方块。
+  function swapRealModel(itemId, g) {
+    for (const e of rendered.values()) {
+      if (!e.rec || e.rec.itemId !== itemId || !e.mesh) continue;
+      const m = meshFrom(g, e.rec);
+      placedGroup.remove(e.mesh);
+      placedGroup.add(m);
+      e.mesh = m;
     }
-    // 否则（无 url / 'placeholder'）：就用刚塞的占位方块，到此为止
+    for (const p of state.pending) {
+      if (!p || !p.mesh || p.itemId !== itemId) continue;
+      const m = meshFrom(g, {
+        x: p.mesh.position.x, y: p.mesh.position.y, z: p.mesh.position.z,
+        rotY: p.mesh.rotation.y / DEG, scale: p.mesh.scale.x || 1,
+      });
+      placedGroup.remove(p.mesh);
+      placedGroup.add(m);
+      p.mesh = m;
+    }
   }
 
   // 组合家具：多个模型 + 灯拼成一个 Group。
@@ -293,7 +317,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       if (profile && unplacedCount(profile, itemId) <= 0) { refreshStrip(); return; }
       const mesh = meshFrom(proto, { x: pt.x, y: 0, z: pt.z, rotY, scale: 1 });
       placedGroup.add(mesh);
-      state.pending.push(mesh);
+      state.pending.push({ mesh, itemId }); // 记下 itemId：服务端回执若错标成「别人摆的」，也能据此认领
       network.sendBuildAdd({ itemId, x: pt.x, y: 0, z: pt.z, rotY, scale: 1 });
     });
   }
@@ -308,33 +332,45 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     spawn(pt, state.itemId, state.rotY);
   }
 
-  function onAdded(rec) {
-    if (rendered.has(rec.id)) return;
-    let mesh = state.pending.shift() || null;
-    if (!mesh) {
-      ensureProto(rec.itemId, (p) => {
-        if (rendered.has(rec.id)) return;
-        const m = meshFrom(p, rec);
-        placedGroup.add(m); rendered.set(rec.id, { mesh: m, rec, mine: true });
-      });
-      return;
-    }
+  // 认领「我刚摆出」的一条：登记归属(可编辑) + 消耗 1 个额度 + 刷新 UI。mesh 由调用方负责加进场景。
+  function acceptMine(rec, mesh) {
     rendered.set(rec.id, { mesh, rec, mine: true });
     myIds.add(rec.id); saveMine();
-    const profile = getProfile(); if (profile) consumeOwned(profile, rec.itemId);
+    const profile = getProfile();
+    if (profile) consumeOwned(profile, rec.itemId); // ← 摆放成功即扣 1 件（背包「家具」页签件数 -1）
     onCoins(); refreshStrip();
   }
+  function onAdded(rec) {
+    if (rendered.has(rec.id)) return;
+    const p = state.pending.shift() || null;
+    if (p && p.mesh) { acceptMine(rec, p.mesh); return; } // 正常路径：用乐观网格
+    // 少见：本地没有乐观网格（例如中途重连）。这条仍是我摆的 → 补个网格并照常消耗。
+    ensureProto(rec.itemId, (proto) => {
+      if (rendered.has(rec.id)) return;
+      const m = meshFrom(proto, rec);
+      placedGroup.add(m);
+      acceptMine(rec, m);
+    });
+  }
   function onRejected(reason) {
-    const mesh = state.pending.shift();
-    if (mesh) placedGroup.remove(mesh);
+    const p = state.pending.shift();
+    if (p && p.mesh) placedGroup.remove(p.mesh);
     refreshStrip(); // 回滚后余额可能变了，刷新家具条上的 ×N
     onToast(reason || '被服务器拒绝');
   }
   function onAdd(rec) {
     if (rendered.has(rec.id)) return;
-    ensureProto(rec.itemId, (p) => {
+    // 兜底：服务端的 «added» 回执若因为 ev 字段被覆盖而当成「add」发来，这里按 itemId 认领自己的那条，
+    // 否则会被误判成「别人摆的」→ 不消耗、且不可编辑（这正是之前的 bug）。
+    const i = state.pending.findIndex((p) => p && p.itemId === rec.itemId);
+    if (i >= 0) {
+      const p = state.pending.splice(i, 1)[0];
+      acceptMine(rec, p.mesh);
+      return;
+    }
+    ensureProto(rec.itemId, (proto) => {
       if (rendered.has(rec.id)) return;
-      const m = meshFrom(p, rec);
+      const m = meshFrom(proto, rec);
       placedGroup.add(m);
       rendered.set(rec.id, { mesh: m, rec, mine: myIds.has(rec.id) });
     });
@@ -502,7 +538,10 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const list = available();
     if (!list.length) { strip.appendChild(mkLabel('没有可摆的家具 · 去商店「家具」页买')); return; }
     for (const entry of list) {
-      strip.appendChild(mkChip(entry.it.name + ' ×' + entry.n, () => { state.itemId = entry.it.id; refreshStrip(); }, 'grey', entry.it.id === state.itemId));
+      // 模型状态标注：占位(无真模型) / 加载中 / 模型失败 / 就绪(无后缀)
+      const st = protoState.get(entry.it.id);
+      const tag = st === 'loading' ? ' ·加载中' : st === 'failed' ? ' ·模型失败' : (st === 'ready' ? '' : ' ·占位');
+      strip.appendChild(mkChip(entry.it.name + ' ×' + entry.n + tag, () => { state.itemId = entry.it.id; refreshStrip(); }, 'grey', entry.it.id === state.itemId));
     }
   }
 
@@ -532,7 +571,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   function exit() {
     if (!state.active) return;
     clearAim();
-    while (state.pending.length) placedGroup.remove(state.pending.pop());
+    while (state.pending.length) { const p = state.pending.pop(); if (p && p.mesh) placedGroup.remove(p.mesh); }
     if (ghost) { ghostGroup.remove(ghost); ghost = null; }
     ghostItemId = null;
     state.active = false;
