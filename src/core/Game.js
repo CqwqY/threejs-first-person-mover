@@ -525,6 +525,7 @@ export class Game {
     this._gatlingHeat = 0;          // 0~100，满 100 过热
     this._gatlingOverheated = false;
     this._gatlingCd = 0;
+    this._gatlingCoolDelay = 0;     // 松开扳机后的散热延迟倒计时（见 _updateGatling）
     this._bullets = [];             // 在飞的子弹（只做视觉，命中是瞬时判定）
     // 弹道做成「一小段亮黄色曳光条」而不是一个小球：直径 16cm 的球飞出几米外就剩一个像素，
     // 隔远了谁都看不见（自己打出去的那几发同样遭殃，别人更是完全看不到）。
@@ -3253,23 +3254,34 @@ export class Game {
   }
 
   _updateGatling(dt) {
-    // 散热：不开火时按固定速率降热
-    if (this._gatlingHeat > 0) {
+    // 顺序很关键：必须先判这一帧开不开火，再决定散不散热。
+    // 原来散热写在开火之前、而且是无条件的，等于「边打边降温」——
+    // 10 发/秒 × 3.5 = +35/秒 的升温被 28/秒 的散热抵消成净 +7/秒，要 14 秒才过热，过热机制等于没有。
+    this._gatlingCd -= dt;
+    const holding = this._gatlingOn && this._gatlingHeld && !this._gatlingOverheated;
+    let fired = false;
+    if (holding && this._gatlingCd <= 0) {
+      this._gatlingCd = Config.GATLING_INTERVAL;
+      this._fireGatling();
+      fired = true;
+      if (this._gatlingHeat >= 100) {
+        this._gatlingOverheated = true;
+        this._gatlingCoolDelay = 0; // 已经过热了就立刻开始散热，别再白等一个延迟
+        this._toast('加特林过热了，等它冷却');
+      }
+    }
+
+    // 散热：扣着扳机时一律不降（打点射靠 COOL_DELAY 留住余温），松手后才按速率降
+    if (fired || holding) {
+      this._gatlingCoolDelay = Config.GATLING_COOL_DELAY;
+    } else if (this._gatlingCoolDelay > 0) {
+      this._gatlingCoolDelay -= dt;
+    } else if (this._gatlingHeat > 0) {
       this._gatlingHeat = Math.max(0, this._gatlingHeat - Config.GATLING_COOL_RATE * dt);
     }
     if (this._gatlingOverheated && this._gatlingHeat <= Config.GATLING_RECOVER_AT) {
       this._gatlingOverheated = false;
       this._toast('加特林冷却完成');
-    }
-
-    this._gatlingCd -= dt;
-    if (this._gatlingOn && this._gatlingHeld && !this._gatlingOverheated && this._gatlingCd <= 0) {
-      this._gatlingCd = Config.GATLING_INTERVAL;
-      this._fireGatling();
-      if (this._gatlingHeat >= 100) {
-        this._gatlingOverheated = true;
-        this._toast('加特林过热了，等它冷却');
-      }
     }
 
     // 子弹一直往前飞，飞满距离或撞到墙后由 _fireGatling 算出的 travel 消失

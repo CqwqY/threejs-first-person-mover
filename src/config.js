@@ -314,8 +314,9 @@ export const Config = {
   GATLING_INTERVAL: 0.1,      // 两发之间的间隔（秒）
   GATLING_RANGE: 60,          // 射程（米）
   GATLING_HIT_RADIUS: 0.55,   // 弹道命中判定半径（米）
-  GATLING_HEAT_PER_SHOT: 3.5, // 每发增加的热量（0~100，满 100 过热）
-  GATLING_COOL_RATE: 28,      // 不射击时每秒散热量
+  GATLING_HEAT_PER_SHOT: 3.5, // 每发增加的热量（0~100，满 100 过热）：10 发/秒 → 净 +35/秒 → 约 2.9 秒扫到过热
+  GATLING_COOL_RATE: 28,      // 每秒散热量，**只在停火之后**才降（开着枪不散热）
+  GATLING_COOL_DELAY: 0.35,   // 松开扳机后多久才开始散热（秒）：给点射留一点余温，否则一松手热量就掉光
   GATLING_RECOVER_AT: 30,     // 过热后要降到这个热量才能继续开火
   GATLING_BULLET_SPEED: 90,   // 子弹飞行速度（米/秒），只影响视觉，命中仍是瞬时判定
   GATLING_BULLET_STEP: 2,     // 射线拦截墙体的步进距离（米）；每步用线段扫描，薄墙也拦得住

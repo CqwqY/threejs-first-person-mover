@@ -7,6 +7,7 @@
 //  4) 手机布局模块：旧侧栏彻底移除、导出动作 API、编辑模式有顶部「完成」条。
 // 用法：node ui-check.mjs
 import { readFileSync } from 'node:fs';
+import { Config } from './src/config.js';
 
 let fails = 0;
 const ok = (cond, msg) => { if (!cond) { fails++; console.log('  FAIL ' + msg); } else { console.log('  ok   ' + msg); } };
@@ -19,6 +20,7 @@ const layoutSrc = read('./src/ui/layout.js');
 const skillSrc = read('./src/ui/SkillSlots.js');
 const mainSrc = read('./src/main.js');
 const gameSrc = read('./src/core/Game.js');
+const themeSrc = read('./src/ui/theme.js');
 const mcCtlSrc = read('./src/ui/MobileControls.js');
 const edSrc = read('./src/editor/EditorApp.js');
 
@@ -77,11 +79,18 @@ const expectLeft = idcLeft + wCard + 4;
 ok(leftRow === expectLeft,
   `顶部按钮行起点 = 校卡 left + 校卡宽 + 4（期望 ${expectLeft}，实际 ${leftRow}）`);
 
-// 窄屏兜底：按钮行可用宽度要容得下三个按钮（背包 / 设置 / 对战匹配）
-// 每个按钮 padding 6+8*2=22 + 1px 边框*2，字号 12px 的中文按 12px/字估算
-const BTN = [2, 2, 4].reduce((a, n) => a + n * 12 + 22 + 2, 0) + 6 * 2; // 两个 gap = 12
+// 窄屏兜底：按钮行可用宽度要容得下三个按钮（背包 / 设置 / 对战匹配）。
+// 按钮是「图标键 36px + 下方文字」竖排一组：宽度 = max(图标键, 字数 × 11px) × 1.1 余量，
+// 再加两个 gap 8px。数都来自样式（theme.js 的 .kui-iconbtn / .kui-topbtn > b、Game 的 gap:8px），
+// 下面顺手对拍这些样式没被人改掉，免得估算失真。
+const ICONBTN = 36, LABEL_PX = 11, TOPGAP = 8;
+const wBtn = (n) => Math.max(ICONBTN, n * LABEL_PX * 1.1);
+const needW = wBtn(2) + wBtn(2) + wBtn(4) + TOPGAP * 2;
 const narrow = 360 - leftRow - 8;
-ok(narrow >= BTN, `360px 窄屏下按钮行还剩 ${narrow}px，够放三个按钮（约需 ${BTN}px）`);
+ok(narrow >= needW, `360px 窄屏下按钮行还剩 ${narrow}px，够放三个图标按钮（约需 ${Math.round(needW)}px）`);
+ok(/width:\s*36px;\s*height:\s*36px/.test(themeSrc), '.kui-iconbtn 仍是 36×36（窄屏宽度估算的前提）');
+ok(/font:\s*600 11px\/1\.2 var\(--kui-font\)/.test(themeSrc), '.kui-topbtn > b 仍是 11px 字号');
+ok(/display:flex;gap:8px;/.test(gameSrc), '手机端按钮行 gap 仍是 8px');
 
 // ---------------------------------------------------------------------------
 console.log('== 3. 设置弹窗（modal）==');
@@ -198,6 +207,23 @@ ok(/forceRelayout\(\)/.test(layoutSrc.replace(/export function forceRelayout\(\)
 // 技能槽必须订阅重排，否则按钮不会贴到保存的位置
 ok(/onRelayout\(\(\)\s*=>\s*\{[^}]*readSavedPos\(\)[^}]*layoutMobile\(\)/s.test(skillSrc),
   '技能槽订阅 onRelayout，读保存位置后重排（否则拖完位置不动）');
+
+// ---- 加特林过热：开着枪不能同时降温 ----
+// 曾经的 bug：_updateGatling 每帧先无条件散热再开火，10 发/秒 × 3.5 的升温被散热吃掉大半，
+// 净升温只剩 7/秒 → 要扫 14 秒才过热，玩家体感就是「一直打也不会过热、热量条几乎不动」。
+// 这里用算术 + 源码顺序两道闸钉住：散热只能发生在「没在开火」的时候。
+const perSec = Config.GATLING_HEAT_PER_SHOT / Config.GATLING_INTERVAL;
+ok(perSec > Config.GATLING_COOL_RATE,
+  `扫射净升温为正（升温 ${perSec}/秒 > 散热 ${Config.GATLING_COOL_RATE}/秒）`);
+const overheatSec = 100 / perSec;
+ok(overheatSec > 1.5 && overheatSec < 8,
+  `持续扫射到过热的耗时合理（${overheatSec.toFixed(1)} 秒，不是几十秒也秒不过热）`);
+ok(Config.GATLING_COOL_DELAY > 0, '有停火散热延迟（点射不会一松手就把热量掉光）');
+const gatBlock = extractBlock(gameSrc, '  _updateGatling(dt) {');
+ok(!!gatBlock, '取到 _updateGatling 函数体');
+ok(gatBlock && /fired \|\| holding/.test(gatBlock), '散热分支被「正在开火/扣着扳机」挡住');
+ok(gatBlock && gatBlock.indexOf('const holding') < gatBlock.indexOf('GATLING_COOL_RATE'),
+  '先判开火、后散热（顺序写反就变回边打边降温）');
 
 console.log(fails === 0 ? '\nPASS 全部通过' : `\nFAIL ${fails} 条未通过`);
 process.exit(fails === 0 ? 0 : 1);
