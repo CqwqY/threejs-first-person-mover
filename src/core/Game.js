@@ -507,7 +507,7 @@ export class Game {
       onRedeem: (code) => this._redeemCode(code),
     });
     this.shop.setState(() => loadWallet(this._profile));
-    this._coinBadge = this._createCoinBadge();
+    // 学币不再单独挂一块牌：余额并进校卡（小牌右端 + 展开后资料里的一行），顶部只留校卡一个入口。
     this._refreshCoins();
 
     // ---- 棍子：挂在相机下的手持模型（技能槽里装备了棍子就一直握在手上，挥动时才播动画）----
@@ -671,7 +671,7 @@ export class Game {
     // z-index 必须压过所有游戏 UI（顶部按钮行 9500 / 学币牌 9500 / 校卡 900 / 编辑模式完成条 9700），
     // 否则 HUD 会被它们盖住 —— 而 HUD 恰恰是「渲染压力大」时唯一的诊断入口，被挡住等于工具失效。
     // 位置：左侧中部（top 50% 垂直居中）。
-    // 屏幕四边都被占了，逐个排除：顶部=校卡(窄屏156/展开268, top14~382) + 按钮行(左172起)；
+    // 屏幕四边都被占了，逐个排除：顶部=校卡(窄屏168/展开268, top14~402) + 按钮行(左184起)；
     // 底部=摇杆(118, left20/bottom26) + 血条(底边居中)；右侧=视角触控区(50vw)。
     // 左边从校卡下沿(382)到血条上沿之间是唯一整片空白，故垂直居中贴左。
     // 另加 max-width 防止长数字换行，max-height 防止横屏超出屏幕。
@@ -1946,47 +1946,11 @@ export class Game {
     }
   }
 
-  // 顶部的学币小牌，常驻显示
-  _createCoinBadge() {
-    const coarse = !!this._coarsePointer; // 触屏判定统一在构造函数里算一次
-    const el = document.createElement('div');
-    el.className = 'kui-panel';
-    // 手机端校卡占了左上角（left 12 / top 12），学币牌挪到它正下方；
-    // z-index 压到校卡（900）之下，这样校卡展开时会把学币牌盖住，不会叠字。
-    el.style.cssText = coarse
-      ? 'position:fixed;z-index:890;left:12px;top:58px;pointer-events:none;user-select:none;'
-      : 'position:fixed;z-index:9500;left:14px;top:14px;pointer-events:none;user-select:none;';
-    const body = document.createElement('div');
-    // 学币用图标 + 数字，别再是一句「学币 123」的纯文字——那在满是 3D 画面的小牌上很突兀。
-    body.className = 'coin-badge__body';
-    body.style.cssText = 'font:13px var(--kui-font);display:flex;align-items:center;gap:5px;';
-    const icon = document.createElement('span');
-    icon.className = 'coin-badge__icon';
-    icon.setAttribute('aria-hidden', 'true');
-    // 内联 SVG（不额外发请求、任意尺寸不糊、颜色跟随主题变量）
-    icon.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" focusable="false">'
-      + '<circle cx="12" cy="12" r="11" fill="var(--kui-gold,#e8b53a)"/>'
-      + '<circle cx="12" cy="12" r="11" fill="none" stroke="var(--kui-gold-deep,#a97c15)" stroke-width="1.6"/>'
-      + '<circle cx="12" cy="12" r="7.4" fill="none" stroke="var(--kui-gold-hi,#f7dc7a)" stroke-width="1.4"/>'
-      // 币面「学」字：笔画做成简化的横竖，避免字体依赖导致不同设备形态不一致
-      + '<path d="M9 8.4h6M12 8.4v7.2M9.6 11.4h4.8" stroke="var(--kui-gold-deep,#a97c15)"'
-      + ' stroke-width="1.7" stroke-linecap="round" fill="none"/>'
-      + '</svg>';
-    const num = document.createElement('span');
-    num.className = 'coin-badge__num';
-    num.style.cssText = 'font-weight:600;';
-    body.appendChild(icon);
-    body.appendChild(num);
-    el.appendChild(body);
-    document.body.appendChild(el);
-    // 返回数字容器：_refreshCoins 只改数字，图标不动
-    return num;
-  }
-
-  // 学币变化后刷新顶部牌子与商店里的余额
+  // 学币变化后刷新校卡上的余额（小牌右端 + 展开后资料里的一行）与商店里的余额。
+  // 2026-10-04 之前这里还负责左上角一块独立的「学币」小牌，那块牌跟 3D 画面格格不入，已并进校卡。
   _refreshCoins() {
     const w = loadWallet(this._profile);
-    if (this._coinBadge) this._coinBadge.textContent = String(w.coins);
+    if (this.playerHUD && this.playerHUD.setCoins) this.playerHUD.setCoins(w.coins);
     if (this.shop && this.shop.isOpen()) this.shop.render();
   }
 
@@ -3458,13 +3422,15 @@ export class Game {
     };
 
     if (coarse) {
-      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐。
+      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+168px，这里从它右边 4px 开始，靠右对齐。
       // 三处基础值都要加上安全区：横屏时刘海在左右两侧，不减掉 inset 的话校卡会被切、
-      // 最右边的「对战匹配」会被顶出屏幕。基础值 172 = 12 + 156 + 4，与校卡宽度是一对，ui-check 有对拍。
+      // 最右边的「对战匹配」会被顶出屏幕。基础值 184 = 12 + 168 + 4，与校卡宽度是一对，ui-check 有对拍。
+      // （168 是校卡**收起态**小牌的宽度，见 PlayerHUD 的 pointer:coarse 媒体查询；
+      //   学币并进校卡后小牌从 156 放宽到 168，改那边必须同步改这里，否则按钮会压在校卡上。）
       const row = document.createElement('div');
       row.style.cssText =
         'position:fixed;z-index:9500;' +
-        'left:calc(env(safe-area-inset-left, 0px) + 172px);' +
+        'left:calc(env(safe-area-inset-left, 0px) + 184px);' +
         'right:calc(env(safe-area-inset-right, 0px) + 8px);' +
         'top:calc(env(safe-area-inset-top, 0px) + 12px);' +
         'display:flex;gap:8px;' +

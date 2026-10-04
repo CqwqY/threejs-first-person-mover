@@ -1,7 +1,11 @@
 // 职责：顶部「校卡」。外层是蓝色卡套，套里是白卡：上方学校名、中间证件照位、下方账号信息
-// （昵称/用户名/称号/皮肤/背包/编号），底部提供退出登录。收起时只露出小牌（昵称 + 状态点）。
+// （昵称/用户名/称号/皮肤/背包/学币/编号），底部提供退出登录。收起时只露出小牌（昵称 + 时间 + 学币）。
 // 视觉统一走 theme.js 的 Kenney 主题：蓝色卡套、主题变量配色，按钮/数字用主题类。
+//
+// 学币为什么在这里而不单独挂一块牌：2026-10-04 用户嫌左上角那块「学币」小牌跟画面格格不入。
+// 校卡本来就是「玩家是谁 / 有什么」的入口，余额属于同一类信息，并进来顶部就只剩一个入口。
 import { ensureTheme } from './theme.js';
+import { icon } from './icons.js';
 
 const TOKEN_KEY = 'fp_token';
 
@@ -28,14 +32,18 @@ function ensureCardLayout() {
     }
     .idc-card, .idc-card * { box-sizing: border-box; }
     /* 外层蓝色卡套：卡本体是套里的白卡，展开时套子一起变大 */
+    /* 卡片本体：收起态小牌。宽度 214（电脑）/ 168（手机）要能同时放下
+       状态点 + 昵称 + 时间 + 学币 —— 学币并进来之后比原来多占约 30px，
+       ⚠ 手机端这个宽度和「背包/设置/对战匹配」那排按钮的 left 起点是一对常量
+       （按钮行 left = 12 + 卡宽 + 4），改这里必须同步改 Game._createTopButtons。 */
     .idc-card {
-      position: relative; width: 190px; height: 44px;
+      position: relative; width: 214px; height: 44px;
       background: linear-gradient(150deg, var(--kui-blue), var(--kui-blue-dark));
       border: 1px solid var(--kui-blue-deep); border-radius: var(--kui-radius);
       box-shadow: var(--kui-shadow); overflow: hidden; cursor: pointer;
       transition: width .22s cubic-bezier(.4,0,.2,1), height .22s cubic-bezier(.4,0,.2,1), border-radius .22s ease;
     }
-    .idc.open .idc-card { width: 268px; height: 368px; border-radius: 16px; }
+    .idc.open .idc-card { width: 268px; height: 388px; border-radius: 16px; }
 
     .idc-mini {
       position: absolute; inset: 4px; border-radius: 9px; background: var(--kui-paper);
@@ -50,10 +58,23 @@ function ensureCardLayout() {
     }
     .idc-hint { margin-left: auto; font-size: 11px; color: var(--kui-ink); }
 
+    /* 学币：金币图标 + 数字，挤在小牌右端。
+       用 icons.js 的 coin（currentColor）而不是另画一个圆——和顶部那排按钮同一套图标语言。 */
+    .idc-coins {
+      display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto;
+      margin-left: auto; font-size: 12px; font-weight: 700;
+      color: var(--kui-gold-deep);
+    }
+    .idc-coins svg { color: var(--kui-gold); }
+    /* 有「校卡」提示字时它被 margin-left:auto 顶到最右，学币就贴着它排，不再抢最右侧 */
+    .idc-hint + .idc-coins { margin-left: 6px; }
+
     .idc-full {
       position: absolute; inset: 6px; border-radius: 11px; background: var(--kui-paper);
       display: flex; flex-direction: column; padding: 10px 12px 12px;
       opacity: 0; pointer-events: none; transition: opacity .18s ease .06s;
+      /* 兜底：矮屏（手机横屏）放不下整张卡时卡内滚动，别把「退出登录」顶出屏幕外点不到 */
+      overflow-y: auto;
     }
     .idc.open .idc-full { opacity: 1; pointer-events: auto; }
 
@@ -98,13 +119,16 @@ function ensureCardLayout() {
          基础值仍是 12px —— 无安全区的设备上 calc(0px + 12px) 与原来完全等价。 */
       .idc { left: calc(env(safe-area-inset-left, 0px) + 12px);
              top: calc(env(safe-area-inset-top, 0px) + 12px); transform: none; }
-      /* 156px = padding 16 + 状态点 9 + 两处 gap 12 + 时间 ~36 + 昵称剩 ~83 */
-      .idc-card { width: 156px; }
+      /* 156 → 168：加进学币那一小枚金币 + 数字后，原来的宽度会把昵称挤成两三个字。
+         ⚠ 同上一处注释：这个数字改了，Game._createTopButtons 的按钮行起点也要跟着改。 */
+      .idc-card { width: 168px; }
       .idc.open .idc-card { width: min(268px, calc(100vw - 24px)); }
       .idc-mini { gap: 6px; padding: 0 8px; }
       .idc-mini-name { flex: 1 1 auto; min-width: 0; max-width: none; font-size: 13px; }
       .idc-time { flex: 0 0 auto; font-size: 13px; }
       .idc-hint { display: none; } /* 只藏「校卡」两字，时间保留 */
+      /* 手机端学币再收一档：图标 12px、数字 12px，让昵称尽量多留几个字 */
+      .idc-coins { font-size: 12px; gap: 2px; }
     }
   `;
   document.head.appendChild(st);
@@ -125,6 +149,7 @@ export function createPlayerHUD(profile, hasToken) {
         <span class="idc-mini-name"></span>
         <span class="idc-time kui-num"></span>
         <span class="idc-hint">校卡</span>
+        <span class="idc-coins" title="学币"></span>
       </div>
       <div class="idc-full">
         <div class="idc-school"><span>花草中学</span><span class="idc-school-dot"></span></div>
@@ -136,6 +161,7 @@ export function createPlayerHUD(profile, hasToken) {
           <div class="idc-row"><span>称号</span><b data-k="title"></b></div>
           <div class="idc-row"><span>皮肤</span><b data-k="skin"></b></div>
           <div class="idc-row"><span>背包</span><b data-k="bag" class="kui-num"></b></div>
+          <div class="idc-row"><span>学币</span><b data-k="coins" class="kui-num"></b></div>
           <div class="idc-row"><span>编号</span><b data-k="id" class="kui-num"></b></div>
         </div>
         <button class="idc-quit kui-btn kui-btn--danger" type="button">退出登录</button>
@@ -154,6 +180,14 @@ export function createPlayerHUD(profile, hasToken) {
   const miniTime = root.querySelector('.idc-time');
   const cells = {};
   for (const b of root.querySelectorAll('.idc-row b')) cells[b.dataset.k] = b;
+
+  // 学币：小牌上是「金币图标 + 数字」，展开后是资料里的一行。
+  // 金币图标只在建卡时画一次（setCoins 只改数字），避免每次余额变动都重建 SVG。
+  const miniCoins = root.querySelector('.idc-coins');
+  miniCoins.innerHTML = icon('coin', { size: '13' });
+  const miniCoinNum = document.createElement('span');
+  miniCoins.appendChild(miniCoinNum);
+  miniCoins.setAttribute('aria-label', '学币');
 
   const toggle = () => root.classList.toggle('open');
   card.addEventListener('click', toggle);
@@ -203,5 +237,12 @@ export function createPlayerHUD(profile, hasToken) {
     if (cells.time) cells.time.textContent = text;
   }
 
-  return { root, setProfile, setTime };
+  // 更新学币余额（买东西 / 兑换码 / 击败老师后由 Game 调一次）
+  function setCoins(n) {
+    const v = String(Math.max(0, Math.floor(Number(n) || 0)));
+    if (miniCoinNum) miniCoinNum.textContent = v;
+    if (cells.coins) cells.coins.textContent = v;
+  }
+
+  return { root, setProfile, setTime, setCoins };
 }

@@ -224,8 +224,8 @@ keytool -genkey -v -keystore fpm.keystore -alias fpm -keyalg RSA -keysize 2048 -
 
 ### 5.3 顶部一排（校卡 + 按钮行）
 
-- `src/ui/PlayerHUD.js` 的 `@media (pointer: coarse)`：校卡 `left:12px; top:12px; width:156px`。
-- `src/core/Game.js` 的 `_createTopButtons()`：按钮行 `left:172px; right:8px; top:12px`（**写死 px**，因为要和校卡宽度对齐）。
+- `src/ui/PlayerHUD.js` 的 `@media (pointer: coarse)`：校卡 `left:12px; top:12px; width:168px`（学币并进小牌后从 156 放宽到 168）。
+- `src/core/Game.js` 的 `_createTopButtons()`：按钮行 `left:184px; right:8px; top:12px`（**写死 px**，因为要和校卡宽度对齐）。
 - 横屏 780px 宽时空间充裕，这排不用挪；但 `top` 要加 `env(safe-area-inset-top)`（横屏刘海同样在顶部有侵占可能）。
 - **这两个数是一对**（`12 + 校卡宽 + 4 = 按钮行 left`），已有 `ui-check.mjs` 的算术对拍钉着，改一个必须改另一个。
 
