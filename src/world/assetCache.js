@@ -67,11 +67,21 @@ function cacheKey(url) {
 // 同一地址并发请求只发一次网络：第一份下载完大家共用
 const inflight = new Map();
 
+// 带超时的 fetch：模型卡在某个连不上/不回包的主机上时，不能永远挂着
+// （否则上层「加载完才可用」的逻辑会静默卡死，连报错都没有）。超时即 abort → 抛错 → 走失败兜底。
+const FETCH_TIMEOUT_MS = 20000;
+function fetchWithTimeout(url) {
+  if (typeof AbortController === 'undefined') return fetch(url);
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  return fetch(url, { signal: ac.signal }).finally(() => clearTimeout(t));
+}
+
 // 取字节：本地有就直接返回；没有就下载并顺手存一份。
 // 返回 { buf, type, cached }；任何环节出问题都抛，由调用方按「加载失败」处理。
 export function fetchAsset(url) {
   if (!isCacheable(url)) {
-    return fetch(url).then(async (res) => {
+    return fetchWithTimeout(url).then(async (res) => {
       if (!res.ok) throw new Error('HTTP ' + res.status + ' · ' + url);
       return { buf: await res.arrayBuffer(), type: res.headers.get('content-type') || '', cached: false };
     });
@@ -89,7 +99,7 @@ export function fetchAsset(url) {
         }
       } catch (e) { /* 命中失败就当没缓存，走网络 */ }
     }
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url);
     if (!res.ok) throw new Error('HTTP ' + res.status + ' · ' + url);
     const buf = await res.arrayBuffer();
     const type = res.headers.get('content-type') || '';
