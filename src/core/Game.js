@@ -7,6 +7,7 @@ import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
+import { fullscreenSupported, isFullscreen, toggleFullscreen, onFullscreenChange } from '../ui/fullscreen.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createChatBox } from '../ui/ChatBox.js';
@@ -3439,24 +3440,28 @@ export class Game {
       // 最右边的「对战匹配」会被顶出屏幕。基础值 184 = 12 + 168 + 4，与校卡宽度是一对，ui-check 有对拍。
       // （168 是校卡**收起态**小牌的宽度，见 PlayerHUD 的 pointer:coarse 媒体查询；
       //   学币并进校卡后小牌从 156 放宽到 168，改那边必须同步改这里，否则按钮会压在校卡上。）
+      // ⚠ 排布（flex / gap）交给 theme.js 的 .kui-toprow：极窄屏要把 gap 收紧，
+      //   行内样式压不过媒体查询；这里只写定位。
       const row = document.createElement('div');
+      row.className = 'kui-toprow';
       row.style.cssText =
         'position:fixed;z-index:9500;' +
         'left:calc(env(safe-area-inset-left, 0px) + 184px);' +
         'right:calc(env(safe-area-inset-right, 0px) + 8px);' +
-        'top:calc(env(safe-area-inset-top, 0px) + 12px);' +
-        'display:flex;gap:8px;' +
-        'justify-content:flex-end;align-items:flex-start;flex-wrap:nowrap;';
+        'top:calc(env(safe-area-inset-top, 0px) + 12px);';
       document.body.appendChild(row);
       const mk = (text, ic, onClick) => {
         const g = mkIconLabel(text, ic, onClick);
         row.appendChild(g.wrap);
         return g.btn;
-      };      this._topRow = row;
+      };
+      this._topRow = row;
       this._btnBag = mk('背包', 'bag', () => this._toggleBag());
       this._btnSettings = mk('设置', 'settings', () => this.settingsPanel.toggle());
       this._btnCombat = mk('对战匹配', 'combat', () => this._toggleCombat());
+      this._btnFullscreen = mk('全屏', 'fullscreen', () => this._toggleFullscreen());
       this._buildBag();
+      this._initFullscreenBtn();
       return;
     }
 
@@ -3484,7 +3489,50 @@ export class Game {
     this._btnSettings = mkBtn('设置', 'settings', 'left:calc(50% + 192px);top:10px;', () => this.settingsPanel.toggle());
     // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化 → 两字/四字宽度不同）
     this._btnCombat = mkBtn('对战匹配', 'combat', 'right:12px;top:10px;', () => this._toggleCombat());
+    // 全屏：排在「设置」右边（192 + 组宽 48 + 间距 10 = 250）
+    this._btnFullscreen = mkBtn('全屏', 'fullscreen', 'left:calc(50% + 250px);top:10px;', () => this._toggleFullscreen());
     this._buildBag();
+    this._initFullscreenBtn();
+  }
+
+  // ---- 全屏按钮 ----
+  // 不支持（iPhone Safari / App 的 WebView）就把整组藏掉：留一个点了没反应的按钮比没有更糟。
+  // 状态变化（用户按 F11 / Esc、或别处触发）后同步文案，所以监听的是 document 事件而不是只靠点击。
+  _initFullscreenBtn() {
+    const b = this._btnFullscreen;
+    if (!b) return;
+    const wrap = b.parentElement; // 图标键外套着 .kui-topbtn（文字也在里面），要整组一起藏
+    if (!fullscreenSupported()) {
+      if (wrap) wrap.style.display = 'none';
+      return;
+    }
+    this._offFullscreen = onFullscreenChange(() => this._syncFullscreenBtn());
+    this._syncFullscreenBtn();
+  }
+
+  _syncFullscreenBtn() {
+    const b = this._btnFullscreen;
+    if (!b) return;
+    const text = isFullscreen() ? '退出全屏' : '全屏';
+    if (b._label) {
+      b._label.textContent = text;
+      b.title = text; // 图标化之后 title 是唯一说明，必须跟着变
+    } else {
+      b.textContent = text;
+    }
+  }
+
+  _toggleFullscreen() {
+    if (!fullscreenSupported()) {
+      this._toast('这个浏览器不支持全屏');
+      return;
+    }
+    const was = isFullscreen(); // 记住意图：退出全屏后 on=false 是正常结果，不能当成「失败」
+    // 浏览器要求这一步发生在用户手势里（点击回调内），这里正好是。
+    toggleFullscreen().then((on) => {
+      this._syncFullscreenBtn();
+      if (on === was) this._toast(was ? '没能退出全屏' : '没能进入全屏');
+    });
   }
 
   // 改「对战匹配」按钮的文案。

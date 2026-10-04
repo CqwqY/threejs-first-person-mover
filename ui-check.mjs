@@ -83,14 +83,32 @@ ok(leftRow === expectLeft,
 // 按钮是「图标键 36px + 下方文字」竖排一组：宽度 = max(图标键, 字数 × 11px) × 1.1 余量，
 // 再加两个 gap 8px。数都来自样式（theme.js 的 .kui-iconbtn / .kui-topbtn > b、Game 的 gap:8px），
 // 下面顺手对拍这些样式没被人改掉，免得估算失真。
-const ICONBTN = 36, LABEL_PX = 11, TOPGAP = 8;
+// 顶部现在是**四个**按钮（背包 / 设置 / 对战匹配 / 全屏）。
+// 估算必须用极窄屏（≤380px）收紧后的数字 —— 那才是放不下的那种屏幕：
+// 图标键 32、标签 10px、间距 4（见 theme.js 的 @media (pointer: coarse) and (max-width: 380px)）。
+// 「退出全屏」是 4 字，所以全屏按钮按 4 字算，不能按建按钮时的「全屏」2 字算。
+const ICONBTN = 32, LABEL_PX = 10, TOPGAP = 4, BTN_CHARS = [2, 2, 4, 4];
 const wBtn = (n) => Math.max(ICONBTN, n * LABEL_PX * 1.1);
-const needW = wBtn(2) + wBtn(2) + wBtn(4) + TOPGAP * 2;
+const needW = BTN_CHARS.reduce((a, n) => a + wBtn(n), 0) + TOPGAP * (BTN_CHARS.length - 1);
 const narrow = 360 - leftRow - 8;
-ok(narrow >= needW, `360px 窄屏下按钮行还剩 ${narrow}px，够放三个图标按钮（约需 ${Math.round(needW)}px）`);
-ok(/width:\s*36px;\s*height:\s*36px/.test(themeSrc), '.kui-iconbtn 仍是 36×36（窄屏宽度估算的前提）');
-ok(/font:\s*600 11px\/1\.2 var\(--kui-font\)/.test(themeSrc), '.kui-topbtn > b 仍是 11px 字号');
-ok(/display:flex;gap:8px;/.test(gameSrc), '手机端按钮行 gap 仍是 8px');
+ok(narrow >= needW,
+  `360px 窄屏下按钮行还剩 ${narrow}px，够放四个图标按钮（约需 ${Math.round(needW)}px）`);
+ok(/font:\s*600 11px\/1\.2 var\(--kui-font\)/.test(themeSrc), '.kui-topbtn > b 默认仍是 11px 字号');
+ok(/\.kui-toprow\s*\{[^}]*gap:\s*8px/.test(themeSrc),
+  '手机端按钮行默认 gap 8px（写在 class 里 —— 行内样式压不过极窄屏的媒体查询）');
+const narrowMq = /@media \(pointer: coarse\) and \(max-width: 380px\)\s*\{([\s\S]*?)\n    \}/.exec(themeSrc);
+ok(!!narrowMq, 'theme.js 有极窄屏（≤380px）收紧规则');
+if (narrowMq) {
+  ok(/\.kui-toprow\s*\{\s*gap:\s*4px/.test(narrowMq[1]), '极窄屏按钮行 gap 收到 4px');
+  ok(/\.kui-iconbtn\s*\{\s*width:\s*32px/.test(narrowMq[1]), '极窄屏图标键收到 32px');
+  ok(/\.kui-topbtn > b\s*\{\s*font-size:\s*10px/.test(narrowMq[1]), '极窄屏标签字号收到 10px');
+}
+// 只看按钮行那一段（Game.js 里别处也有内联的 display:flex;gap:8px，不能全局否定）
+const rowAt = gameSrc.indexOf("row.className = 'kui-toprow'");
+const rowSeg = rowAt >= 0 ? gameSrc.slice(rowAt, rowAt + 420) : '';
+ok(rowSeg && !/display:flex/.test(rowSeg) && !/gap:/.test(rowSeg),
+  '按钮行排布不再写进行内样式（行内会压过上面这条媒体查询）');
+ok(/row\.className = 'kui-toprow'/.test(gameSrc), '手机端按钮行挂 .kui-toprow');
 
 // ---------------------------------------------------------------------------
 console.log('== 3. 设置弹窗（modal）==');

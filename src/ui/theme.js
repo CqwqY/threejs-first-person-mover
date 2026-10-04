@@ -274,6 +274,24 @@ export function ensureTheme() {
       -webkit-user-select: none;
     }
     .kui-topbtn > .kui-iconbtn { flex: 0 0 auto; font-style: normal; }
+    /* 手机端顶部那一行（背包 / 设置 / 对战匹配 / 全屏）。
+       ⚠ gap 必须放在 class 里、不能写进行内样式：行内样式压不过媒体查询，
+       而极窄屏（≤380px）要把间距和图标键一起收紧，否则四个按钮会被挤出屏幕。 */
+    .kui-toprow {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      align-items: flex-start;
+      flex-wrap: nowrap;
+    }
+    /* 360px 这类极窄屏：图标键 36→32、标签 11→10、间距 8→4，四个按钮才放得下
+       （可用宽度 = 360 - 校卡 184 - 右边距 8 = 168，放 32+32+44+44 + 3×4 = 164）。
+       数字被 ui-check.mjs 的窄屏算术对拍引用，改这里必须同步改那边。 */
+    @media (pointer: coarse) and (max-width: 380px) {
+      .kui-toprow { gap: 4px; }
+      .kui-topbtn > .kui-iconbtn { width: 32px; height: 32px; }
+      .kui-topbtn > b { font-size: 10px; }
+    }
     .kui-topbtn > b {
       font: 600 11px/1.2 var(--kui-font);
       color: var(--kui-paper);

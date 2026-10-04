@@ -45,6 +45,16 @@ const WANTED = {
   map: 'direction_n',         // 地图 / 方向
 };
 
+// Kenney 这套里没有的语义，手写补上（同样遵守 56x56 中心原点网格 + currentColor）。
+// ⚠ 描边类图标（细线）用 stroke 是刻意的：把细线画成实心面在小尺寸下会糊成一团。
+//    所以 fullscreen 是「一条描边的斜线 + 一个实心的箭头尖」两条 path。
+const HANDMADE = {
+  // 全屏（四角向外扩张的箭头）
+  fullscreen: `
+    <path fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" d="M-9 -9 L-20 -20 M9 -9 L20 -20 M-9 9 L-20 20 M9 9 L20 20"/>
+    <path fill="currentColor" d="M-27 -27 L-17 -27 L-27 -17 Z M27 -27 L17 -27 L27 -17 Z M-27 27 L-17 27 L-27 17 Z M27 27 L17 27 L27 17 Z"/>`,
+};
+
 // ---- 视图框 ----
 // Kenney 全套图标都画在**统一的 56x56 网格**里（中心在原点，即 -28..28），
 // 所以固定用这个 viewBox，而不是按各自动画包围盒 ——
@@ -84,6 +94,13 @@ for (const [name, file] of Object.entries(WANTED)) {
   parts.push(
     `  // ${file}.svg\n` +
     `  ${name}: { viewBox: '${VIEWBOX}', body: \`\n${paths.join('\n')}\n  \` },`
+  );
+  names.push(name);
+}
+for (const [name, body] of Object.entries(HANDMADE)) {
+  parts.push(
+    `  // ✍ 手写（Kenney 没有这个语义）\n` +
+    `  ${name}: { viewBox: '${VIEWBOX}', body: \`\n${body}\n  \` },`
   );
   names.push(name);
 }
