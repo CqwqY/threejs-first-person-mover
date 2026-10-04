@@ -52,6 +52,34 @@ export const SHOP_ITEMS = [
   },
 ];
 
+// 目录可被服务端覆盖：GET /api/shop 拉到的最新商品表。为 null 时回退到上面写死的 SHOP_ITEMS。
+let CATALOG = null;
+export function setCatalog(items) {
+  if (Array.isArray(items)) CATALOG = items;
+}
+export function getCatalog() {
+  return CATALOG || SHOP_ITEMS;
+}
+// 查商品：优先服务端目录，其次写死兜底（断网也能买）
+export function findItem(itemId) {
+  const id = String(itemId);
+  const list = CATALOG || SHOP_ITEMS;
+  return list.find((it) => it.id === id) || null;
+}
+// 某玩家还没摆出来的教学楼数量（= 已购但未消耗）
+export function unplacedCount(profile, itemId) {
+  const w = loadWallet(profile);
+  return w.owned.filter((x) => x === String(itemId)).length;
+}
+// 摆出成功后消耗 1 个（从 owned 移除一条），返回剩余数量
+export function consumeOwned(profile, itemId) {
+  const w = loadWallet(profile);
+  const i = w.owned.indexOf(String(itemId));
+  if (i >= 0) w.owned.splice(i, 1);
+  saveWallet(profile, w);
+  return w.owned.filter((x) => x === String(itemId)).length;
+}
+
 function walletKey(profile) {
   const id = profile ? (profile.username || profile.nickname || '') : '';
   return KEY_PREFIX + (id || 'guest');
@@ -95,7 +123,7 @@ export function isOwned(profile, itemId) {
 // owned 只记录「曾经买过」，用于界面标记与首购提示，不用于拦截。
 // 成功返回 { ok:true, coins, item, repeat }，失败返回 { ok:false, reason }。
 export function buyItem(profile, itemId) {
-  const item = SHOP_ITEMS.find((it) => it.id === itemId);
+  const item = findItem(itemId);
   if (!item) return { ok: false, reason: '没有这件商品' };
   const w = loadWallet(profile);
   const repeat = w.owned.includes(item.id);

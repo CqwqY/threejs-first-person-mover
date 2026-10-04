@@ -245,6 +245,24 @@ export class Network {
     this.send({ t: 'boss', ...info });
   }
 
+  // 玩家建造（教学楼）：买来的楼才能摆。服务器校验 + 限流后回执/广播。
+  // sendBuildAdd 发 {itemId, x,y,z,rotY,scale}；sendBuildDel 发 {id}（仅自己摆的能删）。
+  sendBuildAdd(info) {
+    if (!info || !info.itemId) return;
+    const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+    this.send({
+      t: 'build_add',
+      itemId: String(info.itemId),
+      x: num(info.x, 0), y: num(info.y, 0), z: num(info.z, 0),
+      rotY: num(info.rotY, 0), scale: num(info.scale, 1),
+    });
+  }
+
+  sendBuildDel(id) {
+    if (!id) return;
+    this.send({ t: 'build_del', id: String(id).slice(0, 48) });
+  }
+
   // 驾驶员上报后座乘客位置：只有驾驶员发，乘客自己不再单独上报，
   // 否则两个冲量在不同客户端独立推进，乘客会相对车身乱抖。
   sendVehPax(pax, x, y, z, yaw) {

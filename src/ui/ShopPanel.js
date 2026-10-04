@@ -1,6 +1,6 @@
 // 职责：商人「小满」的商店浮层。全屏遮罩 + 居中的蓝色面板，顶部标题栏 + 右上角关闭。
 // 商品卡片：图标、名称、说明、价格、购买按钮；已购商品显示「已拥有」。
-import { SHOP_ITEMS } from '../player/Shop.js';
+import { getCatalog } from '../player/Shop.js';
 import { ensureTheme } from './theme.js';
 
 export function createShopPanel({ onBuy, onRedeem }) {
@@ -54,7 +54,7 @@ export function createShopPanel({ onBuy, onRedeem }) {
     coinsEl.textContent = '学币 ' + st.coins;
     grid.innerHTML = '';
     grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;padding-top:6px;';
-    for (const item of SHOP_ITEMS) {
+    for (const item of getCatalog()) {
       const owned = st.owned.includes(item.id);
       const card = document.createElement('div');
       card.style.cssText =
@@ -78,6 +78,13 @@ export function createShopPanel({ onBuy, onRedeem }) {
       const desc = document.createElement('div');
       desc.textContent = item.desc;
       desc.style.cssText = 'color:var(--kui-ink-soft);font-size:13px;min-height:38px;';
+
+      if (item.kind === 'building') {
+        const badge = document.createElement('div');
+        badge.textContent = '教学楼 · 购买后在建造工具(B)里摆放';
+        badge.style.cssText = 'font-size:12px;color:var(--kui-blue);';
+        card.appendChild(badge);
+      }
 
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;';

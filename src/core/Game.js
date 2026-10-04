@@ -16,8 +16,9 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS } from '../player/Shop.js';
+import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
+import { initBuildingTool } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
 import { buildTrackPath, buildTrackCollision } from '../world/TrackViz.js';
@@ -528,6 +529,20 @@ export class Game {
     this.shop.setState(() => loadWallet(this._profile));
     // 学币不再单独挂一块牌：余额并进校卡（小牌右端 + 展开后资料里的一行），顶部只留校卡一个入口。
     this._refreshCoins();
+
+    // ---- 玩家建造（教学楼）：买过的教学楼才能摆，联机共享 + 限流防爆 ----
+    const shopBase = Config.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    this._buildTool = initBuildingTool(this.scene, this.camera, this.renderer.domElement, this.network, {
+      getProfile: () => this._profile,
+      serverBase: shopBase,
+      onToast: (m) => this._toast(m),
+      onCoins: () => { this._refreshCoins(); if (this.shop) this.shop.render(); },
+    });
+    // 拉服务端商店目录（含最新价格与教学楼），覆盖本地写死的 SHOP_ITEMS；失败则回退本地。
+    fetch(shopBase + '/api/shop')
+      .then((r) => r.json())
+      .then((d) => { if (d && d.ok && Array.isArray(d.items)) { setCatalog(d.items); this._buildTool.refresh(); } })
+      .catch(() => {});
 
     // 背包云存档：登录后把背包同步到账号（换设备也是同一份）。游客不参与（没有账号可挂）。
     this._syncBagFromCloud();
@@ -1148,6 +1163,7 @@ export class Game {
           this.playerHUD.setProfile(msg.profile);
           this._refreshLocalLabel();
           this._syncBagFromCloud(); // 账号确定后（昵称/用户名到位）再同步一次背包
+          if (this._buildTool) this._buildTool.refresh(); // 登录态变化后刷新可摆教学楼额度
         } else if (!msg.ok) {
           // 令牌失效：清掉本地会话，退回游客态（下次进入会重新弹登录）
           localStorage.removeItem('fp_token');
@@ -1198,6 +1214,11 @@ export class Game {
         this.playerManager.removePlayer(msg.id);
         // 对战中有人退房 = 出局（按「出局」，不是按「阵亡」记，结算里会区分显示）
         if (this._matchStats.has(String(msg.id))) this._markGone(msg.id);
+        break;
+      }
+      case 'build': {
+        // 玩家建造（教学楼）：服务端回执/广播的增删
+        if (this._buildTool) this._buildTool.handleBuild(msg);
         break;
       }
       case 'chat': {
@@ -2015,6 +2036,7 @@ export class Game {
     this._equipItemSkill(item.name);
     this._refreshCoins();
     this.shop.render();
+    if (this._buildTool) this._buildTool.refresh(); // 买到教学楼后刷新建造工具的可摆额度
     this._toast('买下「' + item.name + '」（背包 ' + n + ' 个），还剩 ' + r.coins + ' 学币');
   }
 

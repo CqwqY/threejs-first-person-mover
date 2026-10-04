@@ -159,6 +159,64 @@ const MAP_FILE = path.join(DATA_DIR, 'city-map.json');
 const SCENE_FILE = path.join(DATA_DIR, 'editor-scene.json');
 fs.mkdirSync(ASSETS_DIR, { recursive: true }); // 启动即确保目录存在
 
+// ---- 商店目录 + 玩家建造（联机共享） ----
+// 商店目录：玩家 GET /api/shop 公开读；管理员 POST /api/shop 带密钥改（导入模型 + 改价格）。
+// 玩家建造：买来的教学楼（kind:'building'）才能摆，摆放持久化到 data/buildings.json 并广播给所有人。
+const SHOP_FILE = path.join(DATA_DIR, 'shop.json');
+const BUILD_FILE = path.join(DATA_DIR, 'buildings.json');
+const SHOP_ADMIN_TOKEN = process.env.SHOP_ADMIN_TOKEN || 'fpm-shop-admin'; // 改价格用管理员密钥；生产请用 env 覆盖
+
+// 建造限流（防爆服务器）：个人上限 / 全局上限 / 放置冷却 / 缩放封顶 / 坐标钳制
+const BUILD_PER_PLAYER = 5;
+const BUILD_GLOBAL = 50;
+const BUILD_COOLDOWN = 3000;
+const BUILD_SCALE_MAX = 3;
+const BUILD_SCALE_MIN = 0.1;
+const BUILD_CLAMP = 24;
+
+// 启动种子：现有在售道具 + 两栋教学楼。首次启动写一份，之后以文件为准（编辑器在线改）
+function seedShop() {
+  return [
+    { id: 'club', name: '棍子', price: 100, desc: '挥动横扫，被扫到的玩家会被撞飞出去。', kind: 'item', effect: { k: 'club' } },
+    { id: 'blackhole', name: '黑洞', price: 150, desc: '扔出去后会不断变大，10 秒后把范围内的人吸过去。', kind: 'item', effect: { k: 'blackhole' } },
+    { id: 'hide', name: '捉迷藏玩具', price: 80, desc: '变成任意颜色的方块。', kind: 'item', effect: { k: 'hide' } },
+    { id: 'gatling', name: '加特林', price: 200, desc: '按住左键持续扫射，单发 30 点伤害。', kind: 'item', effect: { k: 'gatling' } },
+    { id: 'ctrlgun', name: '控制枪', price: 180, desc: '激光抓住别人，移动视角拖着走；对方按空格挣脱。', kind: 'item', effect: { k: 'control' } },
+    { id: 'grapple', name: '抓钩', price: 160, desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去。', kind: 'item', effect: { k: 'grapple' } },
+    { id: 'build_junzhong', name: '军中楼', url: '/models/军中.glb', price: 500, desc: '教学楼（军中楼）。买 1 栋得 1 个摆放额度，在建造工具里摆出。', kind: 'building' },
+    { id: 'build_xingzheng', name: '行政楼', url: '/models/未命名.glb', price: 500, desc: '教学楼（行政楼）。买 1 栋得 1 个摆放额度，在建造工具里摆出。', kind: 'building' },
+  ];
+}
+let SHOP = (() => {
+  try {
+    if (!fs.existsSync(SHOP_FILE)) {
+      const seed = seedShop();
+      fs.writeFileSync(SHOP_FILE, JSON.stringify(seed, null, 2));
+      return seed;
+    }
+    return JSON.parse(fs.readFileSync(SHOP_FILE, 'utf8'));
+  } catch (e) {
+    console.warn('[relay] 商店目录读取失败，用种子:', e);
+    return seedShop();
+  }
+})();
+function saveShop(items) { fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2)); }
+function loadBuildings() {
+  try { return JSON.parse(fs.readFileSync(BUILD_FILE, 'utf8')); } catch { return []; }
+}
+function saveBuildings(list) { fs.writeFileSync(BUILD_FILE, JSON.stringify(list, null, 2)); }
+// 归属键：登录账号用 userId；游客用 IP（同机重连仍算同一人，避免刷上限）
+function ownerKeyOf(ws) {
+  if (ws.__profile && ws.__profile.userId) return 'u:' + ws.__profile.userId;
+  const rip = (ws._socket && ws._socket.remoteAddress) || ws.remoteAddress || ws.__id;
+  return 'anon:' + rip;
+}
+// 向所有在线客户端广播（建造是全局的，不分房间）
+function broadcastAll(msg) {
+  const raw = JSON.stringify(msg);
+  for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(raw);
+}
+
 const MAX_UPLOAD = 64 * 1024 * 1024; // 单次上传上限 64MB（导入的 GLB 模型可能较大）
 
 // 文件名消毒：只保留安全字符，避免路径注入
@@ -299,6 +357,69 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: false, error: String(e) }));
       }
     });
+    return;
+  }
+
+  // 商店目录：公开只读（玩家商店/建造工具都从这里取最新商品与价格）
+  if (req.method === 'GET' && url.pathname === '/api/shop') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, items: SHOP }));
+    return;
+  }
+
+  // 商店目录：管理员带密钥改（导入模型 + 改价格）。token 不符直接 403。
+  if (req.method === 'POST' && url.pathname === '/api/shop') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 1e6) req.destroy(); });
+    req.on('end', () => {
+      const bad = (m, code = 400) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: m }));
+      };
+      try {
+        const data = JSON.parse(body);
+        if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return bad('管理员密钥错误', 403);
+        const op = String(data.op || '');
+        if (op === 'add' || op === 'update') {
+          const it = data.item || {};
+          const id = String(it.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+          if (!id) return bad('id 非法');
+          if (op === 'add' && SHOP.find((x) => x.id === id)) return bad('id 已存在');
+          const price = Math.max(0, Math.min(100000, Math.floor(Number(it.price) || 0)));
+          const u = String(it.url || '');
+          if (!/^\/(assets|models)\//.test(u)) return bad('url 必须是 /assets/ 或 /models/ 下的模型');
+          const kind = it.kind === 'building' ? 'building' : 'item';
+          const name = String(it.name || id).slice(0, 40);
+          const desc = String(it.desc || '').slice(0, 200);
+          const existing = SHOP.find((x) => x.id === id);
+          const rec = existing ? { ...existing } : { id, kind };
+          rec.name = name; rec.price = price; rec.url = u; rec.desc = desc;
+          if (kind === 'item') rec.effect = (it.effect && typeof it.effect === 'object') ? it.effect : null;
+          if (op === 'add') SHOP.push(rec);
+          else SHOP = SHOP.map((x) => (x.id === id ? rec : x));
+          saveShop(SHOP);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, items: SHOP }));
+        } else if (op === 'del') {
+          const id = String(data.id || '');
+          SHOP = SHOP.filter((x) => x.id !== id);
+          saveShop(SHOP);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, items: SHOP }));
+        } else {
+          bad('未知 op');
+        }
+      } catch (e) {
+        bad(String(e));
+      }
+    });
+    return;
+  }
+
+  // 玩家建造（教学楼）只读列表：所有人进游戏先拉一次，渲染全服已摆的楼
+  if (req.method === 'GET' && url.pathname === '/api/build') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, items: loadBuildings() }));
     return;
   }
 
@@ -827,6 +948,54 @@ wss.on('connection', (ws) => {
       cur.ride = 2; // 被代报期间恒为后座
       cur.veh = cur.veh || String(msg.veh || '').slice(0, 16);
       states.set(pax, cur);
+      return;
+    }
+
+    // 玩家建造（教学楼）：买来的楼才能摆，服务端校验 + 限流后存储并广播。
+    // 房间隔离：在大厅摆的楼只广播给大厅；对战里建造工具本就不可用。
+    if (msg.t === 'build_add') {
+      const owner = ownerKeyOf(ws);
+      const item = SHOP.find((x) => x.id === String(msg.itemId || '') && x.kind === 'building');
+      if (!item) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '这件不是可摆放的教学楼' })); return; }
+      const now = Date.now();
+      if (now - (ws.__lastBuild || 0) < BUILD_COOLDOWN) {
+        ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '放置太快，稍等几秒' })); return;
+      }
+      const list = loadBuildings();
+      const mine = list.filter((b) => b.owner === owner).length;
+      if (mine >= BUILD_PER_PLAYER) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '已达个人摆放上限(' + BUILD_PER_PLAYER + ')' })); return; }
+      if (list.length >= BUILD_GLOBAL) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '全服摆放已达上限(' + BUILD_GLOBAL + ')' })); return; }
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const rec = {
+        id: 'b_' + now + '_' + Math.random().toString(36).slice(2, 8),
+        owner, itemId: item.id, url: item.url,
+        x: num(msg.x, 0, -BUILD_CLAMP, BUILD_CLAMP),
+        y: num(msg.y, 0, -2, 10),
+        z: num(msg.z, 0, -BUILD_CLAMP, BUILD_CLAMP),
+        rotY: num(msg.rotY, 0, -Math.PI * 4, Math.PI * 4),
+        scale: num(msg.scale, 1, BUILD_SCALE_MIN, BUILD_SCALE_MAX),
+        ts: now,
+      };
+      list.push(rec);
+      saveBuildings(list);
+      ws.__lastBuild = now;
+      const out = { t: 'build', ev: 'add', id: rec.id, owner, itemId: rec.itemId, url: rec.url, x: rec.x, y: rec.y, z: rec.z, rotY: rec.rotY, scale: rec.scale };
+      roomBroadcast(ws.__room, out, ws);              // 通知别人
+      ws.send(JSON.stringify({ t: 'build', ev: 'added', ...out })); // 通知自己（带 id 确认）
+      return;
+    }
+
+    if (msg.t === 'build_del') {
+      const owner = ownerKeyOf(ws);
+      const id = String(msg.id || '').slice(0, 48);
+      if (!id) return;
+      const list = loadBuildings();
+      const idx = list.findIndex((b) => b.id === id);
+      if (idx < 0) return;
+      if (list[idx].owner !== owner) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '只能移除自己摆的楼' })); return; }
+      list.splice(idx, 1);
+      saveBuildings(list);
+      broadcastAll({ t: 'build', ev: 'del', id });
       return;
     }
 

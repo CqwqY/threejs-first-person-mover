@@ -1,39 +1,29 @@
-// 职责：地图建筑放置工具。可导入 GLB 模型、从内置素材中选择，缩放/旋转/调整高度、拾取位置，
-// 应用到地图；被放置的物件持久化到 localStorage，刷新后仍在。用 B 键或角落按钮开关。
+// 职责：玩家建造工具（教学楼）。必须是**在商店买过的教学楼**（kind:'building'）才能摆；
+// 摆放联机共享——发到服务端校验 + 限流后持久化（data/buildings.json）并广播给所有人，刷新/重进仍在。
+// 限流由服务端权威执行（个人≤5 / 全局≤50 / 冷却3s / 缩放封顶 / 坐标钳制），本地只做体验与额度提示。
+// 消耗式：买 1 栋得 1 个摆放额度，摆出成功后从钱包 owned 消耗 1 个；再买再摆。
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { instantiate } from './AssetLoader.js';
+import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
 
 const DEG = Math.PI / 180;
-const STORE_KEY = 'city.buildings.v1';
 const CLAMP = 24; // 放置区域钳制在 ±24（地面尺寸 50，半径 25）
-const MAX_PERSIST = 1_800_000; // 导入模型 base64 超过该字节数不持久化
 
-// 内置可选素材（文件名来自 /assets）
-const BUILTINS = [
-  'building-small-a.glb',
-  'building-small-b.glb',
-  'building-small-c.glb',
-  'building-small-d.glb',
-  'building-garage.glb',
-  'watertower.glb',
-  'fountain.glb',
-  'bench.glb',
-  'lamp.glb',
-  'tree.glb',
-  'bush.glb',
-];
+// initBuildingTool(scene, camera, domElement, network, opts)：
+//   opts.getProfile   () => profile|null   （钱包按账号；建造额度以此计）
+//   opts.serverBase   'https://host:9000'  （联机服务端基址，用于拉 /api/build）
+//   opts.onToast      (msg) => void
+//   opts.onCoins      () => void              （消耗额度后刷新商店/学币显示）
+// 返回 { state, setActive, toggle, handleBuild }，handleBuild 供 Game 转发服务端 build 消息。
+export function initBuildingTool(scene, camera, domElement, network, opts = {}) {
+  const getProfile = opts.getProfile || (() => null);
+  const serverBase = (opts.serverBase || '').replace(/\/+$/, '');
+  const onToast = opts.onToast || (() => {});
+  const onCoins = opts.onCoins || (() => {});
 
-let _gltfLoader = null;
-function gltfLoader() {
-  if (!_gltfLoader) _gltfLoader = new GLTFLoader();
-  return _gltfLoader;
-}
-
-// initBuildingTool(scene, camera, domElement)：挂载工具，返回开关句柄。
-export function initBuildingTool(scene, camera, domElement) {
   const placedGroup = new THREE.Group();
-  placedGroup.name = 'placed-buildings';
+  placedGroup.name = 'shared-buildings';
   scene.add(placedGroup);
 
   const raycaster = new THREE.Raycaster();
@@ -44,48 +34,71 @@ export function initBuildingTool(scene, camera, domElement) {
   const state = {
     active: false,
     pick: false,
-    sourceUrl: BUILTINS[0],
-    customBin: null, // {name, arrayBuffer} 导入模型
-    customScene: null, // 导入模型解析后的 scene（预览用）
-    scale: 1,
-    rotY: 0,
-    yOff: 0,
-    x: 3,
-    z: 3,
+    itemId: null,
     ghost: null,
+    scale: 1, rotY: 0, yOff: 0,
+    x: 3, z: 3,
+    pendingMesh: null, // 乐观渲染、待服务端回执确认的楼
   };
 
-  // ================= 幽灵模型 =================
-  function resetGhost() {
-    if (state.ghost) {
-      scene.remove(state.ghost);
-      state.ghost = null;
-    }
-    if (!state.active) return;
-    state.ghost = new THREE.Group();
-    state.ghost.add(makeRing());
-    scene.add(state.ghost);
+  // id -> { mesh, rec, mine }
+  const rendered = new Map();
+  const myIds = loadMine(getProfile());   // 我摆过的楼 id（本地记录，用于显示「移除」按钮）
+  const protoCache = new Map();            // itemId -> 已加载的模型原型（切换素材不重复下）
 
-    if (state.customScene) {
-      const m = state.customScene.clone(true);
-      state.ghost.add(m);
-      touchShadowAndProps(m);
-    } else if (state.sourceUrl) {
-      state.ghost.add(makeFallback());
-      instantiate(`/assets/${state.sourceUrl}`)
-        .then((m) => {
-          if (!state.ghost) return;
-          state.ghost.clear();
-          state.ghost.add(makeRing());
-          state.ghost.add(m);
-          touchShadowAndProps(m);
-        })
-        .catch(() => {});
-    }
-    syncGhostProps();
-    positionGhost();
+  function mineKey() {
+    const p = getProfile();
+    const id = p ? (p.username || p.nickname || '') : '';
+    return 'fp_build_mine__' + (id || 'guest');
+  }
+  function loadMine() {
+    try { return new Set(JSON.parse(localStorage.getItem(mineKey()) || '[]')); } catch { return new Set(); }
+  }
+  function saveMine() {
+    try { localStorage.setItem(mineKey(), JSON.stringify([...myIds])); } catch { /* ignore */ }
   }
 
+  function touchShadow(m) {
+    m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  }
+
+  // ---------- 幽灵预览 ----------
+  function getProto(itemId) {
+    return protoCache.get(itemId) || null;
+  }
+  function ensureProto(itemId, cb) {
+    if (protoCache.has(itemId)) { cb(protoCache.get(itemId)); return; }
+    const it = findItem(itemId);
+    if (!it || !it.url) return;
+    instantiate(it.url).then((m) => {
+      protoCache.set(itemId, m);
+      cb(m);
+    }).catch(() => { onToast('模型加载失败：' + (it.url || itemId)); });
+  }
+
+  function resetGhost() {
+    if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
+    if (!state.active || !state.itemId) return;
+    const ghost = new THREE.Group();
+    ghost.add(makeRing());
+    scene.add(ghost);
+    state.ghost = ghost;
+    const proto = getProto(state.itemId);
+    if (proto) attachProto(ghost, proto);
+    else ensureProto(state.itemId, (p) => { if (state.ghost && state.itemId) attachProto(state.ghost, p); });
+    syncGhost();
+    positionGhost();
+  }
+  function attachProto(ghost, proto) {
+    // 清掉旧模型（保留 ring）
+    for (let i = ghost.children.length - 1; i >= 0; i--) {
+      if (ghost.children[i].userData.isRing) continue;
+      ghost.remove(ghost.children[i]);
+    }
+    const m = proto.clone(true);
+    touchShadow(m);
+    ghost.add(m);
+  }
   function makeRing() {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.55, 0.95, 32),
@@ -93,151 +106,112 @@ export function initBuildingTool(scene, camera, domElement) {
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.02;
+    ring.userData.isRing = true;
     return ring;
   }
-
-  function makeFallback() {
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ color: 0x4aa3ff, transparent: true, opacity: 0.5 })
-    );
-    m.position.y = 0.5;
-    return m;
-  }
-
-  // 仅对新加入的模型内容套用缩放/旋转/离地
-  function syncGhostProps() {
+  function syncGhost() {
     if (!state.ghost) return;
-    state.ghost.scale.setScalar(state.scale);
-    state.ghost.rotation.y = state.rotY * DEG;
-    // 内容整体离地：通过一个子容器
-    let inner = state.ghost.userData.inner;
-    if (!inner) {
-      // ghost 第一个子节点是 ring，将其余都包进 inner
-      inner = new THREE.Group();
-      state.ghost.userData.inner = inner;
-      const kids = state.ghost.children.slice(1);
-      for (const k of kids) inner.add(k);
-      state.ghost.clear();
-      state.ghost.add(makeRing());
-      state.ghost.add(inner);
-    }
-    inner.position.y = state.yOff;
-    // 重新把缩放/旋转套给 inner（scale/rotation 应用在 ghost 上）
     for (const c of state.ghost.children) {
-      if (c === state.ghost.userData.inner) continue;
-      c.scale.set(1, 1, 1);
-      c.rotation.set(0, 0, 0);
+      if (c.userData.isRing) continue;
+      c.scale.setScalar(state.scale);
+      c.rotation.y = state.rotY * DEG;
+      c.position.y = state.yOff;
     }
-    state.ghost.scale.setScalar(state.scale);
-    state.ghost.rotation.y = state.rotY * DEG;
   }
-
   function positionGhost() {
     if (state.ghost) state.ghost.position.set(state.x, 0, state.z);
   }
 
-  function touchShadowAndProps(m) {
-    m.traverse((o) => {
-      if (o.isMesh) {
-        o.castShadow = true;
-        o.receiveShadow = true;
-      }
+  // ---------- 摆放 ----------
+  function place() {
+    const profile = getProfile();
+    if (!state.itemId) { onToast('先在商店买教学楼，再到这里摆'); return; }
+    const avail = profile ? unplacedCount(profile, state.itemId) : 0;
+    if (avail <= 0) { onToast('该教学楼已无摆放额度，去商店再买一栋'); return; }
+
+    const proto = getProto(state.itemId);
+    if (!proto) { onToast('模型还没加载好，稍等'); return; }
+
+    // 乐观渲染（待服务端回执给 id）
+    const mesh = proto.clone(true);
+    touchShadow(mesh);
+    mesh.scale.setScalar(state.scale);
+    mesh.rotation.y = state.rotY * DEG;
+    mesh.position.set(state.x, state.yOff, state.z);
+    placedGroup.add(mesh);
+    state.pendingMesh = mesh;
+
+    network.sendBuildAdd({
+      itemId: state.itemId,
+      x: state.x, y: state.yOff, z: state.z,
+      rotY: state.rotY, scale: state.scale,
     });
   }
 
-  // ================= 应用到地图 =================
-  function place() {
-    if (state.customScene) {
-      const m = state.customScene.clone(true);
-      m.scale.setScalar(state.scale);
-      m.rotation.y = state.rotY * DEG;
-      m.position.set(state.x, state.yOff, state.z);
-      touchShadowAndProps(m);
-      placedGroup.add(m);
-      persistBuiltinOrImport({ kind: 'import', name: state.customBin.name, data: arrayBufferToDataUrl(state.customBin.arrayBuffer) });
-    } else if (state.sourceUrl) {
-      instantiate(`/assets/${state.sourceUrl}`)
-        .then((m) => {
-          m.scale.setScalar(state.scale);
-          m.rotation.y = state.rotY * DEG;
-          m.position.set(state.x, state.yOff, state.z);
-          touchShadowAndProps(m);
-          placedGroup.add(m);
-          persistBuiltinOrImport({ kind: 'builtin', url: state.sourceUrl });
-        })
-        .catch(() => {});
-    }
-    renderList();
-  }
-
-  // ---------- 持久化 ----------
-  function loadList() {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  function persistBuiltinOrImport(desc) {
-    if (desc.data && desc.data.length > MAX_PERSIST) {
-      console.warn('[BuildingTool] 模型过大，未持久化（刷新后会消失）:', desc.name);
+  // 服务端回执：摆成功（带 id）
+  function onAdded(rec) {
+    if (rendered.has(rec.id)) return;
+    let mesh = state.pendingMesh;
+    state.pendingMesh = null;
+    if (!mesh) {
+      // 兜底：没乐观网格（理论上不会），按 rec 重新加载
+      ensureProto(rec.itemId, (p) => {
+        const m = p.clone(true); touchShadow(m);
+        m.scale.setScalar(rec.scale); m.rotation.y = rec.rotY * DEG; m.position.set(rec.x, rec.y, rec.z);
+        placedGroup.add(m); rendered.set(rec.id, { mesh: m, rec, mine: true });
+      });
       return;
     }
-    const list = loadList();
-    list.push({
-      kind: desc.kind,
-      ...(desc.kind === 'builtin' ? { url: desc.url } : { name: desc.name, data: desc.data }),
-      x: Math.round(state.x * 100) / 100,
-      y: Math.round(state.yOff * 100) / 100,
-      z: Math.round(state.z * 100) / 100,
-      scale: state.scale,
-      rotY: state.rotY,
+    rendered.set(rec.id, { mesh, rec, mine: true });
+    myIds.add(rec.id); saveMine();
+    const profile = getProfile();
+    if (profile) consumeOwned(profile, rec.itemId);
+    onCoins();
+    refreshSel();
+    renderList();
+  }
+  // 服务端拒绝（额度/上限/冷却）
+  function onRejected(reason) {
+    if (state.pendingMesh) { placedGroup.remove(state.pendingMesh); state.pendingMesh = null; }
+    onToast(reason || '摆放被服务器拒绝');
+  }
+  // 别人摆的（自己收到 add）
+  function onAdd(rec) {
+    if (rendered.has(rec.id)) return;
+    ensureProto(rec.itemId, (p) => {
+      if (rendered.has(rec.id)) return;
+      const m = p.clone(true); touchShadow(m);
+      m.scale.setScalar(rec.scale); m.rotation.y = rec.rotY * DEG; m.position.set(rec.x, rec.y, rec.z);
+      placedGroup.add(m);
+      rendered.set(rec.id, { mesh: m, rec, mine: myIds.has(rec.id) });
     });
-    localStorage.setItem(STORE_KEY, JSON.stringify(list));
   }
-
-  function arrayBufferToDataUrl(ab) {
-    const bytes = new Uint8Array(ab);
-    let bin = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-    }
-    return 'data:model/gltf-binary;base64,' + btoa(bin);
-  }
-
-  function dataUrlToArrayBuffer(dataUrl) {
-    const b64 = dataUrl.split(',')[1];
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes.buffer;
-  }
-
-  // 从持久化列表恢复
-  function restore() {
-    const list = loadList();
-    for (const it of list) {
-      const apply = (m) => {
-        m.scale.setScalar(it.scale ?? 1);
-        m.position.set(it.x ?? 0, it.y ?? 0, it.z ?? 0);
-        if (it.rotY) m.rotation.y = it.rotY * DEG;
-        touchShadowAndProps(m);
-        placedGroup.add(m);
-      };
-      if (it.kind === 'builtin') {
-        instantiate(`/assets/${it.url}`).then(apply).catch(() => {});
-      } else if (it.kind === 'import' && it.data) {
-        gltfLoader().parse(dataUrlToArrayBuffer(it.data), '', (m) => apply(m.scene ?? m)).catch(() => {});
-      }
-    }
+  function onDel(id) {
+    const e = rendered.get(id);
+    if (e) { placedGroup.remove(e.mesh); rendered.delete(id); }
+    myIds.delete(id); saveMine();
     renderList();
   }
 
-  // ================= 位置拾取 =================
+  // Game 转发：msg = {t:'build', ev, ...}
+  function handleBuild(msg) {
+    if (!msg) return;
+    if (msg.ev === 'added') onAdded(msg);
+    else if (msg.ev === 'add') onAdd(msg);
+    else if (msg.ev === 'del') onDel(msg);
+    else if (msg.ev === 'rejected') onRejected(msg.reason);
+  }
+
+  // 进游戏拉一次全服已摆的楼
+  function fetchAll() {
+    if (!serverBase) return;
+    fetch(serverBase + '/api/build')
+      .then((r) => r.json())
+      .then((d) => { if (d && d.ok && Array.isArray(d.items)) d.items.forEach((rec) => onAdd(rec)); })
+      .catch(() => {});
+  }
+
+  // ---------- 位置拾取 ----------
   function pointerOnGround(clientX, clientY) {
     const rect = domElement.getBoundingClientRect();
     ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
@@ -245,57 +219,21 @@ export function initBuildingTool(scene, camera, domElement) {
     raycaster.setFromCamera(ndc, camera);
     return raycaster.ray.intersectPlane(groundPlane, hit);
   }
-
   function onMouseMove(e) {
     if (!state.active || !state.pick || !state.ghost) return;
     const p = pointerOnGround(e.clientX, e.clientY);
-    if (p) {
-      state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP);
-      state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP);
-      positionGhost();
-      syncFields();
-    }
+    if (p) { state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP); state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP); positionGhost(); }
   }
-
   function onMouseDown(e) {
     if (!state.active || !state.pick || !state.ghost) return;
-    e.preventDefault();
-    e.stopPropagation();
+    e.preventDefault(); e.stopPropagation();
     const p = pointerOnGround(e.clientX, e.clientY);
-    if (p) {
-      state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP);
-      state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP);
-      positionGhost();
-      syncFields();
-      place();
-    }
+    if (p) { state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP); state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP); positionGhost(); place(); }
   }
 
-  // ================= UI 控件 =================
-  // 返回 {label, value, slider, box} 的行
-  function row(box) {
-    const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;gap:8px;';
-    const lab = document.createElement('span');
-    lab.style.cssText = 'color:#c7d0da;flex:1;';
-    const val = document.createElement('span');
-    val.style.cssText = 'color:#ffd479;';
-    head.appendChild(lab);
-    head.appendChild(val);
-    const slider = document.createElement('input');
-    slider.type = 'range';
-    slider.style.cssText = 'width:100%;accent-color:#4aa3ff;margin:2px 0;';
-    const el = document.createElement('div');
-    el.style.cssText = 'margin-top:6px;';
-    el.appendChild(head);
-    el.appendChild(slider);
-    if (box) box.appendChild(el);
-    return { lab, val, slider, el };
-  }
-
-  // 面板
+  // ---------- UI ----------
   const toggleBtn = document.createElement('button');
-  toggleBtn.textContent = '建筑工具 (B)';
+  toggleBtn.textContent = '建造 (B)';
   toggleBtn.style.cssText =
     'position:fixed;left:12px;bottom:12px;z-index:99998;background:rgba(15,15,15,.85);color:#fff;' +
     'font:12px/1 sans-serif;padding:8px 12px;border:1px solid #333;border-radius:6px;cursor:pointer;';
@@ -310,80 +248,32 @@ export function initBuildingTool(scene, camera, domElement) {
   const box = panel;
   {
     const title = document.createElement('div');
-    title.textContent = '地图建筑放置工具';
+    title.textContent = '教学楼建造';
     title.style.cssText = 'font-weight:bold;margin-bottom:6px;';
     box.appendChild(title);
 
-    // 素材下拉
     const sel = document.createElement('select');
     sel.style.cssText = 'width:100%;background:#222;color:#fff;border:1px solid #444;border-radius:4px;';
-    BUILTINS.forEach((u) => {
-      const o = document.createElement('option');
-      o.value = u;
-      o.textContent = u.replace('.glb', '');
-      sel.appendChild(o);
-    });
     box.appendChild(sel);
-    sel.addEventListener('change', () => {
-      state.sourceUrl = sel.value;
-      state.customScene = null;
-      resetGhost();
-    });
+    sel.addEventListener('change', () => { state.itemId = sel.value || null; resetGhost(); });
 
-    // 导入
-    const importLab = document.createElement('label');
-    importLab.textContent = '导入 GLB 模型（本地文件）';
-    importLab.style.cssText = 'display:block;text-align:center;margin:6px 0;background:#2b6f5f;color:#fff;' +
-      'padding:6px 0;border-radius:4px;cursor:pointer;';
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.glb,.gltf';
-    fileInput.style.cssText = 'display:none;';
-    importLab.appendChild(fileInput);
-    box.appendChild(importLab);
-    fileInput.addEventListener('change', () => {
-      const f = fileInput.files[0];
-      if (!f) return;
-      const url = URL.createObjectURL(f);
-      f.arrayBuffer().then((ab) => {
-        state.customBin = { name: f.name.replace(/\.(glb|gltf)$/i, ''), arrayBuffer: ab };
-      });
-      gltfLoader().load(url, (gltf) => {
-        state.customScene = gltf.scene;
-        sel.selectedIndex = -1;
-        resetGhost();
-      });
-    });
+    const hint = document.createElement('div');
+    hint.style.cssText = 'color:#ffd479;margin:6px 0;';
+    box.appendChild(hint);
 
-    // 缩放 / 旋转 / 高度
-    const sc = row(box);
-    sc.lab.textContent = '缩放';
-    sc.slider.min = '0.1'; sc.slider.max = '6'; sc.slider.step = '0.05'; sc.slider.value = '1';
-    sc.slider.addEventListener('input', () => { state.scale = parseFloat(sc.slider.value); sc.val.textContent = state.scale.toFixed(2); resetGhost(); });
+    const sc = slider(box, '缩放', 0.1, 3, 0.05, 1, (v) => { state.scale = v; syncGhost(); });
+    const rot = slider(box, '旋转(°)', 0, 360, 1, 0, (v) => { state.rotY = v; syncGhost(); });
+    const yo = slider(box, '离地高度', -1, 4, 0.05, 0, (v) => { state.yOff = v; syncGhost(); });
 
-    const rot = row(box);
-    rot.lab.textContent = '旋转 (°)';
-    rot.slider.min = '0'; rot.slider.max = '360'; rot.slider.step = '1'; rot.slider.value = '0';
-    rot.slider.addEventListener('input', () => { state.rotY = parseFloat(rot.slider.value); rot.val.textContent = state.rotY.toFixed(0); resetGhost(); });
+    const xr = numField(box, 'X');
+    const zr = numField(box, 'Z');
 
-    const yo = row(box);
-    yo.lab.textContent = '离地高度';
-    yo.slider.min = '-1'; yo.slider.max = '4'; yo.slider.step = '0.05'; yo.slider.value = '0';
-    yo.slider.addEventListener('input', () => { state.yOff = parseFloat(yo.slider.value); yo.val.textContent = state.yOff.toFixed(2); resetGhost(); });
-
-    // 坐标
-    const xr = numField(box, 'X', () => positionGhost());
-    const zr = numField(box, 'Z', () => positionGhost());
-
-    // 按钮行
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
     const pickBtn = mkBtn('鼠标拾取位置', '#4aa3ff');
-    const placeBtn = mkBtn('应用到地图', '#2b6f5f');
-    const clearBtn = mkBtn('清空全部', '#a33');
-    btnRow.appendChild(pickBtn);
-    btnRow.appendChild(placeBtn);
-    btnRow.appendChild(clearBtn);
+    const placeBtn = mkBtn('摆出', '#2b6f5f');
+    const clearBtn = mkBtn('移除我摆的', '#a33');
+    btnRow.appendChild(pickBtn); btnRow.appendChild(placeBtn); btnRow.appendChild(clearBtn);
     box.appendChild(btnRow);
 
     pickBtn.addEventListener('click', () => {
@@ -391,121 +281,116 @@ export function initBuildingTool(scene, camera, domElement) {
       pickBtn.textContent = state.pick ? '停止拾取' : '鼠标拾取位置';
       if (state.pick && document.exitPointerLock) document.exitPointerLock();
     });
-    placeBtn.addEventListener('click', () => place());
+    placeBtn.addEventListener('click', place);
     clearBtn.addEventListener('click', () => {
-      placedGroup.clear();
-      localStorage.removeItem(STORE_KEY);
-      renderList();
+      for (const id of [...myIds]) network.sendBuildDel(id);
+      onToast('已请求移除你摆的楼');
     });
 
-    box.appendChild(sectionLabel('已放置物件（点击移除）'));
+    box.appendChild(sectionLabel('我摆的楼（点击移除）'));
     const listBox = document.createElement('div');
     listBox.style.cssText = 'max-height:150px;overflow:auto;margin-top:4px;';
     box.appendChild(listBox);
 
     function renderList() {
       listBox.innerHTML = '';
-      const list = loadList();
-      if (list.length === 0) {
-        const e = document.createElement('div');
-        e.textContent = '（暂无）';
-        e.style.cssText = 'color:#667;';
-        listBox.appendChild(e);
-        return;
+      const mine = [...rendered.values()].filter((e) => e.mine);
+      if (!mine.length) {
+        const e = document.createElement('div'); e.textContent = '（暂无）'; e.style.cssText = 'color:#667;';
+        listBox.appendChild(e); return;
       }
-      list.forEach((it, i) => {
+      mine.forEach((e) => {
         const r = document.createElement('div');
         r.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:2px 0;';
         const labelEl = document.createElement('span');
-        labelEl.textContent = `${i + 1}. ${it.kind === 'builtin' ? it.url.replace('.glb', '') : (it.name || '导入')} (${it.x},${it.z})`;
+        labelEl.textContent = (findItem(e.rec.itemId)?.name || e.rec.itemId) + ` (${e.rec.x | 0},${e.rec.z | 0})`;
         labelEl.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         const del = document.createElement('button');
         del.textContent = '移除';
         del.style.cssText = 'background:#a33;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;';
-        del.addEventListener('click', () => {
-          const nl = list.slice(0, i).concat(list.slice(i + 1));
-          localStorage.setItem(STORE_KEY, JSON.stringify(nl));
-          placedGroup.clear();
-          restore();
-        });
-        r.appendChild(labelEl);
-        r.appendChild(del);
+        del.addEventListener('click', () => network.sendBuildDel(e.rec.id));
+        r.appendChild(labelEl); r.appendChild(del);
         listBox.appendChild(r);
       });
-      sc.val.textContent = state.scale.toFixed(2);
-      rot.val.textContent = state.rotY.toFixed(0);
-      yo.val.textContent = state.yOff.toFixed(2);
     }
 
-    function syncFields() {
-      xr.input.value = state.x.toFixed(2);
-      zr.input.value = state.z.toFixed(2);
+    // 刷新素材下拉：只列「已买且还有额度」的教学楼
+    function refreshSel() {
+      const profile = getProfile();
+      const items = getCatalog().filter((it) => it.kind === 'building');
+      sel.innerHTML = '';
+      let any = false;
+      for (const it of items) {
+        const avail = profile ? unplacedCount(profile, it.id) : 0;
+        if (avail <= 0) continue;
+        any = true;
+        const o = document.createElement('option');
+        o.value = it.id;
+        o.textContent = `${it.name}（剩 ${avail}）`;
+        sel.appendChild(o);
+      }
+      if (!any) {
+        const o = document.createElement('option'); o.value = ''; o.textContent = '（先在商店买教学楼）';
+        sel.appendChild(o);
+        state.itemId = null;
+      } else if (!state.itemId || !getCatalog().some((it) => it.id === state.itemId && (profile ? unplacedCount(profile, it.id) : 0) > 0)) {
+        state.itemId = sel.value || null;
+      }
+      hint.textContent = any ? '选好楼 → 拾取位置 → 摆出' : '去商店买教学楼后才能摆（消耗式：买1栋摆1栋）';
+      resetGhost();
     }
-    // 暴露给 state
-    state.renderList = renderList;
-    state.syncFields = syncFields;
-    state.setPanelDisplay = (v) => { panel.style.display = v ? 'block' : 'none'; };
+    state._refreshSel = refreshSel;
+    state._renderList = renderList;
+    // 初次填充
+    refreshSel();
   }
 
-  // 辅助：数值输入
-  function numField(parent, txt, onCommit) {
+  function slider(parent, txt, min, max, step, val, onInput) {
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    const lab = document.createElement('span'); lab.style.cssText = 'color:#c7d0da;flex:1;'; lab.textContent = txt;
+    const valEl = document.createElement('span'); valEl.style.cssText = 'color:#ffd479;';
+    head.appendChild(lab); head.appendChild(valEl);
+    const s = document.createElement('input');
+    s.type = 'range'; s.style.cssText = 'width:100%;accent-color:#4aa3ff;margin:2px 0;';
+    s.min = String(min); s.max = String(max); s.step = String(step); s.value = String(val);
+    valEl.textContent = String(val);
+    s.addEventListener('input', () => { const v = parseFloat(s.value); valEl.textContent = v.toFixed(2); onInput(v); });
+    const el = document.createElement('div'); el.style.cssText = 'margin-top:6px;';
+    el.appendChild(head); el.appendChild(s); parent.appendChild(el);
+    return { s, valEl };
+  }
+  function numField(parent, txt) {
     const d = document.createElement('div');
     d.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;';
-    const lab = document.createElement('span');
-    lab.textContent = txt;
-    lab.style.cssText = 'color:#c7d0da;width:18px;';
+    const lab = document.createElement('span'); lab.textContent = txt; lab.style.cssText = 'color:#c7d0da;width:18px;';
     const input = document.createElement('input');
     input.style.cssText = 'flex:1;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:2px 6px;';
-    input.type = 'number';
-    input.min = '-24';
-    input.max = '24';
-    input.step = '0.1';
-    d.appendChild(lab);
-    d.appendChild(input);
-    parent.appendChild(d);
+    input.type = 'number'; input.min = '-24'; input.max = '24'; input.step = '0.1';
+    d.appendChild(lab); d.appendChild(input); parent.appendChild(d);
     input.addEventListener('change', () => {
       const v = parseFloat(input.value);
-      if (!Number.isNaN(v) && txt === 'X') state.x = THREE.MathUtils.clamp(v, -CLAMP, CLAMP);
-      if (!Number.isNaN(v) && txt === 'Z') state.z = THREE.MathUtils.clamp(v, -CLAMP, CLAMP);
-      positionGhost();
-      onCommit();
+      if (!Number.isNaN(v)) { if (txt === 'X') state.x = THREE.MathUtils.clamp(v, -CLAMP, CLAMP); else state.z = THREE.MathUtils.clamp(v, -CLAMP, CLAMP); positionGhost(); }
     });
     return { input };
   }
-
-  function sectionLabel(txt) {
-    const d = document.createElement('div');
-    d.textContent = txt;
-    d.style.cssText = 'color:#c7d0da;margin-top:8px;';
-    return d;
-  }
-
-  function mkBtn(txt, color) {
-    const b = document.createElement('button');
-    b.textContent = txt;
+  function sectionLabel(t) { const d = document.createElement('div'); d.textContent = t; d.style.cssText = 'color:#c7d0da;margin-top:8px;'; return d; }
+  function mkBtn(t, color) {
+    const b = document.createElement('button'); b.textContent = t;
     b.style.cssText = `flex:1;padding:6px 0;border:0;border-radius:4px;cursor:pointer;background:${color};color:#fff;`;
     return b;
   }
 
-  // ================= 开关 =================
+  // ---------- 开关 ----------
   function setActive(v) {
     state.active = v;
     window.__BUILD_TOOL_ACTIVE__ = v;
     state.pick = false;
     panel.style.display = v ? 'block' : 'none';
     toggleBtn.style.background = v ? 'rgba(42,111,95,.95)' : 'rgba(15,15,15,.85)';
-    if (v) {
-      state.renderList();
-      resetGhost();
-    } else {
-      if (document.exitPointerLock) document.exitPointerLock();
-      if (state.ghost) {
-        scene.remove(state.ghost);
-        state.ghost = null;
-      }
-    }
+    if (v) { state._refreshSel && state._refreshSel(); resetGhost(); }
+    else { if (document.exitPointerLock) document.exitPointerLock(); if (state.ghost) { scene.remove(state.ghost); state.ghost = null; } }
   }
-
   toggleBtn.addEventListener('click', () => setActive(!state.active));
   window.addEventListener('keydown', (e) => {
     if (e.key === 'b' || e.key === 'B') setActive(!state.active);
@@ -514,7 +399,14 @@ export function initBuildingTool(scene, camera, domElement) {
   domElement.addEventListener('mousemove', onMouseMove);
   domElement.addEventListener('mousedown', onMouseDown);
 
-  restore();
+  fetchAll();
 
-  return { state, setActive, toggle: () => setActive(!state.active) };
+  return {
+    state,
+    setActive,
+    toggle: () => setActive(!state.active),
+    handleBuild,
+    // 登录/目录变化后刷新下拉与已摆列表
+    refresh: () => { state._refreshSel && state._refreshSel(); state._renderList && state._renderList(); fetchAll(); },
+  };
 }

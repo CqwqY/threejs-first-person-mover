@@ -299,6 +299,21 @@ export function createEditor() {
     tkDel: document.getElementById('tkDel'),
     tkClear: document.getElementById('tkClear'),
     btnEmptyCollider: document.getElementById('btnEmptyCollider'),
+    btnShop: document.getElementById('tShop'),
+    shopPanel: document.getElementById('shopPanel'),
+    shopToken: document.getElementById('shopToken'),
+    shopRefresh: document.getElementById('shopRefresh'),
+    shopList: document.getElementById('shopList'),
+    shopId: document.getElementById('shopId'),
+    shopName: document.getElementById('shopName'),
+    shopKind: document.getElementById('shopKind'),
+    shopPrice: document.getElementById('shopPrice'),
+    shopDesc: document.getElementById('shopDesc'),
+    shopFile: document.getElementById('shopFile'),
+    shopUrl: document.getElementById('shopUrl'),
+    shopFormHint: document.getElementById('shopFormHint'),
+    shopSave: document.getElementById('shopSave'),
+    shopCancel: document.getElementById('shopCancel'),
     cStep: document.getElementById('cStep'),
     cMax: document.getElementById('cMax'),
     cMultiBtn: document.getElementById('cMultiBtn'),
@@ -2785,11 +2800,11 @@ export function createEditor() {
 
   function setMode(m) {
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
@@ -2798,17 +2813,21 @@ export function createEditor() {
       StepUI.hint.textContent = '拖青绿板 = 移动这条边 · 拖橙色角球 = 同时改相邻两边 · 右侧面板可填精确数值 · 右键拖拽转视角';
     } else if (m === 'track') {
       StepUI.hint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 右键拖拽转视角 · 右侧面板可改圈数 / 删除 / 清空';
-    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门')) {
+    } else if (m === 'shop') {
+      StepUI.hint.textContent = '商店管理面板：改价格即时全服生效 · 添加教学楼需上传 .glb 模型';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('商店管理')) {
       StepUI.hint.textContent = '';
     }
 
-    // 边界 / 赛道模式：显示各自的可视化 + 俯视全览 + 只留自己那一层；离开时全部还原
+    // 边界 / 赛道 / 商店模式：显示各自面板；离开时全部还原
     const isBound = m === 'bound';
     const isTrack = m === 'track';
+    const isShop = m === 'shop';
     boundaryGroup.visible = isBound;
     trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
     if (StepUI.trackPanel) StepUI.trackPanel.style.display = isTrack ? 'block' : 'none';
+    if (StepUI.shopPanel) StepUI.shopPanel.style.display = isShop ? 'block' : 'none';
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -2843,8 +2862,8 @@ export function createEditor() {
       tCtl.detach(); tCtl.enabled = false;
       resetGhost();
       if (!state.placingEmpty) StepUI.hint.textContent = '';
-    } else if (isBound || isTrack) {
-      // 边界 / 赛道模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
+    } else if (isBound || isTrack || isShop) {
+      // 边界 / 赛道 / 商店模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
       state.placingEmpty = false;
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
       tCtl.detach(); tCtl.enabled = false;
@@ -2875,6 +2894,196 @@ export function createEditor() {
   StepUI.btnRuler.onclick = () => setMode('ruler');
   if (StepUI.btnBound) StepUI.btnBound.onclick = () => setMode('bound'); // 边界编辑模式（空气墙）
   if (StepUI.btnTrack) StepUI.btnTrack.onclick = () => setMode('track'); // 赛道编辑模式（校园狂飙）
+
+  // ---------- 商店管理（在线改价格 / 导入模型） ----------
+  // 与后端 /api/shop 对接：GET 公开读、POST 带管理员密钥改（add/update/del）。
+  // 价格改动即时全服生效（玩家进游戏会重新拉 /api/shop 覆盖本地目录）。
+  const SHOP_TOKEN_KEY = 'fpm-shop-token';
+  let editingShopId = null;        // 正在编辑的商品 id；null 表示新增
+  let lastShopItems = [];          // 最近一次拉取的商品列表（保存/删除后就地更新）
+  if (StepUI.shopToken) {
+    const savedTok = localStorage.getItem(SHOP_TOKEN_KEY) || '';
+    StepUI.shopToken.value = savedTok;
+    StepUI.shopToken.addEventListener('input', () => localStorage.setItem(SHOP_TOKEN_KEY, StepUI.shopToken.value || ''));
+  }
+  function shopApiUrl() { return API_ROOT + '/api/shop'; }
+  function shopToken() { return (StepUI.shopToken && StepUI.shopToken.value) || ''; }
+  function setShopFormHint(text, cls) {
+    if (!StepUI.shopFormHint) return;
+    StepUI.shopFormHint.textContent = text || '';
+    StepUI.shopFormHint.style.color = cls === 'err' ? '#ff8888' : '#9fe0a8';
+  }
+  function renderShopList(items) {
+    if (!StepUI.shopList) return;
+    lastShopItems = items || [];
+    if (!items || !items.length) {
+      StepUI.shopList.innerHTML = '<div style="color:#7d8894">（空）</div>';
+      return;
+    }
+    StepUI.shopList.innerHTML = '';
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:3px;cursor:pointer;';
+      row.style.borderBottom = '1px solid #333';
+      const badge = it.kind === 'building'
+        ? '<span style="color:#7ec8ff">教学楼</span>'
+        : '<span style="color:#cfe0f5">道具</span>';
+      const nm = document.createElement('span');
+      nm.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      nm.innerHTML = '<b>' + escapeHtml(it.name) + '</b> <span style="color:#8a93a0;font-size:11px">' + escapeHtml(it.id) + '</span> · ' + badge + ' · <b style="color:#ffd479">' + (it.price || 0) + '</b> 学币';
+      const edit = document.createElement('span');
+      edit.textContent = '✎';
+      edit.title = '编辑';
+      edit.style.cssText = 'cursor:pointer;color:#9fe0a8;padding:0 4px;flex:0 0 auto';
+      edit.onclick = (e) => { e.stopPropagation(); editShopItem(it); };
+      const del = document.createElement('span');
+      del.textContent = '✕';
+      del.title = '删除';
+      del.style.cssText = 'cursor:pointer;color:#f88;padding:0 4px;flex:0 0 auto';
+      del.onclick = (e) => { e.stopPropagation(); deleteShopItem(it.id); };
+      row.appendChild(nm); row.appendChild(edit); row.appendChild(del);
+      row.onclick = () => editShopItem(it);
+      StepUI.shopList.appendChild(row);
+    }
+  }
+  function escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  async function fetchShop() {
+    try {
+      const r = await fetch(shopApiUrl());
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body || !body.ok) {
+        setShopFormHint('拉取商店失败：HTTP ' + r.status, 'err');
+        return;
+      }
+      renderShopList(body.items);
+      setShopFormHint('已加载 ' + (body.items ? body.items.length : 0) + ' 个商品', '');
+    } catch (e) {
+      setShopFormHint('拉取商店失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  function resetShopForm() {
+    editingShopId = null;
+    if (StepUI.shopId) StepUI.shopId.value = '';
+    if (StepUI.shopName) StepUI.shopName.value = '';
+    if (StepUI.shopKind) StepUI.shopKind.value = 'item';
+    if (StepUI.shopPrice) StepUI.shopPrice.value = '100';
+    if (StepUI.shopDesc) StepUI.shopDesc.value = '';
+    if (StepUI.shopFile) StepUI.shopFile.value = '';
+    if (StepUI.shopUrl) StepUI.shopUrl.value = '';
+    setShopFormHint('', '');
+  }
+  function editShopItem(it) {
+    editingShopId = it.id;
+    if (StepUI.shopId) StepUI.shopId.value = it.id;
+    if (StepUI.shopName) StepUI.shopName.value = it.name || '';
+    if (StepUI.shopKind) StepUI.shopKind.value = it.kind === 'building' ? 'building' : 'item';
+    if (StepUI.shopPrice) StepUI.shopPrice.value = String(it.price != null ? it.price : 0);
+    if (StepUI.shopDesc) StepUI.shopDesc.value = it.desc || '';
+    if (StepUI.shopUrl) StepUI.shopUrl.value = it.url || '';
+    if (StepUI.shopFile) StepUI.shopFile.value = '';
+    setShopFormHint('正在编辑：' + it.id + '（保存即覆盖）', '');
+  }
+  // 上传选中的 GLB 模型，返回后端 url（复用现有上传通道：线上优先 + 同源兜底）
+  async function uploadShopModel(file) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setShopFormHint('模型太大：' + (file.size / 1048576).toFixed(1) + 'MB，超过后端上限 ' + (MAX_UPLOAD_BYTES / 1048576) + 'MB', 'err');
+      return { url: '' };
+    }
+    let ab;
+    try { ab = await file.arrayBuffer(); } catch (e) { setShopFormHint('读取文件失败：' + e, 'err'); return { url: '' }; }
+    const targets = [...new Set([UPLOAD_URL, SAME_ORIGIN_UPLOAD])].filter((u) => /^https?:\/\//.test(u) || u.startsWith('/'));
+    const reasons = [];
+    for (const u of targets) {
+      const r = await uploadModel(u, file, ab);
+      if (r.url) return { url: r.url };
+      reasons.push(u + ' → ' + r.reason);
+    }
+    setShopFormHint('模型上传失败：\n' + reasons.join('\n'), 'err');
+    return { url: '' };
+  }
+  async function saveShopItem() {
+    const token = shopToken();
+    if (!token) { setShopFormHint('请先填管理员密钥', 'err'); return; }
+    const name = (StepUI.shopName.value || '').trim();
+    if (!name) { setShopFormHint('请填商品名称', 'err'); return; }
+    const kind = StepUI.shopKind.value === 'building' ? 'building' : 'item';
+    const price = Math.max(0, Math.min(100000, Math.floor(Number(StepUI.shopPrice.value) || 0)));
+
+    let url = (StepUI.shopUrl.value || '').trim();
+    if (StepUI.shopFile && StepUI.shopFile.files && StepUI.shopFile.files[0]) {
+      setShopFormHint('模型上传中…', '');
+      const up = await uploadShopModel(StepUI.shopFile.files[0]);
+      if (!up.url) return; // 错误已提示
+      url = up.url;
+    }
+    if (!/^\/(assets|models)\//.test(url)) {
+      setShopFormHint('模型 URL 必须是 /assets/ 或 /models/ 下的 .glb（留空则仅作道具/无模型）', 'err');
+      return;
+    }
+
+    // id：编辑时锁定为正在编辑的 id；新增时取表单编号，留空则自动生成
+    const id = editingShopId || (StepUI.shopId.value || '').trim() || ('shop-' + Date.now());
+    const op = editingShopId ? 'update' : 'add';
+    const item = {
+      id,
+      name,
+      kind,
+      price,
+      url,
+      desc: (StepUI.shopDesc.value || '').slice(0, 200),
+    };
+    if (kind === 'item') {
+      // 教学楼之外不强制 effect；保留现有道具的 effect（编辑时从列表取），新增默认无
+      const exist = (lastShopItems || []).find((x) => x.id === id);
+      item.effect = exist && exist.effect ? exist.effect : null;
+    }
+    setShopFormHint(op === 'add' ? '新增中…' : '保存中…', '');
+    try {
+      const r = await fetch(shopApiUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, op, item, id: editingShopId || undefined }),
+      });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body || !body.ok) {
+        setShopFormHint('保存失败：HTTP ' + r.status + (body && body.error ? ' · ' + body.error : ''), 'err');
+        return;
+      }
+      renderShopList(body.items);
+      resetShopForm();
+      setShopFormHint('已' + (op === 'add' ? '新增' : '更新') + '：' + name, '');
+    } catch (e) {
+      setShopFormHint('保存失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  async function deleteShopItem(id) {
+    if (!confirm('确定删除商品「' + id + '」？该操作立即全服生效。')) return;
+    const token = shopToken();
+    if (!token) { setShopFormHint('请先填管理员密钥', 'err'); return; }
+    setShopFormHint('删除中…', '');
+    try {
+      const r = await fetch(shopApiUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, op: 'del', id }),
+      });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body || !body.ok) {
+        setShopFormHint('删除失败：HTTP ' + r.status + (body && body.error ? ' · ' + body.error : ''), 'err');
+        return;
+      }
+      renderShopList(body.items);
+      setShopFormHint('已删除：' + id, '');
+    } catch (e) {
+      setShopFormHint('删除失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  if (StepUI.btnShop) StepUI.btnShop.onclick = () => { setMode('shop'); fetchShop(); };
+  if (StepUI.shopRefresh) StepUI.shopRefresh.onclick = () => fetchShop();
+  if (StepUI.shopSave) StepUI.shopSave.onclick = () => saveShopItem();
+  if (StepUI.shopCancel) StepUI.shopCancel.onclick = () => resetShopForm();
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');
 
