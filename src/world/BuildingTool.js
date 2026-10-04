@@ -1,7 +1,8 @@
-// 职责：玩家建造工具（教学楼）。必须是**在商店买过的教学楼**（kind:'building'）才能摆；
+// 职责：玩家的「家具摆放工具」。必须是**在家具商店买过的家具**（kind:'building'）才能摆；
 // 摆放联机共享——发到服务端校验 + 限流后持久化（data/buildings.json）并广播给所有人，刷新/重进仍在。
 // 限流由服务端权威执行（个人≤5 / 全局≤50 / 冷却3s / 缩放封顶 / 坐标钳制），本地只做体验与额度提示。
-// 消耗式：买 1 栋得 1 个摆放额度，摆出成功后从钱包 owned 消耗 1 个；再买再摆。
+// 消耗式：买 1 件得 1 个摆放额度，摆出成功后从钱包 owned 消耗 1 个；再买再摆。
+// 模型：商品 url 为 'placeholder'（或空）时用占位方块渲染；编辑器导入真模型后自动换成 GLB。
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { instantiate } from './AssetLoader.js';
@@ -11,11 +12,11 @@ const DEG = Math.PI / 180;
 const CLAMP = 24; // 放置区域钳制在 ±24（地面尺寸 50，半径 25）
 
 // initBuildingTool(scene, camera, domElement, network, opts)：
-//   opts.getProfile   () => profile|null   （钱包按账号；建造额度以此计）
+//   opts.getProfile   () => profile|null   （钱包按账号；摆放额度以此计）
 //   opts.serverBase   'https://host:9000'  （联机服务端基址，用于拉 /api/build）
 //   opts.onToast      (msg) => void
 //   opts.onCoins      () => void              （消耗额度后刷新商店/学币显示）
-// 返回 { state, setActive, toggle, handleBuild }，handleBuild 供 Game 转发服务端 build 消息。
+// 返回 { state, setActive, toggle, handleBuild, refresh }，handleBuild 供 Game 转发服务端 build 消息。
 export function initBuildingTool(scene, camera, domElement, network, opts = {}) {
   const getProfile = opts.getProfile || (() => null);
   const serverBase = (opts.serverBase || '').replace(/\/+$/, '');
@@ -38,13 +39,13 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     ghost: null,
     scale: 1, rotY: 0, yOff: 0,
     x: 3, z: 3,
-    pendingMesh: null, // 乐观渲染、待服务端回执确认的楼
+    pendingMesh: null, // 乐观渲染、待服务端回执确认的家具
   };
 
   // id -> { mesh, rec, mine }
   const rendered = new Map();
-  const myIds = loadMine(getProfile());   // 我摆过的楼 id（本地记录，用于显示「移除」按钮）
-  const protoCache = new Map();            // itemId -> 已加载的模型原型（切换素材不重复下）
+  const myIds = loadMine();   // 我摆过的家具 id（本地记录，用于显示「移除」按钮）
+  const protoCache = new Map(); // itemId -> 已加载的模型原型（切换素材不重复下）
 
   function mineKey() {
     const p = getProfile();
@@ -62,6 +63,20 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   }
 
+  // 占位方块：url 为 'placeholder'/空 时绘制一个木色 Box（尺寸取商品 size）
+  function makePlaceholderBox(item) {
+    const size = Array.isArray(item.size) && item.size.length === 3
+      ? [Number(item.size[0]) || 1, Number(item.size[1]) || 1, Number(item.size[2]) || 1]
+      : [1, 1, 1];
+    const geo = new THREE.BoxGeometry(size[0], size[1], size[2]);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xb98a4b, roughness: 0.85, metalness: 0.05 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    const g = new THREE.Group();
+    g.add(mesh);
+    return g;
+  }
+
   // ---------- 幽灵预览 ----------
   function getProto(itemId) {
     return protoCache.get(itemId) || null;
@@ -69,7 +84,14 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   function ensureProto(itemId, cb) {
     if (protoCache.has(itemId)) { cb(protoCache.get(itemId)); return; }
     const it = findItem(itemId);
-    if (!it || !it.url) return;
+    if (!it) return;
+    // 占位方块：不下载模型，直接按 size 画 Box
+    if (!it.url || it.url === 'placeholder') {
+      const box = makePlaceholderBox(it);
+      protoCache.set(itemId, box);
+      cb(box);
+      return;
+    }
     instantiate(it.url).then((m) => {
       protoCache.set(itemId, m);
       cb(m);
@@ -125,9 +147,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   // ---------- 摆放 ----------
   function place() {
     const profile = getProfile();
-    if (!state.itemId) { onToast('先在商店买教学楼，再到这里摆'); return; }
+    if (!state.itemId) { onToast('先在家具商店买家具，再到这里摆'); return; }
     const avail = profile ? unplacedCount(profile, state.itemId) : 0;
-    if (avail <= 0) { onToast('该教学楼已无摆放额度，去商店再买一栋'); return; }
+    if (avail <= 0) { onToast('该家具已无摆放额度，去家具商店再买一件'); return; }
 
     const proto = getProto(state.itemId);
     if (!proto) { onToast('模型还没加载好，稍等'); return; }
@@ -202,7 +224,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     else if (msg.ev === 'rejected') onRejected(msg.reason);
   }
 
-  // 进游戏拉一次全服已摆的楼
+  // 进游戏拉一次全服已摆的家具
   function fetchAll() {
     if (!serverBase) return;
     fetch(serverBase + '/api/build')
@@ -231,9 +253,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (p) { state.x = THREE.MathUtils.clamp(p.x, -CLAMP, CLAMP); state.z = THREE.MathUtils.clamp(p.z, -CLAMP, CLAMP); positionGhost(); place(); }
   }
 
-  // ---------- UI ----------
+  // ---------- UI（家具摆放面板） ----------
   const toggleBtn = document.createElement('button');
-  toggleBtn.textContent = '建造 (B)';
+  toggleBtn.textContent = '家具摆放 (B)';
   toggleBtn.style.cssText =
     'position:fixed;left:12px;bottom:12px;z-index:99998;background:rgba(15,15,15,.85);color:#fff;' +
     'font:12px/1 sans-serif;padding:8px 12px;border:1px solid #333;border-radius:6px;cursor:pointer;';
@@ -248,7 +270,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   const box = panel;
   {
     const title = document.createElement('div');
-    title.textContent = '教学楼建造';
+    title.textContent = '家具摆放';
     title.style.cssText = 'font-weight:bold;margin-bottom:6px;';
     box.appendChild(title);
 
@@ -284,10 +306,10 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     placeBtn.addEventListener('click', place);
     clearBtn.addEventListener('click', () => {
       for (const id of [...myIds]) network.sendBuildDel(id);
-      onToast('已请求移除你摆的楼');
+      onToast('已请求移除你摆的家具');
     });
 
-    box.appendChild(sectionLabel('我摆的楼（点击移除）'));
+    box.appendChild(sectionLabel('我摆的家具（点击移除）'));
     const listBox = document.createElement('div');
     listBox.style.cssText = 'max-height:150px;overflow:auto;margin-top:4px;';
     box.appendChild(listBox);
@@ -314,7 +336,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       });
     }
 
-    // 刷新素材下拉：只列「已买且还有额度」的教学楼
+    // 刷新素材下拉：只列「已买且还有额度」的家具
     function refreshSel() {
       const profile = getProfile();
       const items = getCatalog().filter((it) => it.kind === 'building');
@@ -330,13 +352,13 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
         sel.appendChild(o);
       }
       if (!any) {
-        const o = document.createElement('option'); o.value = ''; o.textContent = '（先在商店买教学楼）';
+        const o = document.createElement('option'); o.value = ''; o.textContent = '（先在家具商店买家具）';
         sel.appendChild(o);
         state.itemId = null;
       } else if (!state.itemId || !getCatalog().some((it) => it.id === state.itemId && (profile ? unplacedCount(profile, it.id) : 0) > 0)) {
         state.itemId = sel.value || null;
       }
-      hint.textContent = any ? '选好楼 → 拾取位置 → 摆出' : '去商店买教学楼后才能摆（消耗式：买1栋摆1栋）';
+      hint.textContent = any ? '选好家具 → 拾取位置 → 摆出' : '去家具商店买家具后才能摆（消耗式：买1件摆1件）';
       resetGhost();
     }
     state._refreshSel = refreshSel;

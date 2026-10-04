@@ -161,7 +161,7 @@ fs.mkdirSync(ASSETS_DIR, { recursive: true }); // 启动即确保目录存在
 
 // ---- 商店目录 + 玩家建造（联机共享） ----
 // 商店目录：玩家 GET /api/shop 公开读；管理员 POST /api/shop 带密钥改（导入模型 + 改价格）。
-// 玩家建造：买来的教学楼（kind:'building'）才能摆，摆放持久化到 data/buildings.json 并广播给所有人。
+// 玩家建造：买来的家具（kind:'building'，先用占位方块）才能摆，摆放持久化到 data/buildings.json 并广播给所有人。
 const SHOP_FILE = path.join(DATA_DIR, 'shop.json');
 const BUILD_FILE = path.join(DATA_DIR, 'buildings.json');
 const SHOP_ADMIN_TOKEN = process.env.SHOP_ADMIN_TOKEN || 'fpm-shop-admin'; // 改价格用管理员密钥；生产请用 env 覆盖
@@ -183,8 +183,9 @@ function seedShop() {
     { id: 'gatling', name: '加特林', price: 200, desc: '按住左键持续扫射，单发 30 点伤害。', kind: 'item', effect: { k: 'gatling' } },
     { id: 'ctrlgun', name: '控制枪', price: 180, desc: '激光抓住别人，移动视角拖着走；对方按空格挣脱。', kind: 'item', effect: { k: 'control' } },
     { id: 'grapple', name: '抓钩', price: 160, desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去。', kind: 'item', effect: { k: 'grapple' } },
-    { id: 'build_junzhong', name: '军中楼', url: '/models/军中.glb', price: 500, desc: '教学楼（军中楼）。买 1 栋得 1 个摆放额度，在建造工具里摆出。', kind: 'building' },
-    { id: 'build_xingzheng', name: '行政楼', url: '/models/未命名.glb', price: 500, desc: '教学楼（行政楼）。买 1 栋得 1 个摆放额度，在建造工具里摆出。', kind: 'building' },
+    { id: 'furn_chair', name: '木椅', url: 'placeholder', price: 80, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [0.5, 0.9, 0.5] },
+    { id: 'furn_table', name: '木桌', url: 'placeholder', price: 120, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.2, 0.8, 0.8] },
+    { id: 'furn_sofa', name: '布艺沙发', url: 'placeholder', price: 200, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.8, 0.8, 0.9] },
   ];
 }
 let SHOP = (() => {
@@ -199,6 +200,22 @@ let SHOP = (() => {
     console.warn('[relay] 商店目录读取失败，用种子:', e);
     return seedShop();
   }
+})();
+// 重做迁移：旧「教学楼」(build_*) 种子不要了，换成占位家具。
+// 仅当还存在旧教学楼种子、或完全没有可摆放商品时触发一次；之后以文件为准。
+(function migrateShop() {
+  const hadOld = SHOP.some((x) => x.id === 'build_junzhong' || x.id === 'build_xingzheng');
+  const hasFurn = SHOP.some((x) => x.kind === 'building');
+  if (!hadOld && hasFurn) return; // 已经是家具了，不动
+  SHOP = SHOP.filter((x) => x.kind !== 'building'); // 清掉所有旧教学楼
+  for (const f of seedShop().filter((x) => x.kind === 'building')) {
+    if (!SHOP.find((x) => x.id === f.id)) SHOP.push(f);
+  }
+  saveShop(SHOP);
+  try {
+    const bs = loadBuildings().filter((x) => !String(x.itemId || '').startsWith('build_'));
+    saveBuildings(bs);
+  } catch (e) { /* ignore */ }
 })();
 function saveShop(items) { fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2)); }
 function loadBuildings() {
@@ -387,13 +404,13 @@ const httpServer = http.createServer(async (req, res) => {
           if (op === 'add' && SHOP.find((x) => x.id === id)) return bad('id 已存在');
           const price = Math.max(0, Math.min(100000, Math.floor(Number(it.price) || 0)));
           const u = String(it.url || '');
-          if (!/^\/(assets|models)\//.test(u)) return bad('url 必须是 /assets/ 或 /models/ 下的模型');
+          if (u && !/^\/(assets|models)\//.test(u) && u !== 'placeholder') return bad('url 必须是 /assets/ 或 /models/ 下的模型，或填 placeholder（占位方块）');
           const kind = it.kind === 'building' ? 'building' : 'item';
           const name = String(it.name || id).slice(0, 40);
           const desc = String(it.desc || '').slice(0, 200);
           const existing = SHOP.find((x) => x.id === id);
           const rec = existing ? { ...existing } : { id, kind };
-          rec.name = name; rec.price = price; rec.url = u; rec.desc = desc;
+          rec.name = name; rec.price = price; rec.url = (kind === 'building' && !u) ? 'placeholder' : u; rec.desc = desc;
           if (kind === 'item') rec.effect = (it.effect && typeof it.effect === 'object') ? it.effect : null;
           if (op === 'add') SHOP.push(rec);
           else SHOP = SHOP.map((x) => (x.id === id ? rec : x));
@@ -956,7 +973,7 @@ wss.on('connection', (ws) => {
     if (msg.t === 'build_add') {
       const owner = ownerKeyOf(ws);
       const item = SHOP.find((x) => x.id === String(msg.itemId || '') && x.kind === 'building');
-      if (!item) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '这件不是可摆放的教学楼' })); return; }
+      if (!item) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '这件不是可摆放的家具' })); return; }
       const now = Date.now();
       if (now - (ws.__lastBuild || 0) < BUILD_COOLDOWN) {
         ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '放置太快，稍等几秒' })); return;

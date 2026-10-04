@@ -2814,7 +2814,7 @@ export function createEditor() {
     } else if (m === 'track') {
       StepUI.hint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 右键拖拽转视角 · 右侧面板可改圈数 / 删除 / 清空';
     } else if (m === 'shop') {
-      StepUI.hint.textContent = '商店管理面板：改价格即时全服生效 · 添加教学楼需上传 .glb 模型';
+      StepUI.hint.textContent = '道具管理面板：改价格/导入模型即时全服生效 · 家具可先不放模型（占位方块）';
     } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('商店管理')) {
       StepUI.hint.textContent = '';
     }
@@ -2926,7 +2926,7 @@ export function createEditor() {
       row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:3px;cursor:pointer;';
       row.style.borderBottom = '1px solid #333';
       const badge = it.kind === 'building'
-        ? '<span style="color:#7ec8ff">教学楼</span>'
+        ? '<span style="color:#7ec8ff">家具</span>'
         : '<span style="color:#cfe0f5">道具</span>';
       const nm = document.createElement('span');
       nm.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
@@ -3018,8 +3018,10 @@ export function createEditor() {
       if (!up.url) return; // 错误已提示
       url = up.url;
     }
-    if (!/^\/(assets|models)\//.test(url)) {
-      setShopFormHint('模型 URL 必须是 /assets/ 或 /models/ 下的 .glb（留空则仅作道具/无模型）', 'err');
+    if (kind === 'building') {
+      if (!url) url = 'placeholder'; // 家具可先无模型（占位方块），之后在编辑器导入真模型
+    } else if (!/^\/(assets|models)\//.test(url)) {
+      setShopFormHint('模型 URL 必须是 /assets/ 或 /models/ 下的 .glb（道具留空则无模型）', 'err');
       return;
     }
 
@@ -3035,7 +3037,7 @@ export function createEditor() {
       desc: (StepUI.shopDesc.value || '').slice(0, 200),
     };
     if (kind === 'item') {
-      // 教学楼之外不强制 effect；保留现有道具的 effect（编辑时从列表取），新增默认无
+      // 家具之外不强制 effect；保留现有道具的 effect（编辑时从列表取），新增默认无
       const exist = (lastShopItems || []).find((x) => x.id === id);
       item.effect = exist && exist.effect ? exist.effect : null;
     }

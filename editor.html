@@ -183,7 +183,7 @@
         <hr />
         <button class="tool" id="tBound"><span class="ico">⛶</span><span class="lbl">边界</span></button>
         <button class="tool" id="tTrack"><span class="ico">⚑</span><span class="lbl">赛道</span></button>
-        <button class="tool" id="tShop"><span class="ico">🛒</span><span class="lbl">商店</span></button>
+        <button class="tool" id="tShop"><span class="ico">🛒</span><span class="lbl">道具</span></button>
         <hr />
         <button class="tool" id="tRuler"><span class="ico">↔</span><span class="lbl">测距</span></button>
         <button class="tool" id="tDel"><span class="ico">✕</span><span class="lbl">删除</span></button>
@@ -227,7 +227,7 @@
           <div id="tkHint" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
         </div>
         <div id="shopPanel" style="display:none">
-          <div class="panel-title">商店管理（在线）</div>
+          <div class="panel-title">道具管理（在线）</div>
           <div id="shopHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">改价格即时全服生效。需要管理员密钥（默认 fpm-shop-admin，生产请用环境变量 SHOP_ADMIN_TOKEN 覆盖）。</div>
           <div class="field">
             <label>密钥</label>
@@ -241,13 +241,13 @@
           <div class="field"><label>类型</label>
             <select id="shopKind">
               <option value="item">道具(item)</option>
-              <option value="building">教学楼(building)</option>
+              <option value="building">家具(building)</option>
             </select>
           </div>
           <div class="field"><label>价格</label><input id="shopPrice" type="number" step="1" min="0" max="100000" value="100" /></div>
           <div class="field"><label>说明</label><input id="shopDesc" type="text" placeholder="一句话描述" /></div>
           <div class="field"><label>模型</label><input id="shopFile" type="file" accept=".glb,.gltf" style="flex:1;color:#cfd7e2" /></div>
-          <div class="field"><label>模型URL</label><input id="shopUrl" type="text" placeholder="/assets/ 或 /models/ 下的 .glb" /></div>
+          <div class="field"><label>模型URL</label><input id="shopUrl" type="text" placeholder="/assets/ 或 /models/ 下的 .glb（家具可留空=占位方块）" /></div>
           <div id="shopFormHint" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
           <div style="display:flex;gap:6px;margin-top:6px">
             <button id="shopSave" class="import-btn" type="button" style="flex:1">保存</button>
@@ -351,6 +351,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261004d"></script>
+  <script type="module" src="./src/editor/main.js?v=20261004e"></script>
 </body>
 </html>
