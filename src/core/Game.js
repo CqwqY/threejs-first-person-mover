@@ -289,9 +289,10 @@ export class Game {
     // 统一走 isCoarsePointer()（多信号 OR，覆盖 WebView / Capacitor / 真机）。
     const coarsePointer = isCoarsePointer();
     this._coarsePointer = coarsePointer; // 提前落定：顶部按钮排布 / 准星 / 攻击键都要读它
-    // 骑车自由视角（鼠标左右转头、不动车头）**只在电脑开**：手机右半屏是视角拖动区，
-    // 那里要留给俯仰，且手机有专门的左右转向键，再加一份自由视角只会互相打架。
-    if (this.localPlayer) this.localPlayer.rideLookEnabled = !coarsePointer;
+    // 骑车「软跟随相机」（转弯时视角被慢慢拖过去 + 可掰开的自由视角）：**电脑与手机都开**。
+    // 手机右半屏的拖拽走的是同一条视角通道（MobileControls → input.addLookDelta），所以一样能用。
+    // 不骑车时这一层恒等于 state.yaw，等于没开（见 LocalPlayer.update）。
+    if (this.localPlayer) this.localPlayer.rideLookEnabled = true;
 
     // ---- 设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
     this.settingsPanel = createSettingsPanel(
@@ -1468,9 +1469,9 @@ export class Game {
     phys.canJump = false;      // 骑乘时不能跳
     if (seat === 1) {
       phys.speedMult = Config.VEHICLE_SPEED / Config.MOVE_SPEED; // 兜底：真实速度由 LocalPlayer._driveVehicle 接管
-      if (this.mobileControls) this.mobileControls.setDriving(true); // 手机：把「跳」换成 左转/倒车/刹车/右转，摇杆变油门键
+      if (this.mobileControls) this.mobileControls.setDriving(true); // 手机：把「跳」换成转向键，摇杆变油门键，技能槽被刹车顶替
       this._toast(this._coarsePointer
-        ? '已上车（驾驶位）：按住左下「油门」前进 · ◀ ▶ 转向 · 刹 刹车 · 倒 后退'
+        ? '已上车（驾驶位）：按住左下「油门」前进 · 旁边「前/倒」换挡倒车 · ◀ ▶ 转向 · 技能槽位置的「刹」刹车'
         : '已上车（驾驶位）：W/S 前进后退 · A/D 转向 · 空格刹车');
     } else {
       this._vehDriver = driverId || null;
@@ -3371,54 +3372,58 @@ export class Game {
     this._chatTab = el;
   }
 
-  // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
+  // 顶部按钮：用 Kenney 方形图标按钮替代文字按钮，减少顶部占用。
+  // PC：背包在左、设置在右、对战匹配在右上角；手机：全部排在玩家校卡右侧。
   _createTopButtons() {
     const coarse = !!this._coarsePointer;
+    const ICONS = {
+      bag: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12l2 13H4L6 7z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>',
+      settings: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+      combat: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5 3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/></svg>',
+    };
+
+    const mkIcon = (icon, title, onClick, extraCss = '') => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'kui-iconbtn';
+      b.title = title;
+      b.innerHTML = icon;
+      b.style.cssText = 'cursor:pointer;user-select:none;-webkit-user-select:none;' + extraCss;
+      b.addEventListener('click', onClick);
+      return b;
+    };
+
     if (coarse) {
-      // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐。
-      // 三处基础值都要加上安全区：横屏时刘海在左右两侧，不减掉 inset 的话校卡会被切、
-      // 最右边的「对战匹配」会被顶出屏幕。基础值 172 = 12 + 156 + 4，与校卡宽度是一对，ui-check 有对拍。
       const row = document.createElement('div');
       row.style.cssText =
         'position:fixed;z-index:9500;' +
-        'left:calc(env(safe-area-inset-left, 0px) + 172px);' +
+        'left:calc(env(safe-area-inset-left, 0px) + 150px);' +
         'right:calc(env(safe-area-inset-right, 0px) + 8px);' +
-        'top:calc(env(safe-area-inset-top, 0px) + 12px);' +
+        'top:calc(env(safe-area-inset-top, 0px) + 10px);' +
         'display:flex;gap:6px;' +
         'justify-content:flex-end;align-items:center;flex-wrap:nowrap;';
       document.body.appendChild(row);
-      const mk = (text, onClick) => {
-        const b = document.createElement('div');
-        b.className = 'kui-btn kui-btn--grey';
-        b.textContent = text;
-        b.style.cssText = 'cursor:pointer;user-select:none;-webkit-user-select:none;' +
-          'padding:6px 8px;font-size:12px;white-space:nowrap;';
-        b.addEventListener('click', onClick);
-        row.appendChild(b);
-        return b;
-      };
       this._topRow = row;
-      this._btnBag = mk('背包', () => this._toggleBag());
-      this._btnSettings = mk('设置', () => this.settingsPanel.toggle());
-      this._btnCombat = mk('对战匹配', () => this._toggleCombat());
+      this._btnBag = mkIcon(ICONS.bag, '背包', () => this._toggleBag());
+      this._btnSettings = mkIcon(ICONS.settings, '设置', () => this.settingsPanel.toggle());
+      this._btnCombat = mkIcon(ICONS.combat, '对战匹配', () => this._toggleCombat());
+      row.appendChild(this._btnBag);
+      row.appendChild(this._btnSettings);
+      row.appendChild(this._btnCombat);
       this._buildBag();
       return;
     }
-    const mkBtn = (text, posCss, onClick) => {
-      const b = document.createElement('div');
-      b.className = 'kui-btn kui-btn--grey';
-      b.textContent = text;
-      b.style.cssText =
-        'position:fixed;z-index:9500;cursor:pointer;user-select:none;padding:7px 10px;' + posCss;
-      b.addEventListener('click', onClick);
-      document.body.appendChild(b);
-      return b;
-    };
-    // 校卡展开时最宽 268px，按钮让它贴着卡左右两侧（50% + 134 再留 10px 间距）
-    this._btnBag = mkBtn('背包', 'right:calc(50% + 144px);top:14px;', () => this._toggleBag());
-    this._btnSettings = mkBtn('设置', 'left:calc(50% + 144px);top:14px;', () => this.settingsPanel.toggle());
-    // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化）
-    this._btnCombat = mkBtn('对战匹配', 'right:14px;top:14px;', () => this._toggleCombat());
+
+    // PC：背包在校卡左侧，设置在校卡右侧，对战匹配在右上角
+    this._btnBag = mkIcon(ICONS.bag, '背包', () => this._toggleBag(),
+      'position:fixed;z-index:9500;right:calc(50% + 134px);top:12px;');
+    this._btnSettings = mkIcon(ICONS.settings, '设置', () => this.settingsPanel.toggle(),
+      'position:fixed;z-index:9500;left:calc(50% + 134px);top:12px;');
+    this._btnCombat = mkIcon(ICONS.combat, '对战匹配', () => this._toggleCombat(),
+      'position:fixed;z-index:9500;right:12px;top:12px;');
+    document.body.appendChild(this._btnBag);
+    document.body.appendChild(this._btnSettings);
+    document.body.appendChild(this._btnCombat);
     this._buildBag();
   }
 
@@ -4660,7 +4665,8 @@ export class Game {
     const coarse = !!this._coarsePointer;
     const box = document.createElement('div');
     box.className = 'spd-box';
-    // 位置：右下角；手机端抬高到驾驶键组（左转/刹车/右转）之上，否则会压住它们
+    // 位置：右下角；手机端抬高到驾驶键组（左转/右转）之上，否则会压住它们
+    // （刹车已挪去顶替技能槽，不在这个角落）
     box.style.cssText =
       'position:fixed;z-index:9400;display:none;pointer-events:none;user-select:none;-webkit-user-select:none;' +
       (coarse

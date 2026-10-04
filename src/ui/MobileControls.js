@@ -65,6 +65,30 @@ export function initMobileControls(input, opts = {}) {
       background:color-mix(in srgb, var(--kui-gold) 16%, transparent)}
     .mc-joy.is-throttle .mc-knob{background:color-mix(in srgb, var(--kui-gold) 82%, transparent)}
     .mc-joy.is-throttle .mc-joy-lbl{opacity:.95}
+    /* 档位切换（前/倒）：油门键自己管方向，这颗小圆钮就贴在油门右侧。
+       竖着放（前进在上、倒车在下），和「上推前进/下拉倒车」的直觉一致。 */
+    .mc-gear{position:fixed;z-index:53;display:none;flex-direction:column;align-items:center;justify-content:center;
+      gap:0;width:clamp(46px,12vmin,56px);height:clamp(46px,12vmin,56px);border-radius:50%;
+      left:calc(env(safe-area-inset-left, 0px) + 150px);
+      bottom:calc(env(safe-area-inset-bottom, 0px) + 58px);
+      color:var(--kui-paper);font:600 clamp(11px,3vmin,13px)/1 var(--kui-font);
+      background:color-mix(in srgb, var(--kui-blue) 30%, transparent);
+      border:2px solid color-mix(in srgb, var(--kui-blue-soft) 75%, transparent);
+      box-sizing:border-box;touch-action:none;user-select:none;-webkit-user-select:none}
+    .mc-gear > b{display:flex;align-items:center;justify-content:center;width:100%;height:50%;
+      font-weight:600;opacity:.45}
+    .mc-gear > b.on{opacity:1;background:color-mix(in srgb, var(--kui-gold) 55%, transparent);
+      border-radius:50% 50% 0 0}
+    .mc-gear > b:last-child.on{border-radius:0 0 50% 50%}
+    /* 刹车键：驾驶时**顶替技能槽**（技能槽那会儿对开车没意义），所以跟着技能槽一起被摆位。
+       尺寸在 setDriving 里按技能槽实际宽度对齐，看起来就是"技能槽变成了刹车"。 */
+    .mc-brake{position:fixed;z-index:61;display:none;align-items:center;justify-content:center;
+      border-radius:50%;color:var(--kui-paper);
+      font:600 clamp(12px,3.2vmin,14px)/1 var(--kui-font);letter-spacing:1px;
+      background:color-mix(in srgb, var(--kui-red, #d64545) 34%, transparent);
+      border:2px solid color-mix(in srgb, var(--kui-red, #d64545) 70%, transparent);
+      box-sizing:border-box;touch-action:none;user-select:none;-webkit-user-select:none}
+    .mc-brake:active{background:color-mix(in srgb, var(--kui-red, #d64545) 68%, transparent)}
     .mc-jump{position:fixed;right:20px;bottom:calc(env(safe-area-inset-bottom, 0px) + 24px);
       width:72px;height:72px;border-radius:50%;z-index:51;
       display:flex;align-items:center;justify-content:center;color:var(--kui-paper);
@@ -111,15 +135,16 @@ export function initMobileControls(input, opts = {}) {
   jumpBtn.addEventListener('pointerup', jumpRelease);
   jumpBtn.addEventListener('pointercancel', jumpRelease);
 
-  // ---- 驾驶键（只在开电动车时显示）：左转 / 刹车 / 右转 ----
-  // 驾驶时跳跃本来就无效，所以直接把右下那颗「跳」临时换成驾驶键组：位置不动、不额外抢屏幕。
-  // 按钮不另设输入通道，直接往 Input 里塞 A / D / 空格 —— 与键盘完全同一套判定（见 Input.setVirtualKey）。
+  // ---- 驾驶键（只在开电动车时显示）：左转 / 右转 ----
+  // 驾驶时跳跃本来就无效，所以直接把右下那颗「跳」临时换成转向键组：位置不动、不额外抢屏幕。
+  // 刹车不在这里 —— 它顶替了技能槽（见 setDriving）；倒车也不在这里 —— 由油门键的「前/倒」档管。
+  // 按钮不另设输入通道，直接往 Input 里塞 A / D —— 与键盘完全同一套判定（见 Input.setVirtualKey）。
   const drivePad = document.createElement('div');
   drivePad.className = 'mc-drive';
   drivePad.style.cssText =
     'position:fixed;right:calc(env(safe-area-inset-right, 0px) + 20px);' +
     'bottom:calc(env(safe-area-inset-bottom, 0px) + 24px);z-index:51;display:none;' +
-    'gap:10px;align-items:center;touch-action:none;user-select:none;-webkit-user-select:none;';
+    'gap:14px;align-items:center;touch-action:none;user-select:none;-webkit-user-select:none;';
   const mkDriveBtn = (text, code) => {
     const b = document.createElement('div');
     b.className = 'mc-drive-btn';
@@ -144,22 +169,121 @@ export function initMobileControls(input, opts = {}) {
     return b;
   };
   mkDriveBtn('◀', 'KeyA');   // 左转
-  mkDriveBtn('倒', 'KeyS');   // 倒车（摇杆改成了前进油门键，倒车挪到这里，功能不丢）
-  mkDriveBtn('刹', 'Space'); // 刹车（骑乘时空格就是刹车）
   mkDriveBtn('▶', 'KeyD');   // 右转
   document.body.appendChild(drivePad);
 
-  // 进出驾驶：藏「跳」露驾驶键组；摇杆切成「前进油门键」；退出时把可能卡住的虚拟键一并清掉
-  let driving = false; // 是否在开车（决定左下摇杆是「模拟摇杆」还是「前进油门键」）
+  // ---- 档位切换（前进 / 倒车）：只给油门键用，所以也只在驾驶时出现 ----
+  // 上下两格，上面=前进、下面=倒车（竖排符合"上推前进/下拉倒车"的直觉）。
+  const gearBox = document.createElement('div');
+  gearBox.className = 'mc-gear';
+  const gearFwd = document.createElement('b');
+  gearFwd.textContent = '前';
+  const gearRev = document.createElement('b');
+  gearRev.textContent = '倒';
+  gearBox.appendChild(gearFwd);
+  gearBox.appendChild(gearRev);
+  document.body.appendChild(gearBox);
+
+  // ---- 刹车键：驾驶时顶替技能槽 ----
+  // 单独建一个元素，靠 setDriving 定位到技能槽当前位置并把技能槽藏起来；下车再原样还回去。
+  const brakeBtn = document.createElement('div');
+  brakeBtn.className = 'mc-brake';
+  brakeBtn.textContent = '刹';
+  document.body.appendChild(brakeBtn);
+  const brakePress = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    input.setVirtualKey('Space', true); // 与键盘空格同一套刹车判定
+    try { brakeBtn.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+  };
+  const brakeRelease = (e) => {
+    e.preventDefault();
+    input.setVirtualKey('Space', false);
+  };
+  brakeBtn.addEventListener('pointerdown', brakePress);
+  brakeBtn.addEventListener('pointerup', brakeRelease);
+  brakeBtn.addEventListener('pointercancel', brakeRelease);
+
+  // 挡位：+1 前进 / -1 倒车。油门键按当前挡位给满油门，倒车不用另设按钮。
+  let gear = 1;
+  // ⚠ 摇杆中央那行字（joyLbl）在下面才创建，所以这里用 _joyLbl 中转：
+  //   applyGear 会被立刻调用一次，若直接引用后声明的 const joyLbl 就是 TDZ 报错。
+  let _joyLbl = null;
+  const applyGear = () => {
+    gearFwd.classList.toggle('on', gear > 0);
+    gearRev.classList.toggle('on', gear < 0);
+    if (_joyLbl) _joyLbl.textContent = gear > 0 ? '油门' : '倒车';
+  };
+  applyGear();
+  gearBox.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    gear = -gear;
+    applyGear();
+    // 正在踩油门时换挡：立刻按新挡位重新给油（否则要等松手再按一下）
+    if (driving && joyId !== null) input.setJoystick(0, gear);
+  });
+
+  // 把刹车键摆到技能槽当前位置（技能槽被顶替，所以直接量它的 rect 对齐大小与圆心）
+  // 量不到（技能槽正被对战/灵魂出窍隐藏着，rect 为 0）时退回「跳跃键正上方」——
+  // 也就是技能槽的默认锚点，保证任何时候刹车键都在右手够得到的地方。
+  const placeBrakeAtSkillSlot = () => {
+    const sk = document.querySelector('.sk-box');
+    let r = sk ? sk.getBoundingClientRect() : null;
+    if (!r || !r.width || !r.height) {
+      const j = jumpBtn.getBoundingClientRect();
+      if (!j.width) return;
+      const size = Math.max(j.width, 56);
+      r = { left: j.left + j.width / 2 - size / 2, top: j.top - 14 - size, width: size, height: size };
+    }
+    brakeBtn.style.left = r.left + 'px';
+    brakeBtn.style.top = r.top + 'px';
+    brakeBtn.style.width = r.width + 'px';
+    brakeBtn.style.height = r.height + 'px';
+  };
+  // 驾驶时藏技能槽、亮刹车。技能槽自己那套显隐（对战/灵魂出窍）由 Game 管，
+  // 所以这里只切 inline style，下车时原样恢复。
+  // ⚠ 用 visibility:hidden 而不是 display:none —— display:none 会让 getBoundingClientRect()
+  //   全变 0，旋转屏幕后就再也找不到技能槽该在哪儿了。visibility 保留布局盒，rect 照常有效。
+  const swapSkillSlotForBrake = (on) => {
+    const sk = document.querySelector('.sk-box');
+    if (on) {
+      // ⚠ 别因为「技能槽还没建好」就 return —— 那会让刹车键永远不出现。
+      //   placeBrakeAtSkillSlot 内部已有「量不到就退回跳跃键上方」的兜底。
+      placeBrakeAtSkillSlot();
+      if (sk) {
+        sk.dataset.mcPrevVis = sk.style.visibility || '';
+        sk.dataset.mcPrevPE = sk.style.pointerEvents || '';
+        sk.style.visibility = 'hidden';
+        sk.style.pointerEvents = 'none';
+      }
+      brakeBtn.style.display = 'flex';
+    } else {
+      if (sk) {
+        sk.style.visibility = sk.dataset.mcPrevVis || '';
+        sk.style.pointerEvents = sk.dataset.mcPrevPE || '';
+        delete sk.dataset.mcPrevVis;
+        delete sk.dataset.mcPrevPE;
+      }
+      brakeBtn.style.display = 'none';
+    }
+  };
+
+  // 进出驾驶：藏「跳」露转向键；摇杆切成「油门键」+ 亮出前/倒档；技能槽被刹车顶替
+  let driving = false; // 是否在开车（决定左下摇杆是「模拟摇杆」还是「油门键」）
   const setDriving = (on) => {
     driving = !!on;
     drivePad.style.display = driving ? 'flex' : 'none';
     jumpBtn.style.display = driving ? 'none' : '';
     base.classList.toggle('is-throttle', driving);
+    gearBox.style.display = driving ? 'flex' : 'none';
+    swapSkillSlotForBrake(driving);
     if (driving) {
-      // 进驾驶先复位：不要让上一轮残留的摇杆轴向继续当油门
+      // 进驾驶先复位：不要让上一轮残留的摇杆轴向继续当油门；档位也回正到「前」
       knob.style.transform = '';
       input.setJoystick(0, 0);
+      gear = 1;
+      applyGear();
     } else {
       input.setVirtualKey('KeyA', false);
       input.setVirtualKey('KeyD', false);
@@ -219,6 +343,8 @@ export function initMobileControls(input, opts = {}) {
   joyLbl.className = 'mc-joy-lbl';
   joyLbl.textContent = '油门';
   base.appendChild(joyLbl);
+  _joyLbl = joyLbl; // 交给 applyGear（挡位切换时改文案：油门 ↔ 倒车）
+  applyGear();
   zone.appendChild(base);
   document.body.appendChild(zone);
 
@@ -256,13 +382,16 @@ export function initMobileControls(input, opts = {}) {
     cy = r.top + r.height / 2;
   };
 
-  // 开车时摇杆 = 「前进油门键」：按下即全油门、松开回零。走的是**同一条摇杆输入通道**
-  // （setJoystick(0,1) 与「把摇杆前推到底」等价），所以驾驶逻辑一行都不用改。
+  // 开车时摇杆 = 「油门键」：按下即**当前档位**的满油门、松手回零。走的是**同一条摇杆输入通道**
+  // （setJoystick(0,±1) 与「把摇杆前推/后拉到底」等价），所以驾驶逻辑一行都不用改。
+  // 前进/倒车由那颗「前/倒」档位钮决定，倒车因此不用再单独占一个按钮。
   // 不做模拟拖动：另一只手在管左右转向，拖摇杆很难拖稳，按一下更跟手。
   const pressThrottle = () => {
-    input.setJoystick(0, 1);
-    // 视觉上把滑块顶到最前（同样要保留 -50% 居中分量）
-    knob.style.transform = `translate(-50%, calc(-50% - ${RADIUS}px))`;
+    input.setJoystick(0, gear);
+    // 视觉上把滑块顶到最前（倒挡则压到最底）；同样要保留 -50% 居中分量
+    knob.style.transform = gear > 0
+      ? `translate(-50%, calc(-50% - ${RADIUS}px))`
+      : `translate(-50%, calc(-50% + ${RADIUS}px))`;
   };
   const releaseThrottle = (e) => {
     if (e.pointerId !== joyId) return;
@@ -354,8 +483,9 @@ export function initMobileControls(input, opts = {}) {
       if (_resetTouchState) _resetTouchState();
     }
     refreshCenter(); // 摇杆基点随布局重算
+    if (driving) placeBrakeAtSkillSlot(); // 刹车键贴着技能槽，技能槽挪了它也得挪
   });
 
-  // 供 Game 在上下车时调用：驾驶键组与「跳」互换
+  // 供 Game 在上下车时调用：驾驶键组与「跳」互换、技能槽被刹车顶替
   return { setDriving };
 }
