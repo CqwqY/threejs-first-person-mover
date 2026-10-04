@@ -310,7 +310,7 @@ export const Config = {
   HIDE_CATCH_RANGE: 1.8,      // 抓的人离躲的人这么近就算抓到（米）
 
   // ---- 加特林（持续扫射 / 过热）----
-  GATLING_DAMAGE: 5,          // 单发伤害
+  GATLING_DAMAGE: 30,         // 单发伤害（10 发/秒 → 满命中 300/秒；玩家 500 血 ≈ 1.7 秒，Boss 每阶段 1000 血 ≈ 3.4 秒，略长于一个过热周期 2.9 秒）
   GATLING_INTERVAL: 0.1,      // 两发之间的间隔（秒）
   GATLING_RANGE: 60,          // 射程（米）
   GATLING_HIT_RADIUS: 0.55,   // 弹道命中判定半径（米）
