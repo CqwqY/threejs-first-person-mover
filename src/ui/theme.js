@@ -352,6 +352,37 @@ export function ensureTheme() {
     body.kui-build #idc-layout,
     body.kui-build .sk-box { display: none !important; }
 
+    /* ---- 建造模式工具条 / 悬浮键（锤子触发）----
+       里面的按钮一律用 .kui-btn 系（Kenney 按钮素材），这里只负责容器排布。
+       容器 pointer-events:none，空隙仍可转视角；子元素各自 auto 才能点。 */
+    .build-strip {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 8px;
+      border-radius: var(--kui-r-md);
+      background: rgba(11, 21, 34, .72);
+      border: 1px solid rgba(255, 255, 255, .12);
+      overflow-x: auto;
+      pointer-events: none;
+    }
+    .build-strip > * { pointer-events: auto; }
+    .build-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .build-actions > .kui-btn { min-width: 92px; }
+    /* 工具条里的标签（“没有可摆的家具…”这类纯文字） */
+    .build-strip__label {
+      flex: 0 0 auto;
+      white-space: nowrap;
+      color: var(--kui-paper);
+      font: 600 12px/1.2 var(--kui-font);
+      opacity: .9;
+      padding: 0 4px;
+    }
+
     /* ---- 键位提示（Kenney Input Prompts Pixel）----
        图块是 16px 像素画，**不要平滑缩放**，否则糊成一团；用 image-rendering: pixelated。
        尺寸用 em，跟着所在文字一起缩放。 */

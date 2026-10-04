@@ -318,71 +318,68 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     return out;
   }
 
+  // 底部工具条（顶替血条位置）：放置模式 = 家具列表；编辑模式 = 旋转/删除/完成。用 .kui-btn（Kenney）
   const strip = document.createElement('div');
   strip.className = 'build-strip';
   strip.style.cssText = coarse
-    ? 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 8px);' +
-      'z-index:64;display:none;gap:8px;align-items:center;width:min(340px,88vw);overflow-x:auto;' +
-      'padding:6px 8px;border-radius:999px;pointer-events:none;' +
-      'background:color-mix(in srgb, var(--kui-ink) 48%, transparent);'
-    : 'position:fixed;left:18px;bottom:22px;z-index:64;display:none;gap:8px;align-items:center;' +
-      'width:min(400px,46vw);overflow-x:auto;padding:6px 8px;border-radius:12px;pointer-events:none;' +
-      'background:color-mix(in srgb, var(--kui-ink) 42%, transparent);';
+    ? 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 8px);z-index:64;display:none;width:min(360px,90vw);'
+    : 'position:fixed;left:18px;bottom:22px;z-index:64;display:none;width:min(440px,50vw);';
   document.body.appendChild(strip);
 
-  const editBtn = document.createElement('div');
-  editBtn.textContent = '编辑';
-  editBtn.style.cssText = coarse
-    ? 'position:fixed;right:20px;bottom:42%;z-index:64;cursor:pointer;box-sizing:border-box;' +
-      'width:clamp(56px,15vmin,78px);height:clamp(56px,15vmin,78px);border-radius:50%;' +
-      'display:none;align-items:center;justify-content:center;text-align:center;padding:0;' +
-      'color:var(--kui-paper);font:600 clamp(13px,3.6vmin,16px)/1 var(--kui-font);' +
-      'background:color-mix(in srgb, var(--kui-blue) 42%, transparent);' +
-      'border:2px solid color-mix(in srgb, var(--kui-blue) 85%, transparent);' +
-      'user-select:none;-webkit-user-select:none;touch-action:none;'
-    : 'position:fixed;right:24px;bottom:42%;z-index:64;display:none;cursor:pointer;box-sizing:border-box;' +
-      'min-width:76px;height:36px;line-height:36px;text-align:center;padding:0 16px;border-radius:8px;' +
-      'color:#fff;font:600 13px var(--kui-font);background:color-mix(in srgb, var(--kui-blue) 72%, transparent);' +
-      'border:0;user-select:none;-webkit-user-select:none;touch-action:none;';
-  document.body.appendChild(editBtn);
-  editBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); startEdit(); });
+  // 右侧悬浮键：编辑（放置模式） + 退出建造（常驻） —— 都走 Kenney 按钮
+  const actions = document.createElement('div');
+  actions.className = 'build-actions';
+  actions.style.cssText = 'position:fixed;right:16px;bottom:44%;z-index:64;display:none;';
+  document.body.appendChild(actions);
 
-  function mkChip(text, onClick, bg, active) {
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'kui-btn kui-btn--primary';
+  editBtn.textContent = '编辑';
+  editBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); startEdit(); });
+  actions.appendChild(editBtn);
+
+  const exitBtn = document.createElement('button');
+  exitBtn.type = 'button';
+  exitBtn.className = 'kui-btn kui-btn--red';
+  exitBtn.textContent = '退出建造';
+  exitBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); exit(); });
+  actions.appendChild(exitBtn);
+
+  function mkChip(text, onClick, variant, active) {
     const b = document.createElement('button');
     b.type = 'button';
+    b.className = 'kui-btn ' + (active ? 'kui-btn--primary' : ('kui-btn--' + (variant || 'grey')));
     b.textContent = text;
-    b.style.cssText =
-      'flex:0 0 auto;box-sizing:border-box;padding:6px 12px;border-radius:999px;cursor:pointer;' +
-      'font:600 12px/1.2 var(--kui-font);white-space:nowrap;pointer-events:auto;touch-action:manipulation;' +
-      'color:#fff;border:2px solid ' + (active ? 'var(--kui-gold-hi-2)' : 'rgba(255,255,255,.4)') + ';' +
-      'background:' + (bg || (active ? 'var(--kui-blue-dark)' : 'rgba(11,21,34,.72)')) + ';';
+    b.style.cssText = 'flex:0 0 auto;white-space:nowrap;';
     b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
     return b;
   }
   function mkLabel(text) {
     const d = document.createElement('div');
+    d.className = 'build-strip__label';
     d.textContent = text;
-    d.style.cssText = 'flex:0 0 auto;white-space:nowrap;color:var(--kui-paper);font:600 12px/1.2 var(--kui-font);opacity:.9;';
     return d;
   }
 
   function refreshStrip() {
-    if (!state.active) { strip.style.display = 'none'; editBtn.style.display = 'none'; return; }
-    strip.style.display = 'flex';
-    // 编辑模式隐藏「编辑」键（此时动作用条上的按钮）；放置模式显示
-    editBtn.style.display = (state.mode === 'place') ? (coarse ? 'flex' : 'block') : 'none';
+    if (!state.active) { strip.style.display = 'none'; actions.style.display = 'none'; return; }
+    strip.style.display = '';
+    actions.style.display = '';
+    // 编辑模式下「编辑」键隐去（动作改到工具条上的 旋转/删除/完成）；「退出建造」常驻
+    editBtn.style.display = (state.mode === 'place') ? '' : 'none';
     strip.innerHTML = '';
     if (state.mode === 'edit') {
       strip.appendChild(mkLabel('编辑：'));
-      strip.appendChild(mkChip('旋转 45°', rotateEdit));
-      strip.appendChild(mkChip('删除', deleteEdit, '#a33'));
-      strip.appendChild(mkChip('完成', commitEdit, '#2b6f5f'));
+      strip.appendChild(mkChip('旋转 45°', rotateEdit, 'grey'));
+      strip.appendChild(mkChip('删除', deleteEdit, 'red'));
+      strip.appendChild(mkChip('完成', commitEdit, 'green'));
       return;
     }
     const list = available();
     if (!list.length) { strip.appendChild(mkLabel('没有可摆的家具 · 去商店「家具」页买')); return; }
     for (const entry of list) {
-      strip.appendChild(mkChip(entry.it.name + ' ×' + entry.n, () => { state.itemId = entry.it.id; refreshStrip(); }, null, entry.it.id === state.itemId));
+      strip.appendChild(mkChip(entry.it.name + ' ×' + entry.n, () => { state.itemId = entry.it.id; refreshStrip(); }, 'grey', entry.it.id === state.itemId));
     }
   }
 
@@ -399,8 +396,8 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     onActiveChange(true);
     refreshStrip();
     onToast(coarse
-      ? '建造模式：只能摆在教学楼范围内 · 攻击键=放置 · 右侧「编辑」键'
-      : '建造模式：左键=放置 · G=编辑（对准家具后） · 编辑中 R=旋转 X=删除 · 仅限教学楼范围内');
+      ? '建造模式：攻击键=放置 · 右侧「编辑」/「退出建造」· 只能摆教学楼范围内'
+      : '建造模式：左键=放置 · G=编辑 · R=旋转 X=删除 · B=退出 · 仅限教学楼范围内');
     return true;
   }
   function exit() {
@@ -415,11 +412,12 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
   function toggle() { if (state.active) exit(); else enter(); }
 
-  // PC 键盘：F 编辑/完成 · R 旋转 · X 删除 · 数字键选家具
+  // PC 键盘：G 编辑/完成 · R 旋转 · X 删除 · B 退出建造 · 数字键选家具
   window.addEventListener('keydown', (e) => {
     if (!state.active) return;
     const el = document.activeElement;
     if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+    if (e.code === 'KeyB') { exit(); return; } // 退出建造（技能槽已隐藏，不能靠再按锤子）
     if (e.code === EDIT_KEY) { if (state.mode === 'edit') commitEdit(); else startEdit(); return; }
     if (e.code === ROTATE_KEY && state.mode === 'edit') { rotateEdit(); return; }
     if (e.code === DELETE_KEY && state.mode === 'edit') { deleteEdit(); return; }
