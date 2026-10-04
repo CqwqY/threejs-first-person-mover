@@ -3427,8 +3427,8 @@ export class Game {
         'left:calc(env(safe-area-inset-left, 0px) + 172px);' +
         'right:calc(env(safe-area-inset-right, 0px) + 8px);' +
         'top:calc(env(safe-area-inset-top, 0px) + 12px);' +
-        'display:flex;gap:10px;' +
-        'justify-content:flex-end;align-items:center;flex-wrap:nowrap;';
+        'display:flex;gap:8px;' +
+        'justify-content:flex-end;align-items:flex-start;flex-wrap:nowrap;';
       document.body.appendChild(row);
       const mk = (text, ic, onClick) => {
         const g = mkIconLabel(text, ic, onClick);
@@ -3458,14 +3458,14 @@ export class Game {
       document.body.appendChild(g.wrap);
       return g.btn;
     };
-    // 校卡展开时最宽 268px（居中 → 右边缘在 50% + 134）。按钮改成「图标键 + 外置文字」后
-    // 一组宽约 64px（36 键 + 4 间隙 + 2 字 + 余量），所以锚点要放到 134 + 64 + 10 = 208，
-    // 否则收起态没问题、展开态文字会压到卡上。ui-browser-check 有 1280 宽的展开态用例。
-    this._btnBag = mkBtn('背包', 'bag', 'right:calc(50% + 208px);top:14px;', () => this._toggleBag());
-    this._btnSettings = mkBtn('设置', 'settings', 'left:calc(50% + 208px);top:14px;', () => this.settingsPanel.toggle());
-    // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化 → 两字/四字宽度不同，
-    // 边距给到 10px 才不会被「退出对战」顶出屏幕）
-    this._btnCombat = mkBtn('对战匹配', 'combat', 'right:10px;top:14px;', () => this._toggleCombat());
+    // 校卡展开时最宽 268px（居中 → 右边缘在 50% + 134）。
+    // 文字在图标**下方**（垂直排列）后，横向占位只由最宽的标签决定：
+    // 最长是「对战匹配」4 字 ≈ 4×11 = 44px，比 36px 的图标键略宽 → 组宽取 48。
+    // 锚点 = 134（卡半宽）+ 48（组宽）+ 10（间距）= 192。
+    this._btnBag = mkBtn('背包', 'bag', 'right:calc(50% + 192px);top:10px;', () => this._toggleBag());
+    this._btnSettings = mkBtn('设置', 'settings', 'left:calc(50% + 192px);top:10px;', () => this.settingsPanel.toggle());
+    // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化 → 两字/四字宽度不同）
+    this._btnCombat = mkBtn('对战匹配', 'combat', 'right:12px;top:10px;', () => this._toggleCombat());
     this._buildBag();
   }
 
