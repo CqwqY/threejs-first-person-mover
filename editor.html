@@ -185,6 +185,7 @@
         <button class="tool" id="tTrack"><span class="ico">⚑</span><span class="lbl">赛道</span></button>
         <button class="tool" id="tShop"><span class="ico">🛒</span><span class="lbl">道具</span></button>
         <button class="tool" id="tCombo"><span class="ico">▦</span><span class="lbl">组合</span></button>
+        <button class="tool" id="tFurn"><span class="ico">⌂</span><span class="lbl">家具</span></button>
         <hr />
         <button class="tool" id="tRuler"><span class="ico">↔</span><span class="lbl">测距</span></button>
         <button class="tool" id="tDel"><span class="ico">✕</span><span class="lbl">删除</span></button>
@@ -275,6 +276,25 @@
             <button id="comboExit" class="import-btn" type="button" style="background:#444">退出组合</button>
           </div>
           <div id="comboHint" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
+        </div>
+        <div id="furnPanel" style="display:none">
+          <div class="panel-title">已摆家具（全服）</div>
+          <div id="furnHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
+            列出全服玩家摆出的家具，勾选后删除；也可一键清空。需要管理员密钥（同「道具」页，默认 fpm-shop-admin）。
+          </div>
+          <div class="field">
+            <label>密钥</label>
+            <input id="furnToken" type="password" placeholder="fpm-shop-admin" style="flex:1" />
+            <button id="furnRefresh" class="import-btn" type="button" style="flex:0 0 auto">刷新</button>
+          </div>
+          <div id="furnList" style="max-height:230px;overflow:auto;margin:6px 0;font-size:12px;line-height:1.6;color:#cfe0f5"></div>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <button id="furnAll" class="import-btn" type="button">全选</button>
+            <button id="furnNone" class="import-btn" type="button" style="background:#444">全不选</button>
+            <button id="furnDelSel" class="import-btn" type="button" style="background:#a33">删除选中</button>
+            <button id="furnClearAll" class="import-btn" type="button" style="background:#a33">清空全部</button>
+          </div>
+          <div id="furnMsg" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
         </div>
         <div id="colliderPanel" style="display:none">
           <div class="panel-title">碰撞体</div>
@@ -373,6 +393,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261004n"></script>
+  <script type="module" src="./src/editor/main.js?v=20261004o"></script>
 </body>
 </html>

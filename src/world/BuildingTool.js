@@ -80,14 +80,35 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   // 家具条上会据此标注，玩家一眼能看出「这件是占位块 / 正在下模型 / 模型失败了」
   const protoState = new Map();
   const myIds = loadMine();    // 我摆过的家具 id（本地记录，判断「我的」）
+  // 服务端下发的「建造归属键」（u:<userId> 或 anon:<ip>）：比本地记录可靠——换设备 / 清缓存后也认得出自己的家具
+  let myOwnerKey = loadOwnerKey();
 
-  function mineKey() {
+  function accountTag() {
     const p = getProfile();
     const id = p ? (p.username || p.nickname || '') : '';
-    return 'fp_build_mine__' + (id || 'guest');
+    return id || 'guest';
   }
+  function mineKey() { return 'fp_build_mine__' + accountTag(); }
+  function ownerKeyName() { return 'fp_build_owner__' + accountTag(); }
   function loadMine() { try { return new Set(JSON.parse(localStorage.getItem(mineKey()) || '[]')); } catch { return new Set(); } }
   function saveMine() { try { localStorage.setItem(mineKey(), JSON.stringify([...myIds])); } catch (e) { /* ignore */ } }
+  function loadOwnerKey() { try { return localStorage.getItem(ownerKeyName()) || ''; } catch { return ''; } }
+  function saveOwnerKey(k) { try { localStorage.setItem(ownerKeyName(), k); } catch (e) { /* ignore */ } }
+
+  // 归属判定：优先服务端 owner 键（准），没拿到时回退本地 id 记录
+  function isMineRec(rec) {
+    if (!rec) return false;
+    if (myOwnerKey && rec.owner) return rec.owner === myOwnerKey;
+    return myIds.has(rec.id);
+  }
+  function setOwnerKey(key) {
+    const k = String(key || '');
+    if (!k || k === myOwnerKey) return;
+    myOwnerKey = k; saveOwnerKey(k);
+    // 已有记录重判归属（关键：清缓存/换设备后也能认出自己摆的家具 → 能编辑、能删除）
+    for (const [id, e] of rendered) if (e && e.rec) e.mine = isMineRec(e.rec) || myIds.has(id);
+    refreshStrip();
+  }
 
   function hasHammer() { return loadWallet(getProfile()).owned.includes(HAMMER_ID); }
 
@@ -236,11 +257,33 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   function clearAim() { if (aimId != null) setHighlight(aimId, false); aimId = null; }
 
   // ---------- 射线：准星中心 ----------
-  function groundPoint() {
+  // 取准星指到的「实际表面」点：优先命中场景里的地面/台阶/楼板/已摆家具（复杂碰撞体），
+  // 拿它的高度 y；没命中再退回水平地面平面（y=0）。
+  const surfaceHits = [];
+  let surfTick = 0, surfCache = null;
+  function surfacePoint() {
     raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+    const targets = [];
+    for (const o of scene.children) if (o !== ghostGroup) targets.push(o); // 排除自己的幽灵（否则会叠在幽灵上）
+    surfaceHits.length = 0;
+    raycaster.intersectObjects(targets, true, surfaceHits);
+    for (const h of surfaceHits) {
+      const p = h.point;
+      if (!Number.isFinite(p.y)) continue;
+      if (p.y < -8 || p.y > 60) continue; // 排除天空穹顶 / 异常高的面
+      return { x: p.x, y: p.y, z: p.z };
+    }
     const p = raycaster.ray.intersectPlane(groundPlane, hit);
-    if (!p) return null;
-    return clampToAreas(p.x, p.z); // 只允许落在教学楼区域内（落外面就吸到最近楼边）
+    return p ? { x: p.x, y: 0, z: p.z } : null;
+  }
+  // 建造点：表面高度 + 水平钳制到允许建造的两栋楼范围内。
+  // fresh=true 时强制重算（放置瞬间用），否则最多每 4 帧算一次（省开销，幽灵仍然跟手）。
+  function groundPoint(fresh) {
+    if (fresh || (surfTick++ % 4) === 0) surfCache = surfacePoint();
+    const sp = surfCache;
+    if (!sp) return null;
+    const c = clampToAreas(sp.x, sp.z);
+    return { x: c.x, y: sp.y, z: c.z };
   }
   function aimedEntry() {
     raycaster.setFromCamera({ x: 0, y: 0 }, camera);
@@ -293,7 +336,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const pt = groundPoint();
     if (!pt) { ghost.visible = false; return; }
     ghost.visible = true;
-    ghost.position.set(pt.x, 0, pt.z);
+    ghost.position.set(pt.x, pt.y || 0, pt.z);
     ghost.rotation.y = state.rotY * DEG;
   }
 
@@ -315,10 +358,10 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const profile = getProfile();
       // 异步期间额度可能已被消耗（或这件家具已换掉）
       if (profile && unplacedCount(profile, itemId) <= 0) { refreshStrip(); return; }
-      const mesh = meshFrom(proto, { x: pt.x, y: 0, z: pt.z, rotY, scale: 1 });
+      const mesh = meshFrom(proto, { x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
       placedGroup.add(mesh);
       state.pending.push({ mesh, itemId }); // 记下 itemId：服务端回执若错标成「别人摆的」，也能据此认领
-      network.sendBuildAdd({ itemId, x: pt.x, y: 0, z: pt.z, rotY, scale: 1 });
+      network.sendBuildAdd({ itemId, x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
     });
   }
   function place() {
@@ -327,7 +370,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const profile = getProfile();
     const avail = profile ? unplacedCount(profile, state.itemId) : 0;
     if (avail <= 0) { onToast('这件家具没有可摆数量了，去商店「家具」页再买一件'); return; }
-    const pt = groundPoint();
+    const pt = groundPoint(true); // 放置瞬间强制重算：落到准星实际指到的表面上
     if (!pt) { onToast('把准星对准地面再放置'); return; }
     spawn(pt, state.itemId, state.rotY);
   }
@@ -372,7 +415,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       if (rendered.has(rec.id)) return;
       const m = meshFrom(proto, rec);
       placedGroup.add(m);
-      rendered.set(rec.id, { mesh: m, rec, mine: myIds.has(rec.id) });
+      rendered.set(rec.id, { mesh: m, rec, mine: isMineRec(rec) });
     });
   }
   function onDel(id) {
@@ -391,6 +434,15 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (rec.scale) e.mesh.scale.setScalar(rec.scale);
   }
 
+  // 服务端要求重载（如管理员在编辑器里清空/删除了家具）：清掉场上全部再拉一次
+  function reloadAll() {
+    for (const e of rendered.values()) if (e && e.mesh) placedGroup.remove(e.mesh);
+    rendered.clear();
+    clearAim();
+    if (state.mode === 'edit') { state.mode = 'place'; state.editId = null; refreshStrip(); }
+    fetchAll();
+  }
+
   // Game 转发：msg = {t:'build', ev, ...}
   function handleBuild(msg) {
     if (!msg) return;
@@ -398,6 +450,8 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     else if (msg.ev === 'add') onAdd(msg);
     else if (msg.ev === 'del') onDel(msg);
     else if (msg.ev === 'move') onMove(msg);
+    else if (msg.ev === 'owner') setOwnerKey(msg.key);
+    else if (msg.ev === 'reload') reloadAll();
     else if (msg.ev === 'rejected') onRejected(msg.reason);
   }
 
@@ -424,6 +478,23 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     onToast('编辑中：对准地面移动 · 旋转/删除/完成在下方');
   }
   function exitEdit() { state.mode = 'place'; state.editId = null; refreshStrip(); }
+  // 三轴位置微调：axis 0=X 左右 / 1=Y 上下 / 2=Z 前后；dir ±1；每次 NUDGE_STEP 米
+  const NUDGE_STEP = 0.5;
+  function nudge(axis, dir) {
+    if (state.mode !== 'edit') return;
+    const e = rendered.get(state.editId);
+    if (!e) return;
+    const d = dir * NUDGE_STEP;
+    if (axis === 0) e.mesh.position.x += d;
+    else if (axis === 1) e.mesh.position.y += d;
+    else e.mesh.position.z += d;
+    if (axis === 1) {
+      e.mesh.position.y = THREE.MathUtils.clamp(e.mesh.position.y, -2, 10); // 与服务端 build_move 的 y 钳制一致
+    } else {
+      const c = clampToAreas(e.mesh.position.x, e.mesh.position.z); // 水平仍限制在教学楼范围内
+      e.mesh.position.x = c.x; e.mesh.position.z = c.z;
+    }
+  }
   function rotateEdit() {
     if (state.mode !== 'edit') return;
     state.rotY = (state.rotY + 45) % 360;
@@ -530,6 +601,13 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     strip.innerHTML = '';
     if (state.mode === 'edit') {
       strip.appendChild(mkLabel('编辑：'));
+      // 三轴位置微调（每次 0.5m）：X 左右 · Y 上下 · Z 前后
+      strip.appendChild(mkChip('X−', () => nudge(0, -1), 'grey'));
+      strip.appendChild(mkChip('X+', () => nudge(0, 1), 'grey'));
+      strip.appendChild(mkChip('Y−', () => nudge(1, -1), 'grey'));
+      strip.appendChild(mkChip('Y+', () => nudge(1, 1), 'grey'));
+      strip.appendChild(mkChip('Z−', () => nudge(2, -1), 'grey'));
+      strip.appendChild(mkChip('Z+', () => nudge(2, 1), 'grey'));
       strip.appendChild(mkChip('旋转 45°', rotateEdit, 'grey'));
       strip.appendChild(mkChip('删除', deleteEdit, 'red'));
       strip.appendChild(mkChip('完成', commitEdit, 'green'));

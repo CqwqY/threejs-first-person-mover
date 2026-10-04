@@ -494,6 +494,37 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // 玩家建造：管理员维护（需要密钥）。op:'clear' 清空全部摆放；op:'del' + id 删单条。
+  if (req.method === 'POST' && url.pathname === '/api/build') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 1e5) req.destroy(); });
+    req.on('end', () => {
+      const bad = (m, code = 400) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: m }));
+      };
+      let data;
+      try { data = JSON.parse(body || '{}'); } catch (e) { return bad('bad json'); }
+      if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return bad('管理员密钥错误', 403);
+      const op = String(data.op || '');
+      let list = loadBuildings();
+      if (op === 'clear') {
+        list = [];
+      } else if (op === 'del') {
+        const id = String(data.id || '');
+        if (!id) return bad('缺少 id');
+        list = list.filter((b) => b.id !== id);
+      } else {
+        return bad('未知操作');
+      }
+      saveBuildings(list);
+      broadcastAll({ t: 'build', ev: 'reload' }); // 让所有在线客户端重新拉取（清掉场上的旧家具）
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, count: list.length }));
+    });
+    return;
+  }
+
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: 'not found' }));
 });
@@ -655,6 +686,8 @@ wss.on('connection', (ws) => {
   // welcome：告知新客户端自己的 id/序号/出生点，以及当前已有玩家（只列同房间/大厅的人）
   const existing = worldPlayers().filter((p) => p.id !== id && !p.room);
   ws.send(JSON.stringify({ t: 'welcome', id, num, spawn, players: existing }));
+  // 建造归属键：客户端据此判断「这条家具是不是我摆的」（跨设备/清缓存也准，比本地记录可靠）
+  ws.send(JSON.stringify({ t: 'build', ev: 'owner', key: ownerKeyOf(ws) }));
 
   ws.on('message', (data) => {
     let msg;
@@ -675,6 +708,7 @@ wss.on('connection', (ws) => {
       }
       ws.__profile = pub;
       ws.send(JSON.stringify({ t: 'auth', ok: !!pub, profile: pub }));
+      ws.send(JSON.stringify({ t: 'build', ev: 'owner', key: ownerKeyOf(ws) })); // 登录后归属键从 anon:<ip> 变成 u:<id>，重发一次
       // 若此前已上报过自身状态，立即用登录资料刷新并广播给他人
       if (pub && states.has(id)) {
         const cur = states.get(id);

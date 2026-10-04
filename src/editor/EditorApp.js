@@ -304,6 +304,16 @@ export function createEditor() {
     btnEmptyCollider: document.getElementById('btnEmptyCollider'),
     btnShop: document.getElementById('tShop'),
     shopPanel: document.getElementById('shopPanel'),
+    btnFurn: document.getElementById('tFurn'),
+    furnPanel: document.getElementById('furnPanel'),
+    furnToken: document.getElementById('furnToken'),
+    furnRefresh: document.getElementById('furnRefresh'),
+    furnList: document.getElementById('furnList'),
+    furnAll: document.getElementById('furnAll'),
+    furnNone: document.getElementById('furnNone'),
+    furnDelSel: document.getElementById('furnDelSel'),
+    furnClearAll: document.getElementById('furnClearAll'),
+    furnMsg: document.getElementById('furnMsg'),
     btnCombo: document.getElementById('tCombo'),
     comboPanel: document.getElementById('comboPanel'),
     comboName: document.getElementById('comboName'),
@@ -2819,13 +2829,13 @@ export function createEditor() {
 
   function setMode(m) {
     // 切到「边界 / 赛道 / 道具」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
-    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop')) exitComboMode();
+    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn')) exitComboMode();
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
@@ -2836,7 +2846,9 @@ export function createEditor() {
       StepUI.hint.textContent = '左键点地面 = 在末尾加一个门 · 拖门 = 移动它 · 右键拖拽转视角 · 右侧面板可改圈数 / 删除 / 清空';
     } else if (m === 'shop') {
       StepUI.hint.textContent = '道具管理面板：改价格/导入模型即时全服生效 · 家具可先不放模型（占位方块）';
-    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('商店管理')) {
+    } else if (m === 'furn') {
+      StepUI.hint.textContent = '已摆家具管理：列出全服摆放，勾选后「删除选中」，或「清空全部」';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('商店管理') || StepUI.hint.textContent.includes('已摆家具')) {
       StepUI.hint.textContent = '';
     }
 
@@ -2844,11 +2856,14 @@ export function createEditor() {
     const isBound = m === 'bound';
     const isTrack = m === 'track';
     const isShop = m === 'shop';
+    const isFurn = m === 'furn';
     boundaryGroup.visible = isBound;
     trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
     if (StepUI.trackPanel) StepUI.trackPanel.style.display = isTrack ? 'block' : 'none';
     if (StepUI.shopPanel) StepUI.shopPanel.style.display = isShop ? 'block' : 'none';
+    if (StepUI.furnPanel) StepUI.furnPanel.style.display = isFurn ? 'block' : 'none';
+    if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -2883,7 +2898,7 @@ export function createEditor() {
       tCtl.detach(); tCtl.enabled = false;
       resetGhost();
       if (!state.placingEmpty) StepUI.hint.textContent = '';
-    } else if (isBound || isTrack || isShop) {
+    } else if (isBound || isTrack || isShop || isFurn) {
       // 边界 / 赛道 / 商店模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
       state.placingEmpty = false;
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
@@ -3107,6 +3122,98 @@ export function createEditor() {
   if (StepUI.shopRefresh) StepUI.shopRefresh.onclick = () => fetchShop();
   if (StepUI.shopSave) StepUI.shopSave.onclick = () => saveShopItem();
   if (StepUI.shopCancel) StepUI.shopCancel.onclick = () => resetShopForm();
+
+  // ---------- 已摆家具管理（全服）：列出 / 勾选删除 / 清空 ----------
+  let lastBuilds = [];
+  if (StepUI.furnToken) {
+    const t0 = localStorage.getItem(SHOP_TOKEN_KEY) || '';
+    if (t0) StepUI.furnToken.value = t0;
+    StepUI.furnToken.addEventListener('input', () => localStorage.setItem(SHOP_TOKEN_KEY, StepUI.furnToken.value || ''));
+  }
+  function furnToken() { return (StepUI.furnToken && StepUI.furnToken.value) || ''; }
+  function setFurnMsg(text, cls) {
+    if (!StepUI.furnMsg) return;
+    StepUI.furnMsg.textContent = text || '';
+    StepUI.furnMsg.style.color = cls === 'err' ? '#ff8888' : '#9fe0a8';
+  }
+  function renderFurnList() {
+    if (!StepUI.furnList) return;
+    if (!lastBuilds.length) {
+      StepUI.furnList.innerHTML = '<div style="color:#7d8894">（当前没有任何已摆家具）</div>';
+      return;
+    }
+    StepUI.furnList.innerHTML = '';
+    for (const b of lastBuilds) {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.06);cursor:pointer';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.id = b.id;
+      cb.style.cssText = 'flex:0 0 auto';
+      const item = (lastShopItems || []).find((x) => x.id === b.itemId);
+      const mineMark = b.owner ? (b.owner.startsWith('u:') ? '玩家' : '游客') : '';
+      const txt = document.createElement('span');
+      txt.textContent = (item ? item.name : (b.itemId || '?')) +
+        '  ·  ' + String(b.id).slice(-6) +
+        '  (' + Math.round(b.x) + ', ' + Math.round(b.y || 0) + ', ' + Math.round(b.z) + ')' +
+        (mineMark ? '  ' + mineMark : '');
+      txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      row.appendChild(cb); row.appendChild(txt);
+      StepUI.furnList.appendChild(row);
+    }
+  }
+  async function postBuild(payload) {
+    const r = await fetch(API_ROOT + '/api/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await r.json().catch(() => null);
+    return { ok: !!(r.ok && body && body.ok), status: r.status, body };
+  }
+  async function fetchBuilds() {
+    setFurnMsg('拉取中…', '');
+    try {
+      const r = await fetch(API_ROOT + '/api/build');
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body || !body.ok) { setFurnMsg('拉取失败：HTTP ' + r.status, 'err'); return; }
+      lastBuilds = body.items || [];
+      renderFurnList();
+      setFurnMsg('共 ' + lastBuilds.length + ' 件已摆家具', '');
+    } catch (e) { setFurnMsg('拉取失败：' + (e && e.message ? e.message : e), 'err'); }
+  }
+  function checkedIds() {
+    if (!StepUI.furnList) return [];
+    return [...StepUI.furnList.querySelectorAll('input[type=checkbox]')].filter((c) => c.checked).map((c) => c.dataset.id);
+  }
+  async function deleteSelectedBuilds() {
+    if (!furnToken()) { setFurnMsg('请先填管理员密钥', 'err'); return; }
+    const ids = checkedIds();
+    if (!ids.length) { setFurnMsg('先勾选要删除的家具', 'err'); return; }
+    setFurnMsg('删除中…（共 ' + ids.length + ' 件）', '');
+    let done = 0, fail = 0;
+    for (const id of ids) {
+      const res = await postBuild({ op: 'del', id, token: furnToken() });
+      if (res.ok) done++; else fail++;
+    }
+    setFurnMsg('已删除 ' + done + ' 件' + (fail ? ('，失败 ' + fail + ' 件（密钥不对或服务端未更新）') : ''), fail ? 'err' : '');
+    await fetchBuilds();
+  }
+  async function clearAllBuilds() {
+    if (!furnToken()) { setFurnMsg('请先填管理员密钥', 'err'); return; }
+    if (typeof window.confirm === 'function' && !window.confirm('确定清空全服所有已摆家具？此操作不可撤销。')) return;
+    setFurnMsg('清空中…', '');
+    const res = await postBuild({ op: 'clear', token: furnToken() });
+    if (res.ok) setFurnMsg('已清空，剩余 ' + (res.body && res.body.count) + ' 件', '');
+    else setFurnMsg('清空失败：HTTP ' + res.status + (res.body && res.body.error ? ' · ' + res.body.error : ''), 'err');
+    await fetchBuilds();
+  }
+  if (StepUI.btnFurn) StepUI.btnFurn.onclick = () => setMode('furn');
+  if (StepUI.furnRefresh) StepUI.furnRefresh.onclick = () => fetchBuilds();
+  if (StepUI.furnAll) StepUI.furnAll.onclick = () => { if (StepUI.furnList) StepUI.furnList.querySelectorAll('input[type=checkbox]').forEach((c) => { c.checked = true; }); };
+  if (StepUI.furnNone) StepUI.furnNone.onclick = () => { if (StepUI.furnList) StepUI.furnList.querySelectorAll('input[type=checkbox]').forEach((c) => { c.checked = false; }); };
+  if (StepUI.furnDelSel) StepUI.furnDelSel.onclick = () => deleteSelectedBuilds();
+  if (StepUI.furnClearAll) StepUI.furnClearAll.onclick = () => clearAllBuilds();
 
   // ---------- 组合家具：空白场景拼装 + 存成商店商品 ----------
   function setComboHint(text, cls) {
