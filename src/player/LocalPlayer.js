@@ -40,6 +40,19 @@ export class LocalPlayer {
     this._rideLook = 0;
     this.rideLookEnabled = false; // 由 Game 按触屏判定设置（手机不开）
     this._rideLookMax = THREE.MathUtils.degToRad(Config.RIDE_LOOK_MAX_DEG);
+    // 骑车视角：false = 视角操控（自由视角，鼠标/触屏可左右掰头看）；true = 锁视角（相机恒在车后，不甩）。
+    // 默认跟随设置 rideView（Game 构造时写入）；也能在骑行中由 HUD 按钮实时切换。
+    this._rideViewLocked = false;
+  }
+
+  // 骑行中由 HUD 按钮 / 设置项实时切换「视角操控 / 锁视角」
+  setRideViewLocked(on) {
+    this._rideViewLocked = !!on;
+    if (this._rideViewLocked && this.state.ride) {
+      // 一锁就立刻对齐到车后，不拖泥带水
+      this._camYaw = this.state.yaw;
+      this._rideLook = 0;
+    }
   }
 
   // 相机实际用的水平朝向 = 缓动跟上的车头 + 自由视角偏移（不骑车/手机时两层都恒等于 state.yaw）
@@ -118,6 +131,12 @@ export class LocalPlayer {
       // 不在车上：两层都对齐朝向，相机行为与改动前完全一致
       this._camYaw = this.state.yaw;
       this._rideLook = 0;
+    } else if (this._rideViewLocked) {
+      // 锁视角：相机始终贴在车后（只跟着车头转向），鼠标左右不掰视角、也不做软跟随。
+      // 这是「锁视角按钮」开启时的状态——开车时视角稳稳朝前，适合专心看路 / 看车把。
+      this._camYaw = this.state.yaw;
+      this._rideLook = 0;
+      // 鼠标 x 在这段被整段吞掉（不写任何视角量），pitch 仍由下方统一处理。
     } else if (this.rideLookEnabled) {
       this._rideLook = THREE.MathUtils.clamp(
         this._rideLook - x * Config.MOUSE_SENSITIVITY,
@@ -158,7 +177,12 @@ export class LocalPlayer {
 
     // ---- 3. 同步相机位置与旋转（从 state 读取） ----
     // 水平朝向用 viewYaw（缓动跟上的车头 + 自由视角偏移）：骑车时能左右转头看而不影响行驶方向。
-    this.camera.position.set(this.state.x, this.state.y, this.state.z);
+    if (this.state.ride) {
+      // 骑车第一人称：相机在眼睛基础上再下沉一点，低头就能看见车把（默认相机太高，只看得见前方路）。
+      this.camera.position.set(this.state.x, this.state.y - Config.RIDE_EYE_DROP, this.state.z);
+    } else {
+      this.camera.position.set(this.state.x, this.state.y, this.state.z);
+    }
     this.camera.rotation.y = this.viewYaw;
     this.camera.rotation.x = this.state.pitch;
 

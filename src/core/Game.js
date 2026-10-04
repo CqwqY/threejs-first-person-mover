@@ -299,8 +299,7 @@ export class Game {
     if (this.localPlayer) this.localPlayer.rideLookEnabled = true;
 
     // ---- 设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
-    this.settingsPanel = createSettingsPanel(
-      {
+    this.settingsPanel = createSettingsPanel(      {
         // 触屏设备不显示「操作说明」区块（没有物理键盘，列 WASD 只是占地方）
         coarsePointer: this._coarsePointer,
         viewFar: (v) => {
@@ -360,17 +359,24 @@ export class Game {
         dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 240); }, // 一昼夜秒数
         bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
         dayOffset: (v) => { this._dayOffset = (Number(v) || 0) / 24; }, // 本地时刻偏移（小时→一天比例）
+        // 骑车视角：视角操控（自由视角）/ 锁视角（相机恒在车后）
+        rideView: (v) => {
+          if (this.localPlayer) this.localPlayer.setRideViewLocked(v === '锁视角');
+          this._syncRideViewBtn();
+        },
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
         // 模型/贴图缓存：清掉本机那份，下次进游戏重新下载（换过模型时用）
         assetCache: () => this._clearAssetCache(),
       },
       {
-        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'skillLayout', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
+        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
       }
     );
+    // 骑车「自由视角 / 锁视角」切换按钮：按需懒创建，仅驾驶位显示
+    this._ensureRideViewBtn();
     // 设置入口统一在顶部校卡右侧的「设置」按钮，不再额外挂悬浮齿轮（旧按钮定位与顶部重复）
 
     // 顶部校卡：显示当前账号名字，点击展开查看详情，并可在卡内退出登录
@@ -1652,8 +1658,10 @@ export class Game {
     if (st.ride === 1) {
       this._speedHudShow(true);
       this._speedHudTick(this.localPlayer._vehSpeed || 0);
+      if (this._rideViewBtn) this._rideViewBtn.style.display = '';
     } else {
       this._speedHudShow(false);
+      if (this._rideViewBtn) this._rideViewBtn.style.display = 'none';
     }
   }
 
@@ -3528,24 +3536,28 @@ export class Game {
   }
 
   // ---- 全屏按钮 ----
-  // 不支持（iPhone Safari / App 的 WebView）就把整组藏掉：留一个点了没反应的按钮比没有更糟。
-  // 状态变化（用户按 F11 / Esc、或别处触发）后同步文案，所以监听的是 document 事件而不是只靠点击。
+  // 始终显示：支持元素全屏的平台（桌面 / Android / iPadOS）走真正的 Fullscreen API；
+  // 不支持的平台（iPhone Safari）不再把按钮藏掉，而是点一下退化成「沉浸模式」——
+  // 隐藏顶栏/校卡等干扰 UI、画面铺满，等于 iOS 上能拿到的「全屏」体验。
+  // 状态变化（用户按 F11 / Esc、或沉浸模式切换）后同步文案，所以监听 document 事件 + 自管 body 类。
   _initFullscreenBtn() {
     const b = this._btnFullscreen;
     if (!b) return;
-    const wrap = b.parentElement; // 图标键外套着 .kui-topbtn（文字也在里面），要整组一起藏
-    if (!fullscreenSupported()) {
-      if (wrap) wrap.style.display = 'none';
-      return;
+    const wrap = b.parentElement; // 图标键外套着 .kui-topbtn（文字也在里面）
+    if (wrap) wrap.classList.add('kui-topbtn--fs'); // 沉浸模式下靠这个类把「全屏」按钮留在屏幕上
+    // 真正支持全屏的平台才需要监听全屏事件；沉浸模式靠点击就地切换，不走 document 事件。
+    if (fullscreenSupported()) {
+      this._offFullscreen = onFullscreenChange(() => this._syncFullscreenBtn());
     }
-    this._offFullscreen = onFullscreenChange(() => this._syncFullscreenBtn());
     this._syncFullscreenBtn();
   }
 
   _syncFullscreenBtn() {
     const b = this._btnFullscreen;
     if (!b) return;
-    const text = isFullscreen() ? '退出全屏' : '全屏';
+    // 处于「真全屏」或「沉浸模式」都显示「退出全屏」
+    const on = isFullscreen() || document.body.classList.contains('kui-immersive');
+    const text = on ? '退出全屏' : '全屏';
     if (b._label) {
       b._label.textContent = text;
       b.title = text; // 图标化之后 title 是唯一说明，必须跟着变
@@ -3555,16 +3567,56 @@ export class Game {
   }
 
   _toggleFullscreen() {
-    if (!fullscreenSupported()) {
-      this._toast('这个浏览器不支持全屏');
+    if (fullscreenSupported()) {
+      const was = isFullscreen(); // 记住意图：退出全屏后 on=false 是正常结果，不能当成「失败」
+      // 浏览器要求这一步发生在用户手势里（点击回调内），这里正好是。
+      toggleFullscreen().then((on) => {
+        this._syncFullscreenBtn();
+        if (on === was) this._toast(was ? '没能退出全屏' : '没能进入全屏');
+      });
       return;
     }
-    const was = isFullscreen(); // 记住意图：退出全屏后 on=false 是正常结果，不能当成「失败」
-    // 浏览器要求这一步发生在用户手势里（点击回调内），这里正好是。
-    toggleFullscreen().then((on) => {
-      this._syncFullscreenBtn();
-      if (on === was) this._toast(was ? '没能退出全屏' : '没能进入全屏');
-    });
+    // iOS 等不支持元素全屏：退化成「沉浸模式」——隐藏顶栏/校卡等干扰 UI，画面铺满。
+    const on = document.body.classList.toggle('kui-immersive');
+    this._syncFullscreenBtn();
+    if (on) this._toast('已进入沉浸模式（隐藏界面），再点一次恢复');
+  }
+
+  // ---- 骑车「视角操控 / 锁视角」切换按钮 ----
+  // 仅坐在驾驶位时出现：点一下在「自由视角（鼠标可左右掰头看）」与「锁视角（相机恒在车后）」间切换。
+  // 状态同时写进设置（rideView），面板开着也会同步；默认跟随设置项。
+  _ensureRideViewBtn() {
+    if (this._rideViewBtn) return this._rideViewBtn;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'kui-btn kui-btn--primary';
+    btn.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:9600;display:none;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 12px);font:inherit;';
+    btn.addEventListener('click', () => this._toggleRideView());
+    document.body.appendChild(btn);
+    this._rideViewBtn = btn;
+    this._syncRideViewBtn();
+    return btn;
+  }
+
+  _syncRideViewBtn() {
+    const b = this._rideViewBtn;
+    if (!b) return;
+    const locked = !!(this.localPlayer && this.localPlayer._rideViewLocked);
+    const text = locked ? '锁视角' : '自由视角';
+    if (b._label) { b._label.textContent = text; b.title = text; }
+    else { b.textContent = text; }
+  }
+
+  _toggleRideView() {
+    const on = !(this.localPlayer && this.localPlayer._rideViewLocked);
+    if (this.localPlayer) this.localPlayer.setRideViewLocked(on);
+    // 同步到设置（面板开着也跟着变）
+    if (this.settingsPanel && typeof this.settingsPanel.setField === 'function') {
+      this.settingsPanel.setField('rideView', on ? '锁视角' : '视角操控');
+    }
+    this._syncRideViewBtn();
   }
 
   // 改「对战匹配」按钮的文案。
@@ -4531,8 +4583,8 @@ export class Game {
     const sinP = Math.sin(this.localState.pitch);
     // 含俯仰的视线单位方向（与第一人称一致：yaw 水平转向 + pitch 俯仰）
     const viewDir = new THREE.Vector3(-Math.sin(yaw) * cosP, sinP, -Math.cos(yaw) * cosP);
-    const DIST = 4.0;
-    const LIFT = 1.0; // 相机相对眼睛再抬高一点，形成略微俯视的肩后视角
+    const DIST = this.localState.ride ? Config.RIDE_CAM_DIST : 4.0;
+    const LIFT = this.localState.ride ? Config.RIDE_CAM_LIFT : 1.0; // 骑车时相机更近更低，能看见车把
     const camPos = eye.clone().addScaledVector(viewDir, -DIST).add(new THREE.Vector3(0, LIFT, 0));
     if (camPos.y < 0.4) camPos.y = 0.4; // 抬头时相机可能钻到地面以下，夹住下限
     this.camera.position.copy(camPos);

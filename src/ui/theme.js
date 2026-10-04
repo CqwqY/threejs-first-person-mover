@@ -305,6 +305,15 @@ export function ensureTheme() {
     .kui-topbtn:active > .kui-iconbtn { transform: translateY(1px); filter: brightness(.94); }
     .kui-topbtn:hover > b { color: var(--kui-blue-soft); }
 
+    /* ---- 沉浸模式（iOS 等不支持元素全屏时的「全屏」兜底）----
+       body.kui-immersive 由 Game 在点击全屏按钮且 fullscreenSupported() 为 false 时切换。
+       隐藏顶栏里除「全屏」按钮外的其它控件 + 校卡 + 车速表，画面铺满；
+       全屏按钮本身（带 .kui-topbtn--fs）保留，作为唯一的退出入口。
+       手机端操控（.mc-*）不受影响——开车/走路仍要它们。 */
+    body.kui-immersive .kui-toprow > :not(.kui-topbtn--fs),
+    body.kui-immersive #idc-layout,
+    body.kui-immersive .spd-box { display: none !important; }
+
     /* ---- 键位提示（Kenney Input Prompts Pixel）----
        图块是 16px 像素画，**不要平滑缩放**，否则糊成一团；用 image-rendering: pixelated。
        尺寸用 em，跟着所在文字一起缩放。 */

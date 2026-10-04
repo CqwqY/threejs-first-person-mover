@@ -3037,7 +3037,8 @@ export function createEditor() {
       castShadow: sunShadow.castShadow,
     },
     // 编辑器面板：光照设计(环境光/半球光/阳光强度+角度) + 阴影，不透出视距（视距由游戏客户端可调）
-    { fields: ['ambient', 'hemi', 'sun', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'] }
+    // liveApply：编辑器要边调边看场景，控件改动即时生效（游戏端则用「应用设置」暂存提交）。
+    { fields: ['ambient', 'hemi', 'sun', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'], liveApply: true }
   );
   const btnSettings = document.getElementById('btnSettings');
   if (btnSettings) btnSettings.onclick = () => settingsPanel.toggle();
