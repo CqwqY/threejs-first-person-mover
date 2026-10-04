@@ -16,7 +16,7 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag } from '../player/Shop.js';
+import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { initBuildingTool } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
@@ -3761,12 +3761,12 @@ export class Game {
       const cardBody = document.createElement('div');
       cardBody.className = 'kui-panel__body';
       cardBody.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:8px;';
-      // 图标：带颜色的圆角方块，里面放物品名的首字（阿花挑的图标以物品名首个字符为代表）
+      // 图标：带颜色的圆角方块 + 一眼能认出的 emoji（比首字好分辨）
       const icon = document.createElement('div');
-      icon.textContent = name.charAt(0) || '?';
+      icon.textContent = this._itemEmoji(name);
       icon.style.cssText =
-        'width:46px;height:46px;border-radius:var(--kui-radius);display:flex;align-items:center;justify-content:center;' +
-        'background:' + this._itemColor(name) + ';color:var(--kui-paper);font-weight:700;font-size:20px;';
+        'width:52px;height:52px;border-radius:var(--kui-radius);display:flex;align-items:center;justify-content:center;' +
+        'background:' + this._itemColor(name) + ';font-size:27px;line-height:1;';
       const meta = document.createElement('div');
       meta.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center;';
       const nameEl = document.createElement('div');
@@ -4480,6 +4480,26 @@ export class Game {
     if (slotIndex != null && slotIndex >= 0) this._setSlot(slotIndex, item);
     const eff = this._effectForItem(item);
     eff.run();
+  }
+
+  // 物品图标：按效果类型 / 家具名给一个一眼能认出的 emoji（比「首字 + 随机色方块」好分辨）
+  _itemEmoji(name) {
+    const it = itemByName(name);
+    if (it && it.kind === 'building') {
+      if (/椅|凳/.test(name)) return '🪑';
+      if (/桌|台|几/.test(name)) return '🪵';
+      if (/沙发|床|垫/.test(name)) return '🛋️';
+      if (/柜|架|箱/.test(name)) return '🗄️';
+      if (/灯/.test(name)) return '💡';
+      return '🧱';
+    }
+    const k = it && it.effect ? it.effect.k : '';
+    const byKind = {
+      club: '🏏', blackhole: '🕳️', hide: '👻', gatling: '🔫',
+      control: '🎮', grapple: '🪝', hammer: '🔨',
+      throw: '💥', heal: '🧪', jetpack: '🚀', speed: '👟', jump: '🦵', size: '📏',
+    };
+    return byKind[k] || '📦';
   }
 
   // 给物品挑一个图标色：按名字散列到一个固定色板，保证同名拿到同色。

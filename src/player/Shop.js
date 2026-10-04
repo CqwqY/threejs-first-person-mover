@@ -75,6 +75,12 @@ export function findItem(itemId) {
   const list = CATALOG || SHOP_ITEMS;
   return list.find((it) => it.id === id) || null;
 }
+// 按显示名查商品：背包只存名字，渲染图标/归类时需要用名字反查目录项
+export function itemByName(name) {
+  const n = String(name);
+  const list = CATALOG || SHOP_ITEMS;
+  return list.find((it) => it.name === n) || null;
+}
 // 家具（可摆放的 building 商品）的名字集合：背包用它把「家具」页签与普通道具分开。
 // 家具按「名字」存进背包（背包只认名字），所以这里也以名字为键。
 export function furnitureNames() {
