@@ -16,7 +16,6 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { createFurnitureShopPanel } from '../ui/FurnitureShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, unplacedCount } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { initBuildingTool } from '../world/BuildingTool.js';
@@ -523,17 +522,13 @@ export class Game {
       this._pickupNearest();
     });
     this.merchant.onRange((r) => { this._merchantNear = !!r; });
+    // 商店面板：「道具 / 家具」两个标签页同处一个「小满的杂货铺」弹层（不再分两个入口/两个按钮）
     this.shop = createShopPanel({
       onBuy: (id) => this._buyShopItem(id),
       onRedeem: (code) => this._redeemCode(code),
+      onPlace: () => { this.shop.close(); if (this._buildTool) this._buildTool.setActive(true); },
     });
     this.shop.setState(() => loadWallet(this._profile));
-    // 家具商店：独立的「买家具」页面（与小满杂货铺分开）；买了可一键打开家具摆放工具
-    this.furnShop = createFurnitureShopPanel({
-      onBuy: (id) => this._buyShopItem(id),
-      onPlace: () => { if (this.furnShop) this.furnShop.close(); if (this._buildTool) this._buildTool.setActive(true); },
-    });
-    this.furnShop.setState(() => loadWallet(this._profile));
     // 学币不再单独挂一块牌：余额并进校卡（小牌右端 + 展开后资料里的一行），顶部只留校卡一个入口。
     this._refreshCoins();
 
@@ -543,7 +538,7 @@ export class Game {
       getProfile: () => this._profile,
       serverBase: shopBase,
       onToast: (m) => this._toast(m),
-      onCoins: () => { this._refreshCoins(); if (this.shop) this.shop.render(); if (this.furnShop && this.furnShop.isOpen()) this.furnShop.render(); },
+      onCoins: () => { this._refreshCoins(); if (this.shop) this.shop.render(); },
     });
     // 拉服务端商店目录（含最新价格与教学楼），覆盖本地写死的 SHOP_ITEMS；失败则回退本地。
     fetch(shopBase + '/api/shop')
@@ -1885,34 +1880,25 @@ export class Game {
 
   // 商人附近的「找小满买东西」按钮
   _createMerchantHint() {
-    // 靠近小满时显示两个按钮：杂货铺（道具）与家具商店（买家具的独立页）
-    const wrap = document.createElement('div');
-    wrap.style.cssText =
-      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;' +
+    // 靠近小满只显示一个按钮，打开「小满的杂货铺」；道具 / 家具在其内部用标签页切换
+    const el = document.createElement('div');
+    el.className = 'kui-btn kui-btn--primary';
+    el.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;cursor:pointer;' +
       'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);' +
-      'gap:10px;';
-    const mk = (txt, fn) => {
-      const b = document.createElement('button');
-      b.className = 'kui-btn kui-btn--primary';
-      b.style.cssText =
-        'min-width:clamp(66px,18vmin,104px);box-sizing:border-box;text-align:center;' +
-        'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
-        'user-select:none;-webkit-user-select:none;touch-action:none;';
-      b.textContent = txt;
-      // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
-      b.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        fn();
-        this._updateMerchantHint();
-      });
-      wrap.appendChild(b);
-      return b;
-    };
-    mk('小满杂货铺', () => this.shop.toggle());
-    mk('家具商店', () => this.furnShop.toggle());
-    document.body.appendChild(wrap);
-    return wrap;
+      'min-width:clamp(66px,18vmin,104px);box-sizing:border-box;text-align:center;' +
+      'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
+      'user-select:none;-webkit-user-select:none;touch-action:none;';
+    el.textContent = '找小满买东西';
+    // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.shop.toggle();
+      this._updateMerchantHint();
+    });
+    document.body.appendChild(el);
+    return el;
   }
 
   // 掉落物旁边的「拾取」按钮：靠近就出现，点一下把地上的东西捡回背包
@@ -2034,13 +2020,13 @@ export class Game {
     });
   }
 
-  // 商人按钮显隐：靠近 + 两个商店都没开着
+  // 商人按钮显隐：靠近 + 商店没开着
   _updateMerchantHint() {
     if (!this._merchantHint) return;
-    const show = !!this._merchantNear && !this.shop.isOpen() && !this.furnShop.isOpen();
+    const show = !!this._merchantNear && !this.shop.isOpen();
     if (this._merchantHintShown === show) return;
     this._merchantHintShown = show;
-    this._merchantHint.style.display = show ? 'flex' : 'none';
+    this._merchantHint.style.display = show ? '' : 'none';
   }
 
   // 购买：道具永久进背包+技能槽；家具(building)只进 owned（摆放额度），不进背包/技能槽
@@ -2052,7 +2038,6 @@ export class Game {
       this._refreshCoins();
       if (this.shop) this.shop.render();
       if (this._buildTool) this._buildTool.refresh(); // 买到家具后刷新建造工具的可摆额度
-      if (this.furnShop && this.furnShop.isOpen()) this.furnShop.render();
       this._toast('买下家具「' + item.name + '」（剩 ' + unplacedCount(this._profile, id) + ' 件可摆），还剩 ' + r.coins + ' 学币');
       return;
     }
@@ -2063,7 +2048,6 @@ export class Game {
     this.shop.render();
     if (this._buildTool) this._buildTool.refresh();
     this._toast('买下「' + item.name + '」（背包 ' + n + ' 个），还剩 ' + r.coins + ' 学币');
-    if (this.furnShop && this.furnShop.isOpen()) this.furnShop.render();
   }
 
   // 兑换码：成功后刷新顶部余额并让商店重绘

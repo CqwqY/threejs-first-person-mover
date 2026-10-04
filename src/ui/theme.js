@@ -217,6 +217,37 @@ export function ensureTheme() {
     }
     .kui-row > b { color: var(--kui-ink); font-weight: 700; }
 
+    /* ---- 标签页（同一面板内切换，如商店的「道具 / 家具」）----
+       用 Kenney 按钮素材做页签：选中态用「深度」底（同主按钮），未选中用灰底。 */
+    .kui-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+    }
+    .kui-tab {
+      box-sizing: border-box;
+      border: 8px solid transparent;
+      border-image: url('/ui/button_rectangle_grey.png') 22 fill / 8px stretch;
+      background: transparent;
+      color: var(--kui-ink);
+      font: 700 13px/1.15 var(--kui-font);
+      padding: 0 16px;
+      min-height: 34px;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: filter .12s ease, transform .08s ease;
+    }
+    .kui-tab:hover { filter: brightness(1.08); }
+    .kui-tab:active { transform: translateY(1px); }
+    .kui-tab.is-active {
+      border-image: url('/ui/button_rectangle_depth.png') 22 fill / 8px stretch;
+      color: #fff;
+      text-shadow: 0 1px 0 rgba(9, 30, 60, .35);
+    }
+
     /* ---- HUD 原子类（2026-10-04）----
        以前血条/加特林条/观战条/Boss 条/聊天面板各写一遍「半透明深底 + 圆角 + 白字 + 文字阴影」，
        同一个壳子有五份行内 cssText，改主题就得改五处。这里收敛成几个类。
