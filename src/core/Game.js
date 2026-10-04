@@ -16,7 +16,7 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, unplacedCount } from '../player/Shop.js';
+import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
 import { initBuildingTool } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
@@ -526,6 +526,7 @@ export class Game {
     this.shop = createShopPanel({
       onBuy: (id) => this._buyShopItem(id),
       onRedeem: (code) => this._redeemCode(code),
+      getProfile: () => this._profile,
       onPlace: () => {
         if (this._buildTool && this._buildTool.hasHammer()) { this.shop.close(); this._buildTool.enter(); }
         else this._toast('先在小满杂货铺的「道具」页买「建造锤」，再用技能槽里的它进入建造模式');
@@ -556,7 +557,13 @@ export class Game {
     // 拉服务端商店目录（含最新价格与教学楼），覆盖本地写死的 SHOP_ITEMS；失败则回退本地。
     fetch(shopBase + '/api/shop')
       .then((r) => r.json())
-      .then((d) => { if (d && d.ok && Array.isArray(d.items)) { setCatalog(d.items); this._buildTool.refresh(); } })
+      .then((d) => {
+        if (d && d.ok && Array.isArray(d.items)) {
+          setCatalog(d.items);
+          migrateFurnitureToBag(this._profile); // 老版记在 owned 的家具搬进背包（幂等）
+          this._buildTool.refresh();
+        }
+      })
       .catch(() => {});
 
     // 背包云存档：登录后把背包同步到账号（换设备也是同一份）。游客不参与（没有账号可挂）。
@@ -2026,6 +2033,7 @@ export class Game {
   _syncBagFromCloud() {
     setBagAccount(this._token, this._profile);
     if (!bagCloudEnabled()) return; // 游客、或资料还没到（此时背包键还是 guest，同步会串号）
+    migrateFurnitureToBag(this._profile); // 家具搬进背包（幂等），保证被一起同步
     // 游客时捡的东西先并进账号（背包按账号分键，不并的话一登录就像清空了）
     if (takeGuestBag(getBagKey(this._profile))) this._toast('游客背包已并入账号');
     syncBag().then((r) => {
@@ -2051,10 +2059,13 @@ export class Game {
     if (!r.ok) { this._toast(r.reason); return; }
     const item = r.item;
     if (item.kind === 'building') {
+      // 家具进背包（背包「家具」页签可见，且随背包云同步到账号）；摆放时从背包消耗
+      const n = addToBag(getBagKey(this._profile), item.name, 1);
       this._refreshCoins();
       if (this.shop) this.shop.render();
-      if (this._buildTool) this._buildTool.refresh(); // 买到家具后刷新建造工具的可摆额度
-      this._toast('买下家具「' + item.name + '」（剩 ' + unplacedCount(this._profile, id) + ' 件可摆），还剩 ' + r.coins + ' 学币');
+      if (this._bagOv && this._bagOv.style.display !== 'none') this._renderBag();
+      if (this._buildTool) this._buildTool.refresh();
+      this._toast('买下家具「' + item.name + '」（背包 ' + n + ' 件可摆），还剩 ' + r.coins + ' 学币');
       return;
     }
     const n = addToBag(getBagKey(this._profile), item.name, 1);
@@ -3704,11 +3715,22 @@ export class Game {
       '<div class="kui-panel__body" style="display:flex;justify-content:space-between;align-items:center;gap:10px;">' +
       '<h2 class="kui-title" style="margin:0;font-size:17px;">我的背包</h2>' +
       '<button type="button" class="kui-iconbtn">×</button></div></div>' +
+      '<div class="kui-tabs">' +
+      '<button type="button" class="kui-tab is-active" data-bag="items">道具</button>' +
+      '<button type="button" class="kui-tab" data-bag="furniture">家具</button>' +
+      '</div>' +
       '<div class="bag-grid"></div>';
     document.body.appendChild(ov);
-    ov.querySelector('button').addEventListener('click', () => { ov.style.display = 'none'; });
+    ov.querySelector('.kui-iconbtn').addEventListener('click', () => { ov.style.display = 'none'; });
     this._bagOv = ov;
     this._bagList = ov.querySelector('.bag-grid');
+    this._bagTab = 'items';
+    const tabs = Array.from(ov.querySelectorAll('.kui-tab'));
+    tabs.forEach((b) => b.addEventListener('click', () => {
+      this._bagTab = b.dataset.bag === 'furniture' ? 'furniture' : 'items';
+      tabs.forEach((x) => x.classList.toggle('is-active', x === b));
+      this._renderBag();
+    }));
   }
 
   _toggleBag() {
@@ -3718,12 +3740,16 @@ export class Game {
 
   _renderBag() {
     const bag = loadBag(getBagKey(this._profile));
-    const entries = Object.entries(bag).filter(([, v]) => v > 0);
+    const furn = furnitureNames();
+    const isFurn = this._bagTab === 'furniture';
+    // 道具页签只列普通道具；家具页签只列家具（家具按名字存进背包，随背包云同步）
+    const entries = Object.entries(bag).filter(([n, v]) => v > 0 && (isFurn ? furn.has(n) : !furn.has(n)));
     const grid = this._bagList;
+    if (!grid) return;
     grid.innerHTML = '';
     if (!entries.length) {
       grid.style.cssText = 'text-align:center;color:var(--kui-paper);padding:40px 0;';
-      grid.textContent = '背包空空如也，去喷泉边找阿花要宝贝吧。';
+      grid.textContent = isFurn ? '还没有家具，去小满杂货铺的「家具」页买。' : '背包空空如也，去喷泉边找阿花要宝贝吧。';
       return;
     }
     grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;padding-top:6px;';
@@ -3746,47 +3772,64 @@ export class Game {
       nameEl.textContent = name;
       nameEl.style.cssText = 'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;';
       const countEl = document.createElement('div');
-      countEl.textContent = '× ' + count + '   ·' + eff.label;
+      countEl.textContent = isFurn ? ('剩余可摆 × ' + count) : ('× ' + count + '   ·' + eff.label);
       countEl.style.cssText = 'font-size:12px;color:var(--kui-ink-soft);';
-      const useBtn = document.createElement('button');
-      useBtn.type = 'button';
-      useBtn.textContent = '使用';
-      useBtn.className = 'kui-btn kui-btn--primary';
-      // 槽位选择：选「直接使用」则只触发效果；选具体槽位则把该物品指定到该技能键后再触发
-      const slotSel = document.createElement('select');
-      slotSel.className = 'kui-input';
-      slotSel.style.cssText = 'font-size:12px;padding:5px 8px;max-width:130px;';
-      const optNone = document.createElement('option');
-      optNone.value = '';
-      optNone.textContent = '直接使用';
-      slotSel.appendChild(optNone);
-      for (let i = 0; i < SLOT_COUNT; i++) {
-        const o = document.createElement('option');
-        o.value = String(i);
-        o.textContent = '装备到 ' + (i + 1) + ' 号槽';
-        slotSel.appendChild(o);
+      const btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex;flex-direction:column;gap:6px;align-items:center;width:100%;';
+      if (isFurn) {
+        // 家具：没有「使用/技能槽」，改成「去摆放」（进建造模式）
+        const placeBtn = document.createElement('button');
+        placeBtn.type = 'button';
+        placeBtn.textContent = '去摆放';
+        placeBtn.className = 'kui-btn kui-btn--primary';
+        placeBtn.addEventListener('click', () => {
+          if (this._buildTool && this._buildTool.hasHammer()) {
+            this._bagOv.style.display = 'none';
+            this._buildTool.enter();
+          } else {
+            this._toast('先在小满杂货铺的「道具」页买「建造锤」，再用技能槽里的它进入建造模式');
+          }
+        });
+        btnRow.appendChild(placeBtn);
+      } else {
+        // 槽位选择：选「直接使用」则只触发效果；选具体槽位则把该物品指定到该技能键后再触发
+        const slotSel = document.createElement('select');
+        slotSel.className = 'kui-input';
+        slotSel.style.cssText = 'font-size:12px;padding:5px 8px;max-width:130px;';
+        const optNone = document.createElement('option');
+        optNone.value = '';
+        optNone.textContent = '直接使用';
+        slotSel.appendChild(optNone);
+        for (let i = 0; i < SLOT_COUNT; i++) {
+          const o = document.createElement('option');
+          o.value = String(i);
+          o.textContent = '装备到 ' + (i + 1) + ' 号槽';
+          slotSel.appendChild(o);
+        }
+        // 已经指定到某槽时，默认选中该槽，方便看出当前归属
+        const cur = Object.keys(this._skillMap).find((k) => this._skillMap[k] === name);
+        if (cur != null) slotSel.value = String(cur);
+        const useBtn = document.createElement('button');
+        useBtn.type = 'button';
+        useBtn.textContent = '使用';
+        useBtn.className = 'kui-btn kui-btn--primary';
+        useBtn.addEventListener('click', () => {
+          const v = slotSel.value;
+          this._useItem(name, v === '' ? null : Number(v));
+          this._renderBag();
+        });
+        btnRow.appendChild(slotSel);
+        btnRow.appendChild(useBtn);
       }
-      // 已经指定到某槽时，默认选中该槽，方便看出当前归属
-      const cur = Object.keys(this._skillMap).find((k) => this._skillMap[k] === name);
-      if (cur != null) slotSel.value = String(cur);
-      useBtn.addEventListener('click', () => {
-        const v = slotSel.value;
-        this._useItem(name, v === '' ? null : Number(v));
-        this._renderBag();
-      });
-      // 销毁：把该物品从背包里丢掉（每次减 1，减到 0 整条移除）
+      // 从背包里丢掉一件（每次减 1，减到 0 整条移除）
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
-      delBtn.textContent = '销毁';
+      delBtn.textContent = isFurn ? '丢弃' : '销毁';
       delBtn.className = 'kui-btn kui-btn--danger';
       delBtn.addEventListener('click', () => {
         removeFromBag(getBagKey(this._profile), name, 1);
         this._renderBag();
       });
-      const btnRow = document.createElement('div');
-      btnRow.style.cssText = 'display:flex;flex-direction:column;gap:6px;align-items:center;width:100%;';
-      btnRow.appendChild(slotSel);
-      btnRow.appendChild(useBtn);
       btnRow.appendChild(delBtn);
       meta.appendChild(nameEl);
       meta.appendChild(countEl);

@@ -2,6 +2,7 @@
 // 学币和「已购买」清单都写在 localStorage 里、按账号隔离：同一个账号在任意客户端打开读到的
 // 都是同一份（这就是「一个账户互联」）；游客用独立的 guest 键，不与任何账号混用。
 import { Config } from '../config.js';
+import { getBagKey, loadBag, addToBag, removeFromBag } from './Inventory.js';
 
 const KEY_PREFIX = 'fp_wallet__';
 
@@ -73,18 +74,39 @@ export function findItem(itemId) {
   const list = CATALOG || SHOP_ITEMS;
   return list.find((it) => it.id === id) || null;
 }
-// 某玩家还没摆出来的教学楼数量（= 已购但未消耗）
-export function unplacedCount(profile, itemId) {
-  const w = loadWallet(profile);
-  return w.owned.filter((x) => x === String(itemId)).length;
+// 家具（可摆放的 building 商品）的名字集合：背包用它把「家具」页签与普通道具分开。
+// 家具按「名字」存进背包（背包只认名字），所以这里也以名字为键。
+export function furnitureNames() {
+  const set = new Set();
+  for (const it of (CATALOG || SHOP_ITEMS)) if (it.kind === 'building') set.add(it.name);
+  return set;
 }
-// 摆出成功后消耗 1 个（从 owned 移除一条），返回剩余数量
+// 某玩家还没摆出来的家具数量 = 背包里该家具名的件数
+// （家具买下即进背包，随背包云同步到账号；换设备也是同一份）
+export function unplacedCount(profile, itemId) {
+  const it = findItem(itemId);
+  if (!it) return 0;
+  return loadBag(getBagKey(profile))[it.name] || 0;
+}
+// 摆出成功后从背包消耗 1 件，返回剩余数量
 export function consumeOwned(profile, itemId) {
+  const it = findItem(itemId);
+  if (!it) return 0;
+  return removeFromBag(getBagKey(profile), it.name, 1);
+}
+// 一次性迁移：把旧版记在 wallet.owned 里的家具（按 id 计数）搬进背包（按名字计数）。
+// 幂等：owned 里没有家具时是空操作。在拿到商店目录后调用即可。
+export function migrateFurnitureToBag(profile) {
   const w = loadWallet(profile);
-  const i = w.owned.indexOf(String(itemId));
-  if (i >= 0) w.owned.splice(i, 1);
-  saveWallet(profile, w);
-  return w.owned.filter((x) => x === String(itemId)).length;
+  const furn = (CATALOG || SHOP_ITEMS).filter((it) => it.kind === 'building');
+  let moved = 0;
+  for (const it of furn) {
+    let n = 0;
+    while (w.owned.includes(it.id)) { w.owned.splice(w.owned.indexOf(it.id), 1); n++; }
+    if (n > 0) { addToBag(getBagKey(profile), it.name, n); moved += n; }
+  }
+  if (moved) saveWallet(profile, w);
+  return moved;
 }
 
 function walletKey(profile) {
@@ -136,7 +158,8 @@ export function buyItem(profile, itemId) {
   const repeat = w.owned.includes(item.id);
   if (w.coins < item.price) return { ok: false, reason: '学币不够（还差 ' + (item.price - w.coins) + '）' };
   w.coins -= item.price;
-  if (!repeat) w.owned.push(item.id);
+  // 家具不算「已拥有道具」（它进背包、按件数计），只有普通道具才记进 owned
+  if (item.kind !== 'building' && !repeat) w.owned.push(item.id);
   saveWallet(profile, w);
   return { ok: true, coins: w.coins, item, repeat };
 }

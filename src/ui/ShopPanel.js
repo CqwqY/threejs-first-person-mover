@@ -4,7 +4,8 @@
 import { getCatalog, unplacedCount } from '../player/Shop.js';
 import { ensureTheme } from './theme.js';
 
-export function createShopPanel({ onBuy, onRedeem, onPlace }) {
+export function createShopPanel({ onBuy, onRedeem, onPlace, getProfile }) {
+  const prof = getProfile || (() => null);
   ensureTheme();
   const ov = document.createElement('div');
   // 外层保留原有的全屏遮罩结构（铺满视口、可滚动、安全的内边距与打开/关闭的 display 逻辑）
@@ -104,7 +105,7 @@ export function createShopPanel({ onBuy, onRedeem, onPlace }) {
     const affordable = st.coins >= item.price;
     const price = document.createElement('div');
     if (isFurn) {
-      price.textContent = item.price + ' 学币（剩 ' + unplacedCount(st, item.id) + ' 可摆）';
+      price.textContent = item.price + ' 学币（背包 ' + unplacedCount(prof(), item.id) + ' 件可摆）';
       price.style.cssText = 'font-weight:700;color:var(--kui-ink);';
     } else {
       price.textContent = item.price + ' 学币' + (owned ? '（已拥有）' : '');
