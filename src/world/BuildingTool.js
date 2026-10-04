@@ -509,6 +509,15 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const c = clampToAreas(e.mesh.position.x, e.mesh.position.z); // 水平仍限建造范围内
       e.mesh.position.x = c.x; e.mesh.position.z = c.z;
     }
+    syncRecPos(e);
+  }
+  // 把 mesh 当前位置写回它在 rendered 里的 rec：
+  // 真模型加载完(swapRealModel) / 重载(reloadAll) 都会拿 rec 重建 mesh，不同步就会被拉回旧坐标。
+  function syncRecPos(e) {
+    if (!e || !e.rec || !e.mesh) return;
+    e.rec.x = e.mesh.position.x;
+    e.rec.y = e.mesh.position.y;
+    e.rec.z = e.mesh.position.z;
   }
   const NUDGE_STEPS = [0.1, 0.25, 0.5, 1, 2, 5];
   function cycleNudgeStep() {
@@ -525,6 +534,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const pt = groundPoint(true);
     if (!pt) { onToast('准星没对准地面'); return; }
     e.mesh.position.set(pt.x, pt.y || 0, pt.z);
+    syncRecPos(e);
   }
   function rotateEdit() {
     if (state.mode !== 'edit') return;
@@ -541,6 +551,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (state.mode !== 'edit') return;
     const e = rendered.get(state.editId);
     if (!e) { exitEdit(); return; }
+    syncRecPos(e); // 先写回 rec：服务端回执到达前若有重建（模型加载完/重载），用的就是新坐标
     network.sendBuildMove({
       id: state.editId,
       x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z,

@@ -173,6 +173,8 @@ const BUILD_GLOBAL = 50;
 const BUILD_COOLDOWN = 3000;
 const BUILD_SCALE_MAX = 3;
 const BUILD_SCALE_MIN = 0.1;
+// 注：早期坐标用固定 ±24 钳制（那时地面半径才 25）。建造范围改成两栋楼实占后已废弃，
+// 现统一走 clampBuildXZ()（跟随建造范围）。保留此行仅为标明历史，勿再使用。
 const BUILD_CLAMP = 24;
 
 // 启动种子：现有在售道具 + 两栋教学楼。首次启动写一份，之后以文件为准（编辑器在线改）
@@ -303,6 +305,26 @@ function loadAreas() {
   return DEFAULT_AREAS.map((x) => ({ ...x }));
 }
 function saveAreas(list) { fs.writeFileSync(AREAS_FILE, JSON.stringify(list, null, 2)); }
+
+// 把建造坐标钳进「建造范围」：落在任一矩形内原样返回，否则吸附到最近矩形的边。
+// ⚠ 以前这里是 ±24 的固定钳制（那是地面半径 25 时代的兜底），但建造范围改成两栋楼的实占
+// （X -63.2~59.1 / Z 44.8~131.8）后，±24 会把楼里的正常坐标压到角落 —— 必须跟着范围走。
+function clampBuildXZ(x, z) {
+  const areas = loadAreas();
+  if (Array.isArray(areas) && areas.length) {
+    for (const a of areas) if (x >= a.minX && x <= a.maxX && z >= a.minZ && z <= a.maxZ) return { x, z };
+    let best = null, bd = Infinity;
+    for (const a of areas) {
+      const cx = Math.min(Math.max(x, a.minX), a.maxX);
+      const cz = Math.min(Math.max(z, a.minZ), a.maxZ);
+      const d = (cx - x) * (cx - x) + (cz - z) * (cz - z);
+      if (d < bd) { bd = d; best = { x: cx, z: cz }; }
+    }
+    if (best) return best;
+  }
+  const C = 200; // 没有任何范围配置时的宽兜底（旧行为是 24，太窄）
+  return { x: Math.min(C, Math.max(-C, x)), z: Math.min(C, Math.max(-C, z)) };
+}
 // 归属键：登录账号用 userId；游客用 IP（同机重连仍算同一人，避免刷上限）
 function ownerKeyOf(ws) {
   if (ws.__profile && ws.__profile.userId) return 'u:' + ws.__profile.userId;
@@ -1131,12 +1153,13 @@ wss.on('connection', (ws) => {
       if (mine >= BUILD_PER_PLAYER) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '已达个人摆放上限(' + BUILD_PER_PLAYER + ')' })); return; }
       if (list.length >= BUILD_GLOBAL) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '全服摆放已达上限(' + BUILD_GLOBAL + ')' })); return; }
       const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const xz = clampBuildXZ(num(msg.x, 0, -1e6, 1e6), num(msg.z, 0, -1e6, 1e6));
       const rec = {
         id: 'b_' + now + '_' + Math.random().toString(36).slice(2, 8),
         owner, itemId: item.id, url: item.url,
-        x: num(msg.x, 0, -BUILD_CLAMP, BUILD_CLAMP),
+        x: xz.x,
         y: num(msg.y, 0, -2, 10),
-        z: num(msg.z, 0, -BUILD_CLAMP, BUILD_CLAMP),
+        z: xz.z,
         rotY: num(msg.rotY, 0, -Math.PI * 4, Math.PI * 4),
         scale: num(msg.scale, 1, BUILD_SCALE_MIN, BUILD_SCALE_MAX),
         ts: now,
@@ -1174,9 +1197,10 @@ wss.on('connection', (ws) => {
       if (!rec) return;
       if (rec.owner !== owner) { ws.send(JSON.stringify({ t: 'build', ev: 'rejected', reason: '只能编辑自己摆的家具' })); return; }
       const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
-      rec.x = num(msg.x, rec.x, -BUILD_CLAMP, BUILD_CLAMP);
+      const mXZ = clampBuildXZ(num(msg.x, rec.x, -1e6, 1e6), num(msg.z, rec.z, -1e6, 1e6));
+      rec.x = mXZ.x;
       rec.y = num(msg.y, rec.y, -2, 10);
-      rec.z = num(msg.z, rec.z, -BUILD_CLAMP, BUILD_CLAMP);
+      rec.z = mXZ.z;
       rec.rotY = num(msg.rotY, rec.rotY, -Math.PI * 4, Math.PI * 4);
       rec.scale = num(msg.scale, rec.scale, BUILD_SCALE_MIN, BUILD_SCALE_MAX);
       saveBuildings(list);
