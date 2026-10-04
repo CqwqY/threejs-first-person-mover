@@ -133,6 +133,12 @@ export function initAuth(dbPath) {
       qty INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY(user_id, item_key)
     );
+    -- 背包的「修订号」：每次写入 +1，用于多端同步时判断谁更新（后写的赢）
+    CREATE TABLE IF NOT EXISTS bag_meta(
+      user_id INTEGER PRIMARY KEY,
+      rev INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS sessions(
       token TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
@@ -158,7 +164,26 @@ export function initAuth(dbPath) {
     )`),
     skins: db.prepare('SELECT skin_key FROM owned_skins WHERE user_id = ? ORDER BY skin_key'),
     items: db.prepare('SELECT item_key, qty FROM bag_items WHERE user_id = ? ORDER BY item_key'),
+    // 背包读写（/api/bag）：整包替换 + 修订号
+    clearBag: db.prepare('DELETE FROM bag_items WHERE user_id = ?'),
+    upsertItem: db.prepare(`INSERT INTO bag_items(user_id, item_key, qty) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, item_key) DO UPDATE SET qty = excluded.qty`),
+    bagMeta: db.prepare('SELECT rev FROM bag_meta WHERE user_id = ?'),
+    setBagMeta: db.prepare(`INSERT INTO bag_meta(user_id, rev, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET rev = excluded.rev, updated_at = excluded.updated_at`),
   };
+
+  const bagOf = (userId) => {
+    const out = {};
+    for (const r of stmts.items.all(userId)) out[r.item_key] = r.qty;
+    return out;
+  };
+
+  // 一次写完「清空 + 逐条写入」，中途出错不会留下半份背包
+  const replaceBag = db.transaction((userId, bag) => {
+    stmts.clearBag.run(userId);
+    for (const k of Object.keys(bag)) stmts.upsertItem.run(userId, k, bag[k]);
+  });
 
   // 用户不存在时也跑一次等开销的 scrypt，消除「响应快=用户不存在」的计时侧信道
   const DUMMY_SALT = crypto.randomBytes(16).toString('hex');
@@ -330,6 +355,56 @@ export function initAuth(dbPath) {
         sendJSON(res, 200, { ok: true, profile: fullProfile(user) });
         return true;
       }
+    }
+
+    // 背包云存档：GET 拉取、POST 整包覆盖。
+    // 同步策略是「按修订号后写覆盖」：客户端带自己的 rev 上来，比服务端旧就拒绝并回传服务端那份，
+    // 客户端据以覆盖本地 —— 这样两台设备交替玩不会互相丢东西，也不会出现「丢了又回来」。
+    if (p === '/api/bag') {
+      const user = userFromAuth(req);
+      if (!user) { sendJSON(res, 401, { ok: false, error: '未登录或已过期' }); return true; }
+
+      if (req.method === 'GET') {
+        const m = stmts.bagMeta.get(user.id) || { rev: 0 };
+        sendJSON(res, 200, { ok: true, bag: bagOf(user.id), rev: m.rev });
+        return true;
+      }
+      if (req.method === 'POST') {
+        let body;
+        try { body = JSON.parse((await readBody(req, 256 * 1024)) || '{}'); }
+        catch { sendJSON(res, 400, { ok: false, error: 'invalid body' }); return true; }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) body = {};
+
+        const m = stmts.bagMeta.get(user.id) || { rev: 0 };
+        const givenRev = Number.isFinite(body.rev) ? Math.max(0, Math.floor(body.rev)) : 0;
+        if (givenRev < m.rev) {
+          // 客户端这份更旧：把服务端的回给它，让它覆盖本地（多端冲突时以服务端为准）
+          sendJSON(res, 200, { ok: false, error: 'stale', bag: bagOf(user.id), rev: m.rev });
+          return true;
+        }
+
+        // 逐条校验：物品名限长、去控制字符；数量必须是 1..99999 的整数；条数封顶 200
+        const src = (body.bag && typeof body.bag === 'object' && !Array.isArray(body.bag)) ? body.bag : {};
+        const bag = {};
+        let n = 0;
+        for (const k of Object.keys(src)) {
+          if (n >= 200) break;
+          const key = cleanText(k, 32);
+          if (!key) continue;
+          const q = Math.floor(Number(src[k]));
+          if (!Number.isFinite(q) || q < 1) continue;
+          bag[key] = Math.min(99999, q);
+          n++;
+        }
+
+        const rev = Math.max(m.rev, givenRev) + 1;
+        replaceBag(user.id, bag);
+        stmts.setBagMeta.run(user.id, rev, Date.now());
+        sendJSON(res, 200, { ok: true, rev, count: n });
+        return true;
+      }
+      sendJSON(res, 405, { ok: false, error: 'method not allowed' });
+      return true;
     }
 
     if (req.method === 'POST' && p === '/api/logout') {

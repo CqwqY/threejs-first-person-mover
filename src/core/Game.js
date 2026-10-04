@@ -33,7 +33,7 @@ import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
 import { setModelScale, setHeldItem, setNameTagsVisible, setHealthBarsVisible, createHeldWeapon, tickPlayerModels, spinHeldBarrels } from '../player/PlayerModel.js';
-import { getBagKey, addToBag, loadBag, removeFromBag } from '../player/Inventory.js';
+import { getBagKey, addToBag, loadBag, removeFromBag, setBagAccount, bagCloudEnabled, syncBag, takeGuestBag } from '../player/Inventory.js';
 import { createSkillSlots, SLOT_COUNT } from '../ui/SkillSlots.js';
 import { onRelayout, readLayout, currentMode, viewportSize } from '../ui/layout.js';
 import { Network } from '../net/Network.js';
@@ -522,6 +522,9 @@ export class Game {
     this.shop.setState(() => loadWallet(this._profile));
     // 学币不再单独挂一块牌：余额并进校卡（小牌右端 + 展开后资料里的一行），顶部只留校卡一个入口。
     this._refreshCoins();
+
+    // 背包云存档：登录后把背包同步到账号（换设备也是同一份）。游客不参与（没有账号可挂）。
+    this._syncBagFromCloud();
 
     // ---- 棍子：挂在相机下的手持模型（技能槽里装备了棍子就一直握在手上，挥动时才播动画）----
     // 相机要进场景图，否则挂在它下面的模型不会被渲染
@@ -1138,12 +1141,14 @@ export class Game {
           this._profile = msg.profile;
           this.playerHUD.setProfile(msg.profile);
           this._refreshLocalLabel();
+          this._syncBagFromCloud(); // 账号确定后（昵称/用户名到位）再同步一次背包
         } else if (!msg.ok) {
           // 令牌失效：清掉本地会话，退回游客态（下次进入会重新弹登录）
           localStorage.removeItem('fp_token');
           this._profile = null;
           this.playerHUD.setProfile(null, false);
           this._refreshLocalLabel();
+          setBagAccount(null, null); // 关掉云同步，别把游客包写到别人账号上
         }
         break;
       }
@@ -1966,6 +1971,21 @@ export class Game {
     const w = loadWallet(this._profile);
     if (this.playerHUD && this.playerHUD.setCoins) this.playerHUD.setCoins(w.coins);
     if (this.shop && this.shop.isOpen()) this.shop.render();
+  }
+
+  // 背包同步到账号：拉服务端那份，按修订号决定谁覆盖谁（策略见 Inventory.js 顶部注释）。
+  // 游客（无 token）不参与；拉不到（老服务端 / 断网）就静默降级，背包还是本地那份，不影响玩。
+  _syncBagFromCloud() {
+    setBagAccount(this._token, this._profile);
+    if (!bagCloudEnabled()) return; // 游客、或资料还没到（此时背包键还是 guest，同步会串号）
+    // 游客时捡的东西先并进账号（背包按账号分键，不并的话一登录就像清空了）
+    if (takeGuestBag(getBagKey(this._profile))) this._toast('游客背包已并入账号');
+    syncBag().then((r) => {
+      if (!r || !r.changed) return;
+      // 背包界面正开着就重画一次，否则显示的还是同步前的旧内容
+      if (this._bagOv && this._bagOv.style.display !== 'none') this._renderBag();
+      this._toast('背包已与账号同步');
+    });
   }
 
   // 商人按钮显隐：靠近 + 商店没开着

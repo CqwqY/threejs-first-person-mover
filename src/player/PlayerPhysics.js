@@ -32,6 +32,9 @@ export class PlayerPhysics {
     // 无视世界碰撞：被抓钩拽着飞的这段时间不再理会柱身/墙（否则会半路被挡下或被侧向弹出去）。
     // 只在「疯狂抓钩」模式由 Game 临时开启，松手/死亡/切场景都会关掉。
     this.noClip = false;
+    // 本帧脚下踩到的支撑面高度（米）。null = 本帧没接触任何地面（在空中 / 被抓钩拽着飞）。
+    // 0 = 踩的是平地。由碰撞解析与地面吸附写入，供第 6 步的「贴地兜底」判断脚下到底是平地还是平台。
+    this._supportY = null;
     // 场地边界（空气墙）：null = 用 Config.GROUND_* 推导的默认矩形。
     // 由 Game 在拉到编辑器保存的 boundary 后注入，四边独立，可不对称于原点。
     this.bound = null;
@@ -150,8 +153,17 @@ export class PlayerPhysics {
       else simples.push(c);
     }
 
+    // 本帧的支撑面先清空：下面 5.5 / 5.6 两步（碰撞解析 + 地面吸附）会重新写。
+    // 注意不要挪到 5 之前——位移本身不产生接触，只有这两步才知道脚下踩着什么。
+    this._supportY = null;
+
     if (trimeshes.length) {
       resolveMove(state, this.velocity, trimeshes, dt); // 位置在解算器内部按子步推进
+      // trimesh 的接触解析在 solver 内部，那里拿不到「支撑面高度」；
+      // 但它顶着陆后脚底就贴在面上，故用脚底高度兜底记录（脚下有东西 ≠ 平地）。
+      if (state.onGround && this._supportY === null) {
+        this._supportY = state.y - Config.PLAYER_HEIGHT * this.sizeScale;
+      }
     } else {
       state.x += this.velocity.x * dt;
       state.y += this.velocity.y * dt;
@@ -177,8 +189,12 @@ export class PlayerPhysics {
       state.y = groundY;
       this.velocity.y = 0;
       state.onGround = true;
-    } else if (state.onGround && state.y - groundY < 0.6) {
-      // 缩小体型时脚底会离地：仍站在地面（落差很小）就贴回地面，避免悬空/掉落感
+      this._supportY = 0;
+    } else if (state.onGround && state.y - groundY < 0.6 && this._supportY !== null && this._supportY <= 1e-3) {
+      // 缩小体型时脚底会离地：仍站在地面（落差很小）就贴回地面，避免悬空/掉落感。
+      // ⚠ 必须限定「脚下踩的就是平地」（_supportY ≈ 0）：少了这个条件，站在矮平台/薄地板上的人
+      //   会被当成「悬空」硬拉回平地、起跳速度也被清零——表现为「踩在地板上跳不起来」（还会陷进板里）。
+      //   站在平台上时 _supportY 是平台面高度（> 0），这里就不该插手。
       state.y = groundY;
       this.velocity.y = 0;
     }
@@ -236,6 +252,7 @@ export class PlayerPhysics {
             state.y = boxBottom + b.hy * 2 + Config.PLAYER_HEIGHT * this.sizeScale;
             if (this.velocity.y < 0) this.velocity.y = 0;
             state.onGround = true;
+            this._supportY = boxBottom + b.hy * 2; // 记下支撑面 = 盒顶面
           } else if (boxBottom <= feet) {
             // 盒底面在玩家脚底之下 = 玩家整体嵌在盒子里（宽大模型的常见情形）。
             // 竖直方向没有出路：往下推会把人塞进地里（再被地面钳回来），跳起也会被立刻清零，
@@ -291,6 +308,7 @@ export class PlayerPhysics {
           state.y = boxBottom + b.hy * 2 + Config.PLAYER_HEIGHT * this.sizeScale;
           if (this.velocity.y < 0) this.velocity.y = 0;
           state.onGround = true;
+          this._supportY = boxBottom + b.hy * 2;
         } else if (boxBottom <= feet) {
           // 玩家整体嵌在盒内（同 AABB 路径）：竖直无出路，改沿水平最小穿透轴推出，
           // 否则向下推会把人塞进地里、跳起也会被清零。
@@ -418,6 +436,7 @@ export class PlayerPhysics {
         state.y = b.maxY + Config.PLAYER_HEIGHT * this.sizeScale;
         if (this.velocity.y < 0) this.velocity.y = 0;
         state.onGround = true;
+        this._supportY = b.maxY; // 凸包顶面
       } else if (py < b.minY) {
         state.y = b.minY;
         if (this.velocity.y > 0) this.velocity.y = 0;
@@ -461,6 +480,7 @@ export class PlayerPhysics {
         // 玩家在坡面之上：算着地，清掉向下速度（否则重力会逐帧累加，导致每帧更深地嵌入）
         if (this.velocity.y < 0) this.velocity.y = 0;
         state.onGround = true;
+        this._supportY = state.y - Config.PLAYER_HEIGHT * this.sizeScale; // 坡面：脚下就是接触点
       } else if (this.velocity.y > 0) {
         // 玩家在坡面之下（顶到坡的底面）：挡回向上速度
         this.velocity.y = 0;
@@ -517,6 +537,7 @@ export class PlayerPhysics {
     state.y = best + Config.PLAYER_HEIGHT * this.sizeScale;
     if (this.velocity.y < 0) this.velocity.y = 0;
     state.onGround = true;
+    this._supportY = best; // 吸附到的那个面（平地时为 0）
   }
 
   // 求凸包在 (x,z) 处「可站立面」的接触高度（没有可站立面则返回 null）。
