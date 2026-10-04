@@ -5,6 +5,7 @@ import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
 import { createLights } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
+import { icon } from '../ui/icons.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createChatBox } from '../ui/ChatBox.js';
@@ -297,6 +298,8 @@ export class Game {
     // ---- 设置面板（游戏端）：只开放视距 + 阴影等图形项，不开放光照强度 ----
     this.settingsPanel = createSettingsPanel(
       {
+        // 触屏设备不显示「操作说明」区块（没有物理键盘，列 WASD 只是占地方）
+        coarsePointer: this._coarsePointer,
         viewFar: (v) => {
           this.camera.far = v;
           this.camera.updateProjectionMatrix();
@@ -927,7 +930,7 @@ export class Game {
       : 'height:10px;';
     const fill = document.createElement('div');
     fill.className = 'kui-bar__fill';
-    fill.style.cssText = 'width:100%;background:#2ecc71;transition:width .18s ease,background .18s ease;';
+    fill.style.cssText = 'width:100%;background:var(--kui-ok);transition:width .18s ease,background .18s ease;';
     track.appendChild(fill);
     box.appendChild(row);
     box.appendChild(track);
@@ -943,7 +946,8 @@ export class Game {
     const hp = Math.max(0, Math.min(max, Math.round(this.localState.health)));
     const ratio = hp / max;
     this._hpFill.style.width = (ratio * 100).toFixed(1) + '%';
-    this._hpFill.style.background = ratio > 0.5 ? '#2ecc71' : (ratio > 0.2 ? '#f1c40f' : '#e74c3c');
+    // 三档配色走语义变量（--kui-ok / --kui-warn / --kui-danger），别再写死 Material 色
+    this._hpFill.style.background = ratio > 0.5 ? 'var(--kui-ok)' : (ratio > 0.2 ? 'var(--kui-warn)' : 'var(--kui-danger)');
     this._hpNum.textContent = hp + ' / ' + max;
   }
 
@@ -1826,8 +1830,9 @@ export class Game {
       'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);' +
       'user-select:none;-webkit-user-select:none;touch-action:none;';
     el.textContent = '拾取';
-    // PC 上光标被指针锁定，点不到 DOM 按钮，所以在按钮上标出快捷键
-    this._pickupKeySuffix = (isCoarsePointer()) ? '' : (' (' + Config.PICKUP_KEY.slice(-1) + ')');
+    // PC 上光标被指针锁定，点不到 DOM 按钮，所以在按钮上标出快捷键。
+    // 复用构造时算好的 this._coarsePointer —— 触屏判定只该有一处，别再单独 matchMedia。
+    this._pickupKeySuffix = this._coarsePointer ? '' : (' (' + Config.PICKUP_KEY.slice(-1) + ')');
     // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -2200,7 +2205,7 @@ export class Game {
     row.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);';
     const name = document.createElement('span');
     name.textContent = '老师';
-    name.style.cssText = 'font-weight:600;color:#ffb4c6;';
+    name.style.cssText = 'font-weight:700;color:var(--kui-gold-hi-2);';;
     const num = document.createElement('span');
     row.appendChild(name);
     row.appendChild(num);
@@ -2700,6 +2705,8 @@ export class Game {
     const roleSel = card.querySelector('.hd-role');
     const colorBox = card.querySelector('.hd-colors');
 
+    // 这里**故意不用主题色**：角色外观/物品图标需要「一堆能互相区分的颜色」，
+    // 语义变量（成功/危险/警告）只有三档，不够分。属于例外，勿与状态色混用。
     const COLORS = ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#16a085', '#3498db', '#9b59b6', '#2c3e50'];
     let color = COLORS[3];
     const swatches = COLORS.map((c) => {
@@ -3305,7 +3312,7 @@ export class Game {
     track.style.cssText = 'height:8px;';
     const fill = document.createElement('div');
     fill.className = 'kui-bar__fill';
-    fill.style.cssText = 'width:0%;background:#2ecc71;transition:width .06s linear;';
+    fill.style.cssText = 'width:0%;background:var(--kui-ok);transition:width .06s linear;';
     track.appendChild(fill);
     const txt = document.createElement('div');
     txt.style.cssText = 'margin-top:4px;text-shadow:0 1px 3px rgba(0,0,0,.7);';
@@ -3330,7 +3337,7 @@ export class Game {
     if (key === this._gatlingBarKey) return;
     this._gatlingBarKey = key;
     bar.fill.style.width = heat + '%';
-    bar.fill.style.background = this._gatlingOverheated ? '#e74c3c' : (heat > 65 ? '#f1c40f' : '#2ecc71');
+    bar.fill.style.background = this._gatlingOverheated ? 'var(--kui-danger)' : (heat > 65 ? 'var(--kui-warn)' : 'var(--kui-ok)');
     bar.txt.textContent = this._gatlingOverheated ? '加特林过热中，等它冷却' : ('加特林 ' + heat + '%');
   }
 
@@ -3373,8 +3380,28 @@ export class Game {
   }
 
   // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
+  // 每个按钮是「图标 + 文字」并排 —— 图标只是辅助记忆，**文字必须留着**：
+  // 「对战匹配」这种词，光看交叉的剑认不出来，全砍成图标反而更难用。
   _createTopButtons() {
     const coarse = !!this._coarsePointer;
+    // 图标在前、文字在后。icon() 出的是内联 SVG（fill=currentColor），跟着 color 走。
+    // ⚠ 文字放在**独立的 span** 里，别直接用 el.textContent ——
+    //   对战按钮的文案会随状态改（textContent = '退出对战'），那样会把图标一起抹掉。
+    const withIcon = (el, name) => {
+      el.insertAdjacentHTML('afterbegin', icon(name, { size: '1.05em' }));
+      el.style.display = 'inline-flex';
+      el.style.alignItems = 'center';
+      el.style.justifyContent = 'center';
+      el.style.gap = '5px';
+      // 图标要跟着按钮底色走：Kenney 素材原色是白，深色描边按钮上就得反色
+      el.querySelector('svg').style.color = 'var(--kui-ink)';
+      // 把裸文本节点包进 span，后续改文案只动这个 span（_setCombatBtnText）
+      const label = document.createElement('span');
+      while (el.lastChild && el.lastChild.nodeType === 3) label.appendChild(el.lastChild);
+      el.appendChild(label);
+      el._label = label;
+      return el;
+    };
     if (coarse) {
       // 校卡（见 PlayerHUD 的 pointer:coarse 媒体查询）占左侧 12+156px，这里从它右边 4px 开始，靠右对齐。
       // 三处基础值都要加上安全区：横屏时刘海在左右两侧，不减掉 inset 的话校卡会被切、
@@ -3388,39 +3415,51 @@ export class Game {
         'display:flex;gap:6px;' +
         'justify-content:flex-end;align-items:center;flex-wrap:nowrap;';
       document.body.appendChild(row);
-      const mk = (text, onClick) => {
+      const mk = (text, ic, onClick) => {
         const b = document.createElement('div');
         b.className = 'kui-btn kui-btn--grey';
         b.textContent = text;
         b.style.cssText = 'cursor:pointer;user-select:none;-webkit-user-select:none;' +
           'padding:6px 8px;font-size:12px;white-space:nowrap;';
         b.addEventListener('click', onClick);
+        withIcon(b, ic);
         row.appendChild(b);
         return b;
       };
       this._topRow = row;
-      this._btnBag = mk('背包', () => this._toggleBag());
-      this._btnSettings = mk('设置', () => this.settingsPanel.toggle());
-      this._btnCombat = mk('对战匹配', () => this._toggleCombat());
+      this._btnBag = mk('背包', 'bag', () => this._toggleBag());
+      this._btnSettings = mk('设置', 'settings', () => this.settingsPanel.toggle());
+      this._btnCombat = mk('对战匹配', 'combat', () => this._toggleCombat());
       this._buildBag();
       return;
     }
-    const mkBtn = (text, posCss, onClick) => {
+    const mkBtn = (text, ic, posCss, onClick) => {
       const b = document.createElement('div');
       b.className = 'kui-btn kui-btn--grey';
       b.textContent = text;
       b.style.cssText =
         'position:fixed;z-index:9500;cursor:pointer;user-select:none;padding:7px 10px;' + posCss;
       b.addEventListener('click', onClick);
+      withIcon(b, ic);
       document.body.appendChild(b);
       return b;
     };
     // 校卡展开时最宽 268px，按钮让它贴着卡左右两侧（50% + 134 再留 10px 间距）
-    this._btnBag = mkBtn('背包', 'right:calc(50% + 144px);top:14px;', () => this._toggleBag());
-    this._btnSettings = mkBtn('设置', 'left:calc(50% + 144px);top:14px;', () => this.settingsPanel.toggle());
+    this._btnBag = mkBtn('背包', 'bag', 'right:calc(50% + 144px);top:14px;', () => this._toggleBag());
+    this._btnSettings = mkBtn('设置', 'settings', 'left:calc(50% + 144px);top:14px;', () => this.settingsPanel.toggle());
     // 对战匹配：右上角独立按钮，点开匹配/退出对战（文案随状态变化）
-    this._btnCombat = mkBtn('对战匹配', 'right:14px;top:14px;', () => this._toggleCombat());
+    this._btnCombat = mkBtn('对战匹配', 'combat', 'right:14px;top:14px;', () => this._toggleCombat());
     this._buildBag();
+  }
+
+  // 改「对战匹配」按钮的文案。
+  // ⚠ 不能用 this._btnCombat.textContent = ... —— 那会把并排的图标一起抹掉，
+  //   对战一进场按钮就变成光秃秃两个字。withIcon() 建按钮时把文字包进了 _label span。
+  _setCombatBtnText(text) {
+    const b = this._btnCombat;
+    if (!b) return;
+    if (b._label) b._label.textContent = text;
+    else b.textContent = text; // 万一按钮是别处造的，退回旧行为
   }
 
   _buildBag() {
@@ -4165,6 +4204,7 @@ export class Game {
   }
 
   // 给物品挑一个图标色：按名字散列到一个固定色板，保证同名拿到同色。
+  // 同上：这是「多色相区分」用途，不是状态色，刻意不走 --kui-* 语义变量。
   _itemColor(name) {
     const palette = ['#e74c3c', '#e67e22', '#f1c40f', '#27ae60', '#16a085', '#3498db', '#9b59b6', '#e84393', '#2c3e50'];
     let h = 0;
@@ -4251,11 +4291,15 @@ export class Game {
   _showFailText(text, color) {
     if (this._failEl) { this._failEl.remove(); this._failEl = null; }
     const el = document.createElement('div');
-    const c = color || '#ff4d4d';
-    // 光晕用同一个颜色，避免「金字红光晕」这种对不上的组合
-    const glow = /^#[0-9a-fA-F]{6}$/.test(c)
+    const c = color || 'var(--kui-danger)';
+    // 光晕跟着文字同色，避免「金字配红光晕」这种对不上的组合。
+    // 传进来的可能是 var(--kui-gold-hi-2) 这类**变量引用**（不是字面色），
+    // 那就没法在 JS 里算 rgba —— 改用 currentColor 交给 CSS：
+    // text-shadow 里写 currentColor 会解析成 color 的计算值，正好等于文字色。
+    const isLiteral = /^#[0-9a-fA-F]{6}$/.test(c);
+    const glow = isLiteral
       ? 'rgba(' + parseInt(c.slice(1, 3), 16) + ',' + parseInt(c.slice(3, 5), 16) + ',' + parseInt(c.slice(5, 7), 16) + ',.75)'
-      : 'rgba(255,60,60,.75)';
+      : 'currentColor';
     el.style.cssText =
       'position:fixed;left:50%;top:44%;transform:translate(-50%,-50%) scale(.7);' +
       'z-index:9600;pointer-events:none;white-space:nowrap;' +
@@ -4824,10 +4868,10 @@ export class Game {
         'font:13px/1.4 var(--kui-font);color:var(--kui-paper);' +
         'background:rgba(11,21,34,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 12px;';
       el.innerHTML =
-        '<span id="__cMode" style="font-weight:700;color:#ffd76a;">对战</span>' +
+        '<span id="__cMode" style="font-weight:700;color:var(--kui-gold-hi-2);">对战</span>' +
         '<span id="__cAlive">存活 -</span>' +
         '<span id="__cRank" style="display:none;">名次 -</span>' +
-        '<span id="__cCoin" style="display:none;color:#ffd76a;">金币 0</span>' +
+        '<span id="__cCoin" style="display:none;color:var(--kui-gold-hi-2);">金币 0</span>' +
         '<span id="__cTime">时间 00:00</span>' +
         '<button type="button" id="__cLeave" class="kui-btn kui-btn--grey" style="padding:3px 10px;">退出</button>';
       document.body.appendChild(el);
@@ -4957,7 +5001,7 @@ export class Game {
     // 训练场用后缀区分，别让人以为自己在打匹配（输赢规则完全不同）
     if (modeEl) modeEl.textContent = meta.name + (solo ? '（训练场）' : '');
     if (coinEl) coinEl.style.display = mode === 'grapple' ? '' : 'none';
-    if (this._btnCombat) this._btnCombat.textContent = '退出对战';
+    this._setCombatBtnText('退出对战');
     this._updateBossUI(); // 刷新攻击按钮（对战中常驻）
     this._updateSkillBarVisibility(); // 竞技场里不显示技能栏
     this._updateCombatHUD();
@@ -5016,7 +5060,7 @@ export class Game {
     this._clearCoins();
     this._endGrapple();
     this._hideCombatHUD();
-    if (this._btnCombat) this._btnCombat.textContent = '对战匹配';
+    this._setCombatBtnText('对战匹配');
     this._updateBossUI(); // 交回给主世界逻辑控制攻击按钮显隐
     this._updateSkillBarVisibility(); // 回到主世界，恢复技能栏
     this._toast('已退出，返回主世界');
@@ -5170,7 +5214,7 @@ export class Game {
     const meId = String(this.localState.id);
     if (!c.solo && res.winnerId) {
       const won = res.winnerId === meId;
-      this._showFailText(won ? '胜利' : '失败', won ? '#ffd76a' : '#ff4d4d');
+      this._showFailText(won ? '胜利' : '失败', won ? 'var(--kui-gold-hi-2)' : 'var(--kui-danger)');
     }
     this._showResultPanel(res);
   }
@@ -5216,9 +5260,9 @@ export class Game {
         '<div style="font-size:13px;color:var(--kui-ink-soft);margin-bottom:10px;">' +
         (isCoin ? '限时内吃到的金币' : '本局坚持了多久') + '</div>' +
         '<div style="font-size:15px;line-height:1.9;">' +
-        '本次：<b style="color:#ffd76a;font-size:20px;">' + fmt(score) + '</b><br>' +
+        '本次：<b style="color:var(--kui-gold-hi-2);font-size:20px;">' + fmt(score) + '</b><br>' +
         '本机最高：<b>' + fmt(isNew ? score : prev) + '</b>' +
-        (isNew ? ' <span style="color:#2ecc71;font-weight:700;">新纪录！</span>' : '') +
+        (isNew ? ' <span style="color:var(--kui-ok);font-weight:700;">新纪录！</span>' : '') +
         '</div>';
     } else {
       const won = res.winnerId === meId;
@@ -5231,7 +5275,7 @@ export class Game {
         (res.winnerId
           ? (why + ' · ' + (winner ? this._esc(winner.nick) : '') + ' 获胜（' + (c.mode === 'grapple' ? '金币最多' : COMBAT_MODES[c.mode].win) + '）')
           : (why + ' · 无人获胜')) + '</div>' +
-        '<div style="font-size:13px;">你的名次：<b style="color:#ffd76a;font-size:17px;">第 ' + (mine ? mine.rank : '-') + ' 名</b>' +
+        '<div style="font-size:13px;">你的名次：<b style="color:var(--kui-gold-hi-2);font-size:17px;">第 ' + (mine ? mine.rank : '-') + ' 名</b>' +
         ' / 共 ' + rows.length + ' 人</div>';
     }
 
@@ -5246,7 +5290,7 @@ export class Game {
       const st = this._matchStats.get(r.id);
       const tag = r.id === meId ? ' <span style="color:#4ea1ff;">(你)</span>' : '';
       const gone = st && st.gone ? ' <span style="color:var(--kui-ink-soft);">已退房</span>' : (r.alive ? '' : '');
-      table += '<span style="font-weight:700;color:' + (r.id === res.winnerId ? '#ffd76a' : '#fff') + ';">' + r.rank + '</span>' +
+      table += '<span style="font-weight:700;color:' + (r.id === res.winnerId ? 'var(--kui-gold-hi-2)' : '#fff') + ';">' + r.rank + '</span>' +
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:' + this._esc(r.color) + ';">' +
         this._esc(r.nick) + tag + gone + '</span>' +
         '<span style="text-align:right;">' + formatClock(r.survivalMs) + '</span>' +
@@ -5384,7 +5428,7 @@ export class Game {
         'font:13px/1.4 var(--kui-font);color:var(--kui-paper);' +
         'background:rgba(11,21,34,.72);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:7px 12px;';
       el.innerHTML =
-        '<span style="font-weight:700;color:#ff9d6a;">观战中</span>' +
+        '<span class="kui-tag kui-tag--warn">观战中</span>' +
         '<span id="__spTarget">-</span>' +
         '<button type="button" id="__spNext" class="kui-btn kui-btn--grey" style="padding:3px 10px;">切换视角</button>' +
         '<button type="button" id="__spQuit" class="kui-btn kui-btn--grey" style="padding:3px 10px;">提前退出</button>';

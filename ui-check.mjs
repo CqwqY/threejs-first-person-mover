@@ -139,9 +139,18 @@ ok(/onReset: \(\) => layoutApi\.reset\(\)/.test(mainSrc), 'onReset → reset');
 // ---------------------------------------------------------------------------
 console.log('== 6. 联动：Game 里 coarse 只判一次 ==');
 {
-  // 之前 _createTopButtons 与构造函数各判一份 matchMedia，改一边容易漏另一边
-  const n = (gameSrc.match(/matchMedia\('\(pointer: coarse\)'\)/g) || []).length;
-  ok(n === 1, `Game.js 里 (pointer: coarse) 只判一次（实际 ${n} 次）`);
+  // 触屏判定已收拢进 src/util/isCoarse.js 的 isCoarsePointer()（多信号 OR + 主指针兜底），
+  // Game 里不该再有裸 matchMedia —— 早先那条「裸 matchMedia 恰好 1 次」的断言已经过时，
+  // 现在要查的是「判定只调一次封装、结果落在实例上、各处复用」。
+  // 只数「真正的调用」：import 行与注释里也会出现这个名字，得剔掉
+  const n = (gameSrc
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|import\b)/.test(l)) // 注释与 import 不算调用
+    .join('\n')
+    .match(/isCoarsePointer\(\)/g) || []).length;
+  ok(n === 1, `Game.js 里 isCoarsePointer() 只调一次（实际 ${n} 次）`);
+  ok(!/matchMedia\('\(pointer: coarse\)'\)/.test(gameSrc),
+    'Game.js 里没有裸的 matchMedia(\'(pointer: coarse)\')（判定已收拢进 isCoarse.js）');
   ok(/this\._coarsePointer = coarsePointer;/.test(gameSrc), '判定结果落在实例上供各处复用');
   ok(/const coarse = !!this\._coarsePointer;/.test(gameSrc), '_createTopButtons 复用同一份判定');
 }

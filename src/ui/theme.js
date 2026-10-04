@@ -42,6 +42,24 @@ export function ensureTheme() {
       /* 显示数字/拉丁字母用的方体字；中文请继续用系统 CJK 字体 */
       --kui-font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
       --kui-font-num: '${FONT_DISPLAY}', system-ui, "Microsoft YaHei", sans-serif;
+
+      /* ---- 语义色（2026-10-04）----
+         以前血条/热度条/战斗结算各自硬编码了一套 Material 色（#2ecc71/#e74c3c/#ffd76a…），
+         同一个"危险"有四种红、"成功"有两种绿。现在一律走这里的语义变量。
+         要表达状态就用语义名，不要再写死具体色值 —— 否则换个主题要改几十处。 */
+      --kui-ok-2: #46b36b;        /* 满血/就绪 */
+      --kui-warn: #e0a83a;       /* 中等（半血/过热） */
+      --kui-danger: #d9534f;     /* 危急/失败 */
+      --kui-gold-hi-2: #ffd76a;  /* 胜利/金币高光 */
+      --kui-ink-mute: #7b8ea4;   /* 次要说明文字（观战状态、提示尾注） */
+
+      /* ---- 圆角阶梯（2026-10-04）----
+         以前界面里散着 50% / 999px / 10px / 7px / 8px / 4px / 6px 七种值，
+         面板和按钮圆角对不上，看着"不像一套"。现在只用这四档。 */
+      --kui-r-sm: 6px;    /* 小徽标、标签、进度条内圈 */
+      --kui-r-md: 10px;   /* 输入框、小浮层（最常用） */
+      --kui-r-lg: 14px;   /* 卡片、面板 */
+      --kui-r-pill: 999px;/* 胶囊：血条、药丸按钮 */
     }
 
     /* ---- 面板：Kenney 蓝色九宫格，可任意拉伸 ---- */
@@ -198,6 +216,66 @@ export function ensureTheme() {
       color: var(--kui-ink-soft);
     }
     .kui-row > b { color: var(--kui-ink); font-weight: 700; }
+
+    /* ---- HUD 原子类（2026-10-04）----
+       以前血条/加特林条/观战条/Boss 条/聊天面板各写一遍「半透明深底 + 圆角 + 白字 + 文字阴影」，
+       同一个壳子有五份行内 cssText，改主题就得改五处。这里收敛成几个类。
+       用法：给容器加 .kui-hud（深色玻璃底），文字部分加 .kui-hud__label / .kui-hud__note。 */
+    .kui-hud {
+      box-sizing: border-box;
+      border-radius: var(--kui-r-md);
+      background: rgba(11, 21, 34, .72);
+      border: 1px solid rgba(255, 255, 255, .12);
+      padding: 6px 10px;
+      color: var(--kui-paper);
+      font-family: var(--kui-font);
+      pointer-events: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .kui-hud__title {
+      display: flex; justify-content: space-between; gap: 10px;
+      font-size: 12px; font-weight: 700;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, .7);
+    }
+    .kui-hud__note {          /* 次要说明：数值、状态后缀 */
+      color: var(--kui-ink-mute);
+      font-size: 11px;
+      font-family: var(--kui-font-num);
+    }
+    .kui-hud__caption {       /* 进度条下方的说明文字 */
+      margin-top: 4px;
+      font-size: 11px;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, .7);
+    }
+    /* 状态徽标：战斗结算/观战横幅那种小圆角标签 */
+    .kui-tag {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: var(--kui-r-sm);
+      font-size: 11px;
+      font-weight: 700;
+      background: color-mix(in srgb, var(--kui-blue) 34%, transparent);
+      color: var(--kui-paper);
+    }
+    .kui-tag--ok { background: color-mix(in srgb, var(--kui-ok) 38%, transparent); }
+    .kui-tag--warn { background: color-mix(in srgb, var(--kui-warn) 38%, transparent); color: #2b1f05; }
+    .kui-tag--danger { background: color-mix(in srgb, var(--kui-danger) 40%, transparent); }
+
+    /* ---- 键位提示（Kenney Input Prompts Pixel）----
+       图块是 16px 像素画，**不要平滑缩放**，否则糊成一团；用 image-rendering: pixelated。
+       尺寸用 em，跟着所在文字一起缩放。 */
+    .kui-key {
+      display: inline-block;
+      width: 2.1em; height: 2.1em;
+      vertical-align: -0.42em;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background-repeat: no-repeat;
+      background-position: center;
+      background-size: contain;
+      filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .45));
+    }
 
     /* ---- 准星 ----
        用 CSS 画而不是贴图：素材是纯黑 PNG，在紫柱子/岩浆/夜景里基本看不见；

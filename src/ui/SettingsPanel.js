@@ -5,6 +5,7 @@
 // 每项是一个 (value) => void 的 setter，面板在初始化、改动、恢复默认时都会调用对应 setter 立即应用。
 // 编辑器写入的「光照设计」（环境光/阳光强度、阳光角度）会保存到设计键，客户端读取并应用同一份。
 import { ensureTheme } from './theme.js';
+import { createKeyHints } from './KeyHints.js';
 
 export const DEFAULT_SETTINGS = {
   ambient: 0.32, // 环境光强度（压暗底色，拉开明暗对比）—— 编辑器中可调，会保存给客户端
@@ -303,6 +304,14 @@ export function createSettingsPanel(binds, opts = {}) {
     saveSettings(settings, storeKey);
   });
   body.appendChild(reset);
+
+  // ---- 「操作说明」区块（仅电脑）：用键位图块列出实际按键 ----
+  // 手机上不显示：那��没有物理键盘，列一堆 WASD 只是占地方。
+  // opts.coarsePointer 由调用方传入（Game 已经算过一次，别再判一遍）。
+  if (!opts.coarsePointer) {
+    const keyBox = createKeyHints();
+    if (keyBox) card.appendChild(keyBox);
+  }
 
   // ---- 「画面元素」区块（手机端）：拖拽摆放跳跃键 / 技能槽 / 血条 / 对话选项卡 ----
   // 面板本身不认识布局模块，动作由 main.js 在 initMobileLayout() 之后注入；

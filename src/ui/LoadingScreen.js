@@ -63,12 +63,12 @@ export function createLoadingScreen(opts = {}) {
   const arc = document.createElement('div');
   arc.style.cssText =
     'position:absolute;inset:0;border-radius:50%;' +
-    'border:3px solid rgba(255,255,255,.14);border-top-color:#ffd76a;border-right-color:#7fd0ff;' +
+    'border:3px solid rgba(255,255,255,.14);border-top-color:var(--kui-gold-hi-2);border-right-color:#7fd0ff;' +
     'animation:fpm-ld-spin 1s linear infinite;';
   const dot = document.createElement('div');
   dot.style.cssText =
     'position:absolute;left:50%;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;' +
-    'background:#ffd76a;animation:fpm-ld-pulse 1.4s ease-in-out infinite;';
+    'background:var(--kui-gold-hi-2);animation:fpm-ld-pulse 1.4s ease-in-out infinite;';
   ring.appendChild(arc);
   ring.appendChild(dot);
 
