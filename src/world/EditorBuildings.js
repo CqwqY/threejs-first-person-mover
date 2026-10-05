@@ -15,13 +15,19 @@ import {
   AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from './Lights.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
-import { createWindowMesh, setWindowEnv, WINDOW_DEFAULTS } from './FakeWindow.js';
+import {
+  createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
+} from './FakeWindow.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
 let _addedHolders = [];
 // 本次构建创建的全部障眼法窗户网格。环境贴图（scene.environment）在场景构建时可能还没就绪
 // （天空贴图是异步加载的），所以这里登记下来，由 syncFakeWindowEnvs() 在环境就绪/换时段时补挂。
 let windowMeshes = [];
+// 本次构建里「标记了挖洞」的窗户记录（角度为**弧度**），供 applyEditorHoles() 写进共享 uniform。
+let _holeWins = [];
+// 挖洞厚度（米）：洞盒在墙面法线方向的厚度，必须大于最厚的墙。
+const HOLE_DEPTH = 1.2;
 // 本次构建的「模型加载」Promise 列表（不含 trimesh 烘焙）——
 // optimizeEditorScene 要等它们全都 settle 才能做跨物件合并。
 let _pendingLoads = [];
@@ -32,6 +38,7 @@ function clearHolders(scene) {
   for (const h of _addedHolders) scene.remove(h);
   _addedHolders = [];
   windowMeshes = [];
+  _holeWins = [];
 }
 
 // 把当前 scene.environment 同步到所有障眼法窗户上。
@@ -44,6 +51,43 @@ export function syncFakeWindowEnvs(scene) {
     if (!mesh || !mesh.material) continue;
     setWindowEnv(mesh.material, env);
   }
+}
+
+// 把「标记了挖洞的窗户」应用成墙上的真洞（fragment discard，零额外开销）。
+//
+// ⚠ 调用时机很关键：**必须等建筑模型加载完**（材质此刻才存在，也才打得上补丁）。
+//   所以本函数只在 whenEditorLoadsSettled() 之后有意义，由 optimizeEditorScene() 调用；
+//   另外窗户数据本身是同步就好 的，洞的**位置**在场景重建后立刻可用。
+//
+// 收集范围：本函数把**所有编辑器摆放的物件**（placed）的材质都打上挖洞补丁。
+//   为什么不只挑"建筑"：本项目 placed 里既有楼也有家具/树，靠名字/url 猜不可靠；
+//   而挖洞补丁在 uHoleCount=0 时只是一次 uniform 比较（几乎免费），
+//   漏打的代价（洞在某个模型上不生效）远大于多打的代价。
+export function applyEditorHoles(scene) {
+  if (!scene) return { count: 0, patched: 0, shadow: 0 };
+  // ① 洞数据：把窗户记录里的角度（已存为弧度）喂给共享 uniform
+  const wins = _holeWins;
+  // ② 目标材质：编辑器摆放物件的全部材质（窗户自己的 ShaderMaterial 不含 onBeforeCompile，
+  //    patchBuildingMaterial 会自动跳过它）
+  const mats = [];
+  const seen = new Set();
+  for (const h of _addedHolders) {
+    if (!h || !h.parent) continue;
+    h.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      const list = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of list) {
+        if (!m || seen.has(m)) continue;
+        seen.add(m);
+        mats.push(m);
+      }
+    });
+  }
+  // ③ 阴影：太阳方向光的阴影深度材质要单独打补丁，否则洞在阴影里"补回去"了。
+  //    找场景里第一盏开了阴影的平行光（本项目的太阳）。
+  const lights = [];
+  scene.traverse((o) => { if (o.isDirectionalLight && o.castShadow) lights.push(o); });
+  return applyWindowHoles(wins, mats, lights, { depth: HOLE_DEPTH });
 }
 
 // 统一显隐「编辑器建筑」：进入对战独立竞技场时把城市建筑整组隐藏，退出时恢复。
@@ -153,6 +197,16 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       });
       holder.add(mesh);
       windowMeshes.push(mesh);
+      // 勾了「挖穿墙体」的窗户要在墙上真开洞。这里只**登记数据**（角度已是弧度），
+      // 真正的补丁在 applyEditorHoles() 里打 —— 那时建筑模型才加载完、材质才存在。
+      if (it.hole === true) {
+        _holeWins.push({
+          x: it.x ?? 0, y: it.y ?? 0, z: it.z ?? 0,
+          rotX: it.rotX ?? 0, rotY: it.rotY ?? 0, rotZ: it.rotZ ?? 0,
+          xw: it.xw ?? WINDOW_DEFAULTS.w,
+          xh: it.xh ?? WINDOW_DEFAULTS.h,
+        });
+      }
       return; // 窗户没有碰撞体、不参与 LOD/批次合并，到此为止
     }
     const sc = normScale(it.scale);
@@ -513,6 +567,15 @@ export function mergeSceneBatches(scene, holdersOverride) {
 // 否则它们永远是全细节渲染。
 export async function optimizeEditorScene(scene) {
   await whenEditorLoadsSettled();
+  // 模型都加载完了 → 现在材质才齐全，可以给墙打挖洞补丁。
+  // ⚠ 必须在 mergeSceneBatches 之前：合并会把多个网格的材质并成"首实例"那个，
+  //   若合并完再打补丁，被丢弃的那些材质实例上的补丁就白打了（虽然它们本就已不在场景里）。
+  let hole = { count: 0, patched: 0, shadow: 0 };
+  try {
+    hole = applyEditorHoles(scene);
+  } catch (e) {
+    console.warn('[EditorBuildings] 挖洞应用失败（保持原样）:', e);
+  }
   let st = { before: 0, after: 0, batches: 0 };
   try {
     st = mergeSceneBatches(scene);
@@ -530,7 +593,7 @@ export async function optimizeEditorScene(scene) {
       registerLodTarget(h, { noHide });
     }
   }
-  return st;
+  return { ...st, holes: hole.count, holePatched: hole.patched };
 }
 
 // buildEditorLights(scene, dataOverride)：把编辑器保存的光源渲染进场景。

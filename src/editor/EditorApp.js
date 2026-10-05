@@ -33,10 +33,16 @@ import {
   releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
-import { createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS } from '../world/FakeWindow.js';
+import {
+  createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS,
+  applyWindowHoles, resetHolePatches, MAX_HOLES,
+} from '../world/FakeWindow.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
+// 挖洞厚度（米）：窗洞盒在**墙面法线方向**的厚度。必须大于最厚的墙，否则洞打不穿、
+// 会在墙内留下一层"膜"。1.2m 覆盖本项目所有建筑外墙（含厚墙）。
+const HOLE_DEPTH = 1.2;
 // 视角飞行速度（米/秒，WASD 移动）。滚轮缩放会按远近再动态加倍，见 speedScale()
 const CAM_SPEED = 55;
 // scale 规范化：统一为 {x,y,z}，兼容旧的单数值
@@ -185,6 +191,10 @@ export function createEditor() {
     if (!e.value) {
       const light = selectedLight();
       if (light) { readLightScale(light); syncLightPanel(); }
+      // 挪动/旋转**窗户**结束 → 洞的位置跟着变，重新同步一次挖洞。
+      // ⚠ 只在拖动结束时同步（不是 objectChange 每帧）：syncHoles 要遍历场景里的材质，
+      //   每帧跑一次是纯浪费，而洞的位置差一帧用户根本看不出来。
+      if (state.selected && state.selected.kind === 'window' && state.selected.hole) syncHoles();
     }
   });
   tCtl.addEventListener('objectChange', () => {
@@ -367,6 +377,7 @@ export function createEditor() {
     winGlass: document.getElementById('winGlass'),
     winOpacity: document.getElementById('winOpacity'),
     winMirror: document.getElementById('winMirror'),
+    winHole: document.getElementById('winHole'),
     winReset: document.getElementById('winReset'),
     winInfo: document.getElementById('winInfo'),
     gate: document.getElementById('gate'),
@@ -568,6 +579,8 @@ export function createEditor() {
       glass: WINDOW_DEFAULTS.glass,
       opacity: WINDOW_DEFAULTS.opacity,
       mirror: WINDOW_DEFAULTS.mirror,
+      // 是否在墙上真开洞（默认开 —— 用户要的就是「挖穿」）。关掉就是纯贴纸窗户。
+      hole: true,
       obj,
     };
     scene.add(obj);
@@ -577,6 +590,7 @@ export function createEditor() {
     markDirty();
     outlinerUpdate();
     select(rec);
+    syncHoles();
     return rec;
   }
 
@@ -586,6 +600,57 @@ export function createEditor() {
     const mesh = rec.obj.children[0];
     if (mesh && mesh.isMesh && mesh.userData.editorWindow) disposeWindow(mesh);
     scene.remove(rec.obj);
+  }
+
+  // ---------- 墙体挖洞（真开洞，零额外渲染开销）----------
+  // 勾了「挖穿墙体」的窗户会在墙上真正打一个洞（fragment discard，见 FakeWindow.js）。
+  // 编辑器里也要能实时看到效果，所以这里把场景里所有模型的材质都打上挖洞补丁，
+  // 再把「勾了挖洞的窗户」同步进共享 uniform。
+  //
+  // ⚠ 只收集标记了 hole 的窗户；未勾选的窗户只是"贴纸"，不开洞。
+  function collectHoleWins() {
+    const out = [];
+    for (const rec of state.placed) {
+      if (rec && rec.kind === 'window' && rec.hole) out.push(rec);
+    }
+    return out;
+  }
+
+  // 把场景里所有模型材质 + 阴影收集起来（挖洞补丁的施加对象）。
+  // 每次调用都重新遍历：模型是异步加载的，晚到的模型也要能吃上补丁。
+  function collectHoleTargets() {
+    const mats = [];
+    const seen = new Set();
+    // 只对**编辑器摆放的模型**开洞，不动游戏底景（地形/道路/树）—— 挖穿地面没有意义且开销白费
+    for (const rec of state.placed) {
+      if (!rec || !rec.obj || rec.kind === 'window') continue;
+      rec.obj.traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const list = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of list) {
+          if (!m || seen.has(m)) continue;
+          seen.add(m);
+          mats.push(m);
+        }
+      });
+    }
+    return mats;
+  }
+
+  // 同步挖洞状态到渲染层。调用时机：勾选变化 / 移动旋转缩放窗户 / 增删窗户 / 模型加载完。
+  // ⚠ 不是每帧调用（会遍历材质）。
+  function syncHoles() {
+    const wins = collectHoleWins();
+    const mats = collectHoleTargets();
+    const lights = [];
+    if (sun && sun.shadow) lights.push(sun);
+    try {
+      const st = applyWindowHoles(wins, mats, lights, { depth: HOLE_DEPTH });
+      return st;
+    } catch (e) {
+      console.warn('[editor] 挖洞同步失败（保持原样）:', e);
+      return { count: 0, patched: 0, shadow: 0 };
+    }
   }
 
   // ---------- 位置拾取 ----------
@@ -917,7 +982,7 @@ export function createEditor() {
     select(item);
     markDirty();
     outlinerUpdate();
-    instantiate(state.currentUrl).then((m) => { obj.add(m); enableShadows(m); autoFitCollider(item); }).catch(() => {});
+    instantiate(state.currentUrl).then((m) => { obj.add(m); enableShadows(m); autoFitCollider(item); syncHoles(); }).catch(() => {});
   }
 
   function enableShadows(m) {
@@ -1457,6 +1522,32 @@ export function createEditor() {
   // 复制一个对象：原样克隆网格/属性/碰撞体（线框按 collider 重建），返回新 rec
   function duplicateRec(rec, selectIt = false) {
     const obj = new THREE.Group();
+    // 障眼法窗户：不能走下面的「克隆子网格」路径 —— 窗户的材质是 ShaderMaterial，
+    // clone 出来的材质会**共享 uniform 中的 env 引用但各自独立**，参数改了不会同步；
+    // 而且窗户记录用的是 xw/xh 而不是 scale。这里直接按参数重建一份，保证副本参数完整。
+    if (rec && rec.kind === 'window') {
+      const wcopy = {
+        id: nextId(), kind: 'window', name: rec.name || '障眼法窗户',
+        x: rec.x ?? 0, y: rec.y ?? 0, z: rec.z ?? 0,
+        rotX: rec.rotX ?? 0, rotY: rec.rotY ?? 0, rotZ: rec.rotZ ?? 0,
+        xw: rec.xw ?? WINDOW_DEFAULTS.w, xh: rec.xh ?? WINDOW_DEFAULTS.h,
+        glass: rec.glass || WINDOW_DEFAULTS.glass,
+        opacity: rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity,
+        mirror: rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror,
+        hole: rec.hole === true,
+        obj,
+      };
+      obj.name = wcopy.name;
+      scene.add(obj);
+      buildWindowObject(wcopy);
+      tagId(wcopy);
+      state.placed.push(wcopy);
+      markDirty();
+      outlinerUpdate();
+      if (selectIt) select(wcopy);
+      syncHoles();
+      return wcopy;
+    }
     (rec.obj ? rec.obj.children : []).forEach((ch) => {
       if (typeof ch.name === 'string' && ch.name.startsWith('collider-vis')) return; // 线框稍后按 collider 重建
       obj.add(ch.clone(true));
@@ -2304,12 +2395,15 @@ export function createEditor() {
 
   function removePlaced(rec) {
     // 障眼法窗户：先释放自己的几何/材质（环境贴图是共享的，不会被误释放）
-    if (rec && rec.kind === 'window') removeFakeWindow(rec);
+    const wasWindow = !!(rec && rec.kind === 'window');
+    if (wasWindow) removeFakeWindow(rec);
     else scene.remove(rec.obj);
     state.placed = state.placed.filter((p) => p !== rec);
     if (state.selected === rec) select(null);
     markDirty();
     outlinerUpdate();
+    // 删掉的若是「挖洞窗户」，洞要跟着消失（否则墙上留个莫名其妙的窟窿）
+    if (wasWindow) syncHoles();
   }
 
   // ---------- 持久化（编辑器自有场景文件，游戏读取） ----------
@@ -2355,6 +2449,9 @@ export function createEditor() {
             glass: rec.glass || WINDOW_DEFAULTS.glass,
             opacity: rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity,
             mirror: rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror,
+            // 挖穿墙体：true 时游戏端会在墙上真开一个洞（fragment discard）。
+            // ⚠ 缺省 false —— 旧存档（没有该字段）保持"纯贴纸"行为，不会突然到处开洞。
+            hole: rec.hole === true,
           };
         }
         const s = normScale(rec.scale ?? rec.obj.scale);
@@ -2464,6 +2561,7 @@ export function createEditor() {
           glass: it.glass || WINDOW_DEFAULTS.glass,
           opacity: it.opacity != null ? it.opacity : WINDOW_DEFAULTS.opacity,
           mirror: it.mirror != null ? it.mirror : WINDOW_DEFAULTS.mirror,
+          hole: it.hole === true, // 旧存档缺省 false（纯贴纸）
           obj,
         };
         buildWindowObject(wrec);
@@ -2488,7 +2586,7 @@ export function createEditor() {
       };
       obj.name = nm;
       if (it.url) {
-        instantiate(it.url).then((m) => { obj.add(m); enableShadows(m); }).catch(() => {});
+        instantiate(it.url).then((m) => { obj.add(m); enableShadows(m); syncHoles(); }).catch(() => {});
       } else if (it.data) {
         const g = new GLTFLoader();
         g.load(it.data, (gltf) => { obj.add(gltf.scene); enableShadows(gltf.scene); }, undefined, () => {});
@@ -4071,7 +4169,7 @@ export function createEditor() {
     const rec = selectedWindow();
     const dis = !rec;
     const els = [StepUI.winW, StepUI.winH, StepUI.winRX, StepUI.winRY, StepUI.winRZ,
-      StepUI.winGlass, StepUI.winOpacity, StepUI.winMirror];
+      StepUI.winGlass, StepUI.winOpacity, StepUI.winMirror, StepUI.winHole];
     for (const el of els) if (el) el.disabled = dis;
     if (StepUI.winInfo) {
       StepUI.winInfo.textContent = rec
@@ -4088,6 +4186,7 @@ export function createEditor() {
     if (StepUI.winGlass) StepUI.winGlass.value = rec.glass || WINDOW_DEFAULTS.glass;
     if (StepUI.winOpacity) StepUI.winOpacity.value = (rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity).toFixed(2);
     if (StepUI.winMirror) StepUI.winMirror.value = (rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror).toFixed(2);
+    if (StepUI.winHole) StepUI.winHole.checked = rec.hole === true;
   }
 
   if (StepUI.winAdd) {
@@ -4109,6 +4208,8 @@ export function createEditor() {
       if (rebuildGeo) applyWindowTransform(rec);
       else refreshWindowMaterial(rec);
       markDirty();
+      // 尺寸/朝向变了 → 洞的形状和位置也变了，必须同步（只对勾了挖洞的窗户有实际影响）
+      if (rec.hole) syncHoles();
     });
   }
   bindWinNum(StepUI.winW, (r, v) => { if (Number.isFinite(v)) r.xw = Math.max(0.1, v); }, true);
@@ -4119,6 +4220,23 @@ export function createEditor() {
   bindWinNum(StepUI.winGlass, (r, v) => { r.glass = v; }, false);
   bindWinNum(StepUI.winOpacity, (r, v) => { if (Number.isFinite(v)) r.opacity = Math.min(1, Math.max(0, v)); }, false);
   bindWinNum(StepUI.winMirror, (r, v) => { if (Number.isFinite(v)) r.mirror = Math.min(1.5, Math.max(0, v)); }, false);
+  // 挖穿墙体开关：勾选/取消立即重挖（同步共享 uniform，不重建任何几何）
+  if (StepUI.winHole) {
+    StepUI.winHole.addEventListener('change', () => {
+      const rec = selectedWindow();
+      if (!rec) return;
+      rec.hole = !!StepUI.winHole.checked;
+      markDirty();
+      const st = syncHoles();
+      if (StepUI.winInfo) {
+        StepUI.winInfo.textContent = rec.hole
+          ? (st.count >= MAX_HOLES
+            ? '已挖穿 —— 但洞数已达上限 ' + MAX_HOLES + '，多余的窗户不会开洞。'
+            : '已挖穿墙体（洞数 ' + st.count + '）。挪动窗户时洞会跟着走。')
+          : '已关闭挖洞，这扇窗恢复为「贴纸」模式（墙是完整的）。';
+      }
+    });
+  }
   if (StepUI.winReset) {
     StepUI.winReset.onclick = () => {
       const rec = selectedWindow();
@@ -4130,6 +4248,7 @@ export function createEditor() {
       refreshWindowMaterial(rec);
       syncWindowPanel();
       markDirty();
+      if (rec.hole) syncHoles();
     };
   }
 
@@ -4257,6 +4376,9 @@ let _lastWindowEnv = null; // 上次同步给障眼法窗户的环境贴图引�
 
   adoptGameScenery();
   restore();
+  // 读档完成 → 把存档里标记了挖洞的窗户同步一次（模型本体是异步加载的，
+  // 各自在 then() 里还会补一次，这里负责「一扇洞都没有」的常见情况快速归零）。
+  syncHoles();
   loop();
   resize();
 

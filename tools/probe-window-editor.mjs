@@ -123,5 +123,60 @@ for (const [name, src] of newBlocks) {
   ok(empties.length === 0, `${name} 没有空 catch（实得 ${empties.length} 处）`);
 }
 
+// ------------------------------------------------------- 挖洞（hole）链路
+console.log('\n[9] 挖洞（hole）字段的「五步链」必须全部打通');
+// ① HTML 有勾选框
+has(html, 'id="winHole"', '①a editor.html 有挖洞勾选框 #winHole');
+has(html, '挖穿墙体', '①b editor.html 有挖洞说明区');
+// ② StepUI 引用 + 回填 + 事件
+has(app, "winHole: document.getElementById('winHole')", '②a StepUI 引用 winHole');
+has(app, 'StepUI.winHole.checked = rec.hole === true', '②b syncWindowPanel 回填勾选状态');
+has(app, "StepUI.winHole.addEventListener('change'", '②c 勾选框绑了 change 事件');
+has(app, 'rec.hole = !!StepUI.winHole.checked', '②d change 写回 rec.hole');
+// ③ 新建/复制带默认值
+ok(/hole: true,/.test(app), '③a 新建窗户默认开洞（hole: true）');
+ok(/hole: rec\.hole === true,/.test(app), '③b 复制窗户带上 hole 字段');
+// ④ 序列化 / 反序列化
+has(serSeg, 'hole:', '④a serialize 写出 hole');
+has(resSeg, 'hole: it.hole === true', '④b restore 读回 hole（旧存档缺省 false，不会突然到处开洞）');
+// ⑤ 游戏端消费 + 应用
+has(ebPlaced, 'if (it.hole === true)', '⑤a EditorBuildings 收集 hole 窗户');
+has(eb, '_holeWins.push', '⑤b 收集进 _holeWins（供 applyEditorHoles 用）');
+has(eb, 'export function applyEditorHoles', '⑤c 导出 applyEditorHoles');
+has(eb, 'applyWindowHoles(wins, mats, lights', '⑤d 调 applyWindowHoles 真正打补丁');
+ok(/await whenEditorLoadsSettled\(\);[\s\S]{0,400}?applyEditorHoles\(scene\)/.test(eb),
+  '⑤e 挖洞在**模型加载完之后**才应用（材质此刻才存在）');
+ok(eb.indexOf('applyEditorHoles(scene)') < eb.indexOf('mergeSceneBatches(scene)'),
+  '⑤f 挖洞在跨物件合并**之前**（避免补丁打在将被丢弃的材质实例上）');
+
+console.log('\n[10] 挖洞的性能契约：零额外 draw call / 三角面 / 渲染趟数');
+// 挖洞是纯 shader discard —— 不得引入任何新的 Mesh / 渲染 pass
+const holeApplySrc = fwSrc.slice(fwSrc.indexOf('export function applyWindowHoles'));
+ok(!/new THREE\.Mesh/.test(holeApplySrc), 'applyWindowHoles 不新建任何 Mesh（不增加 draw call）');
+ok(!/new THREE\.WebGLRenderTarget/.test(fwSrc), 'FakeWindow 不创建 RenderTarget（不增加渲染趟数/显存）');
+ok(!/PlaneGeometry/.test(holeApplySrc), 'applyWindowHoles 不建几何（不增加三角面）');
+// 每帧不同步
+ok(!/syncHoles\(\)/.test(loopSeg), '编辑器 loop 里不逐帧同步挖洞（syncHoles 会遍历材质）');
+
+console.log('\n[11] 编辑器挖洞同步的调用时机（漏一处 = 洞不跟手）');
+// 拖拽结束
+has(app, "state.selected.kind === 'window' && state.selected.hole) syncHoles()",
+  '拖动窗户结束 → syncHoles（洞跟着走）');
+// 面板改尺寸/朝向 → 洞形状变了
+ok(/if \(rebuildGeo\) applyWindowTransform\(rec\);[\s\S]{0,200}?if \(rec\.hole\) syncHoles\(\)/.test(app),
+  '面板改尺寸/朝向 → syncHoles（洞形状跟着变）');
+// 删除
+ok(/if \(wasWindow\) syncHoles\(\)/.test(app), '删除挖洞窗户 → syncHoles（洞跟着消失）');
+// 新建 / 复制 / 模型加载完
+ok(/syncHoles\(\);\s*return rec;/.test(app), '新建窗户 → syncHoles');
+ok(/syncHoles\(\);\s*return wcopy;/.test(app), '复制窗户 → syncHoles');
+has(app, 'autoFitCollider(item); syncHoles();', '新放模型加载完 → syncHoles（晚到的材质也能吃上补丁）');
+
+console.log('\n[12] 挖洞共享 uniform（Merge 指纹不含 onBeforeCompile 的应对）');
+has(app, 'applyWindowHoles(wins, mats, lights, { depth: HOLE_DEPTH })',
+  '编辑器走统一入口 applyWindowHoles（洞参数写入共享 uniform）');
+ok(!/mats\[i\]\.uniforms/.test(app), '编辑器没有把洞参数写进单个材质自己的 uniforms');
+has(app, 'const HOLE_DEPTH = 1.2;', '编辑器定义洞厚常量（穿透厚墙）');
+
 console.log('\n' + (fails === 0 ? '✅ 全部通过' : `❌ ${fails} 项失败`));
 process.exit(fails === 0 ? 0 : 1);
