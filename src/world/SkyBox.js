@@ -15,30 +15,45 @@ import { assetBlobURL } from './assetCache.js';
 let _pmrem = null;
 let _envRT = null;
 
-export function applyEnvironment(scene, renderer, equirectTexture) {
-  if (!scene || !renderer) return;
+// 只负责「等距圆柱贴图 → PMREM 环境贴图」，不动场景、也不释放任何东西 ——
+// 调用方自己持有返回值并负责释放（时段天空要缓存 4 份，不能边生成边释放上一份）。
+export function buildEnvMap(renderer, equirectTexture) {
+  if (!renderer) return null;
   try {
     if (!_pmrem) _pmrem = new THREE.PMREMGenerator(renderer);
-    const rt = equirectTexture
+    return equirectTexture
       ? _pmrem.fromEquirectangular(equirectTexture)
       : _pmrem.fromScene(new RoomEnvironment(), 0.04);
-    if (_envRT && _envRT !== rt) { try { _envRT.dispose(); } catch (e) { /* ignore */ } }
-    _envRT = rt;
-    scene.environment = rt.texture;
   } catch (e) {
     console.warn('[sky] 环境贴图生成失败（金属材质可能偏黑）:', e);
+    return null;
   }
 }
 
+// 生成并立刻应用，同时释放上一份。给「只要一份环境」的场景用（编辑器、单张天空）。
+// 返回本次的 RT，方便调用方后续替换时释放。
+export function applyEnvironment(scene, renderer, equirectTexture) {
+  if (!scene || !renderer) return null;
+  const rt = buildEnvMap(renderer, equirectTexture);
+  if (!rt) return null;
+  if (_envRT && _envRT !== rt) { try { _envRT.dispose(); } catch (e) { /* ignore */ } }
+  _envRT = rt;
+  scene.environment = rt.texture;
+  return rt;
+}
+
 // ---- 各时段的环境光强度 ----
-// ⚠ 为什么是「调强度」而不是「随时段换环境贴图」（这里踩过坑）：
-//   ① 换 scene.environment = 把整片场景的间接光来源整体换掉。所有 MeshStandardMaterial 的
-//      环境贡献都来自它，换的瞬间色温/亮度会**跳变**（入夜时表现为"啪"一下变蓝变暗）。
-//   ② 生成一份新环境贴图要同步跑一遍 PMREMGenerator（渲染 6 个面 + 生成 mip 链），
-//      在帧里做就是一次几十毫秒的卡顿 —— 时段一换就掉帧。
-//   现在改成：贴图只用一张（加载后定死），亮度靠这个标量随天色平滑变化，开销为零。
-const ENV_INTENSITY = { morning: 0.8, day: 1.0, night: 0.4, space: 0.2 };
-const ENV_LERP_TAU = 0.8; // 指数平滑时间常数（秒）：越大越慢越柔
+// 环境贴图现在**每个时段各有一份**（加载期预生成、缓存，切换时只换引用 → 零成本、不重编译），
+// 所以贴图本身已经带足了色温与明暗（清晨的暖、夜晚的冷暗），这里只是轻微辅助。
+const ENV_INTENSITY = { morning: 0.95, day: 1.0, night: 0.8, space: 0.7 };
+// 过渡走到一半（a = 0.5）时才换贴图，并在前后把环境光压成一个"哑铃"（最低点在切换那一刻）：
+// 亮度先降后升，**换色发生在最暗的一瞬**，肉眼最不容易察觉。
+// ⚠ 这条曲线本身是连续的，所以直接赋值给 environmentIntensity 即可，不需要再做平滑
+//   （再加平滑反而会让谷底对不齐切换点）。
+// ⚠ 谷底不能压太深：一昼夜只有 240 秒，**清晨段仅 3 小时 = 现实 5.4 秒**，
+//   过渡窗口（段的 18%）只有 1 秒出头。压到 0.55 时那 5 秒内会看到"暗一下又亮回来"，
+//   像闪了一下。0.8（只压 20%）既够掩护换色，又在短段里也平缓 —— 每帧变化量控制在千分之几。
+const ENV_DIP = 0.8;
 
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
@@ -152,6 +167,25 @@ function skyBlend(t) {
   return { from: cur.key, to: null, a: 0 };
 }
 
+// 纯逻辑：给定世界时刻，算出「环境反射该用哪张时段贴图」+「environmentIntensity 该是多少」。
+// 抽成纯函数是为了能在 Node 里直接断言 —— 切换点（a=0.5）与哑铃曲线这里是**连着踩过两次坑**的地方：
+//   第一次：时段一变就重建 PMREM（每分钟卡一帧 + 变色跳变）；
+//   第二次：为了省事把贴图定死成白天那张，结果"一整天都在反射白天的天空"（清晨/黄昏的暖色全丢了）。
+// 现在：4 张贴图各预生成一份缓存，切换只换引用；亮度走哑铃，换色发生在最暗的一瞬。
+export function envAt(t) {
+  const { from, to, a } = skyBlend(t);
+  const iFrom = ENV_INTENSITY[from] ?? 1;
+  const iTo = to ? (ENV_INTENSITY[to] ?? iFrom) : iFrom;
+  const dip = Math.min(iFrom, iTo) * ENV_DIP; // 过渡最低点（切换贴图就发生在这里附近）
+  let intensity = iFrom;
+  if (to) {
+    intensity = (a < 0.5)
+      ? iFrom + (dip - iFrom) * (a / 0.5)        // 前半段：压到谷底
+      : dip + (iTo - dip) * ((a - 0.5) / 0.5);   // 后半段：升到目标
+  }
+  return { from, to, a, key: (to && a >= 0.5) ? to : from, intensity };
+}
+
 // createTimeSky(scene, renderer)：生成四张天空球壳 + 程序化天空兜底，返回 { update(t, camera) }。
 // update 每帧调用：按时刻决定哪张球壳可见并交叉淡入，同时让球壳跟随相机（无视差、不被裁剪）。
 // ⚠ 一定要传 renderer：金属/光滑材质（metalness 高、roughness→0）靠 scene.environment 出颜色，
@@ -160,12 +194,11 @@ export function createTimeSky(scene, renderer) {
   const fallback = createSky(scene); // 贴图没加载出来前的兜底，加载成功后隐藏
   const domes = new Map();
   let anyLoaded = false;
-  let envUpgraded = false;      // 是否已用时段贴图升级过环境反射（第一张到了就升级，只做一次）
-  let envUpgradedFromDay = false;
-  let envIntensity = 1;         // 当前环境光强度（每帧向目标平滑逼近）
-  let lastNow = 0;
+  const envMaps = new Map();   // key -> 该时段的环境贴图（PMREM RT），加载期各生成一份
+  let fallbackRT = null;       // RoomEnvironment 那份临时环境，第一张时段环境就绪后释放
+  let envKey = null;           // 当前 scene.environment 用的是哪个时段
 
-  if (renderer) applyEnvironment(scene, renderer, null); // 基础环境，立刻生效（RoomEnvironment）
+  if (renderer) fallbackRT = applyEnvironment(scene, renderer, null); // 基础环境，立刻生效
 
   for (const key of Object.keys(SKYBOX_URLS)) {
     const mat = new THREE.MeshBasicMaterial({
@@ -183,58 +216,63 @@ export function createTimeSky(scene, renderer) {
     scene.add(mesh);
     domes.set(key, mesh);
 
-    // 四张全景图加起来 4MB 多，同样走本地缓存；blob: URL 用完回收
-    assetBlobURL(SKYBOX_URLS[key]).then((url) => {
-      new THREE.TextureLoader().load(
-        url,
-        (texture) => {
-          URL.revokeObjectURL(url);
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.anisotropy = 4; // 贴图与视线接近平行时（近地平线）少糊一点
-          mat.map = texture;
-          mat.color.setHex(0xffffff);
-          mat.needsUpdate = true;
-          anyLoaded = true;
-          fallback.visible = false;
-          // 环境反射升级：第一张到的时段贴图建一份；若第一张不是白天，等白天到了再补升一次。
-          // 之后**再也不动**（时段变化只改 scene.environmentIntensity）。
-          if (renderer && (!envUpgraded || (key === 'day' && !envUpgradedFromDay))) {
-            applyEnvironment(scene, renderer, texture);
-            envUpgraded = true;
-            if (key === 'day') envUpgradedFromDay = true;
-          }
-        },
-        undefined,
-        () => {
-          URL.revokeObjectURL(url);
-          console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
-        }
-      );
-    }).catch(() => {
-      console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
-    });
+    // 四张全景图加起来 4MB 多，同样走本地缓存；blob: URL 用完回收。
+    // ⚠ 整体包一层 track：**环境贴图的生成也算"加载的一部分"**。
+    //   每张 PMREM 要渲染 6 个面 + mip 链（几十毫秒），4 张一起往渲染帧里塞就是连续卡 4 下；
+    //   放在加载屏期间做完，玩家看不到。代价只是加载屏多等一两百毫秒。
+    track(new Promise((resolve) => {
+      assetBlobURL(SKYBOX_URLS[key]).then((url) => {
+        new THREE.TextureLoader().load(
+          url,
+          (texture) => {
+            URL.revokeObjectURL(url);
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.anisotropy = 4; // 贴图与视线接近平行时（近地平线）少糊一点
+            mat.map = texture;
+            mat.color.setHex(0xffffff);
+            mat.needsUpdate = true;
+            anyLoaded = true;
+            fallback.visible = false;
+            // 每个时段各生成一份环境贴图并缓存（切换时只换引用 = 零成本、不重编译）。
+            // 这样清晨是清晨的暖光、夜晚是夜晚的冷暗 —— 而不是一整天都反射白天的天空。
+            if (renderer) {
+              const rt = buildEnvMap(renderer, texture);
+              if (rt) {
+                envMaps.set(key, rt);
+                if (!envKey) {
+                  envKey = key;
+                  scene.environment = rt.texture;
+                  if (fallbackRT) { try { fallbackRT.dispose(); } catch (e) { /* ignore */ } fallbackRT = null; }
+                }
+              }
+            }
+            resolve(true);
+          },
+          undefined,
+          () => { URL.revokeObjectURL(url); console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]); resolve(false); }
+        );
+      }).catch(() => {
+        console.warn('[sky] 时段天空盒加载失败:', SKYBOX_URLS[key]);
+        resolve(false);
+      });
+    }));
   }
 
   function update(t, camera) {
-    const { from, to, a } = skyBlend(t);
-
-    // 环境光强度：目标值 = 当前时段与下一时段按过渡进度 a 的混合，再向它指数逼近。
-    // a 只在每段最后 SKY_FADE_RATIO 里从 0 涨到 1，所以「环境变暗/变亮」与天空球壳的
-    // 交叉淡入**同步**、且是渐变的 —— 不会再出现入夜时啪一下变色。
+    // 环境反射随天色走：贴图在过渡中点（a=0.5）才切换（与天空球壳的交叉淡入同步），
+    // 亮度走哑铃曲线（换色发生在最暗的一瞬）。换贴图只是改一个引用，没有 PMREM 重建。
+    // 具体计算见 envAt()（纯函数，有 tools/probe-skyenv.mjs 覆盖）。
     if (renderer && scene.environment) {
-      const iFrom = ENV_INTENSITY[from] ?? 1;
-      const iTo = to ? (ENV_INTENSITY[to] ?? iFrom) : iFrom;
-      const target = iFrom + (iTo - iFrom) * a;
-      const now = performance.now();
-      const dt = lastNow ? Math.min(0.25, (now - lastNow) / 1000) : 0;
-      lastNow = now;
-      // dt=0（首帧）直接用目标值，省去开局从 1 慢慢变暗的过程
-      envIntensity = dt
-        ? envIntensity + (target - envIntensity) * (1 - Math.exp(-dt / ENV_LERP_TAU))
-        : target;
-      scene.environmentIntensity = envIntensity;
+      const e = envAt(t);
+      scene.environmentIntensity = e.intensity;
+      if (e.key !== envKey) {
+        const rt = envMaps.get(e.key);
+        if (rt) { envKey = e.key; scene.environment = rt.texture; }
+        // 目标时段的环境贴图还没生成好（首次加载中）→ 保持当前这份，下一帧再试
+      }
     }
 
+    const { from, to, a } = skyBlend(t);
     for (const [key, mesh] of domes) {
       let opacity = 0;
       let order = -1;
