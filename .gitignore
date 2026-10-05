@@ -41,3 +41,10 @@ server-remote/data/*
 !server-remote/data/.gitkeep
 server/data/*
 !server/data/.gitkeep
+
+# 工具跑出的临时产物（esbuild 输出 / 临时场景抓取 / 临时目录），非源码，绝不入库
+_esb_main.out.js
+_esb_*.out.js
+_perftmp/
+_tmp_remote_scene.json
+_tmp_*.json

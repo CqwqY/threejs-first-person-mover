@@ -17,6 +17,7 @@ export default {
       input: {
         index: path.join(root, 'index.html'),
         editor: path.join(root, 'editor.html'),
+        perftest: path.join(root, 'perftest.html'),
       },
     },
   },
