@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import {
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
-  releaseAreaShadow, updateShadowBudgets, clearShadowBudgets, AREA_SHADOW_TUNING,
+  releaseAreaShadow, updateShadowBudgets, clearShadowBudgets, AREA_SHADOW_TUNING, LIGHT_SCALE,
 } from '../src/world/Lights.js';
 
 const T = AREA_SHADOW_TUNING; // 亮度的旋钮（split/gain/angle）—— 期望值跟着真实常量走，改参数不用改自检
@@ -74,8 +74,8 @@ console.log('\n② 总亮度 = 本体 + 代理，且可重复拆分（不能越�
   enableAreaShadow(a);
   const proxy = a.children.find((c) => c.isSpotLight);
   const A = 4 * 3, SPLIT = T.split, GAIN = T.gain;
-  check(`本体亮度 = L×(1-${SPLIT})`, a.intensity, 5 * (1 - SPLIT), 1e-6);
-  check(`代理亮度 = L×A×${SPLIT}×${GAIN}（坎德拉）`, proxy.intensity, 5 * A * SPLIT * GAIN, 1e-6);
+  check(`本体亮度 = L×(1-${SPLIT})×LIGHT_SCALE`, a.intensity, 5 * (1 - SPLIT) * LIGHT_SCALE, 1e-6);
+  check(`代理亮度 = L×A×${SPLIT}×${GAIN}×LIGHT_SCALE（坎德拉）`, proxy.intensity, 5 * A * SPLIT * GAIN * LIGHT_SCALE, 1e-6);
   // 重复同步 5 次亮度必须不变（基准值存在于 userData，不受本体被改影响）
   const i0 = a.intensity, p0 = proxy.intensity;
   for (let i = 0; i < 5; i++) syncAreaShadow(a);
@@ -83,11 +83,11 @@ console.log('\n② 总亮度 = 本体 + 代理，且可重复拆分（不能越�
   check('重复 sync 5 次后代理亮度不变', proxy.intensity, p0, 1e-9);
   // 改强度必须走 setAreaBaseIntensity（编辑器改面板走这条）
   setAreaBaseIntensity(a, 10);
-  check(`改为 L=10 后本体 = 10×(1-${SPLIT})`, a.intensity, 10 * (1 - SPLIT), 1e-6);
-  check('改为 L=10 后代理 = 10×12×SPLIT×GAIN', proxy.intensity, 10 * A * SPLIT * GAIN, 1e-6);
+  check(`改为 L=10 后本体 = 10×(1-${SPLIT})×LIGHT_SCALE`, a.intensity, 10 * (1 - SPLIT) * LIGHT_SCALE, 1e-6);
+  check('改为 L=10 后代理 = 10×12×SPLIT×GAIN×LIGHT_SCALE', proxy.intensity, 10 * A * SPLIT * GAIN * LIGHT_SCALE, 1e-6);
   // 改尺寸后代理照度要跟着面积走
   a.width = 2; a.height = 2; syncAreaShadow(a);
-  check('尺寸改成 2×2 后代理 = 10×4×SPLIT×GAIN', proxy.intensity, 10 * 4 * SPLIT * GAIN, 1e-6);
+  check('尺寸改成 2×2 后代理 = 10×4×SPLIT×GAIN×LIGHT_SCALE', proxy.intensity, 10 * 4 * SPLIT * GAIN * LIGHT_SCALE, 1e-6);
   // 归还后亮度要还原
   releaseAreaShadow(a);
   check('release 后本体亮度还原为基准 10', a.intensity, 10, 1e-6);
@@ -116,7 +116,7 @@ console.log('\n③ clone(true) 后重建代理：不许重复挂灯、光向必�
   const d = dirOf(ca);
   check('克隆体挪位后仍朝下 (0,-1,0)', vecEq(d, 0, -1, 0), true);
   const cp = ca.children.find((c) => c.isSpotLight);
-  check('克隆体代理亮度按基准 6 重算', cp.intensity, 6 * 12 * T.split * T.gain, 1e-6);
+  check('克隆体代理亮度按基准 6 重算', cp.intensity, 6 * 12 * T.split * T.gain * LIGHT_SCALE, 1e-6);
   check('target 挂在自己子树里（不是游离节点）', !!cp.target.parent, true);
 }
 

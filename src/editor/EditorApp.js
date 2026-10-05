@@ -29,7 +29,7 @@ import { attachSky } from '../world/SkyBox.js';
 import {
   updateShadowBudgets, registerPointLight, unregisterPointLight,
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
-  releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS,
+  releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from '../world/Lights.js';
 import { createSettingsPanel, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 
@@ -1818,7 +1818,7 @@ export function createEditor() {
       rec.type = 'point';
       const light = new THREE.PointLight(
         new THREE.Color(lightColorHex(rec)),
-        rec.intensity ?? 20,
+        (rec.intensity ?? 20) * LIGHT_SCALE,
         rec.distance ?? 12,
         rec.decay ?? 2
       );
@@ -1850,7 +1850,7 @@ export function createEditor() {
       //   不改的话面板上拖「照射距离」看不到任何变化（阴影范围还是默认的 14 米）。
       setAreaShadowDistance(light, rec.distance ?? 0);
     } else {
-      light.intensity = rec.intensity ?? 0;
+      light.intensity = (rec.intensity ?? 0) * LIGHT_SCALE;
       light.distance = Math.max(0, rec.distance ?? 0);
       light.decay = Math.max(0, rec.decay ?? 2);
     }

@@ -13,7 +13,7 @@ import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '.
 import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
 import { Config } from '../config.js';
-import { registerPointLight, enableAreaShadow, AREA_LIGHT_DEFAULTS } from './Lights.js';
+import { registerPointLight, enableAreaShadow, AREA_LIGHT_DEFAULTS, LIGHT_SCALE } from './Lights.js';
 
 const DEG = Math.PI / 180;
 
@@ -289,7 +289,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
           enableAreaShadow(area, { distance: Number(l.distance) > 0 ? Number(l.distance) : AREA_LIGHT_DEFAULTS.distance });
           g.add(area);
         } else {
-          const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);
+          const pl = new THREE.PointLight(col, (Number(l.intensity) || 1) * LIGHT_SCALE, Number(l.distance) || 12, Number(l.decay) || 2);
           pl.position.copy(pos);
           registerPointLight(pl); // 交给 Lights 统一分配阴影名额（最近的几盏才投影）
           g.add(pl);

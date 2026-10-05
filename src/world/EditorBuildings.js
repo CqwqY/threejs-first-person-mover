@@ -12,7 +12,7 @@ import { bakeTriMeshAsync } from './collision/trimesh.js';
 import { track } from './loadTracker.js';
 import {
   registerPointLight, unregisterPointLight, enableAreaShadow, releaseAreaShadow, clearShadowBudgets,
-  AREA_LIGHT_DEFAULTS,
+  AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from './Lights.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 
@@ -504,7 +504,7 @@ export function buildEditorLights(scene, dataOverride) {
     if (it.type === 'point') {
       const light = new THREE.PointLight(
         color,
-        intensity,
+        intensity * LIGHT_SCALE,
         finiteOr(it.distance, LIGHT_DEFAULTS.distance),
         finiteOr(it.decay, LIGHT_DEFAULTS.decay)
       );

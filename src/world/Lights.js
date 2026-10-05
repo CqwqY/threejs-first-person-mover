@@ -21,6 +21,12 @@ const MAX_POINT_SHADOW = 4;
 const MAX_AREA_SHADOW = 2;   // 面光源的阴影代理（聚光灯，单张 2D 阴影贴图，比点光源便宜得多）
 const SHADOW_MAP = 512;
 
+// 全局「用户摆放光源」亮度倍率：想把所有面光源/点光源（编辑器与游戏端都算）统一调亮或调暗，改这一个值。
+// 它压在每盏**用户灯**最终赋强度的地方，不影响编辑器面板/存档里你填的"设计值"——
+// 滑块上看到的 20 仍是 20，只是实际渲染时统一乘了 LIGHT_SCALE。
+// （太阳/环境/半球这类全局光不走这里，改 DEFAULT_SETTINGS 里的 sun/ambient/hemi。）
+export const LIGHT_SCALE = 0.7;
+
 const _pointCands = new Set(); // 已登记的点光源（场景灯 + 家具里的灯）
 const _areaCands = new Set();  // 已登记的面光源阴影代理（SpotLight）
 const _tmpV = new THREE.Vector3(); // rebalance 里取世界坐标用的临时量（避免每帧分配）
@@ -45,7 +51,7 @@ const _tmpV = new THREE.Vector3(); // rebalance 里取世界坐标用的临时�
 //   ① 代理沿发光方向**后退**一段（面积越大退越多，见 areaProxyBackoff）——把近处那段 1/d² 削平，
 //      远场 d ≫ 后退量时又自动回到 I/d²，不影响正常照明距离。
 //   ② 整体压一档（GAIN），因为聚光灯把光拢在 60° 锥里，主观上就是比面光"冲"。
-const AREA_SHADOW_SPLIT = 0.55;             // 走代理（会被遮挡）的亮度占比
+const AREA_SHADOW_SPLIT = 0.3;              // 走代理（会被遮挡）的亮度占比——压低：让面光源本体（柔和面光）占主导，光型才像"面"而不是聚光灯的锥形尖斑
 const AREA_SHADOW_DISTANCE = 14;            // 代理光衰减半径（米）
 const AREA_SHADOW_ANGLE = (60 * Math.PI) / 180; // 张角：够盖住一间屋子
 const AREA_SHADOW_PENUMBRA = 1;             // 全柔边，尽量接近面光的软阴影
@@ -155,8 +161,8 @@ export function syncAreaShadow(area) {
   if (!proxy) return;
   const base = Number.isFinite(area.userData.__areaBase) ? area.userData.__areaBase : area.intensity;
   const a = Math.max(0.01, (area.width || 1) * (area.height || 1));
-  area.intensity = base * (1 - AREA_SHADOW_SPLIT);
-  proxy.intensity = base * a * AREA_SHADOW_SPLIT * AREA_SHADOW_GAIN;
+  area.intensity = base * (1 - AREA_SHADOW_SPLIT) * LIGHT_SCALE;
+  proxy.intensity = base * a * AREA_SHADOW_SPLIT * AREA_SHADOW_GAIN * LIGHT_SCALE;
   proxy.color.copy(area.color);
   // 尺寸在编辑器里能改 → 后退量跟着重算（面越大退越多，否则近处又爆）。
   // 光向不受影响：target 是代理的子节点，方向只取决于它相对代理的偏移，与代理自身位置无关。
