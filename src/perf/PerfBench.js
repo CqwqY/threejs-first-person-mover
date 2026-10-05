@@ -232,6 +232,13 @@ function renderFrame(dtSec) {
   lightsBundle.sun.position.copy(lightsBundle.sunTarget.position).add(lightsBundle.offset);
   updateShadowBudgets(camera.position);
 
+  // 首帧一次性预编译所有材质变体（含阴影），避免基准档把"首帧重编译"算进统计。
+  // 与游戏的 Game._precompileShaders 同源思路；编译发生在 warmup 内（首帧），不计入帧耗时。
+  if (!state.compiled) {
+    try { if (renderer && typeof renderer.compile === 'function') renderer.compile(scene, camera); } catch (e) {}
+    state.compiled = true;
+  }
+
   // 天空与环境反射（固定时刻，不推进昼夜）。关环境反射的场景要跳过 update，
   // 否则 sky.update 每帧会把 scene.environment 又设回去，开关就白关了。
   if (sky && active.skyEnv) sky.update(state.timeOfDay, camera);
