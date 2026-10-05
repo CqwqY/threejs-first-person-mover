@@ -1031,10 +1031,12 @@ export class Game {
   // 开销极小：复用主循环里已经算好的 _fpsAcc/_fpsN，不额外采样。
   _createFpsBadge() {
     const el = document.createElement('div');
-    // 右上角：避开顶部校卡（左侧）与按钮行；pointer-events:none 保证不挡触控。
+    // ⚠ 位置避开右上角：那里从上到下是「对战匹配」按钮(top:10px) + 对战状态条(top:56px)，
+    //   右上角放帧数对战时必被挡住。改贴左上角、校卡下方（校卡居中 50%、高约 44px，
+    //   顶部按钮行从 left:184px 起，左边缘整片空着）。pointer-events:none 保证不挡触控。
     el.style.cssText =
       'position:fixed;top:calc(env(safe-area-inset-top, 0px) + 6px);' +
-      'right:calc(env(safe-area-inset-right, 0px) + 8px);z-index:9400;' +
+      'left:calc(env(safe-area-inset-left, 0px) + 8px);z-index:9400;' +
       'pointer-events:none;font:600 12px/1.2 ui-monospace,Menlo,Consolas,monospace;' +
       'padding:3px 7px;border-radius:6px;color:#9df5bd;background:rgba(0,0,0,.55);' +
       'border:1px solid rgba(157,245,189,.3);text-shadow:0 1px 2px rgba(0,0,0,.8);' +
