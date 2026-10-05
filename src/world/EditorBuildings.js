@@ -507,6 +507,14 @@ function disposeLight(obj) {
 // ===========================================================================
 const BATCH_GRID = 48; // 空间格边长（米）
 
+// ⚠⚠ 默认关闭（2026-10-05）：用户报「碰撞没了」，而**唯一会"把网格搬走"的改动就是这里**。
+//   已知的危险交互：trimesh.js 的 collectMeshes 里有 `if (!isVisible(o)) return;`
+//   —— 不可见的网格**不参与碰撞烘焙**。LOD 会把远处对象设成 visible=false，
+//   一旦烘焙的收集时机与隐藏重叠，就会烘出空碰撞体（碰撞直接消失）。
+//   在把「合并 / LOD / 烘焙」三者的时序彻底理清之前，先把跨物件合并关掉，恢复"碰撞必定正常"。
+//   要重新启用：改成 true 并确认放置/移动/对战隐藏都不会与烘焙打架。
+const ENABLE_BATCH_MERGE = false;
+
 export function whenEditorLoadsSettled() {
   const list = _pendingLoads.slice();
   return Promise.all(list.map((p) => (p && p.catch) ? p.catch(() => {}) : p));
@@ -515,6 +523,7 @@ export function whenEditorLoadsSettled() {
 // 返回 { before, after, batches } 供日志；失败时原样保留，画面不受影响。
 // holdersOverride 仅供自检注入（正常调用不传）。
 export function mergeSceneBatches(scene, holdersOverride) {
+  if (!ENABLE_BATCH_MERGE) return { before: 0, after: 0, batches: 0, disabled: true };
   const holders = (holdersOverride || _addedHolders).filter((h) => h.parent && h.userData && h.userData.__batchable);
   const srcMeshes = [];
   for (const h of holders) {
@@ -605,8 +614,14 @@ export async function optimizeEditorScene(scene) {
   }
   for (const h of _addedHolders) {
     if (!h.parent) continue;
-    if (h.name === 'scene-batches') for (const b of h.children) registerLodTarget(b);
-    else registerLodTarget(h);
+    if (h.name === 'scene-batches') {
+      for (const b of h.children) registerLodTarget(b);
+    } else {
+      // ⚠ complex 碰撞（trimesh）的物件：碰撞是从**渲染网格**烘出来的，而烘焙会跳过不可见网格
+      //   （trimesh.js: `if (!isVisible(o)) return;`）→ 这类对象只许关投影，**绝不许隐藏**。
+      const noHide = h.userData && h.userData.__batchable === false;
+      registerLodTarget(h, { noHide });
+    }
   }
   return st;
 }

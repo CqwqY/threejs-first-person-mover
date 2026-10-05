@@ -38,8 +38,11 @@ updateLod(new THREE.Vector3(150, 0, 0), true);         // 150m（>93 → 不投�
 check('150m 可见', small.visible, true);
 check('150m 不投影', meshOf(small).castShadow, false);
 
-updateLod(new THREE.Vector3(300, 0, 0), true);         // 300m（>245 → 隐藏）
-check('300m 隐藏', small.visible, false);
+// ⚠ 「整块隐藏」当前默认关闭（见 Lod.js 的 ENABLE_LOD_HIDE）：trimesh 烘焙与射线拾取都依赖
+//   visible，不值得拿它们冒险。所以下面断言的是**默认配置下的真实行为**：远处只关投影、不隐藏。
+updateLod(new THREE.Vector3(300, 0, 0), true);         // 300m（远超 hideDist）
+check('300m 仍可见（隐藏功能默认关闭）', small.visible, true);
+check('300m 不投影', meshOf(small).castShadow, false);
 
 // --- 大物件（边长 200 → 半径约 173）：阈值按尺寸放宽 ---
 //   shadowDist = 90 + min(173*2, 160) = 250；hideDist = 240 + min(173*3, 360) = 600
@@ -54,8 +57,8 @@ check('400m 还投影', meshOf(big).castShadow, true);
 updateLod(new THREE.Vector3(700, 0, 0), true);         // 最近点 ≈ 527m：可见但不投影
 check('700m 可见', big.visible, true);
 check('700m 不投影', meshOf(big).castShadow, false);
-updateLod(new THREE.Vector3(900, 0, 0), true);         // 最近点 ≈ 727m > 600 → 隐藏
-check('900m 隐藏', big.visible, false);
+updateLod(new THREE.Vector3(900, 0, 0), true);         // 最近点 ≈ 727m
+check('900m 仍可见（隐藏功能默认关闭）', big.visible, true);
 
 // --- 原本不投影的网格：分级不能把它打开 ---
 console.log('原本 castShadow=false 的网格：');

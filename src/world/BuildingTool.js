@@ -7,6 +7,7 @@
 // 消耗式：买 1 件得 1 个摆放额度，放置成功后从钱包 owned 消耗 1 个；移动/旋转不消耗。
 // 模型：商品 url 为 'placeholder'（或空）时用占位方块渲染；编辑器导入真模型后自动换成 GLB。
 import * as THREE from 'three';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { instantiate } from './AssetLoader.js';
 import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -15,6 +16,14 @@ import { Config } from '../config.js';
 import { registerPointLight } from './Lights.js';
 
 const DEG = Math.PI / 180;
+
+// 面光源（RectAreaLight）使用前必须初始化一次 LTC 查找表 —— 全局只需要一次
+let _rectAreaReady = false;
+function ensureRectAreaLib() {
+  if (_rectAreaReady) return;
+  _rectAreaReady = true;
+  try { RectAreaLightUniformsLib.init(); } catch (e) { console.warn('[build] 面光源初始化失败:', e); }
+}
 const CLAMP = 24; // 无配置范围时的兜底：钳制在 ±24（地面尺寸 50，半径 25）
 // 允许建造的矩形区域（默认取 Config.BUILD_AREAS = 场景里「编号 92 / 104」两栋教学楼的占地）。
 // 运行时可由服务端下发的范围覆盖（编辑器里改、全服即时生效），见 setBuildAreas()。
@@ -234,30 +243,11 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
 
   // 组合家具：多个模型 + 灯拼成一个 Group。
-  // 灯 = 点光源（照亮周围，带阴影所以不穿墙）+ 一团柔和的光晕（看得出"这儿有个灯"）。
+  // 灯只负责照亮（点光源登记阴影、面光源原样还原），**不再挂任何可见的"灯泡"标记** ——
+  // 之前那个纯色小球/光晕在夜里就是个白点与眩光，用户明确要求去掉。
   //
-  // ⚠ 以前这里挂的是一个 MeshBasicMaterial 的纯色小球当"灯泡"，那东西**不受光照、直接输出颜色**，
-  //   夜里就是一个突兀的硬白点（像渲染坏了），而且完全没有"灯在发光"的观感。
-  //   现在换成一张径向渐变的**光晕 Sprite**（叠加混合、不写深度）：中心亮、边缘透明，
-  //   远处自然缩小、白天几乎看不见 —— 才像一盏灯。
-  let _glowTex = null;
-  function glowTexture() {
-    if (_glowTex) return _glowTex;
-    const S = 64;
-    const cv = document.createElement('canvas');
-    cv.width = cv.height = S;
-    const ctx = cv.getContext('2d');
-    const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
-    g.addColorStop(0, 'rgba(255,255,255,1)');
-    g.addColorStop(0.18, 'rgba(255,255,255,0.62)');
-    g.addColorStop(0.45, 'rgba(255,255,255,0.18)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, S, S);
-    _glowTex = new THREE.CanvasTexture(cv);
-    _glowTex.colorSpace = THREE.SRGBColorSpace;
-    return _glowTex;
-  }
+  // ⚠ 类型必须保留：这里以前写死 new THREE.PointLight(...)，编辑器里存的面光源（area）
+  //   一摆出来就"变成"点光源了（用户报的就是这个）。
   function buildComboProto(item) {
     const c = item.combo || {};
     const parts = Array.isArray(c.parts) ? c.parts : [];
@@ -275,23 +265,30 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       for (const l of lightDefs) {
         const col = new THREE.Color(l.color || '#ffffff');
         const pos = new THREE.Vector3(Number(l.x) || 0, Number(l.y) || 3, Number(l.z) || 0);
-        const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);
-        pl.position.copy(pos);
-        registerPointLight(pl); // 交给 Lights 统一分配阴影名额（最近的几盏才投影，避免 6 面立方体阴影把帧数吃光）
-        g.add(pl);
-        const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-          map: glowTexture(),
-          color: col,
-          transparent: true,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          fog: false,
-          opacity: 0.9,
-        }));
-        glow.position.copy(pos);
-        glow.scale.setScalar(1.0); // 世界单位：约 1 米直径的柔光团
-        glow.renderOrder = 996;
-        g.add(glow);
+        if (l.type === 'area') {
+          ensureRectAreaLib(); // 面光源使用前必须初始化一次 LTC 查找表
+          const area = new THREE.RectAreaLight(
+            col,
+            Number(l.intensity) || 3,
+            Math.max(0.01, Number(l.width) || 4),
+            Math.max(0.01, Number(l.height) || 3)
+          );
+          area.position.copy(pos);
+          // RectAreaLight 沿本地 -Z 发光：rotX 默认 -90°（垂直朝下），与编辑器里的朝向约定一致。
+          // 用 YXZ 顺序（先偏航 rotY 再俯仰 rotX）。
+          area.rotation.order = 'YXZ';
+          area.rotation.set(
+            DEG * (Number.isFinite(Number(l.rotX)) ? Number(l.rotX) : -90),
+            DEG * (Number(l.rotY) || 0),
+            0
+          );
+          g.add(area);
+        } else {
+          const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);
+          pl.position.copy(pos);
+          registerPointLight(pl); // 交给 Lights 统一分配阴影名额（最近的几盏才投影）
+          g.add(pl);
+        }
       }
       return g;
     });
@@ -324,8 +321,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (!src) return;
     const o = src.clone(true); // geometry 共享，只克隆节点
     o.traverse((n) => {
-      if (n.isLight) { n.visible = false; return; } // 组合家具里的点光源不参与描边
-      if (n.isSprite) { n.visible = false; return; } // 灯的光晕也不要在描边壳里再叠一层
+      if (n.isLight) { n.visible = false; return; } // 组合家具里的灯不参与描边
       if (!n.isMesh) return;
       n.material = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide });
       n.castShadow = false; n.receiveShadow = false;
