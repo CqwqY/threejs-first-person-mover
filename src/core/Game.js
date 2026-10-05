@@ -17,7 +17,8 @@ import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName } from '../player/Shop.js';
-import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible } from '../world/EditorBuildings.js';
+import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene } from '../world/EditorBuildings.js';
+import { updateLod } from '../world/Lod.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
@@ -217,7 +218,11 @@ export class Game {
     // 注意：LocalPlayer 持有 this.colliders 的同一条数组引用，因此原地改写而不是整体替换。
     // 远端场景拉取（含它触发的那些 GLB 加载）：进游戏前的加载动画会等它。
     // 拉取失败会静默回退打包数据，所以这里不能 reject，否则加载屏会卡住。
-    this._sceneReady = _fetchRemoteScene(this, this.scene, roots, this.colliders);
+    // 之后再跑一次「场景优化」：跨物件同材质合并 + 登记距离分级（Lod.js）。
+    // 放在加载屏期间做，玩家看不到合并那一下的开销；失败也不影响玩法。
+    this._sceneReady = _fetchRemoteScene(this, this.scene, roots, this.colliders)
+      .then(() => optimizeEditorScene(this.scene))
+      .catch((e) => { console.warn('[Game] 场景优化失败（保持原样）:', e); });
 
     // ---- 输入 ----
     this.input = new Input();
@@ -887,6 +892,9 @@ export class Game {
     // 点光源阴影名额：按「离相机最近」分配（最多 4 盏，见 Lights.js）。
     // 只在渲染前跑一次，成本是几十个灯的距离排序；数量恒定所以不会触发 shader 重编译。
     updatePointLightShadows(this.camera.position);
+    // 距离分级：远处物体不投影、更远整块隐藏（内部 300ms 节流）。
+    // 对战中城市建筑已整组隐藏，这边不再插手（否则会把它们设回可见，与对战隐藏打架）。
+    if (!this._combat) updateLod(this.camera.position);
     const up = this._useUpscale() && this._ensureUpscale() && this._ensureRT();
     if (!up) {
       this.renderer.setRenderTarget(null);

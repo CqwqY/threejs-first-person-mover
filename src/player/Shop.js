@@ -190,7 +190,12 @@ export async function redeemCode(profile, code, token) {
   if (!c) return { ok: false, reason: '请输入兑换码' };
   const out = await accountApi('POST', '/api/redeem', { code: c }, token);
   if (!out) return { ok: false, reason: '兑换服务暂时不可用，请稍后再试' };
-  if (!out.ok) return { ok: false, reason: out.error || '兑换失败' };
+  if (!out.ok) {
+    const msg = String(out.error || '');
+    // 老服务端没有这个接口时会回 not found —— 直接说人话，别让玩家以为是码错了
+    if (msg === 'not found') return { ok: false, reason: '服务端还没更新（缺少兑换接口），请先更新后端' };
+    return { ok: false, reason: msg || '兑换失败' };
+  }
   const value = Math.max(0, Math.floor(Number(out.value) || 0));
   const key = c.toLowerCase().replace(/\s+/g, '');
   const w = loadWallet(profile);

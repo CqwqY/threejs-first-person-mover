@@ -11,9 +11,13 @@ import { API_BASE } from '../config.js';
 import { bakeTriMeshAsync } from './collision/trimesh.js';
 import { track } from './loadTracker.js';
 import { registerPointLight, unregisterPointLight } from './Lights.js';
+import { registerLodTarget, clearLodTargets } from './Lod.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
 let _addedHolders = [];
+// 本次构建的「模型加载」Promise 列表（不含 trimesh 烘焙）——
+// optimizeEditorScene 要等它们全都 settle 才能做跨物件合并。
+let _pendingLoads = [];
 // 构建代数：异步 trimesh 烘焙是「先返回、后回调」的，
 // 回调里必须校验代数，避免上一份场景的烘焙结果被 push 进重建后的碰撞体数组。
 let _buildGen = 0;
@@ -249,7 +253,8 @@ function countMeshes(root) {
 // 返回世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]（complex 物体额外异步 push {type:'trimesh',...}）。
 export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
   clearHolders(scene); // 重跑前先移除上一次添加的 holder，避免重复叠加
-  const gen = ++_buildGen; // 本次构建代数（异步烘焙回调据此丢弃过期结果）
+  clearLodTargets();  // 场景重建 → 上一轮的 LOD 登记全部作废  const gen = ++_buildGen; // 本次构建代数（异步烘焙回调据此丢弃过期结果）
+  _pendingLoads = [];  // 本次构建的模型加载 Promise（供 optimizeEditorScene 等待「都加载完」）
   let data = dataOverride || editorMapData || {};
   // 兼容旧格式：纯数组（仅含 placed）
   if (Array.isArray(data)) data = { scenery: [], placed: data };
@@ -317,18 +322,21 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
           '（主渲染 + 阴影贴图两趟各少 ' + (st.before - st.after) + ' 次 draw call）');
       }
       enableShadows(m);
+      // 标记「可以参与跨物件合并」：complex 物体要靠渲染网格烘 trimesh 碰撞，
+      // 合并会把网格搬走，可能让还在后台跑的烘焙算一半 —— 宁可少合也不出错。
+      holder.userData.__batchable = !isComplex;
       if (isComplex) bakeComplex();
     };
 
     // 统一绝对路径 /assets/xxx.glb 调用；兼容旧的内嵌 data URL 记录
     if (it.url) {
-      instantiate(it.url).then(setupModel).catch(() => {});
+      _pendingLoads.push(instantiate(it.url).then(setupModel).catch(() => {}));
     } else if (it.data) {
       // 旧的内嵌 data URL 记录：不走 AssetLoader 缓存，这里手动登记进加载计数
-      track(new Promise((resolve) => {
+      _pendingLoads.push(track(new Promise((resolve) => {
         const loader = new GLTFLoader();
         loader.load(it.data, (gltf) => { resolve(gltf.scene); setupModel(gltf.scene); }, undefined, () => resolve(null));
-      }));
+      })));
     }
 
     // 碰撞体：OBB（有向包围盒），把朝向 rotY（Y 轴旋转角）一并给出，使碰撞体随模型旋转。
@@ -482,6 +490,125 @@ function disposeLight(obj) {
       for (const m of mats) if (m && m.dispose) m.dispose();
     }
   });
+}
+
+// ===========================================================================
+// 跨物件同材质合并（draw call 优化的第二步）
+// ---------------------------------------------------------------------------
+// 第一步 mergeStaticMeshes 已经把「一个模型内部」的几百个小网格合掉了；
+// 但「同一棵树摆了 4 遍」这种**跨物件**的同材质网格仍是各画各的，这里再合一轮。
+//
+// 为什么按空间格切块：合并之后就只剩「整块显隐」这一种控制粒度了。切成 BATCH_GRID 米的格子、
+// 每格一批，Lod.js 才能按距离整块剔除 —— 合并与 LOD 才不互相打架。
+//
+// ⚠ 只合并不透明的静态网格：透明物体合并会打乱排序，骨骼/morph 网格的几何会随动画变。
+// ⚠ 只合并 __batchable（没有 complex 碰撞）的物件：complex 靠渲染网格烘 trimesh 碰撞，
+//   合并会把网格搬走，可能让还在后台跑的烘焙算一半。
+// ===========================================================================
+const BATCH_GRID = 48; // 空间格边长（米）
+
+export function whenEditorLoadsSettled() {
+  const list = _pendingLoads.slice();
+  return Promise.all(list.map((p) => (p && p.catch) ? p.catch(() => {}) : p));
+}
+
+// 返回 { before, after, batches } 供日志；失败时原样保留，画面不受影响。
+// holdersOverride 仅供自检注入（正常调用不传）。
+export function mergeSceneBatches(scene, holdersOverride) {
+  const holders = (holdersOverride || _addedHolders).filter((h) => h.parent && h.userData && h.userData.__batchable);
+  const srcMeshes = [];
+  for (const h of holders) {
+    h.updateMatrixWorld(true);
+    h.traverse((o) => {
+      if (!o.isMesh || o.isSkinnedMesh) return;
+      if (o.morphTargetInfluences && o.morphTargetInfluences.length) return;
+      if (Array.isArray(o.material)) return;      // 材质数组的网格各部分要各自渲染
+      const g = o.geometry;
+      if (!g || !g.attributes || !g.attributes.position) return;
+      if (!o.material || o.material.transparent) return;
+      srcMeshes.push(o);
+    });
+  }
+  const before = srcMeshes.length;
+  if (before < 4) return { before, after: before, batches: 0 }; // 太少，收益抵不上开销
+
+  const _p = new THREE.Vector3();
+  const groups = new Map(); // 空间格 + 几何布局 + 材质外观 → 一批
+  for (const o of srcMeshes) {
+    _p.setFromMatrixPosition(o.matrixWorld);
+    const cell = Math.floor(_p.x / BATCH_GRID) + '_' + Math.floor(_p.z / BATCH_GRID);
+    const key = cell + '#' + geometrySigKey(o.geometry) + '#' + materialSigKey(o.material);
+    let grp = groups.get(key);
+    if (!grp) { grp = { material: o.material, list: [] }; groups.set(key, grp); }
+    grp.list.push(o);
+  }
+
+  const batchRoot = new THREE.Group();
+  batchRoot.name = 'scene-batches';
+  let batches = 0;
+  for (const grp of groups.values()) {
+    if (grp.list.length < 2) continue; // 单件没有合并收益
+    const geos = [];
+    for (const o of grp.list) {
+      const g = o.geometry.clone(); // 必须克隆：instantiate 是浅克隆，几何与缓存源模型共享
+      g.applyMatrix4(o.matrixWorld); // 直接烘到世界坐标（批次挂在 scene 下、单位变换）
+      // 镜像节点（行列式为负）合并后绕向会反，必须翻回来，否则出现内壁/破面
+      if (o.matrixWorld.determinant() < 0) flipTriangleWinding(g);
+      geos.push(g);
+    }
+    let merged = null;
+    try { merged = mergeGeometries(geos, false); } catch (e) { merged = null; }
+    for (const g of geos) g.dispose(); // 中间克隆体已烘进 merged
+    if (!merged) continue; // 属性布局意外不一致：保留原件，画面不受影响
+
+    const mesh = new THREE.Mesh(merged, grp.material);
+    mesh.name = 'batch-' + (grp.material && grp.material.name ? grp.material.name : batches);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.matrixAutoUpdate = false; // 单位变换，不必每帧重算矩阵
+    mesh.updateMatrix();
+    batchRoot.add(mesh);
+    for (const o of grp.list) o.removeFromParent();
+    batches++;
+  }
+  if (!batches) return { before, after: before, batches: 0 };
+
+  scene.add(batchRoot);
+  _addedHolders.push(batchRoot); // 重建时随 clearHolders 一起清掉；对战隐藏也靠它
+
+  // 被掏空的 holder 从场景摘掉（留着只会让每帧的矩阵遍历更长）
+  for (const h of holders) {
+    let hasMesh = false;
+    h.traverse((o) => { if (o.isMesh) hasMesh = true; });
+    if (hasMesh) continue;
+    h.removeFromParent();
+    const i = _addedHolders.indexOf(h);
+    if (i >= 0) _addedHolders.splice(i, 1);
+  }
+
+  const after = countMeshes(batchRoot);
+  console.info('[EditorBuildings] 跨物件同材质合并 ' + before + ' → ' + after +
+    ' 个网格（' + batches + ' 批，按 ' + BATCH_GRID + 'm 空间格切块以便远处整块剔除）');
+  return { before, after, batches };
+}
+
+// 场景优化统一入口：等模型加载完 → 跨物件合并 → 把结果登记进距离分级（Lod.js）。
+// 合并后的每个批次、以及没被合并的物件（complex 碰撞的、透明的、单件的）都要登记，
+// 否则它们永远是全细节渲染。
+export async function optimizeEditorScene(scene) {
+  await whenEditorLoadsSettled();
+  let st = { before: 0, after: 0, batches: 0 };
+  try {
+    st = mergeSceneBatches(scene);
+  } catch (e) {
+    console.warn('[EditorBuildings] 场景合并失败（保持原样）:', e);
+  }
+  for (const h of _addedHolders) {
+    if (!h.parent) continue;
+    if (h.name === 'scene-batches') for (const b of h.children) registerLodTarget(b);
+    else registerLodTarget(h);
+  }
+  return st;
 }
 
 // buildEditorLights(scene, dataOverride)：把编辑器保存的光源渲染进场景。

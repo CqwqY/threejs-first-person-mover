@@ -3544,6 +3544,9 @@ export function createEditor() {
     }
   }
   if (StepUI.btnCombo) StepUI.btnCombo.onclick = () => { if (state.comboMode) exitComboMode(); else enterComboMode(); };
+  // ⚠ 每个工具按钮都是**单独手动绑定**的（不是遍历自动绑）—— 新增按钮必须在这里补一行，
+  //   否则「点都点不了」。兑换码页签就踩过这个坑。
+  if (StepUI.btnCodes) StepUI.btnCodes.onclick = () => setMode('codes');
   if (StepUI.comboToken) {
     StepUI.comboToken.value = localStorage.getItem(SHOP_TOKEN_KEY) || '';
     StepUI.comboToken.addEventListener('input', () => localStorage.setItem(SHOP_TOKEN_KEY, StepUI.comboToken.value || ''));
