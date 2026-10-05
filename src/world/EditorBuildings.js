@@ -15,9 +15,13 @@ import {
   AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from './Lights.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
+import { createWindowMesh, setWindowEnv, WINDOW_DEFAULTS } from './FakeWindow.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
 let _addedHolders = [];
+// 本次构建创建的全部障眼法窗户网格。环境贴图（scene.environment）在场景构建时可能还没就绪
+// （天空贴图是异步加载的），所以这里登记下来，由 syncFakeWindowEnvs() 在环境就绪/换时段时补挂。
+let windowMeshes = [];
 // 本次构建的「模型加载」Promise 列表（不含 trimesh 烘焙）——
 // optimizeEditorScene 要等它们全都 settle 才能做跨物件合并。
 let _pendingLoads = [];
@@ -27,6 +31,19 @@ let _buildGen = 0;
 function clearHolders(scene) {
   for (const h of _addedHolders) scene.remove(h);
   _addedHolders = [];
+  windowMeshes = [];
+}
+
+// 把当前 scene.environment 同步到所有障眼法窗户上。
+// 调用时机：①场景构建完 ②天空/环境贴图就绪或被替换时（SkyBox 换时段的路径里）。
+// ⚠ 不要每帧调用 —— 每帧写 uniform 只会白白增加开销，而环境贴图只在时段切换时变。
+// 传入 scene 是为了拿最新引用；不传则只清空引用（防持有已 dispose 的贴图）。
+export function syncFakeWindowEnvs(scene) {
+  const env = (scene && scene.environment) || null;
+  for (const mesh of windowMeshes) {
+    if (!mesh || !mesh.material) continue;
+    setWindowEnv(mesh.material, env);
+  }
 }
 
 // 统一显隐「编辑器建筑」：进入对战独立竞技场时把城市建筑整组隐藏，退出时恢复。
@@ -113,6 +130,31 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
   const placed = Array.isArray(data.placed) ? data.placed : [];
   placed.forEach((it) => {
     if (!it) return;
+    // ---- 障眼法窗户：没有模型可加载，只贴一块用环境贴图采样的 quad（零额外渲染趟数）----
+    // 必须在下面的模型加载路径**之前**分流，否则会走 instantiate(undefined) 报错。
+    if (it.kind === 'window') {
+      const holder = new THREE.Group();
+      holder.name = it.name || '障眼法窗户';
+      holder.userData.id = (it.id ?? '');
+      holder.position.set(it.x ?? 0, it.y ?? 0, it.z ?? 0);
+      // ⚠ 窗户三轴都要：rotY 定面朝向，rotX/rotZ 修正贴在斜墙/斜顶上
+      holder.rotation.set(it.rotX ?? 0, it.rotY ?? 0, it.rotZ ?? 0);
+      scene.add(holder);
+      _addedHolders.push(holder);
+      // 环境贴图此刻可能还没就绪（天空加载晚于场景构建）——先建网格，之后由
+      // syncFakeWindowEnvs() 在环境就绪/换时段时统一补挂。见本文件末尾导出。
+      const mesh = createWindowMesh({
+        w: it.xw ?? WINDOW_DEFAULTS.w,
+        h: it.xh ?? WINDOW_DEFAULTS.h,
+        env: scene.environment || null,
+        glass: it.glass || WINDOW_DEFAULTS.glass,
+        opacity: it.opacity != null ? it.opacity : WINDOW_DEFAULTS.opacity,
+        mirror: it.mirror != null ? it.mirror : WINDOW_DEFAULTS.mirror,
+      });
+      holder.add(mesh);
+      windowMeshes.push(mesh);
+      return; // 窗户没有碰撞体、不参与 LOD/批次合并，到此为止
+    }
     const sc = normScale(it.scale);
     // 统一挂到 holder，应用位置/轴向缩放/朝向
     const holder = new THREE.Group();
@@ -280,6 +322,9 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       }
     }
   });
+  // 场景刚建好时环境贴图往往还没就绪（天空是异步加载的）。这里先同步一次，
+  // 之后 SkyBox 换环境贴图的路径会再调一次 syncFakeWindowEnvs() 补上真正的反射。
+  syncFakeWindowEnvs(scene);
   return colliders;
 }
 

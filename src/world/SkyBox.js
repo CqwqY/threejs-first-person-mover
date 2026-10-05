@@ -268,6 +268,10 @@ export function createTimeSky(scene, renderer, opts = {}) {
   // 过渡期混合用的复用画布/贴图/RT：避免每次重建都新建 canvas 与 texture
   let morphCanvas = null, morphCtx = null, morphTex = null, morphRT = null;
   let morphDisabled = false;   // 过渡期重建失败过 → 永久退回"整段贴图"，避免每帧重试 PMREM
+  // 环境贴图换新时的回调（可选）。用途：障眼法窗户等「直接采样 scene.environment」的自定义材质
+  // 需要重新绑定贴图引用。**不要每帧调用** —— 只在引用真的变了时触发。
+  // 用回调而不是让本模块 import EditorBuildings，避免 SkyBox ⇄ EditorBuildings 循环依赖。
+  const notifyEnv = () => { if (typeof opts.onEnvChange === 'function') { try { opts.onEnvChange(scene.environment); } catch (e) { console.warn('[sky] onEnvChange 回调失败:', e); } } };
 
   if (renderer) fallbackRT = applyEnvironment(scene, renderer, null); // 基础环境，立刻生效
 
@@ -321,6 +325,7 @@ export function createTimeSky(scene, renderer, opts = {}) {
                 if (!curEnvId) {
                   curEnvId = key;
                   scene.environment = rt.texture;
+                  notifyEnv(); // 首张时段环境就绪 → 通知窗户等自定义材质重新绑定
                   if (fallbackRT) { try { fallbackRT.dispose(); } catch (e) { /* ignore */ } fallbackRT = null; }
                 }
               }
@@ -366,6 +371,7 @@ export function createTimeSky(scene, renderer, opts = {}) {
     if (!rt) return; // 该时段还没生成好（首次加载中）→ 保持当前这份，下一帧再试
     scene.environment = rt.texture;
     curEnvId = key;
+    notifyEnv(); // 换时段 → 通知窗户等自定义材质重新绑定（一昼夜只在时段切换时触发，成本可忽略）
     releaseMorphRT();
   }
 

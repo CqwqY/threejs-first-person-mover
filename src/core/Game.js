@@ -17,7 +17,7 @@ import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName } from '../player/Shop.js';
-import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene } from '../world/EditorBuildings.js';
+import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene, syncFakeWindowEnvs } from '../world/EditorBuildings.js';
 import { updateLod } from '../world/Lod.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
@@ -191,7 +191,13 @@ export class Game {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，时段天空球壳覆盖其上）
     // 时段天空盒：清晨/白天/夜晚/深夜四张全景图，按世界时刻交叉淡入（内部含程序化天空兜底）
-    this._timeSky = createTimeSky(this.scene, this.renderer, { ambientRef: () => this._ambient.intensity }); // 传 renderer：要生成环境贴图，否则金属材质全黑；ambientRef 让环境光=0 时 IBL 也归零
+    // onEnvChange：环境贴图（引用）变化时重新绑定障眼法窗户的采样源 —— 窗户 shader 直接采样
+    //   scene.environment，换了时段天空就得跟着换，否则窗里永远是旧天空。
+    //   只在「首张就绪」和「时段切换」时触发，不是每帧。
+    this._timeSky = createTimeSky(this.scene, this.renderer, {
+      ambientRef: () => this._ambient.intensity,
+      onEnvChange: () => syncFakeWindowEnvs(this.scene),
+    }); // 传 renderer：要生成环境贴图，否则金属材质全黑；ambientRef 让环境光=0 时 IBL 也归零
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);

@@ -26,12 +26,14 @@ import { buildTrackPath, disposeTrackViz } from '../world/TrackViz.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
+import { syncFakeWindowEnvs } from '../world/EditorBuildings.js';
 import {
   updateShadowBudgets, registerPointLight, unregisterPointLight,
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
   releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
+import { createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS } from '../world/FakeWindow.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -353,6 +355,20 @@ export function createEditor() {
     codeCancel: document.getElementById('codeCancel'),
     codeReset: document.getElementById('codeReset'),
     codesFormHint: document.getElementById('codesFormHint'),
+    // ---- 障眼法窗户 ----
+    btnWindow: document.getElementById('tWindow'),
+    windowPanel: document.getElementById('windowPanel'),
+    winAdd: document.getElementById('winAdd'),
+    winW: document.getElementById('winW'),
+    winH: document.getElementById('winH'),
+    winRX: document.getElementById('winRX'),
+    winRY: document.getElementById('winRY'),
+    winRZ: document.getElementById('winRZ'),
+    winGlass: document.getElementById('winGlass'),
+    winOpacity: document.getElementById('winOpacity'),
+    winMirror: document.getElementById('winMirror'),
+    winReset: document.getElementById('winReset'),
+    winInfo: document.getElementById('winInfo'),
     gate: document.getElementById('gate'),
     gatePass: document.getElementById('gatePass'),
     gateMsg: document.getElementById('gateMsg'),
@@ -439,7 +455,14 @@ export function createEditor() {
     rec.x = rec.obj.position.x;
     rec.y = rec.obj.position.y;
     rec.z = rec.obj.position.z;
-    rec.rotY = rec.obj.rotation.y;
+    // 窗户是三轴朝向（贴斜墙/斜顶），普通模型只关心 rotY
+    if (rec.kind === 'window') {
+      rec.rotX = rec.obj.rotation.x;
+      rec.rotY = rec.obj.rotation.y;
+      rec.rotZ = rec.obj.rotation.z;
+    } else {
+      rec.rotY = rec.obj.rotation.y;
+    }
     rec.scale = { x: rec.obj.scale.x, y: rec.obj.scale.y, z: rec.obj.scale.z };
     StepUI.stX.textContent = rec.x.toFixed(1);
     StepUI.stZ.textContent = rec.z.toFixed(1);
@@ -471,6 +494,98 @@ export function createEditor() {
     r.position.y = 0.02;
     r.renderOrder = 999; // 图层置顶：放置圆环始终画在最上层
     return r;
+  }
+
+  // ---------- 障眼法窗户 ----------
+  // 窗户是「贴墙的 quad」，用环境贴图做出"窗外景色"的错觉（见 src/world/FakeWindow.js）。
+  // 编辑器侧只负责：建对象 / 摆位置 / 调参数 / 序列化；不涉及额外渲染趟数。
+
+  // 把 rec 的变换写进 rec.obj。窗户走独立路径（没有 scale 字段，用 xw/xh 表示宽高）。
+  function applyWindowTransform(rec) {
+    if (!rec || !rec.obj) return;
+    rec.obj.position.set(rec.x ?? 0, rec.y ?? 0, rec.z ?? 0);
+    rec.obj.rotation.set(rec.rotX ?? 0, rec.rotY ?? 0, rec.rotZ ?? 0);
+    const mesh = rec.obj.children[0];
+    if (mesh && mesh.isMesh) {
+      const w = rec.xw ?? WINDOW_DEFAULTS.w;
+      const h = rec.xh ?? WINDOW_DEFAULTS.h;
+      if (mesh.geometry && mesh.geometry.parameters &&
+        (mesh.geometry.parameters.width !== w || mesh.geometry.parameters.height !== h)) {
+        // 宽高变了要重建几何（PlaneGeometry 的 uv/顶点是按尺寸烘死的）
+        mesh.geometry.dispose();
+        mesh.geometry = new THREE.PlaneGeometry(w, h, 1, 1);
+      }
+      mesh.userData.windowSize = { w, h };
+    }
+  }
+
+  // 用 rec 的参数（重新）构建窗户网格并挂到 rec.obj 上
+  function buildWindowObject(rec) {
+    if (!rec || !rec.obj) return;
+    const env = scene.environment || null;
+    const mesh = createWindowMesh({
+      w: rec.xw ?? WINDOW_DEFAULTS.w,
+      h: rec.xh ?? WINDOW_DEFAULTS.h,
+      env,
+      glass: rec.glass || WINDOW_DEFAULTS.glass,
+      opacity: rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity,
+      mirror: rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror,
+    });
+    mesh.userData.editorWindow = true;
+    rec.obj.clear();
+    rec.obj.add(mesh);
+    applyWindowTransform(rec);
+  }
+
+  // 面板改动后即时刷新窗户材质（不重建网格，避免拖动时反复 dispose）
+  function refreshWindowMaterial(rec) {
+    if (!rec || !rec.obj) return;
+    const mesh = rec.obj.children[0];
+    if (!mesh || !mesh.isMesh) return;
+    const u = mesh.material.uniforms;
+    if (!u) return;
+    const c = new THREE.Color(rec.glass || WINDOW_DEFAULTS.glass);
+    u.uGlass.value.set(c.r, c.g, c.b);
+    u.uOpacity.value = rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity;
+    u.uMirror.value = rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror;
+    // 环境贴图可能刚就绪/被替换，顺带同步一次（幂等，便宜）
+    setWindowEnv(mesh.material, scene.environment || null);
+  }
+
+  // 新建一扇窗（面板点「添加窗户」时调用）。默认放在相机前方地面的上方一点。
+  function addFakeWindow() {
+    const obj = new THREE.Group();
+    const id = nextId();
+    const camDir = new THREE.Vector3();
+    camera.getWorldDirection(camDir);
+    const px = camera.position.x + camDir.x * 6;
+    const pz = camera.position.z + camDir.z * 6;
+    const rec = {
+      id, kind: 'window', name: '障眼法窗户',
+      x: Math.round(px * 10) / 10, y: 1.6, z: Math.round(pz * 10) / 10,
+      rotX: 0, rotY: 0, rotZ: 0,
+      xw: WINDOW_DEFAULTS.w, xh: WINDOW_DEFAULTS.h,
+      glass: WINDOW_DEFAULTS.glass,
+      opacity: WINDOW_DEFAULTS.opacity,
+      mirror: WINDOW_DEFAULTS.mirror,
+      obj,
+    };
+    scene.add(obj);
+    buildWindowObject(rec);
+    tagId(rec);
+    state.placed.push(rec);
+    markDirty();
+    outlinerUpdate();
+    select(rec);
+    return rec;
+  }
+
+  // 删除一扇窗（释放自己的几何/材质；环境贴图是共享的，不会被释放）
+  function removeFakeWindow(rec) {
+    if (!rec || !rec.obj) return;
+    const mesh = rec.obj.children[0];
+    if (mesh && mesh.isMesh && mesh.userData.editorWindow) disposeWindow(mesh);
+    scene.remove(rec.obj);
   }
 
   // ---------- 位置拾取 ----------
@@ -1388,7 +1503,8 @@ export function createEditor() {
   }
 
   // ---------- 选中 + 3D 轴绑定 ----------
-  const GIZMO_MODE = { move: 'translate', rot: 'rotate', scale: 'scale' };
+  // window 模式也挂移动轴：窗户工具页签下应当能直接拖动选中的窗户
+  const GIZMO_MODE = { move: 'translate', rot: 'rotate', scale: 'scale', window: 'translate' };
 
   function select(rec) {
     // 光源与普通物件选中互斥：选中普通物件（或清空选中）时一并取消光源选中。
@@ -1407,6 +1523,9 @@ export function createEditor() {
     syncPropsUI();
     outlinerUpdate();
     syncLightPanel(); // 光源列表高亮随之刷新（清空选中时同样生效）
+    // 选中变化时回填窗户面板（非窗户选中会置灰并提示）
+    if (state.mode === 'window') syncWindowPanel();
+    else if (StepUI.windowPanel && StepUI.windowPanel.style.display !== 'none') syncWindowPanel();
   }
 
   // ---------- 交互（点击选中；gizmo 拖动由 TransformControls 接管） ----------
@@ -1516,6 +1635,8 @@ export function createEditor() {
   }
 
   function applyPlTransform(rec) {
+    // 窗户没有 scale 语义（宽高存在 xw/xh，几何按尺寸重建），单独一条路径
+    if (rec.kind === 'window') { applyWindowTransform(rec); return; }
     const s = normScale(rec.scale);
     rec.obj.scale.set(s.x, s.y, s.z);
     rec.obj.position.set(rec.x ?? 0, rec.y ?? 0, rec.z ?? 0);
@@ -2182,7 +2303,9 @@ export function createEditor() {
   }
 
   function removePlaced(rec) {
-    scene.remove(rec.obj);
+    // 障眼法窗户：先释放自己的几何/材质（环境贴图是共享的，不会被误释放）
+    if (rec && rec.kind === 'window') removeFakeWindow(rec);
+    else scene.remove(rec.obj);
     state.placed = state.placed.filter((p) => p !== rec);
     if (state.selected === rec) select(null);
     markDirty();
@@ -2213,6 +2336,27 @@ export function createEditor() {
       }),
       // 用户新建摆放的对象
       placed: state.placed.map((rec) => {
+        // 障眼法窗户：不写模型字段，只写 quad 的变换 + 窗户参数。
+        // kind:'window' 是判别键，游戏端 EditorBuildings.js 靠它走另一条创建分支。
+        if (rec.kind === 'window') {
+          return {
+            id: rec.id,
+            kind: 'window',
+            name: rec.name || '障眼法窗户',
+            x: rec.x ?? rec.obj.position.x,
+            y: rec.y ?? rec.obj.position.y,
+            z: rec.z ?? rec.obj.position.z,
+            // ⚠ 窗户需要三个轴：贴墙的面朝向由 rotY 决定，俯仰/翻滚由 rotX/rotZ 修正
+            rotX: rec.rotX ?? 0,
+            rotY: rec.rotY ?? 0,
+            rotZ: rec.rotZ ?? 0,
+            xw: rec.xw ?? rec.obj.scale.x,
+            xh: rec.xh ?? rec.obj.scale.y,
+            glass: rec.glass || WINDOW_DEFAULTS.glass,
+            opacity: rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity,
+            mirror: rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror,
+          };
+        }
         const s = normScale(rec.scale ?? rec.obj.scale);
         const out = {
           id: rec.id,
@@ -2310,6 +2454,25 @@ export function createEditor() {
       const id = claimId(it.id);
       // 老存档可能没有 name 字段（undefined 会被 JSON.stringify 丢掉），回退到模型文件名
       const nm = (typeof it.name === 'string' && it.name.trim()) ? it.name : (nameFromUrl(it.url) || '未命名');
+      // 障眼法窗户：单独一条重建路径（没有 url/scale，只有 quad 参数）
+      if (it && it.kind === 'window') {
+        const wrec = {
+          id, kind: 'window', name: nm,
+          x: it.x ?? 0, y: it.y ?? 0, z: it.z ?? 0,
+          rotX: it.rotX ?? 0, rotY: it.rotY ?? 0, rotZ: it.rotZ ?? 0,
+          xw: it.xw ?? WINDOW_DEFAULTS.w, xh: it.xh ?? WINDOW_DEFAULTS.h,
+          glass: it.glass || WINDOW_DEFAULTS.glass,
+          opacity: it.opacity != null ? it.opacity : WINDOW_DEFAULTS.opacity,
+          mirror: it.mirror != null ? it.mirror : WINDOW_DEFAULTS.mirror,
+          obj,
+        };
+        buildWindowObject(wrec);
+        obj.name = nm;
+        scene.add(obj);
+        tagId(wrec);
+        state.placed.push(wrec);
+        continue;
+      }
       const rec = {
         id, kind: it.kind, name: nm, url: it.url,
         x: it.x, y: it.y, z: it.z, rotY: it.rotY,
@@ -2995,11 +3158,11 @@ export function createEditor() {
     // 切到「边界 / 赛道 / 道具 / 家具 / 兑换码」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
     if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn' || m === 'codes')) exitComboMode();
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes', 'window'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes, window: StepUI.btnWindow };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
@@ -3014,16 +3177,19 @@ export function createEditor() {
       StepUI.hint.textContent = '已摆家具管理：列出全服摆放，勾选后「删除选中」，或「清空全部」';
     } else if (m === 'codes') {
       StepUI.hint.textContent = '兑换码管理：码表存在服务端，改完即时生效（玩家进游戏输入即可兑换）';
-    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('已摆家具') || StepUI.hint.textContent.includes('兑换码管理')) {
+    } else if (m === 'window') {
+      StepUI.hint.textContent = '点「添加窗户」放一扇 · 用选择/移动/旋转轴贴到墙上 · 右侧面板可调尺寸/朝向/玻璃色';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('已摆家具') || StepUI.hint.textContent.includes('兑换码管理') || StepUI.hint.textContent.includes('添加窗户')) {
       StepUI.hint.textContent = '';
     }
 
-    // 边界 / 赛道 / 商店 / 家具 / 兑换码模式：显示各自面板；离开时全部还原
+    // 边界 / 赛道 / 商店 / 家具 / 兑换码 / 窗户模式：显示各自面板；离开时全部还原
     const isBound = m === 'bound';
     const isTrack = m === 'track';
     const isShop = m === 'shop';
     const isFurn = m === 'furn';
     const isCodes = m === 'codes';
+    const isWindow = m === 'window';
     boundaryGroup.visible = isBound;
     trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
@@ -3031,10 +3197,12 @@ export function createEditor() {
     if (StepUI.shopPanel) StepUI.shopPanel.style.display = isShop ? 'block' : 'none';
     if (StepUI.furnPanel) StepUI.furnPanel.style.display = isFurn ? 'block' : 'none';
     if (StepUI.codesPanel) StepUI.codesPanel.style.display = isCodes ? 'block' : 'none';
+    if (StepUI.windowPanel) StepUI.windowPanel.style.display = isWindow ? 'block' : 'none';
     buildVizGroup.visible = isFurn;
     areaVizGroup.visible = isFurn;
     if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具 + 建造范围
     if (isCodes) fetchCodes();  // 进入即拉一次服务端码表
+    if (isWindow) syncWindowPanel(); // 进入即把选中窗户的参数回填到面板
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -3101,6 +3269,8 @@ export function createEditor() {
   StepUI.btnRuler.onclick = () => setMode('ruler');
   if (StepUI.btnBound) StepUI.btnBound.onclick = () => setMode('bound'); // 边界编辑模式（空气墙）
   if (StepUI.btnTrack) StepUI.btnTrack.onclick = () => setMode('track'); // 赛道编辑模式（校园狂飙）
+  // ⚠ 编辑器工具按钮**不是遍历自动绑**的，必须手写这一行，漏了就是「点都点不了」
+  if (StepUI.btnWindow) StepUI.btnWindow.onclick = () => setMode('window'); // 障眼法窗户
 
   // ---------- 商店管理（在线改价格 / 导入模型） ----------
   // 与后端 /api/shop 对接：GET 公开读、POST 带管理员密钥改（add/update/del）。
@@ -3890,6 +4060,79 @@ export function createEditor() {
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');
 
+  // ---------- 障眼法窗户面板 ----------
+  // 面板只对「当前选中的窗户」生效。改动即时写回 rec 并刷新材质/几何。
+  function selectedWindow() {
+    return (state.selected && state.selected.kind === 'window') ? state.selected : null;
+  }
+
+  // 把选中窗户的参数回填到面板（进入窗户页签 / 选中变化时调用）
+  function syncWindowPanel() {
+    const rec = selectedWindow();
+    const dis = !rec;
+    const els = [StepUI.winW, StepUI.winH, StepUI.winRX, StepUI.winRY, StepUI.winRZ,
+      StepUI.winGlass, StepUI.winOpacity, StepUI.winMirror];
+    for (const el of els) if (el) el.disabled = dis;
+    if (StepUI.winInfo) {
+      StepUI.winInfo.textContent = rec
+        ? '正在编辑：' + (rec.name || '窗户') + '（用移动/旋转轴可直接拖动）'
+        : '先点「添加窗户」，或在场景里选中一扇已放的窗户。';
+    }
+    if (!rec) return;
+    const DEG2 = 180 / Math.PI;
+    if (StepUI.winW) StepUI.winW.value = (rec.xw ?? WINDOW_DEFAULTS.w).toFixed(2);
+    if (StepUI.winH) StepUI.winH.value = (rec.xh ?? WINDOW_DEFAULTS.h).toFixed(2);
+    if (StepUI.winRX) StepUI.winRX.value = ((rec.rotX ?? 0) * DEG2).toFixed(0);
+    if (StepUI.winRY) StepUI.winRY.value = ((rec.rotY ?? 0) * DEG2).toFixed(0);
+    if (StepUI.winRZ) StepUI.winRZ.value = ((rec.rotZ ?? 0) * DEG2).toFixed(0);
+    if (StepUI.winGlass) StepUI.winGlass.value = rec.glass || WINDOW_DEFAULTS.glass;
+    if (StepUI.winOpacity) StepUI.winOpacity.value = (rec.opacity != null ? rec.opacity : WINDOW_DEFAULTS.opacity).toFixed(2);
+    if (StepUI.winMirror) StepUI.winMirror.value = (rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror).toFixed(2);
+  }
+
+  if (StepUI.winAdd) {
+    StepUI.winAdd.onclick = () => {
+      const rec = addFakeWindow();
+      syncWindowPanel();
+      if (StepUI.winInfo) StepUI.winInfo.textContent = '已添加，用移动轴把它贴到墙面窗洞位置。';
+      return rec;
+    };
+  }
+  // 数值变化 → 写回 rec → 刷新几何/材质。⚠ 角度一律用**度**（与编辑器其它字段一致）
+  // 注意：不在这里再声明 DEG —— 模块顶部（L38）已有 `const DEG = Math.PI / 180`，重复声明是噪声。
+  function bindWinNum(el, apply, rebuildGeo) {
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const rec = selectedWindow();
+      if (!rec) return;
+      apply(rec, parseFloat(el.value));
+      if (rebuildGeo) applyWindowTransform(rec);
+      else refreshWindowMaterial(rec);
+      markDirty();
+    });
+  }
+  bindWinNum(StepUI.winW, (r, v) => { if (Number.isFinite(v)) r.xw = Math.max(0.1, v); }, true);
+  bindWinNum(StepUI.winH, (r, v) => { if (Number.isFinite(v)) r.xh = Math.max(0.1, v); }, true);
+  bindWinNum(StepUI.winRX, (r, v) => { if (Number.isFinite(v)) r.rotX = v * DEG; }, true);
+  bindWinNum(StepUI.winRY, (r, v) => { if (Number.isFinite(v)) r.rotY = v * DEG; }, true);
+  bindWinNum(StepUI.winRZ, (r, v) => { if (Number.isFinite(v)) r.rotZ = v * DEG; }, true);
+  bindWinNum(StepUI.winGlass, (r, v) => { r.glass = v; }, false);
+  bindWinNum(StepUI.winOpacity, (r, v) => { if (Number.isFinite(v)) r.opacity = Math.min(1, Math.max(0, v)); }, false);
+  bindWinNum(StepUI.winMirror, (r, v) => { if (Number.isFinite(v)) r.mirror = Math.min(1.5, Math.max(0, v)); }, false);
+  if (StepUI.winReset) {
+    StepUI.winReset.onclick = () => {
+      const rec = selectedWindow();
+      if (!rec) return;
+      rec.xw = WINDOW_DEFAULTS.w; rec.xh = WINDOW_DEFAULTS.h;
+      rec.rotX = WINDOW_DEFAULTS.rotX; rec.rotY = WINDOW_DEFAULTS.rotY; rec.rotZ = WINDOW_DEFAULTS.rotZ;
+      rec.glass = WINDOW_DEFAULTS.glass; rec.opacity = WINDOW_DEFAULTS.opacity; rec.mirror = WINDOW_DEFAULTS.mirror;
+      applyWindowTransform(rec);
+      refreshWindowMaterial(rec);
+      syncWindowPanel();
+      markDirty();
+    };
+  }
+
   // 复制模式开关：开启后拖动 3D 轴即复制一份，拖一次复制一次（原件保留）
   document.getElementById('tCopy').onclick = () => {
     state.copyMode = !state.copyMode;
@@ -3977,6 +4220,7 @@ export function createEditor() {
   // 渲染循环
   let _t0 = performance.now();
   let _badgeAt = 0; // 上一次刷新「投影中」标记的时间戳（节流用）
+let _lastWindowEnv = null; // 上次同步给障眼法窗户的环境贴图引用（变了才重绑，避免每帧写 uniform）
   function loop() {
     const t = performance.now();
     applyWASDMove(Math.min((t - _t0) / 1000, 0.1));
@@ -4001,6 +4245,12 @@ export function createEditor() {
     // 环境光=0 时让天空 IBL 也跟着归零（IBL 是独立通道，不随 AmbientLight.intensity 变），
     // 否则编辑器里把环境光拉到 0 金属/光滑材质仍被天空照得发亮。
     scene.environmentIntensity = Math.min(2, Math.max(0, ambient.intensity / 0.32));
+    // 障眼法窗户直接采样 scene.environment。环境贴图是异步就绪的（attachSky 里天空贴图加载完才换），
+    // 所以这里**只在引用真的变了时**同步一次（比每帧写 uniform 省，且不会漏掉就绪那一刻）。
+    if (scene.environment !== _lastWindowEnv) {
+      _lastWindowEnv = scene.environment;
+      syncFakeWindowEnvs(scene);
+    }
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(loop);
   }
