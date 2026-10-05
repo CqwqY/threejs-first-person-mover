@@ -1686,6 +1686,11 @@ export class Game {
     st.veh = Config.VEHICLE_ID;
     this.input.consumeJump(); // 清掉待处理的跳跃请求
     phys.canJump = false;      // 骑乘时不能跳
+    // 骑乘 / 赛车状态：整组隐藏顶栏、校卡、技能槽（CSS body.kui-ride，对齐对战隐藏集）
+    document.body.classList.add('kui-ride');
+    this._bossUiKey = null;    // 强制重算攻击键/传送门显隐（骑乘时收起）
+    this._updateBossUI();
+    this._updateSkillBarVisibility();
     if (seat === 1) {
       phys.speedMult = Config.VEHICLE_SPEED / Config.MOVE_SPEED; // 兜底：真实速度由 LocalPlayer._driveVehicle 接管
       if (this.mobileControls) this.mobileControls.setDriving(true); // 手机：把「跳」换成转向键，摇杆变油门键，技能槽被刹车顶替
@@ -1712,6 +1717,7 @@ export class Game {
     st.ride = 0;
     st.veh = '';
     this._vehDriver = null;
+    document.body.classList.remove('kui-ride'); // 下车：恢复顶栏/校卡/技能槽
     if (this.mobileControls) this.mobileControls.setDriving(false); // 手机：驾驶键组换回「跳」
     this.localPlayer.resetRideLook(); // 骑行自由视角回正（否则下车后镜头还歪着）
     const phys = this.localPlayer.physics;
@@ -1720,6 +1726,9 @@ export class Game {
     phys.controlLock = !!(this.aiChat && this.aiChat.isOpen());
     phys.speedMult = 1;
     phys.speedMode = 'walk';
+    this._bossUiKey = null; // 强制重算：恢复主世界的攻击键/传送门提示显隐
+    this._updateBossUI();
+    this._updateSkillBarVisibility(); // 恢复技能栏
     this._toast(quitRace ? '已下车，狂飙结束' : '已下车');
   }
 
@@ -2465,9 +2474,12 @@ export class Game {
     const near = Math.hypot(this.localState.x - P.x, this.localState.z - P.z) <= Config.PORTAL_PROXIMITY;
     // 对战中：Boss/传送门 UI 全隐藏，攻击按钮常驻（用来丢能量球打人）；但阵亡后（观战）要收起
     const inCombat = !!this._combat;
-    const showPortal = !inCombat && mode === 'idle' && near;
-    const showAtk = (inCombat && !this._dead) || (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn;
-    const showShield = !inCombat && mode === 'alive' && phase >= 3 && !this._dead;
+    // 骑乘/赛车：与对战同理，Boss / 传送门 / 护盾 UI 全部收起，给驾驶让出画面。
+    // （速度表与骑行视角键由 _updateVehicle 单独管，不受这里影响）
+    const riding = !!this.localState.ride;
+    const showPortal = !inCombat && !riding && mode === 'idle' && near;
+    const showAtk = !riding && ((inCombat && !this._dead) || (mode === 'alive' && !this._dead) || this._gatlingOn || this._ctrlOn);
+    const showShield = !inCombat && !riding && mode === 'alive' && phase >= 3 && !this._dead;
     const shieldReady = performance.now() >= this._shieldReadyAt;
     const seconds = mode === 'countdown' ? Math.ceil(this.boss.countdown) : 0;
     const hp = mode === 'alive' ? Math.max(0, Math.round(this.boss.hp)) : 0;
@@ -2494,6 +2506,10 @@ export class Game {
 
     const bar = this._bossBar;
     if (!bar) return;
+    if (riding) {
+      bar.box.style.display = 'none'; // 骑乘/赛车：Boss 血条同样收起（纯战斗 UI）
+      return;
+    }
     if (mode === 'countdown') {
       bar.box.style.display = '';
       bar.name.textContent = '老师';
@@ -5299,10 +5315,11 @@ export class Game {
     if (this._combatHud) this._combatHud.style.display = 'none';
   }
 
-  // 技能栏显隐：对战（竞技场）与灵魂出窍下不显示——这两个场景里技能栏无意义
+  // 技能栏显隐：对战（竞技场）、灵魂出窍、建造模式、骑乘/赛车下都不显示
+  // —— 这些场景里技能栏无意义或已被别的操控顶替
   _updateSkillBarVisibility() {
     if (!this.skillSlots || typeof this.skillSlots.setVisible !== 'function') return;
-    this.skillSlots.setVisible(!this._combat && !this._soul && !this._isBuildActive());
+    this.skillSlots.setVisible(!this._combat && !this._soul && !this._isBuildActive() && !this.localState.ride);
     // 显隐翻转后位置可能要变（攻击键显示/隐藏会改变技能键的挂靠对象）
     this._relayoutSkillBtn();
   }

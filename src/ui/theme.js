@@ -352,6 +352,21 @@ export function ensureTheme() {
     body.kui-build #idc-layout,
     body.kui-build .sk-box { display: none !important; }
 
+    /* ---- 骑乘 / 赛车状态（上车即切）----
+       body.kui-ride 由 Game 在 _mountVehicle / _dismountVehicle 切换。
+       对齐「对战/竞技场」的隐藏集：顶栏按钮行、校卡收起，给驾驶让出画面。
+       ⚠ 技能槽**不在这里藏** —— 手机端 MobileControls 的刹车键要「定位到技能槽当前位置」
+         （placeBrakeAtSkillSlot），而 kui-ride 类是在 setDriving(true) **之前**加上的：
+         若此处把 .sk-box 设成 display:none，刹车键会量到 0 尺寸飞到屏幕角落。
+         技能槽改由 Game._updateSkillBarVisibility() 统一管（该函数已并入 ride 条件，
+         走 SkillSlots.setVisible，与对战/灵魂出窍共用一条路径，MobileControls 认它）。
+       车速表（.spd-box）与骑行视角键是驾驶必需，必须保留；
+       手机端驾驶键组（.mc-*，由 mobileControls.setDriving 单独切换）也不受影响。
+       这里只用 CSS 整组隐藏，不逐个写 style.display —— 避免每帧 DOM 写入、
+       也绝不触碰 Three 的 visible（不参与碰撞烘焙 / 射线拾取）。 */
+    body.kui-ride .kui-toprow,
+    body.kui-ride #idc-layout { display: none !important; }
+
     /* ---- 建造模式工具条 / 悬浮键（锤子触发）----
        里面的按钮一律用 .kui-btn 系（Kenney 按钮素材），这里只负责容器排布。
        容器 pointer-events:none，空隙仍可转视角；子元素各自 auto 才能点。 */
