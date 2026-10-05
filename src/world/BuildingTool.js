@@ -13,7 +13,7 @@ import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '.
 import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
 import { Config } from '../config.js';
-import { registerPointLight, enableAreaShadow } from './Lights.js';
+import { registerPointLight, enableAreaShadow, AREA_LIGHT_DEFAULTS } from './Lights.js';
 
 const DEG = Math.PI / 180;
 
@@ -269,22 +269,24 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
           ensureRectAreaLib(); // 面光源使用前必须初始化一次 LTC 查找表
           const area = new THREE.RectAreaLight(
             col,
-            Number(l.intensity) || 3,
-            Math.max(0.01, Number(l.width) || 4),
-            Math.max(0.01, Number(l.height) || 3)
+            Number(l.intensity) || AREA_LIGHT_DEFAULTS.intensity,
+            Math.max(0.01, Number(l.width) || AREA_LIGHT_DEFAULTS.width),
+            Math.max(0.01, Number(l.height) || AREA_LIGHT_DEFAULTS.height)
           );
           area.position.copy(pos);
-          // RectAreaLight 沿本地 -Z 发光：rotX 默认 -90°（垂直朝下），与编辑器里的朝向约定一致。
+          // RectAreaLight 沿本地 -Z 发光：rotX 为俯仰（度，负值朝下），默认 -90 即垂直向下。
           // 用 YXZ 顺序（先偏航 rotY 再俯仰 rotX）。
+          // ⚠ 缺省值统一取自 AREA_LIGHT_DEFAULTS —— 各处自己写死默认值迟早分叉
+          //   （分叉过一次：编辑器读存档写成 0，家具里的灯就横过来了）。
           area.rotation.order = 'YXZ';
           area.rotation.set(
-            DEG * (Number.isFinite(Number(l.rotX)) ? Number(l.rotX) : -90),
-            DEG * (Number(l.rotY) || 0),
+            DEG * (Number.isFinite(Number(l.rotX)) ? Number(l.rotX) : AREA_LIGHT_DEFAULTS.rotX),
+            DEG * (Number.isFinite(Number(l.rotY)) ? Number(l.rotY) : AREA_LIGHT_DEFAULTS.rotY),
             0
           );
           // 面光源本身不能投影（RectAreaLight 无 shadow 字段）→ 接一盏阴影代理聚光灯，
           // 由它真正被墙挡住（亮度拆分与单位换算见 Lights.enableAreaShadow）。
-          enableAreaShadow(area, { distance: Number(l.distance) || 0 });
+          enableAreaShadow(area, { distance: Number(l.distance) > 0 ? Number(l.distance) : AREA_LIGHT_DEFAULTS.distance });
           g.add(area);
         } else {
           const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);

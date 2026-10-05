@@ -55,6 +55,22 @@ export const AREA_SHADOW_TUNING = {
   split: AREA_SHADOW_SPLIT, gain: AREA_SHADOW_GAIN, angle: AREA_SHADOW_ANGLE, distance: AREA_SHADOW_DISTANCE,
 };
 
+// ---- 面光源的**默认参数**（唯一来源）--------------------------------------
+// ⚠⚠ 这是"面光源在家具里横转 90°"的根因区：之前四处的默认值各写各的 ——
+//   游戏端 LIGHT_DEFAULTS.rotX = -90、组合家具 -90、编辑器新建 -90，
+//   但**编辑器读存档那处写的是 rotX: 0**。于是「存档里没有 rotX 字段的灯」
+//   载入后就是 rotX=0（发光面竖直、朝水平方向照）＝ 比朝下整整横过来 90°，
+//   而游戏端同样缺失却按 -90 处理 —— 两端还对不上，编辑器和实机表现不一致。
+//   分叉的默认值迟早出 bug，所以收敛到这一处，四处都从这里取。
+export const AREA_LIGHT_DEFAULTS = {
+  rotX: -90,  // 俯仰（度）：RectAreaLight 沿本地 -Z 发光，-90 = 发光面水平、朝下照（吸顶灯）；0 = 发光面竖直、朝水平照
+  rotY: 0,    // 偏航（度）
+  width: 4,
+  height: 3,
+  intensity: 3,
+  distance: AREA_SHADOW_DISTANCE, // 阴影代理的衰减半径（面光源本体无衰减概念，这个只给代理用）
+};
+
 // 代理沿发光方向（本地 -Z）后退多少米。
 // 面积越大，面光的"饱和"发生得越远，代理就得更靠后，否则近处照样爆。
 // 用等面积圆的半径 r = √(A/π) 作尺度：r 正好是「远场公式开始失效」的距离。

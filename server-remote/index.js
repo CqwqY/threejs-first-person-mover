@@ -237,6 +237,26 @@ let SHOP = (() => {
     saveBuildings(bs);
   } catch (e) { /* ignore */ }
 })();
+// 一次性修复老数据：把「被弧度范围钳坏」的面光源俯仰角还原。
+// 背景：sanitizeCombo 曾把 rotX 按弧度钳到 ±2π（≈±6.283），而客户端单位是**度** ——
+//   编辑器存的 -90（朝下）被夹成 -6.283 度，摆出来就几乎水平（"面光源在家具里横转 90°"）。
+// 判定必须极严格：只在数值**等于** ±2π 时动手（用户经 UI 设不出这种小数），且**保留正负号**
+//   （+2π 说明原本是朝上的大角度 → 还原成 +90），其余一律不碰。跑一次打个 warn 日志。
+(function repairClampedAreaPitch() {
+  const EPS = 1e-6;
+  let fixed = 0;
+  for (const it of SHOP) {
+    const ls = it && it.combo && Array.isArray(it.combo.lights) ? it.combo.lights : null;
+    if (!ls) continue;
+    for (const l of ls) {
+      if (!l || l.type !== 'area') continue;
+      const v = Number(l.rotX);
+      if (!Number.isFinite(v)) continue;
+      if (Math.abs(Math.abs(v) - Math.PI * 2) < EPS) { l.rotX = v < 0 ? -90 : 90; fixed++; }
+    }
+  }
+  if (fixed) { saveShop(SHOP); console.warn('[relay] 修复了 ' + fixed + ' 个被弧度钳坏的面光源角度（rotX ±6.283° → ±90°）'); }
+})();
 // 确保「建造锤」在售（老 shop.json 已存在时不会自动带上新种子）
 (function ensureHammer() {
   if (SHOP.some((x) => x.effect && x.effect.k === 'hammer')) return;
@@ -244,6 +264,14 @@ let SHOP = (() => {
   if (h) { SHOP.push(h); saveShop(SHOP); }
 })();
 // 组合家具的部件 / 灯光消毒：只放行已知字段并逐项钳制（防脏数据 / 超大对象）
+// ⚠⚠ 单位：客户端的 rotY/rotX 一律是**度**（不是弧度）—— 早先这里按弧度写了钳制范围
+//   （±2π ≈ ±6.28），结果编辑器存进去的 rotX = -90（朝下照）被夹成 **-6.28 度**，
+//   读回来几乎水平 —— 这就是「面光源在家具里横着转了 90°」。同理 rotY 只能转 ±12.6°。
+//   现在统一按度钳制到 ±360（允许多圈，负数合法）。
+const DEG_LO = -360;
+const DEG_HI = 360;
+const AREA_ROTX_DEFAULT = -90; // 与前端 Lights.AREA_LIGHT_DEFAULTS.rotX 保持一致
+const AREA_DISTANCE_DEFAULT = 14; // 与前端 AREA_SHADOW_DISTANCE 保持一致
 function sanitizeCombo(c) {
   const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
   const hex = (v) => (/^#[0-9a-fA-F]{3,8}$/.test(String(v || '')) ? String(v) : '#ffffff');
@@ -261,7 +289,8 @@ function sanitizeCombo(c) {
       out.parts.push({
         url: u,
         x: num(p.x, 0, -400, 400), y: num(p.y, 0, -100, 300), z: num(p.z, 0, -400, 400),
-        rotY: num(p.rotY, 0, -Math.PI * 4, Math.PI * 4),
+        // 部件的 rotY 也是度（前端 buildComboProto: m.rotation.y = rotY * DEG）
+        rotY: num(p.rotY, 0, DEG_LO, DEG_HI),
         scale: sc,
       });
     }
@@ -277,7 +306,13 @@ function sanitizeCombo(c) {
       };
       if (type === 'area') {
         o.width = num(l.width, 4, 0.1, 80); o.height = num(l.height, 3, 0.1, 80);
-        o.rotY = num(l.rotY, 0, -Math.PI * 4, Math.PI * 4); o.rotX = num(l.rotX, 0, -Math.PI * 2, Math.PI * 2);
+        // 朝向是度：rotX 负值朝下，缺省 -90（吸顶灯）。⚠ 绝不能用弧度范围钳制（会把 -90 夹成 -6.28）
+        o.rotY = num(l.rotY, 0, DEG_LO, DEG_HI);
+        o.rotX = num(l.rotX, AREA_ROTX_DEFAULT, DEG_LO, DEG_HI);
+        // 面光源自己没有 distance，这个只作用于阴影代理（照射范围 + 阴影贴图 far）。
+        // ⚠ 早期这里**根本没放行 distance** —— 编辑器里调好存上去，服务端一消毒就丢了，
+        //   家具摆出来永远是默认 14 米（等于白调）。
+        o.distance = num(l.distance, AREA_DISTANCE_DEFAULT, 0, 400);
       } else {
         o.distance = num(l.distance, 12, 0, 400); o.decay = num(l.decay, 2, 0, 10);
       }

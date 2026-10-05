@@ -12,6 +12,7 @@ import { bakeTriMeshAsync } from './collision/trimesh.js';
 import { track } from './loadTracker.js';
 import {
   registerPointLight, unregisterPointLight, enableAreaShadow, releaseAreaShadow, clearShadowBudgets,
+  AREA_LIGHT_DEFAULTS,
 } from './Lights.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 
@@ -471,10 +472,16 @@ function ensureRectAreaLib() {
   _rectAreaLibReady = true;
 }
 
-// 各字段缺省值（与编辑器约定保持一致）
-const LIGHT_DEFAULTS = { color: '#ffffff', intensity: 1, distance: 12, decay: 2, width: 4, height: 3, rotY: 0, rotX: -90 };
+// 各字段缺省值（与编辑器约定保持一致）。
+// ⚠ 面光源那几个字段**必须**从 AREA_LIGHT_DEFAULTS 取 —— 分叉写死过一次默认值，
+//   结果「存档里没有 rotX 的灯」在编辑器里是横的、在游戏端是朝下的（横转 90° 那个 bug）。
+const LIGHT_DEFAULTS = {
+  color: '#ffffff', intensity: 1, distance: 12, decay: 2,
+  width: AREA_LIGHT_DEFAULTS.width, height: AREA_LIGHT_DEFAULTS.height,
+  rotY: AREA_LIGHT_DEFAULTS.rotY, rotX: AREA_LIGHT_DEFAULTS.rotX,
+};
 // 面光源没有 distance/decay（LTC 自带平方反比），但阴影代理需要一个衰减半径，这里给个默认值
-const AREA_SHADOW_DEFAULT_DISTANCE = 14;
+const AREA_SHADOW_DEFAULT_DISTANCE = AREA_LIGHT_DEFAULTS.distance;
 
 // 数值容错：非有限数取默认值
 function finiteOr(v, dflt) {

@@ -29,7 +29,7 @@ import { attachSky } from '../world/SkyBox.js';
 import {
   updateShadowBudgets, registerPointLight, unregisterPointLight,
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
-  releaseAreaShadow, AREA_SHADOW_TUNING,
+  releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS,
 } from '../world/Lights.js';
 import { createSettingsPanel, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 
@@ -1785,9 +1785,15 @@ export function createEditor() {
   // 按 rotY/rotX（单位为度）设置面光源朝向，必须与游戏端 EditorBuildings.buildEditorLights 完全一致：
   // RectAreaLight 沿「本地 -Z」发光，所以直接用 YXZ 欧拉角赋值（rotX 俯仰、负值朝下，rotY 偏航），
   // 不能用 lookAt —— lookAt 会让本地 +Z 指向目标，等于把发光面转反 180°（编辑器里朝下、游戏里朝上）。
+  // ⚠ 缺失时的兜底必须走 AREA_LIGHT_DEFAULTS（唯一来源）—— 早先这里写死 -90、而读存档那处写 0，
+  //   两端分叉导致「存档里没 rotX 的灯」载入后横过来 90°（也就是"面光源在家具里横着转"）。
   function applyAreaOrientation(light, rec) {
     light.rotation.order = 'YXZ';
-    light.rotation.set((rec.rotX ?? -90) * DEG, (rec.rotY ?? 0) * DEG, 0);
+    light.rotation.set(
+      (Number.isFinite(Number(rec.rotX)) ? Number(rec.rotX) : AREA_LIGHT_DEFAULTS.rotX) * DEG,
+      (Number.isFinite(Number(rec.rotY)) ? Number(rec.rotY) : AREA_LIGHT_DEFAULTS.rotY) * DEG,
+      0
+    );
   }
 
   // 把数据记录实例化为真实灯光 + 辅助器，并挂进场景（rec.obj / rec.helper）
@@ -1903,10 +1909,11 @@ export function createEditor() {
       type: type === 'area' ? 'area' : 'point',
       x: controls.target.x, y: 3, z: controls.target.z,
       color: '#ffffff',
-      intensity: type === 'area' ? 3 : 20,
+      intensity: type === 'area' ? AREA_LIGHT_DEFAULTS.intensity : 20,
       // 面光源的 distance 只作用于阴影代理（照到多远 + 阴影贴图多远），默认跟 Lights.js 一致
-      distance: type === 'area' ? AREA_SHADOW_TUNING.distance : 12, decay: 2,
-      width: 4, height: 3, rotY: 0, rotX: -90,
+      distance: type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12, decay: 2,
+      width: AREA_LIGHT_DEFAULTS.width, height: AREA_LIGHT_DEFAULTS.height,
+      rotY: AREA_LIGHT_DEFAULTS.rotY, rotX: AREA_LIGHT_DEFAULTS.rotX,
     };
     buildLightObject(rec);
     state.lights.push(rec);
@@ -2022,12 +2029,12 @@ export function createEditor() {
     if (StepUI.lZ) StepUI.lZ.value = Math.round((rec.z ?? 0) * 100) / 100;
     if (StepUI.lColor) StepUI.lColor.value = lightColorHex(rec);
     if (StepUI.lIntensity) StepUI.lIntensity.value = rec.intensity ?? 0;
-    if (StepUI.lDistance) StepUI.lDistance.value = rec.distance ?? (isArea ? AREA_SHADOW_TUNING.distance : 12);
+    if (StepUI.lDistance) StepUI.lDistance.value = rec.distance ?? (isArea ? AREA_LIGHT_DEFAULTS.distance : 12);
     if (StepUI.lDecay) StepUI.lDecay.value = rec.decay ?? 2;
-    if (StepUI.lWidth) StepUI.lWidth.value = rec.width ?? 4;
-    if (StepUI.lHeight) StepUI.lHeight.value = rec.height ?? 3;
-    if (StepUI.lRotY) StepUI.lRotY.value = rec.rotY ?? 0;
-    if (StepUI.lRotX) StepUI.lRotX.value = rec.rotX ?? 0;
+    if (StepUI.lWidth) StepUI.lWidth.value = rec.width ?? AREA_LIGHT_DEFAULTS.width;
+    if (StepUI.lHeight) StepUI.lHeight.value = rec.height ?? AREA_LIGHT_DEFAULTS.height;
+    if (StepUI.lRotY) StepUI.lRotY.value = rec.rotY ?? AREA_LIGHT_DEFAULTS.rotY;
+    if (StepUI.lRotX) StepUI.lRotX.value = rec.rotX ?? AREA_LIGHT_DEFAULTS.rotX;
   }
 
   function syncLightPanel() {
@@ -2177,13 +2184,13 @@ export function createEditor() {
           intensity: rec.intensity ?? 1,
           // ⚠ 两种灯都要存 distance：面光源的 distance 不进存档的话，
           //   阴影代理的范围在保存/重开后就丢回默认值，游戏端也永远拿不到（等于白调）
-          distance: rec.distance ?? (rec.type === 'area' ? AREA_SHADOW_TUNING.distance : 12),
+          distance: rec.distance ?? (rec.type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12),
         };
         if (out.type === 'area') {
-          out.width = rec.width ?? 4;
-          out.height = rec.height ?? 3;
-          out.rotY = rec.rotY ?? 0;
-          out.rotX = rec.rotX ?? 0;
+          out.width = rec.width ?? AREA_LIGHT_DEFAULTS.width;
+          out.height = rec.height ?? AREA_LIGHT_DEFAULTS.height;
+          out.rotY = rec.rotY ?? AREA_LIGHT_DEFAULTS.rotY;
+          out.rotX = rec.rotX ?? AREA_LIGHT_DEFAULTS.rotX;
         } else {
           out.decay = rec.decay ?? 2;
         }
@@ -2274,14 +2281,16 @@ export function createEditor() {
         type: it.type === 'area' ? 'area' : 'point',
         x: num(it.x, 0), y: num(it.y, 3), z: num(it.z, 0),
         color: (typeof it.color === 'string' && it.color) ? it.color : '#ffffff',
-        intensity: num(it.intensity, it.type === 'area' ? 3 : 20),
+        intensity: num(it.intensity, it.type === 'area' ? AREA_LIGHT_DEFAULTS.intensity : 20),
         // 面光源的 distance 是阴影代理的范围，默认值跟 Lights.js 对齐（点光源仍是 12）
-        distance: num(it.distance, it.type === 'area' ? AREA_SHADOW_TUNING.distance : 12),
+        distance: num(it.distance, it.type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12),
         decay: num(it.decay, 2),
-        width: num(it.width, 4),
-        height: num(it.height, 3),
-        rotY: num(it.rotY, 0),
-        rotX: num(it.rotX, 0),
+        width: num(it.width, AREA_LIGHT_DEFAULTS.width),
+        height: num(it.height, AREA_LIGHT_DEFAULTS.height),
+        rotY: num(it.rotY, AREA_LIGHT_DEFAULTS.rotY),
+        // ⚠⚠ 这里早先写死 0（水平），而新建/游戏端是 -90（朝下）—— 存档里没 rotX 字段的老灯
+        //    载入后就被横过来 90°，也就是"面光源在家具里横着转"。现在统一取自 AREA_LIGHT_DEFAULTS。
+        rotX: num(it.rotX, AREA_LIGHT_DEFAULTS.rotX),
       };
       buildLightObject(rec);
       state.lights.push(rec);
@@ -3559,8 +3568,8 @@ export function createEditor() {
     }).filter((p) => /^\/(assets|models)\//.test(p.url));
     if (!parts.length) { setComboHint('草稿里的模型没有有效路径（需要 /assets 或 /models 的 glb）', 'err'); return; }
     const lights = state.lights.map((rec) => {
-      const out = { type: rec.type === 'area' ? 'area' : 'point', x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0, color: lightColorHex(rec), intensity: rec.intensity ?? 1, distance: rec.distance ?? (rec.type === 'area' ? AREA_SHADOW_TUNING.distance : 12) };
-      if (out.type === 'area') { out.width = rec.width ?? 4; out.height = rec.height ?? 3; out.rotY = rec.rotY ?? 0; out.rotX = rec.rotX ?? 0; }
+      const out = { type: rec.type === 'area' ? 'area' : 'point', x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0, color: lightColorHex(rec), intensity: rec.intensity ?? 1, distance: rec.distance ?? (rec.type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12) };
+      if (out.type === 'area') { out.width = rec.width ?? AREA_LIGHT_DEFAULTS.width; out.height = rec.height ?? AREA_LIGHT_DEFAULTS.height; out.rotY = rec.rotY ?? AREA_LIGHT_DEFAULTS.rotY; out.rotX = rec.rotX ?? AREA_LIGHT_DEFAULTS.rotX; }
       else { out.decay = rec.decay ?? 2; }
       return out;
     });
