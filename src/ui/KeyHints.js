@@ -67,8 +67,12 @@ export const KEYBINDS = [
 
 // 键位图块 URL。文件名里没有扩展名，这里统一补。
 // 用 Vite 的 BASE_URL 走相对路径，这样部署到子路径（GitHub Pages 项目页）也不会 404。
+//
+// ⚠ KEYS_VER：图块内容改过就 +1。浏览器按 URL 缓存 PNG，只 bump index.html 的 ?v 换不掉这些图片。
+//   （2026-10-05：字母区切图错位，a-z / 0-9 全部改由 tools/redraw-key-tiles.mjs 重绘 → 升到 v2）
+const KEYS_VER = '2';
 function keyUrl(name) {
-  return `${import.meta.env?.BASE_URL || '/'}ui/keys/${name}.png`;
+  return `${import.meta.env?.BASE_URL || '/'}ui/keys/${name}.png?v=${KEYS_VER}`;
 }
 
 // 造一个键位图块元素
