@@ -242,6 +242,7 @@ export class Game {
     // 放在加载屏期间做，玩家看不到合并那一下的开销；失败也不影响玩法。
     this._sceneReady = _fetchRemoteScene(this, this.scene, roots, this.colliders)
       .then(() => optimizeEditorScene(this.scene))
+      .then(() => this._precompileShaders())   // 预编译材质变体，灭掉首帧重编译冻结（在加载屏期间执行）
       .catch((e) => { console.warn('[Game] 场景优化失败（保持原样）:', e); });
 
     // ---- 输入 ----
@@ -910,10 +911,28 @@ export class Game {
     }
   }
 
+  // 加载期预编译所有材质变体（含阴影），把首帧/边走边卡的"多秒重编译冻结"挪到加载屏里。
+  // 前提：投影灯数量恒定（Lights.updateShadowBudgets 永远恰好 MAX_POINT_SHADOW+MAX_AREA_SHADOW 盏），
+  // 编译出的 program 在游戏中可复用，不会随走动触发全场重编译。
+  _precompileShaders() {
+    if (this._shadersCompiled) return;
+    try {
+      if (typeof updateShadowBudgets === 'function') updateShadowBudgets(this.camera.position);
+      if (this.renderer && typeof this.renderer.compile === 'function') {
+        this.renderer.compile(this.scene, this.camera);
+      }
+      this._shadersCompiled = true;
+    } catch (e) {
+      console.warn('[Game] 着色器预编译失败（忽略，退回运行时编译）:', e);
+    }
+  }
+
   _renderFrame() {
     // 点光源阴影名额：按「离相机最近」分配（最多 4 盏，见 Lights.js）。
     // 只在渲染前跑一次，成本是几十个灯的距离排序；数量恒定所以不会触发 shader 重编译。
     updateShadowBudgets(this.camera.position);
+    // 兜底：若加载期没编译完（异常路径），首帧在这里一次性预编译，避免游戏中边走边卡
+    if (!this._shadersCompiled) this._precompileShaders();
     // 距离分级：远处物体不投影、更远整块隐藏（内部 300ms 节流）。
     // 对战中城市建筑已整组隐藏，这边不再插手（否则会把它们设回可见，与对战隐藏打架）。
     if (!this._combat) updateLod(this.camera.position);

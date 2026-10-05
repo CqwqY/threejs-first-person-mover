@@ -309,6 +309,11 @@ const LIGHT_DEFAULTS = {
 // 面光源没有 distance/decay（LTC 自带平方反比），但阴影代理需要一个衰减半径，这里给个默认值
 const AREA_SHADOW_DEFAULT_DISTANCE = AREA_LIGHT_DEFAULTS.distance;
 
+// 阴影视锥上限（米）：线上编辑器灯常带 distance=100，会让每盏点光源的 6 个立方体阴影面
+// 把整场景各渲一遍 → 阴影成本爆炸。钳到 30m 后阴影相机 far 同步收紧，大幅降阴影趟开销。
+// 注：light.distance 同时决定灯照明半径，钳上限会把远距离灯变成"局部灯"（性能换观感）。
+const MAX_EDITOR_POINT_LIGHT_DIST = 30;
+
 // 数值容错：非有限数取默认值
 function finiteOr(v, dflt) {
   return (typeof v === 'number' && Number.isFinite(v)) ? v : dflt;
@@ -517,7 +522,7 @@ export function buildEditorLights(scene, dataOverride) {
       const light = new THREE.PointLight(
         color,
         intensity * LIGHT_SCALE,
-        finiteOr(it.distance, LIGHT_DEFAULTS.distance),
+        Math.min(finiteOr(it.distance, LIGHT_DEFAULTS.distance), MAX_EDITOR_POINT_LIGHT_DIST),
         finiteOr(it.decay, LIGHT_DEFAULTS.decay)
       );
       light.position.set(x, y, z);
