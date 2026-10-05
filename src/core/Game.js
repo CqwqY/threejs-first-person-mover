@@ -384,6 +384,11 @@ export class Game {
           setNameTagsVisible(v);   // 玩家头顶名牌总开关
           setHealthBarsVisible(v); // 血条跟着一起开关
         },
+        // 常驻帧数角标开关
+        showFps: (v) => {
+          if (!this._fpsBadge) return;
+          this._fpsBadge.el.style.display = v ? '' : 'none';
+        },
         // 昼夜循环开关。关掉后就没有「当前时刻」的概念了，必须把按时段关掉的灯全部点亮，
         // 否则上次被时段关掉的灯会一直是黑的（_updateDayNight 在关闭时直接 return，不会重算）。
         dayNight: (v) => { this._dayEnabled = !!v; if (!v) this._applyEditorLightDayState(null); },
@@ -400,7 +405,7 @@ export class Game {
         assetCache: () => this._clearAssetCache(),
       },
       {
-        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
+        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'showFps', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -756,6 +761,10 @@ export class Game {
     this._dropLabelMat = new Map(); // 物品名 → Sprite 材质（缓存，同名共用）
     // 性能 HUD：地址栏带 perf（#perf / ?perf）时出现，用于定位「卡在哪」（物理 / 渲染 / 其他）
     this._perf = perfEnabled() ? this._createPerfHud() : null;
+    // 常驻帧数角标（右上角）：默认可见、可在「设置 → 显示」关掉
+    this._fpsBadge = this._createFpsBadge();
+    this._fpsBadge.el.style.display = (loadSettings('scene-settings-game-v1').showFps === false) ? 'none' : '';
+    if (this._fpsBadge.el.style.display !== 'none') this._fpsBadge.shown = true;
   }
 
   // ============ 性能 HUD ============
@@ -1015,6 +1024,39 @@ export class Game {
       (this._useUpscale() ? ' 超分锐化' + (this._sharpen || 0).toFixed(1) : '') + '\n' +
       'GPU ' + this._gpuName();
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
+  }
+
+  // ============ 常驻帧数角标（右上角）============
+  // 与 #perf 那套「完整诊断 HUD」不同：这里只要一个数字，默认可见、可关（设置项 showFps）。
+  // 开销极小：复用主循环里已经算好的 _fpsAcc/_fpsN，不额外采样。
+  _createFpsBadge() {
+    const el = document.createElement('div');
+    // 右上角：避开顶部校卡（左侧）与按钮行；pointer-events:none 保证不挡触控。
+    el.style.cssText =
+      'position:fixed;top:calc(env(safe-area-inset-top, 0px) + 6px);' +
+      'right:calc(env(safe-area-inset-right, 0px) + 8px);z-index:9400;' +
+      'pointer-events:none;font:600 12px/1.2 ui-monospace,Menlo,Consolas,monospace;' +
+      'padding:3px 7px;border-radius:6px;color:#9df5bd;background:rgba(0,0,0,.55);' +
+      'border:1px solid rgba(157,245,189,.3);text-shadow:0 1px 2px rgba(0,0,0,.8);' +
+      'font-variant-numeric:tabular-nums;white-space:nowrap;';
+    el.textContent = '-- FPS';
+    el.style.display = 'none'; // 先藏，等首帧算出帧率再显示
+    document.body.appendChild(el);
+    return { el, txt: '', shown: false };
+  }
+
+  _updateFpsBadge(fps) {
+    const b = this._fpsBadge;
+    if (!b) return;
+    const n = Math.round(fps);
+    // 颜色分级：>=55 绿（流畅）/ >=30 黄（可接受）/ 其余红（卡）
+    const color = n >= 55 ? '#9df5bd' : (n >= 30 ? '#ffd76a' : '#ff8a8a');
+    const txt = n + ' FPS';
+    if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
+    // 数字与边框都按档位着色（一眼看出流畅/可接受/卡）
+    b.el.style.color = color;
+    b.el.style.borderColor = color;
+    if (!b.shown) { b.el.style.display = ''; b.shown = true; }
   }
 
   // 左下角血量条：数值 + 横条，满血绿色、越低越红
@@ -6991,6 +7033,7 @@ export class Game {
       const fps = this._fpsN / this._fpsAcc;
       this._fpsAcc = 0; this._fpsN = 0;
       this._adaptResolution(fps);
+      this._updateFpsBadge(fps); // 复用同一份帧率，零额外采样
     }
 
     // 性能 HUD（#perf）：把一帧拆成 物理 / 渲染 / 其他 三段，每 0.25s 刷一次

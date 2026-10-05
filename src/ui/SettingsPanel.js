@@ -29,6 +29,7 @@ export const DEFAULT_SETTINGS = {
   antiAlias:
     typeof localStorage !== 'undefined' && localStorage.getItem('fpm-noaa') === '1' ? 'off' : 'on',
   nameTag: true, // 是否显示玩家头顶名牌（仅客户端本地生效）
+  showFps: true, // 右上角常驻帧数角标（默认开；关掉即隐藏，不影响玩法）
   skillLayout: '轮盘', // 手机技能槽排布：轮盘 / 2行竖列（PC 无影响）
   rideView: '视角操控', // 骑车视角：视角操控（自由视角，鼠标可左右掰头看）/ 锁视角（相机恒在车后）
   dayNight: true, // 是否开启昼夜循环
@@ -128,6 +129,7 @@ const FIELDS = [
   },
   { id: 'castShadow', label: '阴影开关', kind: 'toggle', defaultValue: true, group: '视野与阴影' },
   { id: 'nameTag', label: '显示名牌与血条', kind: 'toggle', defaultValue: true, group: '显示' },
+  { id: 'showFps', label: '显示帧数(FPS)', kind: 'toggle', defaultValue: true, group: '显示', gameOnly: true },
   // 手机端技能槽的两种排布：轮盘省地方但要点两下；网格一眼看见、点一下就用（仅触屏生效）
   { id: 'skillLayout', label: '手机技能槽', kind: 'select', options: ['轮盘', '2行竖列'], group: '显示', gameOnly: true },
   { id: 'rideView', label: '骑车视角', kind: 'select', options: ['视角操控', '锁视角'], group: '显示', gameOnly: true },
