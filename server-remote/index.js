@@ -277,10 +277,12 @@ function loadBuildings() {
 function saveBuildings(list) { fs.writeFileSync(BUILD_FILE, JSON.stringify(list, null, 2)); }
 
 // ---- 建造范围（可摆家具的矩形区域，AABB）：编辑器可改，全服即时生效 ----
-// 默认 = 场景里「编号 92 / 104」两栋教学楼的占地范围（与客户端 Config.BUILD_AREAS 一致）。
+// ⚠ 这两组是**实机校准**的值（在编辑器「家具」页对着场景调好后保存），**不是**按 collider 半宽算的
+//   —— 早期用「物件位置 + collider 半宽高按 rotY=-90° 换算」，Z 对得上但 X 整体偏了 ~26 米。
+//   这里只在 data/buildareas.json 不存在/为空时兜底，正常以文件里的值为准。改这里记得和 src/config.js 对齐。
 const DEFAULT_AREAS = [
-  { name: '教学楼111', minX: -63.2, maxX: 24.8, minZ: 51.5, maxZ: 130.4 },
-  { name: '行政楼', minX: -5.7, maxX: 59.1, minZ: 44.8, maxZ: 131.8 },
+  { name: '教学楼111', minX: -116, maxX: -8, minZ: 56, maxZ: 136 },
+  { name: '行政楼', minX: 21, maxX: 91, minZ: 51, maxZ: 139 },
 ];
 function sanitizeAreas(list) {
   const out = [];
