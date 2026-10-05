@@ -30,6 +30,16 @@ export function applyEnvironment(scene, renderer, equirectTexture) {
   }
 }
 
+// ---- 各时段的环境光强度 ----
+// ⚠ 为什么是「调强度」而不是「随时段换环境贴图」（这里踩过坑）：
+//   ① 换 scene.environment = 把整片场景的间接光来源整体换掉。所有 MeshStandardMaterial 的
+//      环境贡献都来自它，换的瞬间色温/亮度会**跳变**（入夜时表现为"啪"一下变蓝变暗）。
+//   ② 生成一份新环境贴图要同步跑一遍 PMREMGenerator（渲染 6 个面 + 生成 mip 链），
+//      在帧里做就是一次几十毫秒的卡顿 —— 时段一换就掉帧。
+//   现在改成：贴图只用一张（加载后定死），亮度靠这个标量随天色平滑变化，开销为零。
+const ENV_INTENSITY = { morning: 0.8, day: 1.0, night: 0.4, space: 0.2 };
+const ENV_LERP_TAU = 0.8; // 指数平滑时间常数（秒）：越大越慢越柔
+
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
 
@@ -149,11 +159,13 @@ function skyBlend(t) {
 export function createTimeSky(scene, renderer) {
   const fallback = createSky(scene); // 贴图没加载出来前的兜底，加载成功后隐藏
   const domes = new Map();
-  const textures = new Map(); // key -> 等距圆柱贴图（时段切换时用来更新环境反射）
   let anyLoaded = false;
-  let envKey = null;
+  let envUpgraded = false;      // 是否已用时段贴图升级过环境反射（第一张到了就升级，只做一次）
+  let envUpgradedFromDay = false;
+  let envIntensity = 1;         // 当前环境光强度（每帧向目标平滑逼近）
+  let lastNow = 0;
 
-  if (renderer) applyEnvironment(scene, renderer, null); // 基础环境，立刻生效
+  if (renderer) applyEnvironment(scene, renderer, null); // 基础环境，立刻生效（RoomEnvironment）
 
   for (const key of Object.keys(SKYBOX_URLS)) {
     const mat = new THREE.MeshBasicMaterial({
@@ -184,7 +196,13 @@ export function createTimeSky(scene, renderer) {
           mat.needsUpdate = true;
           anyLoaded = true;
           fallback.visible = false;
-          textures.set(key, texture); // 留给 update() 生成环境反射
+          // 环境反射升级：第一张到的时段贴图建一份；若第一张不是白天，等白天到了再补升一次。
+          // 之后**再也不动**（时段变化只改 scene.environmentIntensity）。
+          if (renderer && (!envUpgraded || (key === 'day' && !envUpgradedFromDay))) {
+            applyEnvironment(scene, renderer, texture);
+            envUpgraded = true;
+            if (key === 'day') envUpgradedFromDay = true;
+          }
         },
         undefined,
         () => {
@@ -199,11 +217,24 @@ export function createTimeSky(scene, renderer) {
 
   function update(t, camera) {
     const { from, to, a } = skyBlend(t);
-    // 时段变化 → 同步换一份环境反射（金属/光滑材质跟着天色走；没这一步它们会一直用初始那份）
-    if (renderer && from !== envKey && textures.has(from)) {
-      envKey = from;
-      applyEnvironment(scene, renderer, textures.get(from));
+
+    // 环境光强度：目标值 = 当前时段与下一时段按过渡进度 a 的混合，再向它指数逼近。
+    // a 只在每段最后 SKY_FADE_RATIO 里从 0 涨到 1，所以「环境变暗/变亮」与天空球壳的
+    // 交叉淡入**同步**、且是渐变的 —— 不会再出现入夜时啪一下变色。
+    if (renderer && scene.environment) {
+      const iFrom = ENV_INTENSITY[from] ?? 1;
+      const iTo = to ? (ENV_INTENSITY[to] ?? iFrom) : iFrom;
+      const target = iFrom + (iTo - iFrom) * a;
+      const now = performance.now();
+      const dt = lastNow ? Math.min(0.25, (now - lastNow) / 1000) : 0;
+      lastNow = now;
+      // dt=0（首帧）直接用目标值，省去开局从 1 慢慢变暗的过程
+      envIntensity = dt
+        ? envIntensity + (target - envIntensity) * (1 - Math.exp(-dt / ENV_LERP_TAU))
+        : target;
+      scene.environmentIntensity = envIntensity;
     }
+
     for (const [key, mesh] of domes) {
       let opacity = 0;
       let order = -1;
