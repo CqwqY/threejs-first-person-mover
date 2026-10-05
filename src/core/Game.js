@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { createLights, updatePointLightShadows } from '../world/Lights.js';
+import { createLights, updateShadowBudgets } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -893,7 +893,7 @@ export class Game {
   _renderFrame() {
     // 点光源阴影名额：按「离相机最近」分配（最多 4 盏，见 Lights.js）。
     // 只在渲染前跑一次，成本是几十个灯的距离排序；数量恒定所以不会触发 shader 重编译。
-    updatePointLightShadows(this.camera.position);
+    updateShadowBudgets(this.camera.position);
     // 距离分级：远处物体不投影、更远整块隐藏（内部 300ms 节流）。
     // 对战中城市建筑已整组隐藏，这边不再插手（否则会把它们设回可见，与对战隐藏打架）。
     if (!this._combat) updateLod(this.camera.position);

@@ -26,7 +26,7 @@ import { buildTrackPath, disposeTrackViz } from '../world/TrackViz.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
-import { updatePointLightShadows, registerPointLight, unregisterPointLight } from '../world/Lights.js';
+import { updateShadowBudgets, registerPointLight, unregisterPointLight, enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, releaseAreaShadow } from '../world/Lights.js';
 import { createSettingsPanel, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 
 const DEG = Math.PI / 180;
@@ -1793,6 +1793,8 @@ export function createEditor() {
       );
       light.position.set(rec.x ?? 0, rec.y ?? 3, rec.z ?? 0);
       applyAreaOrientation(light, rec);
+      // 接上阴影代理（面光源自己不能投影）—— 预览里就能看出光有没有被墙挡住
+      enableAreaShadow(light, { distance: rec.distance ?? 0 });
       const helper = new RectAreaLightHelper(light);
       light.add(helper); // RectAreaLightHelper 必须作为灯光的子节点才能跟随朝向
       scene.add(light);
@@ -1807,7 +1809,7 @@ export function createEditor() {
         rec.decay ?? 2
       );
       light.position.set(rec.x ?? 0, rec.y ?? 3, rec.z ?? 0);
-      // 登记点光源：预览里就能看出光有没有被墙挡住（「面光源」做不到——RectAreaLight 不支持阴影）
+      // 登记点光源：预览里就能看出光有没有被墙挡住（名额分配按离相机的距离）
       registerPointLight(light);
       scene.add(light);
       const helper = new THREE.PointLightHelper(light, 0.4);
@@ -1823,12 +1825,15 @@ export function createEditor() {
     if (!light) return;
     light.position.set(rec.x ?? 0, rec.y ?? 3, rec.z ?? 0);
     light.color.set(lightColorHex(rec));
-    light.intensity = rec.intensity ?? 0;
     if (rec.type === 'area') {
+      // 面光源：亮度要拆给阴影代理，不能直接写 light.intensity（那样基准值会失真、越调越暗）
+      setAreaBaseIntensity(light, rec.intensity ?? 0);
       light.width = Math.max(0.01, rec.width ?? 4);
       light.height = Math.max(0.01, rec.height ?? 3);
       applyAreaOrientation(light, rec);
+      syncAreaShadow(light); // 尺寸/颜色变了也要重算代理亮度（代理照度 ∝ 宽×高）
     } else {
+      light.intensity = rec.intensity ?? 0;
       light.distance = Math.max(0, rec.distance ?? 0);
       light.decay = Math.max(0, rec.decay ?? 2);
     }
@@ -1909,6 +1914,7 @@ export function createEditor() {
     }
     if (rec.obj) {
       unregisterPointLight(rec.obj); // 从阴影管理器注销，别占着名额
+      releaseAreaShadow(rec.obj);    // 面光源：归还阴影代理（非面光源会直接返回）
       scene.remove(rec.obj);
       if (typeof rec.obj.dispose === 'function') rec.obj.dispose();
     }
@@ -3867,7 +3873,7 @@ export function createEditor() {
     sun.position.copy(sunTarget.position).add(sunOffset);
     sunTarget.updateMatrixWorld();
     // 点光源阴影名额按「离相机最近」分配（最多 4 盏），其余只照亮不遮挡（见 Lights.js）
-    updatePointLightShadows(camera.position);
+    updateShadowBudgets(camera.position);
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(loop);
   }

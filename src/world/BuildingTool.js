@@ -13,7 +13,7 @@ import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '.
 import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
 import { Config } from '../config.js';
-import { registerPointLight } from './Lights.js';
+import { registerPointLight, enableAreaShadow } from './Lights.js';
 
 const DEG = Math.PI / 180;
 
@@ -282,6 +282,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
             DEG * (Number(l.rotY) || 0),
             0
           );
+          // 面光源本身不能投影（RectAreaLight 无 shadow 字段）→ 接一盏阴影代理聚光灯，
+          // 由它真正被墙挡住（亮度拆分与单位换算见 Lights.enableAreaShadow）。
+          enableAreaShadow(area, { distance: Number(l.distance) || 0 });
           g.add(area);
         } else {
           const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);
@@ -295,6 +298,14 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
   function meshFrom(proto, rec) {
     const m = proto.clone(true); touchShadow(m);
+    // ⚠ clone(true) 会把面光源的阴影代理一起拷过来，但 three 的 SpotLight.copy 做的是
+    //   `this.target = source.target.clone()` —— 拷出来的是**游离节点**，不在场景图里、
+    //   matrixWorld 永远不更新 → 光向会算错（照向世界原点方向）。
+    //   这里对每盏面光源重新 enableAreaShadow：复用拷来的代理，并把 target 重新挂回自己的子树。
+    //   基准亮度存在 userData（数字，能安全穿过 clone 的 JSON 深拷贝），所以不会越调越暗。
+    const areas = [];
+    m.traverse((o) => { if (o.isRectAreaLight) areas.push(o); });
+    for (const a of areas) enableAreaShadow(a);
     m.scale.setScalar(rec && rec.scale ? rec.scale : 1);
     m.rotation.y = ((rec && rec.rotY) ? rec.rotY : 0) * DEG;
     m.position.set(rec ? rec.x : 0, (rec && rec.y) || 0, rec ? rec.z : 0);

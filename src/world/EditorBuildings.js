@@ -10,7 +10,9 @@ import { editorMapData } from './editorMapData.js';
 import { API_BASE } from '../config.js';
 import { bakeTriMeshAsync } from './collision/trimesh.js';
 import { track } from './loadTracker.js';
-import { registerPointLight, unregisterPointLight } from './Lights.js';
+import {
+  registerPointLight, unregisterPointLight, enableAreaShadow, releaseAreaShadow, clearShadowBudgets,
+} from './Lights.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
@@ -254,6 +256,7 @@ function countMeshes(root) {
 export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
   clearHolders(scene); // 重跑前先移除上一次添加的 holder，避免重复叠加
   clearLodTargets(); // 场景重建 → 上一轮的 LOD 登记全部作废
+  clearShadowBudgets(); // 同理：上一轮的阴影名额登记全部作废（旧灯会被 disposeLight 逐个注销，这里先兜底防漏）
   const gen = ++_buildGen; // 本次构建代数（异步烘焙回调据此丢弃过期结果）
   _pendingLoads = [];  // 本次构建的模型加载 Promise（供 optimizeEditorScene 等待「都加载完」）
   let data = dataOverride || editorMapData || {};
@@ -470,6 +473,8 @@ function ensureRectAreaLib() {
 
 // 各字段缺省值（与编辑器约定保持一致）
 const LIGHT_DEFAULTS = { color: '#ffffff', intensity: 1, distance: 12, decay: 2, width: 4, height: 3, rotY: 0, rotX: -90 };
+// 面光源没有 distance/decay（LTC 自带平方反比），但阴影代理需要一个衰减半径，这里给个默认值
+const AREA_SHADOW_DEFAULT_DISTANCE = 14;
 
 // 数值容错：非有限数取默认值
 function finiteOr(v, dflt) {
@@ -486,7 +491,10 @@ function colorOf(v) {
 // 释放光源：Light 本身不占 GPU 资源，但仍按需清理其子树可能携带的几何/材质，避免残留。
 // 同时从阴影管理器注销 —— 本函数会被调用两次（打包数据 + 远端数据），不注销的话旧灯会一直占着名额。
 function disposeLight(obj) {
+  // ⚠ 面光源要先归还阴影代理（它会把本体亮度改回去并注销名额），再走下面的子树清理
+  if (obj.isRectAreaLight) releaseAreaShadow(obj);
   obj.traverse((o) => {
+    if (o.isRectAreaLight) releaseAreaShadow(o);
     if (o.isLight) unregisterPointLight(o);
     if (o.geometry && o.geometry.dispose) o.geometry.dispose();
     if (o.material) {
@@ -669,7 +677,7 @@ export function buildEditorLights(scene, dataOverride) {
       );
       light.position.set(x, y, z);
       // 点光源登记进阴影管理器 → 光被墙挡住，不会照进隔壁房间
-      // （谁真正投影由 Lights.updatePointLightShadows 按离相机远近决定，最多 4 盏）
+      // （谁真正投影由 Lights.updateShadowBudgets 按离相机远近决定，最多 4 盏）
       registerPointLight(light);
       group.add(light);
     } else if (it.type === 'area') {
@@ -689,6 +697,9 @@ export function buildEditorLights(scene, dataOverride) {
         THREE.MathUtils.degToRad(finiteOr(it.rotY, LIGHT_DEFAULTS.rotY)),
         0
       );
+      // 面光源自己不能投影（RectAreaLight 没有 shadow 字段，LTC 模型不支持）→ 配一盏阴影代理聚光灯。
+      // 代理会分走大部分亮度并真正被墙挡住，本体留一小部分保留面光质感。见 Lights.enableAreaShadow。
+      enableAreaShadow(light, { distance: finiteOr(it.distance, AREA_SHADOW_DEFAULT_DISTANCE) });
       group.add(light);
     } else {
       continue; // 未知类型跳过
