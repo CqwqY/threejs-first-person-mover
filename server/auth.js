@@ -9,6 +9,7 @@ import fs from 'node:fs';
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // token 有效期 30 天
 const SCRYPT_LEN = 64;
 const MAX_SESSIONS_PER_USER = 10;             // 单账号保留的会话上限，超出踢掉最旧的
+const MAX_LOGIN_LOG = 20;                     // 单账号保留的登录记录条数
 const MIN_USERNAME_LEN = 3;
 const MAX_USERNAME_LEN = 20;
 const MIN_PASSWORD_LEN = 8;
@@ -152,6 +153,17 @@ export function initAuth(dbPath) {
       created_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL
     );
+    -- 登录记录：每次登录写一条（真实 IP + 时间 + UA）。
+    -- 反代后面 socket.remoteAddress 恒为 127.0.0.1，所以 IP 必须走 clientIp()（读 XFF），
+    -- 否则记下来全是回环地址，等于没记。
+    CREATE TABLE IF NOT EXISTS login_log(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      ip TEXT NOT NULL DEFAULT '',
+      ua TEXT NOT NULL DEFAULT '',
+      at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_login_log_user ON login_log(user_id, at DESC);
   `);
 
   const stmts = {
@@ -182,6 +194,12 @@ export function initAuth(dbPath) {
     getState: db.prepare('SELECT data, rev FROM user_state WHERE user_id = ?'),
     setState: db.prepare(`INSERT INTO user_state(user_id, data, rev, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, rev = excluded.rev, updated_at = excluded.updated_at`),
+    // 登录记录（只保留最近 MAX_LOGIN_LOG 条，防止无限增长）
+    insertLogin: db.prepare('INSERT INTO login_log(user_id, ip, ua, at) VALUES (?, ?, ?, ?)'),
+    recentLogin: db.prepare('SELECT ip, ua, at FROM login_log WHERE user_id = ? ORDER BY at DESC LIMIT 1'),
+    trimLogins: db.prepare(`DELETE FROM login_log WHERE user_id = ? AND id NOT IN (
+      SELECT id FROM login_log WHERE user_id = ? ORDER BY at DESC LIMIT ?
+    )`),
   };
 
   const bagOf = (userId) => {
@@ -241,6 +259,25 @@ export function initAuth(dbPath) {
     stmts.insertSession.run(sha256(token), userId, now, now + SESSION_TTL_MS);
     stmts.trimSessions.run(userId, userId, MAX_SESSIONS_PER_USER);
     return token; // 明文 token 只回给客户端，不入库
+  }
+
+  // 记一次登录：真实 IP + 时间（+ UA）。返回本次与上一次，供界面显示「本次 / 上次登录」。
+  // 调用点：POST /api/login、POST /api/register（注册即登录）、GET /api/profile（带 token 自动进入）。
+  // 写库失败只警告，绝不因此让登录失败。
+  function logLogin(userId, req) {
+    const h = (req && req.headers) || {};
+    const ip = clientIp(req);
+    const ua = str(h['user-agent'], 160);
+    const at = Date.now();
+    let prev = null;
+    try { prev = stmts.recentLogin.get(userId); } catch (e) { /* ignore */ }
+    try {
+      stmts.insertLogin.run(userId, ip, ua, at);
+      stmts.trimLogins.run(userId, userId, MAX_LOGIN_LOG);
+    } catch (e) {
+      console.warn('[auth] 登录记录写入失败:', e);
+    }
+    return { ip, at, ua, prevIp: prev ? prev.ip : '', prevAt: prev ? prev.at : 0 };
   }
 
   // 返回单用户完整档案（含预留给皮肤/背包的列表）
@@ -330,6 +367,8 @@ export function initAuth(dbPath) {
 
       // 登录失败才计数（成功不计，避免正常用户被自己的成功登录拖累）
       if (!out.ok && p === '/api/login') { pushCount('ip:' + ip); pushCount('u:' + name); }
+      // 成功即记一次登录（真实 IP + 时间），随 profile 一起回给客户端展示
+      if (out.ok && out.profile) out.profile = { ...out.profile, login: logLogin(out.profile.userId, req) };
       sendJSON(res, out.ok ? 200 : 401, out);
       return true;
     }
@@ -339,7 +378,8 @@ export function initAuth(dbPath) {
       if (!user) { sendJSON(res, 401, { ok: false, error: '未登录或已过期' }); return true; }
 
       if (req.method === 'GET') {
-        sendJSON(res, 200, { ok: true, profile: fullProfile(user) });
+        // 带 token 自动进游戏也算一次登录 → 同样记真实 IP + 时间（这就是「每次登录取一次」）
+        sendJSON(res, 200, { ok: true, profile: { ...fullProfile(user), login: logLogin(user.id, req) } });
         return true;
       }
       if (req.method === 'POST') {
@@ -496,13 +536,15 @@ export function initAuth(dbPath) {
   }
 
   // 依 token 解析用户公开资料（供 WS 登录后挂身份 / 名牌展示）
+  // ⚠ 必须带上 userId：中继的「归属键」（ownerKeyOf）和兑换码记账都靠它区分登录玩家，
+  //   只返回昵称的话登录用户会被当成游客（按 IP 归属），互相能删对方的家具。
   function getPublicByToken(tok) {
     const t = str(tok, 128).trim();
     if (!t) return null;
     const user = userFromAuth({ headers: { authorization: 'Bearer ' + t } });
     if (!user) return null;
     const p = stmts.profile.get(user.id) || {};
-    return publicProfile(p, user);
+    return { ...publicProfile(p, user), userId: user.id };
   }
 
   return { handleRequest, getPublicByToken };

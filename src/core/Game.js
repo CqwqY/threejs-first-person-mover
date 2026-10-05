@@ -1189,7 +1189,9 @@ export class Game {
       case 'auth': {
         // 服务端确认登录结果：刷新本地资料（昵称/颜色用于 HUD 与自己的名牌）
         if (msg.ok && msg.profile) {
-          this._profile = msg.profile;
+          // 合并而非整体覆盖：这份 profile 来自 WS 鉴权（公开字段），不含登录记录（login），
+          // 直接覆盖会把「本次/上次登录 IP 与时间」擦掉。
+          this._profile = { ...this._profile, ...msg.profile };
           this.playerHUD.setProfile(msg.profile);
           this._refreshLocalLabel();
           this._syncBagFromCloud(); // 账号确定后（昵称/用户名到位）再同步一次背包

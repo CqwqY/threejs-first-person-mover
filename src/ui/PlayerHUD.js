@@ -134,6 +134,16 @@ function ensureCardLayout() {
   document.head.appendChild(st);
 }
 
+// 「本次/上次登录」的显示文本：真实 IP · 本地时间（月-日 时:分）。
+// 数据来自服务端 /api/login 与 /api/profile 的 profile.login（服务端读 XFF 拿真实 IP）。
+function loginText(ip, at) {
+  if (!at) return '—';
+  const d = new Date(at);
+  const p2 = (n) => String(n).padStart(2, '0');
+  const when = (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  return (ip || '未知 IP') + ' · ' + when;
+}
+
 // profile：登录资料（可为 null，如本地有 token 但服务端还没回执）
 // hasToken：本地是否持有会话 token，决定「退出登录」是否可用
 export function createPlayerHUD(profile, hasToken) {
@@ -163,6 +173,8 @@ export function createPlayerHUD(profile, hasToken) {
           <div class="idc-row"><span>背包</span><b data-k="bag" class="kui-num"></b></div>
           <div class="idc-row"><span>学币</span><b data-k="coins" class="kui-num"></b></div>
           <div class="idc-row"><span>编号</span><b data-k="id" class="kui-num"></b></div>
+          <div class="idc-row"><span>本次登录</span><b data-k="loginNow"></b></div>
+          <div class="idc-row"><span>上次登录</span><b data-k="loginPrev"></b></div>
         </div>
         <button class="idc-quit kui-btn kui-btn--danger" type="button">退出登录</button>
       </div>
@@ -201,12 +213,17 @@ export function createPlayerHUD(profile, hasToken) {
   });
 
   let logged = !!hasToken;
+  // 登录信息（真实 IP / 时间）只在登录那一刻由服务端给一次，
+  // 之后 WS 的 auth 回执会带一份**不含 login** 的精简资料把 profile 覆盖掉 ——
+  // 所以这里缓存一份，缺失时沿用，避免卡片上的登录信息被擦成「—」。
+  let lastLogin = null;
 
   // p：登录资料；tokenPresent：是否仍持有有效会话（令牌失效时传 false 退回游客态）
   function setProfile(p, tokenPresent = logged) {
     logged = !!tokenPresent;
     const name = p ? (p.nickname || p.username || '玩家') : (logged ? '登录中…' : '游客');
     const color = (p && p.nicknameColor) || '#8a94a6';
+    if (p && p.login) lastLogin = p.login;
 
     miniName.textContent = name;
     miniDot.style.background = color;
@@ -224,6 +241,17 @@ export function createPlayerHUD(profile, hasToken) {
     cells.skin.textContent = (p && p.skin) || '默认';
     cells.bag.textContent = p && Array.isArray(p.bag) ? String(p.bag.length) : '0';
     cells.id.textContent = p && p.userId != null ? String(p.userId) : '—';
+
+    // 本次 / 上次登录（真实 IP + 时间）：游客没有，显示「—」
+    if (cells.loginNow) {
+      cells.loginNow.textContent = lastLogin ? loginText(lastLogin.ip, lastLogin.at) : '—';
+      cells.loginNow.title = lastLogin ? ('本次登录：' + loginText(lastLogin.ip, lastLogin.at)) : '未登录（游客）';
+    }
+    if (cells.loginPrev) {
+      const hasPrev = !!(lastLogin && lastLogin.prevAt);
+      cells.loginPrev.textContent = hasPrev ? loginText(lastLogin.prevIp, lastLogin.prevAt) : (lastLogin ? '首次登录' : '—');
+      cells.loginPrev.title = hasPrev ? ('上次登录：' + loginText(lastLogin.prevIp, lastLogin.prevAt)) : '';
+    }
 
     quit.classList.toggle('hidden', !logged);
     if (!logged) root.classList.remove('open'); // 游客没有详情可看，保持收起

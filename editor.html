@@ -191,7 +191,7 @@
       <div id="gateMsg" class="gate-msg"></div>
       <button id="gateGo" type="button">进入编辑器</button>
       <div class="gate-tip">
-        密钥 = 服务端的 SHOP_ADMIN_TOKEN（「道具 / 家具 / 兑换码」都用它）。<br />
+        密钥由服务器管理员持有。<br />
         通过后本次会话内不再重复询问，并自动填进各面板的密钥框。
       </div>
     </div>
@@ -269,10 +269,10 @@
         </div>
         <div id="shopPanel" style="display:none">
           <div class="panel-title">道具管理（在线）</div>
-          <div id="shopHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">改价格即时全服生效。需要管理员密钥（默认 fpm-shop-admin，生产请用环境变量 SHOP_ADMIN_TOKEN 覆盖）。</div>
+          <div id="shopHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">改价格即时全服生效。需要管理员密钥。</div>
           <div class="field">
             <label>密钥</label>
-            <input id="shopToken" type="password" placeholder="fpm-shop-admin" style="flex:1" />
+            <input id="shopToken" type="password" placeholder="管理员密钥" style="flex:1" />
             <button id="shopRefresh" class="import-btn" type="button" style="flex:0 0 auto">刷新</button>
           </div>
           <div id="shopList" style="max-height:190px;overflow:auto;margin:6px 0;font-size:12px;line-height:1.6;color:#cfe0f5"></div>
@@ -319,11 +319,11 @@
         <div id="furnPanel" style="display:none">
           <div class="panel-title">已摆家具（全服）</div>
           <div id="furnHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
-            列出全服玩家摆出的家具，勾选后删除；也可一键清空。需要管理员密钥（同「道具」页，默认 fpm-shop-admin）。
+            列出全服玩家摆出的家具，勾选后删除；也可一键清空。需要管理员密钥（同「道具」页）。
           </div>
           <div class="field">
             <label>密钥</label>
-            <input id="furnToken" type="password" placeholder="fpm-shop-admin" style="flex:1" />
+            <input id="furnToken" type="password" placeholder="管理员密钥" style="flex:1" />
             <button id="furnRefresh" class="import-btn" type="button" style="flex:0 0 auto">刷新</button>
           </div>
           <div id="furnList" style="max-height:230px;overflow:auto;margin:6px 0;font-size:12px;line-height:1.6;color:#cfe0f5"></div>
@@ -353,7 +353,7 @@
           </div>
           <div class="field">
             <label>密钥</label>
-            <input id="codesToken" type="password" placeholder="fpm-shop-admin" style="flex:1" />
+            <input id="codesToken" type="password" placeholder="管理员密钥" style="flex:1" />
             <button id="codesRefresh" class="import-btn" type="button" style="flex:0 0 auto">刷新</button>
           </div>
           <div id="codesList" style="max-height:200px;overflow:auto;margin:6px 0;font-size:12px;line-height:1.6;color:#cfe0f5"></div>
@@ -467,6 +467,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261005b"></script>
+  <script type="module" src="./src/editor/main.js?v=20261005c"></script>
 </body>
 </html>

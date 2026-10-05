@@ -167,7 +167,21 @@ const BUILD_FILE = path.join(DATA_DIR, 'buildings.json');
 const AREAS_FILE = path.join(DATA_DIR, 'buildareas.json');
 const CODES_FILE = path.join(DATA_DIR, 'redeem-codes.json');
 const REDEEM_LOG_FILE = path.join(DATA_DIR, 'redeems.json');
-const SHOP_ADMIN_TOKEN = process.env.SHOP_ADMIN_TOKEN || 'fpm-shop-admin'; // 改价格用管理员密钥；生产请用 env 覆盖
+// 管理员密钥（改商店 / 家具 / 建造范围 / 兑换码、进编辑器都用它）。
+// 解析顺序：环境变量 SHOP_ADMIN_TOKEN > data/admin-token.txt（服务器本地文件）> 默认值并落一份该文件。
+// ⚠ 绝不写进前端：editor.html 是公网静态页，写在那里等于把后台钥匙贴在门上。
+const ADMIN_TOKEN_FILE = path.join(DATA_DIR, 'admin-token.txt');
+const SHOP_ADMIN_TOKEN = (() => {
+  const env = String(process.env.SHOP_ADMIN_TOKEN || '').trim();
+  if (env) return env;
+  try {
+    const t = fs.readFileSync(ADMIN_TOKEN_FILE, 'utf8').trim();
+    if (t) return t;
+  } catch (e) { /* 首次启动还没有 → 下面落一份 */ }
+  const def = 'Caiyizun1';
+  try { fs.writeFileSync(ADMIN_TOKEN_FILE, def + '\n', { mode: 0o600 }); } catch (e) { /* ignore */ }
+  return def;
+})();
 
 // 建造限流（防爆服务器）：个人上限 / 全局上限 / 放置冷却 / 缩放封顶 / 坐标钳制
 const BUILD_PER_PLAYER = 5;

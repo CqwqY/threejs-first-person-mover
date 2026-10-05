@@ -34,3 +34,10 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 *.local
+
+# 服务端运行期数据（绝不能入库）：管理员密钥 data/admin-token.txt、玩家账号库、
+# 地图/商店/建造/兑换码数据。server-remote/data/.gitkeep 例外保留（占位用）。
+server-remote/data/*
+!server-remote/data/.gitkeep
+server/data/*
+!server/data/.gitkeep
