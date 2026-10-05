@@ -86,6 +86,30 @@
       flex: 1; background: #1d1d1d; color: #e6e6e6; border: 1px solid #3a3a3a; border-radius: 3px; padding: 3px 6px;
     }
 
+    /* 进门密码遮罩：没通过校验前盖住整个界面。
+       校验是**打服务端 /api/admin/verify**，不是前端比对 —— 前端只负责挡住入口。 */
+    #gate {
+      position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center;
+      background: #141414;
+    }
+    #gate .gate-box {
+      width: 330px; padding: 22px 20px; background: #232323; border: 1px solid #3a3a3a; border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+    }
+    #gate .gate-title { font-size: 16px; font-weight: 700; color: #ffd479; margin-bottom: 4px; }
+    #gate .gate-sub { color: #9aa4b1; font-size: 12px; margin-bottom: 12px; }
+    #gate input[type=password] {
+      width: 100%; background: #1d1d1d; color: #e6e6e6; border: 1px solid #3a3a3a; border-radius: 4px;
+      padding: 7px 9px; font: inherit;
+    }
+    #gate button {
+      width: 100%; margin-top: 10px; padding: 8px; border: 0; border-radius: 4px; cursor: pointer;
+      background: #2e7d5b; color: #fff; font: inherit;
+    }
+    #gate button:disabled { opacity: .55; cursor: default; }
+    #gate .gate-msg { min-height: 17px; font-size: 12px; margin-top: 9px; color: #ff8888; line-height: 1.5; }
+    #gate .gate-tip { font-size: 11px; color: #7d8894; line-height: 1.6; margin-top: 10px; }
+
     /* 碰撞体列表（分类显示：盒 / 凸包），每项带删除按钮 */
     #cList { max-height: 220px; overflow-y: auto; }
     #cList .cgroup { color: #8a93a0; font-size: 11px; margin: 4px 0 2px; }
@@ -158,6 +182,20 @@
   </style>
 </head>
 <body>
+  <!-- 进门密码：进入编辑器前必须先通过服务端校验（不通过就不放行，遮罩一直盖着） -->
+  <div id="gate">
+    <div class="gate-box">
+      <div class="gate-title">城市建筑编辑器</div>
+      <div class="gate-sub">请输入管理员密钥</div>
+      <input id="gatePass" type="password" placeholder="管理员密钥" autocomplete="off" spellcheck="false" />
+      <div id="gateMsg" class="gate-msg"></div>
+      <button id="gateGo" type="button">进入编辑器</button>
+      <div class="gate-tip">
+        密钥 = 服务端的 SHOP_ADMIN_TOKEN（「道具 / 家具 / 兑换码」都用它）。<br />
+        通过后本次会话内不再重复询问，并自动填进各面板的密钥框。
+      </div>
+    </div>
+  </div>
   <div id="app">
     <div id="topbar">
       <span class="logo">城市建筑编辑器</span>
@@ -186,6 +224,7 @@
         <button class="tool" id="tShop"><span class="ico">🛒</span><span class="lbl">道具</span></button>
         <button class="tool" id="tCombo"><span class="ico">▦</span><span class="lbl">组合</span></button>
         <button class="tool" id="tFurn"><span class="ico">⌂</span><span class="lbl">家具</span></button>
+        <button class="tool" id="tCodes"><span class="ico">🎟</span><span class="lbl">兑换码</span></button>
         <hr />
         <button class="tool" id="tRuler"><span class="ico">↔</span><span class="lbl">测距</span></button>
         <button class="tool" id="tDel"><span class="ico">✕</span><span class="lbl">删除</span></button>
@@ -306,6 +345,31 @@
           </div>
           <div id="areaMsg" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
         </div>
+        <div id="codesPanel" style="display:none">
+          <div class="panel-title">兑换码（全服生效）</div>
+          <div id="codesHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
+            码表存在服务端（玩家进游戏后输入即可兑换，每个身份每个码只能领一次）。这里改完即时生效，
+            不用重新部署客户端。<br />「限量」填 0 = 不限量；「停用」保留记录但玩家兑换不了。
+          </div>
+          <div class="field">
+            <label>密钥</label>
+            <input id="codesToken" type="password" placeholder="fpm-shop-admin" style="flex:1" />
+            <button id="codesRefresh" class="import-btn" type="button" style="flex:0 0 auto">刷新</button>
+          </div>
+          <div id="codesList" style="max-height:200px;overflow:auto;margin:6px 0;font-size:12px;line-height:1.6;color:#cfe0f5"></div>
+          <div class="panel-title" style="margin-top:8px">添加 / 编辑兑换码</div>
+          <div class="field"><label>兑换码</label><input id="codeText" type="text" placeholder="字母/数字/_/-，如 huacaozhongxue" /></div>
+          <div class="field"><label>学币</label><input id="codeValue" type="number" step="1" min="0" max="1000000" value="1000" /></div>
+          <div class="field"><label>限量</label><input id="codeLimit" type="number" step="1" min="0" max="100000" value="0" /></div>
+          <div class="field"><label>备注</label><input id="codeNote" type="text" maxlength="60" placeholder="给自己看的（如：开学活动）" /></div>
+          <div class="field"><label>停用</label><input id="codeDisabled" type="checkbox" /></div>
+          <div id="codesFormHint" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <button id="codeSave" class="import-btn" type="button" style="flex:1">保存</button>
+            <button id="codeCancel" class="import-btn" type="button" style="flex:1;background:#444">取消编辑</button>
+            <button id="codeReset" class="import-btn" type="button" style="background:#a33">恢复默认码表</button>
+          </div>
+        </div>
         <div id="colliderPanel" style="display:none">
           <div class="panel-title">碰撞体</div>
           <div class="field">
@@ -403,6 +467,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261005a"></script>
+  <script type="module" src="./src/editor/main.js?v=20261005b"></script>
 </body>
 </html>

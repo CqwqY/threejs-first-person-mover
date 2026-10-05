@@ -321,6 +321,24 @@ export function createEditor() {
     areaSave: document.getElementById('areaSave'),
     areaFit: document.getElementById('areaFit'),
     areaMsg: document.getElementById('areaMsg'),
+    btnCodes: document.getElementById('tCodes'),
+    codesPanel: document.getElementById('codesPanel'),
+    codesToken: document.getElementById('codesToken'),
+    codesRefresh: document.getElementById('codesRefresh'),
+    codesList: document.getElementById('codesList'),
+    codeText: document.getElementById('codeText'),
+    codeValue: document.getElementById('codeValue'),
+    codeLimit: document.getElementById('codeLimit'),
+    codeNote: document.getElementById('codeNote'),
+    codeDisabled: document.getElementById('codeDisabled'),
+    codeSave: document.getElementById('codeSave'),
+    codeCancel: document.getElementById('codeCancel'),
+    codeReset: document.getElementById('codeReset'),
+    codesFormHint: document.getElementById('codesFormHint'),
+    gate: document.getElementById('gate'),
+    gatePass: document.getElementById('gatePass'),
+    gateMsg: document.getElementById('gateMsg'),
+    gateGo: document.getElementById('gateGo'),
     btnCombo: document.getElementById('tCombo'),
     comboPanel: document.getElementById('comboPanel'),
     comboName: document.getElementById('comboName'),
@@ -2846,14 +2864,14 @@ export function createEditor() {
   rm.dist = document.getElementById('status');
 
   function setMode(m) {
-    // 切到「边界 / 赛道 / 道具」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
-    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn')) exitComboMode();
+    // 切到「边界 / 赛道 / 道具 / 家具 / 兑换码」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
+    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn' || m === 'codes')) exitComboMode();
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
@@ -2866,24 +2884,29 @@ export function createEditor() {
       StepUI.hint.textContent = '道具管理面板：改价格/导入模型即时全服生效 · 家具可先不放模型（占位方块）';
     } else if (m === 'furn') {
       StepUI.hint.textContent = '已摆家具管理：列出全服摆放，勾选后「删除选中」，或「清空全部」';
-    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('商店管理') || StepUI.hint.textContent.includes('已摆家具')) {
+    } else if (m === 'codes') {
+      StepUI.hint.textContent = '兑换码管理：码表存在服务端，改完即时生效（玩家进游戏输入即可兑换）';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('已摆家具') || StepUI.hint.textContent.includes('兑换码管理')) {
       StepUI.hint.textContent = '';
     }
 
-    // 边界 / 赛道 / 商店模式：显示各自面板；离开时全部还原
+    // 边界 / 赛道 / 商店 / 家具 / 兑换码模式：显示各自面板；离开时全部还原
     const isBound = m === 'bound';
     const isTrack = m === 'track';
     const isShop = m === 'shop';
     const isFurn = m === 'furn';
+    const isCodes = m === 'codes';
     boundaryGroup.visible = isBound;
     trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
     if (StepUI.trackPanel) StepUI.trackPanel.style.display = isTrack ? 'block' : 'none';
     if (StepUI.shopPanel) StepUI.shopPanel.style.display = isShop ? 'block' : 'none';
     if (StepUI.furnPanel) StepUI.furnPanel.style.display = isFurn ? 'block' : 'none';
+    if (StepUI.codesPanel) StepUI.codesPanel.style.display = isCodes ? 'block' : 'none';
     buildVizGroup.visible = isFurn;
     areaVizGroup.visible = isFurn;
     if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具 + 建造范围
+    if (isCodes) fetchCodes();  // 进入即拉一次服务端码表
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -3524,6 +3547,212 @@ export function createEditor() {
   if (StepUI.comboClear) StepUI.comboClear.onclick = () => clearComboDraft();
   if (StepUI.comboSave) StepUI.comboSave.onclick = () => saveComboItem();
   if (StepUI.comboExit) StepUI.comboExit.onclick = () => exitComboMode();
+
+  // ---------- 兑换码管理（码表在服务端） ----------
+  // 码表存 data/redeem-codes.json，读写都走 /api/codes（需管理员密钥）；玩家兑换走 /api/redeem。
+  // 客户端不再内置任何码 —— 以前写死在 Config.REDEEM_CODES 里，谁都能从 JS 翻出来。
+  const CODES_URL = API_ROOT + '/api/codes';
+  let lastCodes = [];      // 最近一次拉到的码表（含每个码已兑换人数）
+  let editingCode = null;  // 正在编辑的码；null = 新增
+
+  function setCodesMsg(text, cls) {
+    if (!StepUI.codesFormHint) return;
+    StepUI.codesFormHint.textContent = text || '';
+    StepUI.codesFormHint.style.color = cls === 'err' ? '#ff8888' : '#9fe0a8';
+  }
+  function codesToken() { return (StepUI.codesToken && StepUI.codesToken.value) || ''; }
+
+  // 一行 = 码名（等宽，停用变灰）+ 面额 + 用量（限量码显示 已兑/上限）+ 编辑 / 删除
+  function renderCodesList(list) {
+    lastCodes = Array.isArray(list) ? list : [];
+    const box = StepUI.codesList;
+    if (!box) return;
+    box.textContent = '';
+    if (!lastCodes.length) {
+      const p = document.createElement('div');
+      p.style.color = '#8a93a0';
+      p.textContent = '（还没有兑换码，用下面的表单加一个）';
+      box.appendChild(p);
+      return;
+    }
+    for (const rec of lastCodes) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:3px;background:#262626;margin-bottom:3px';
+      const nm = document.createElement('span');
+      nm.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:Consolas,monospace;color:' + (rec.disabled ? '#7d8894' : '#e6e6e6');
+      nm.textContent = rec.code + (rec.disabled ? '（停用）' : '');
+      if (rec.note) nm.title = '备注：' + rec.note;
+      const info = document.createElement('span');
+      info.style.cssText = 'flex:0 0 auto;color:#9fe0a8';
+      info.textContent = '+' + rec.value + ' 学币 · 已兑 ' + (rec.uses || 0) + (rec.limit > 0 ? '/' + rec.limit : '');
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'import-btn';
+      edit.textContent = '编辑';
+      edit.style.cssText = 'flex:0 0 auto;padding:2px 6px';
+      edit.onclick = (e) => { e.stopPropagation(); editCode(rec); };
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'import-btn';
+      del.textContent = '删除';
+      del.style.cssText = 'flex:0 0 auto;padding:2px 6px;background:#a33';
+      del.onclick = (e) => { e.stopPropagation(); delCode(rec.code); };
+      row.append(nm, info, edit, del);
+      box.appendChild(row);
+    }
+  }
+  async function postCodes(payload) {
+    const r = await fetch(CODES_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await r.json().catch(() => null);
+    return { ok: r.ok, status: r.status, body };
+  }
+  async function fetchCodes() {
+    const token = codesToken();
+    if (!token) { setCodesMsg('请先填管理员密钥', 'err'); return; }
+    setCodesMsg('拉取中…', '');
+    try {
+      const { ok, status, body } = await postCodes({ token, op: 'list' });
+      if (!ok || !body || !body.ok) { setCodesMsg('拉取失败：HTTP ' + status + (body && body.error ? ' · ' + body.error : ''), 'err'); return; }
+      renderCodesList(body.codes);
+      setCodesMsg('共 ' + lastCodes.length + ' 个兑换码（服务端）', '');
+    } catch (e) {
+      setCodesMsg('拉取失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  function resetCodeForm() {
+    editingCode = null;
+    if (StepUI.codeText) { StepUI.codeText.value = ''; StepUI.codeText.disabled = false; }
+    if (StepUI.codeValue) StepUI.codeValue.value = '1000';
+    if (StepUI.codeLimit) StepUI.codeLimit.value = '0';
+    if (StepUI.codeNote) StepUI.codeNote.value = '';
+    if (StepUI.codeDisabled) StepUI.codeDisabled.checked = false;
+    setCodesMsg('', '');
+  }
+  // 编辑时锁定「兑换码」输入框：改字母等于换了一个码，容易把原来的用量记录搞乱
+  function editCode(rec) {
+    editingCode = rec.code;
+    if (StepUI.codeText) { StepUI.codeText.value = rec.code; StepUI.codeText.disabled = true; }
+    if (StepUI.codeValue) StepUI.codeValue.value = String(rec.value);
+    if (StepUI.codeLimit) StepUI.codeLimit.value = String(rec.limit || 0);
+    if (StepUI.codeNote) StepUI.codeNote.value = rec.note || '';
+    if (StepUI.codeDisabled) StepUI.codeDisabled.checked = !!rec.disabled;
+    setCodesMsg('正在编辑：' + rec.code + '（保存即覆盖；要改字母请删掉重建）', '');
+  }
+  async function saveCode() {
+    const token = codesToken();
+    if (!token) { setCodesMsg('请先填管理员密钥', 'err'); return; }
+    const code = String(editingCode || (StepUI.codeText && StepUI.codeText.value) || '').trim();
+    if (!code) { setCodesMsg('请填兑换码', 'err'); return; }
+    const value = Math.max(0, Math.floor(Number(StepUI.codeValue && StepUI.codeValue.value) || 0));
+    const limit = Math.max(0, Math.floor(Number(StepUI.codeLimit && StepUI.codeLimit.value) || 0));
+    const note = (StepUI.codeNote && StepUI.codeNote.value) || '';
+    const disabled = !!(StepUI.codeDisabled && StepUI.codeDisabled.checked);
+    const wasEdit = !!editingCode;
+    setCodesMsg('保存中…', '');
+    try {
+      const { ok, status, body } = await postCodes({ token, op: 'set', code, value, limit, note, disabled });
+      if (!ok || !body || !body.ok) { setCodesMsg('保存失败：HTTP ' + status + (body && body.error ? ' · ' + body.error : ''), 'err'); return; }
+      renderCodesList(body.codes);
+      resetCodeForm();
+      setCodesMsg('已' + (wasEdit ? '更新' : '添加') + '：' + code + '（+' + value + ' 学币）', '');
+    } catch (e) {
+      setCodesMsg('保存失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  async function delCode(code) {
+    if (!codesToken()) { setCodesMsg('请先填管理员密钥', 'err'); return; }
+    if (!window.confirm('删除兑换码「' + code + '」？\n（已兑换过的玩家记录保留，不影响他们的学币）')) return;
+    setCodesMsg('删除中…', '');
+    try {
+      const { ok, status, body } = await postCodes({ token: codesToken(), op: 'del', code });
+      if (!ok || !body || !body.ok) { setCodesMsg('删除失败：HTTP ' + status + (body && body.error ? ' · ' + body.error : ''), 'err'); return; }
+      renderCodesList(body.codes);
+      if (editingCode === code) resetCodeForm();
+      setCodesMsg('已删除：' + code, '');
+    } catch (e) {
+      setCodesMsg('删除失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  async function resetCodes() {
+    if (!codesToken()) { setCodesMsg('请先填管理员密钥', 'err'); return; }
+    if (!window.confirm('恢复默认码表？\n当前所有兑换码会被替换成默认那一个（玩家已兑换记录保留）。')) return;
+    setCodesMsg('恢复中…', '');
+    try {
+      const { ok, status, body } = await postCodes({ token: codesToken(), op: 'reset' });
+      if (!ok || !body || !body.ok) { setCodesMsg('恢复失败：HTTP ' + status + (body && body.error ? ' · ' + body.error : ''), 'err'); return; }
+      renderCodesList(body.codes);
+      resetCodeForm();
+      setCodesMsg('已恢复默认码表', '');
+    } catch (e) {
+      setCodesMsg('恢复失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  if (StepUI.codesToken) {
+    StepUI.codesToken.value = localStorage.getItem(SHOP_TOKEN_KEY) || '';
+    StepUI.codesToken.addEventListener('input', () => localStorage.setItem(SHOP_TOKEN_KEY, StepUI.codesToken.value || ''));
+  }
+  if (StepUI.codesRefresh) StepUI.codesRefresh.onclick = () => fetchCodes();
+  if (StepUI.codeSave) StepUI.codeSave.onclick = () => saveCode();
+  if (StepUI.codeCancel) StepUI.codeCancel.onclick = () => resetCodeForm();
+  if (StepUI.codeReset) StepUI.codeReset.onclick = () => resetCodes();
+  if (StepUI.codeText) StepUI.codeText.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveCode(); });
+
+  // ---------- 进门密码 ----------
+  // 编辑器入口的门：**校验打服务端** /api/admin/verify（前端只是门面，正确性由服务端定），
+  // 不通过就一直盖着遮罩。通过后把密钥塞进三处密钥框共用的 localStorage 键，省得重复输入。
+  (function initGate() {
+    const gate = StepUI.gate, pass = StepUI.gatePass, msg = StepUI.gateMsg, go = StepUI.gateGo;
+    if (!gate || !pass || !go) return;
+    const GATE_KEY = 'fpm-editor-pass'; // sessionStorage：关掉标签页即失效，比长期记住更保守
+    function setGateMsg(t, kind) {
+      if (!msg) return;
+      msg.textContent = t || '';
+      msg.style.color = kind === 'err' ? '#ff8888' : (kind === 'ok' ? '#9fe0a8' : '#9aa4b1');
+    }
+    async function verify(token) {
+      try {
+        const r = await fetch(API_ROOT + '/api/admin/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+        if (r.status === 403) return 'bad';
+        if (!r.ok) return 'error';
+        const b = await r.json().catch(() => null);
+        return (b && b.ok) ? 'ok' : 'bad';
+      } catch (e) { return 'error'; } // 网络不通 / 老服务端没有该接口
+    }
+    function unlock(token) {
+      try { sessionStorage.setItem(GATE_KEY, token); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(SHOP_TOKEN_KEY, token); } catch (e) { /* ignore */ }
+      for (const el of [StepUI.shopToken, StepUI.furnToken, StepUI.comboToken, StepUI.codesToken]) if (el) el.value = token;
+      gate.style.display = 'none';
+      setGateMsg('', '');
+    }
+    async function tryPass(token) {
+      const t = String(token || '').trim();
+      if (!t) { setGateMsg('请输入管理员密钥', 'err'); pass.focus(); return; }
+      go.disabled = true;
+      setGateMsg('校验中…', '');
+      const r = await verify(t);
+      go.disabled = false;
+      if (r === 'ok') { unlock(t); return; }
+      setGateMsg(r === 'bad'
+        ? '密钥不对'
+        : '连不上服务端，无法校验（确认后端已更新到带 /api/admin/verify 的版本）', 'err');
+      pass.select();
+    }
+    go.onclick = () => tryPass(pass.value);
+    pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryPass(pass.value); });
+    let saved = '';
+    try { saved = sessionStorage.getItem(GATE_KEY) || ''; } catch (e) { /* ignore */ }
+    if (saved) tryPass(saved);                     // 本会话已通过过 → 静默复验（服务端换过密钥就重新问）
+    else setTimeout(() => pass.focus(), 60);
+  })();
 
   StepUI.btnDel.onclick = () => { if (state.selected && state.selected.kind !== 'scenery') removePlaced(state.selected); };
   setMode('place');

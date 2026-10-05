@@ -57,8 +57,28 @@ export function createShopPanel({ onBuy, onRedeem, onPlace, getProfile }) {
     render();
   }
 
-  function submitCode() {
-    const r = onRedeem(codeInput.value);
+  // 兑换走服务端（码表在服务端），所以是异步的：给「兑换中…」反馈并防连点，
+  // 否则玩家连按会发好几个请求（虽然服务端只认第一次，但界面会乱）。
+  let redeeming = false;
+  async function submitCode() {
+    if (redeeming) return;
+    const raw = codeInput.value;
+    if (!String(raw || '').trim()) {
+      redeemMsg.style.color = 'var(--kui-danger)';
+      redeemMsg.textContent = '请输入兑换码';
+      return;
+    }
+    redeeming = true;
+    redeemMsg.style.color = 'var(--kui-ink-soft)';
+    redeemMsg.textContent = '兑换中…';
+    let r;
+    try {
+      r = await onRedeem(raw);
+    } catch (e) {
+      r = { ok: false, reason: '兑换失败：' + (e && e.message ? e.message : e) };
+    }
+    redeeming = false;
+    if (!r) r = { ok: false, reason: '兑换失败' };
     redeemMsg.style.color = r.ok ? 'var(--kui-ok)' : 'var(--kui-danger)';
     redeemMsg.textContent = r.ok ? ('兑换成功，+' + r.value + ' 学币') : r.reason;
     if (r.ok) codeInput.value = '';

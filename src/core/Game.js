@@ -2084,9 +2084,10 @@ export class Game {
     this._toast('买下「' + item.name + '」（背包 ' + n + ' 个），还剩 ' + r.coins + ' 学币');
   }
 
-  // 兑换码：成功后刷新顶部余额并让商店重绘
-  _redeemCode(code) {
-    const r = redeemCode(this._profile, code);
+  // 兑换码：校验在服务端（码表已搬走，客户端不再内置），这里只传 token 并处理结果。
+  // 成功后刷新顶部余额并让商店重绘；返回 Promise，调用方（商店面板）要 await。
+  async _redeemCode(code) {
+    const r = await redeemCode(this._profile, code, this._token);
     if (r.ok) {
       this._refreshCoins();
       this.shop.render();

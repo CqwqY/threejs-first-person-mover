@@ -496,13 +496,15 @@ export function initAuth(dbPath) {
   }
 
   // 依 token 解析用户公开资料（供 WS 登录后挂身份 / 名牌展示）
+  // ⚠ 必须带上 userId：中继的「归属键」（ownerKeyOf）和兑换码记账都靠它区分登录玩家，
+  //   只返回昵称的话登录用户会被当成游客（按 IP 归属），互相能删对方的家具。
   function getPublicByToken(tok) {
     const t = str(tok, 128).trim();
     if (!t) return null;
     const user = userFromAuth({ headers: { authorization: 'Bearer ' + t } });
     if (!user) return null;
     const p = stmts.profile.get(user.id) || {};
-    return publicProfile(p, user);
+    return { ...publicProfile(p, user), userId: user.id };
   }
 
   return { handleRequest, getPublicByToken };

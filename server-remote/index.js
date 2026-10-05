@@ -165,6 +165,8 @@ fs.mkdirSync(ASSETS_DIR, { recursive: true }); // 启动即确保目录存在
 const SHOP_FILE = path.join(DATA_DIR, 'shop.json');
 const BUILD_FILE = path.join(DATA_DIR, 'buildings.json');
 const AREAS_FILE = path.join(DATA_DIR, 'buildareas.json');
+const CODES_FILE = path.join(DATA_DIR, 'redeem-codes.json');
+const REDEEM_LOG_FILE = path.join(DATA_DIR, 'redeems.json');
 const SHOP_ADMIN_TOKEN = process.env.SHOP_ADMIN_TOKEN || 'fpm-shop-admin'; // 改价格用管理员密钥；生产请用 env 覆盖
 
 // 建造限流（防爆服务器）：个人上限 / 全局上限 / 放置冷却 / 缩放封顶 / 坐标钳制
@@ -307,6 +309,101 @@ function loadAreas() {
   return DEFAULT_AREAS.map((x) => ({ ...x }));
 }
 function saveAreas(list) { fs.writeFileSync(AREAS_FILE, JSON.stringify(list, null, 2)); }
+
+// ---- 兑换码（服务端权威）----
+// 为什么搬到这里：以前码表写死在客户端 Config.REDEEM_CODES 里 —— 谁都能从 JS 里翻出来，
+// 而且「兑换过没有」只存在玩家自己的 localStorage，清一次缓存就能重复领。
+// 现在：码表在 data/redeem-codes.json（编辑器在线改），兑换记录在 data/redeems.json（按身份记账），
+// 客户端只拿到「这次该发多少学币」，码表本身不再下发。
+//
+// redeem-codes.json: [{ code, value, note, limit, disabled }]
+//   code    —— 小写字母/数字/_/-，比较时统一小写去空格
+//   value   —— 兑换成功发放的学币
+//   limit   —— 总使用次数上限（0 = 不限）
+//   disabled—— 停用（保留记录但不可兑换）
+// redeems.json: { "<ownerKey>": ["code", ...] }（ownerKey 与建造归属同一套：登录 u:<id> / 游客 anon:<ip>）
+const DEFAULT_CODES = [
+  { code: 'huacaozhongxue', value: 4000, note: '花草中学（默认种子）', limit: 0, disabled: false },
+];
+function normalizeCode(c) { return String(c || '').trim().toLowerCase().replace(/\s+/g, ''); }
+function sanitizeCodeRec(c) {
+  if (!c) return null;
+  const code = normalizeCode(c.code);
+  if (!/^[a-z0-9_-]{1,32}$/.test(code)) return null; // 非法码直接丢弃（防脏数据）
+  return {
+    code,
+    value: Math.max(0, Math.min(1000000, Math.floor(Number(c.value) || 0))),
+    note: String(c.note || '').slice(0, 60),
+    limit: Math.max(0, Math.min(100000, Math.floor(Number(c.limit) || 0))),
+    disabled: !!c.disabled,
+  };
+}
+function loadCodes() {
+  try {
+    const a = JSON.parse(fs.readFileSync(CODES_FILE, 'utf8'));
+    if (Array.isArray(a)) {
+      const list = a.map(sanitizeCodeRec).filter(Boolean);
+      if (list.length) return list;
+    }
+  } catch (e) { /* 没配过 → 用默认种子 */ }
+  // 首次启动：落一份种子文件，之后以文件为准
+  const seed = DEFAULT_CODES.map((x) => ({ ...x }));
+  try { fs.writeFileSync(CODES_FILE, JSON.stringify(seed, null, 2)); } catch (e) { /* ignore */ }
+  return seed;
+}
+function saveCodes(list) { fs.writeFileSync(CODES_FILE, JSON.stringify(list, null, 2)); }
+function loadRedeemLog() {
+  try {
+    const o = JSON.parse(fs.readFileSync(REDEEM_LOG_FILE, 'utf8'));
+    return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+  } catch (e) { return {}; }
+}
+function saveRedeemLog(log) { fs.writeFileSync(REDEEM_LOG_FILE, JSON.stringify(log, null, 2)); }
+
+let CODES = loadCodes();
+
+// 码表 + 每个码已被多少人兑换（编辑器列表要显示用量，方便判断限量码还剩多少）
+function codesPayload() {
+  const uses = Object.create(null);
+  for (const arr of Object.values(loadRedeemLog())) {
+    if (!Array.isArray(arr)) continue;
+    for (const c of arr) uses[c] = (uses[c] || 0) + 1;
+  }
+  return CODES.map((c) => ({ ...c, uses: uses[c.code] || 0 }));
+}
+
+// 兑换核心：校验码表 → 查该身份是否兑过 / 是否超总上限 → 记账。返回 {ok:true,value} 或 {ok:false,error}
+function doRedeem(ownerKey, rawCode) {
+  const code = normalizeCode(rawCode);
+  if (!code) return { ok: false, error: '请输入兑换码' };
+  const rec = CODES.find((c) => c.code === code);
+  if (!rec) return { ok: false, error: '兑换码无效' };
+  if (rec.disabled) return { ok: false, error: '这个兑换码已停用' };
+  const log = loadRedeemLog();
+  const mine = Array.isArray(log[ownerKey]) ? log[ownerKey] : [];
+  if (mine.includes(code)) return { ok: false, error: '这个兑换码已经兑换过了' };
+  if (rec.limit > 0) {
+    let used = 0;
+    for (const arr of Object.values(log)) if (Array.isArray(arr) && arr.includes(code)) used++;
+    if (used >= rec.limit) return { ok: false, error: '这个兑换码已经被领完了' };
+  }
+  mine.push(code);
+  log[ownerKey] = mine;
+  saveRedeemLog(log);
+  return { ok: true, value: rec.value, code };
+}
+
+// HTTP 侧的归属键：登录 token → u:<userId>；否则游客 anon:<真实 IP>（与 WS 的 ownerKeyOf 同规则）
+function ownerKeyOfReq(req) {
+  let pub = null;
+  try {
+    const h = req.headers.authorization || '';
+    const tok = typeof h === 'string' && h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+    if (tok) pub = auth.getPublicByToken(tok);
+  } catch (e) { /* 鉴权异常按游客处理 */ }
+  if (pub && pub.userId) return 'u:' + pub.userId;
+  return 'anon:' + (clientIpOf(req) || 'unknown');
+}
 
 // 把建造坐标钳进「建造范围」：落在任一矩形内原样返回，否则吸附到最近矩形的边。
 // ⚠ 以前这里是 ±24 的固定钳制（那是地面半径 25 时代的兜底），但建造范围改成两栋楼的实占
@@ -616,6 +713,72 @@ const httpServer = http.createServer(async (req, res) => {
       broadcastAll({ t: 'build', ev: 'areas', areas }); // 在线客户端即时更新建造范围
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, areas }));
+    });
+    return;
+  }
+
+  // 兑换码：管理员读/改（需密钥）。op: list（默认）| set | del | reset
+  // 返回的都是「码表 + 每个码已兑换人数」，编辑器据此渲染列表。
+  if (req.method === 'POST' && url.pathname === '/api/codes') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 1e5) req.destroy(); });
+    req.on('end', () => {
+      const bad = (m, code = 400) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: m }));
+      };
+      let data;
+      try { data = JSON.parse(body || '{}'); } catch (e) { return bad('bad json'); }
+      if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return bad('管理员密钥错误', 403);
+      const op = String(data.op || 'list');
+      if (op === 'set') {
+        const rec = sanitizeCodeRec(data);
+        if (!rec) return bad('兑换码只能用字母/数字/_/-（≤32 位）');
+        const i = CODES.findIndex((c) => c.code === rec.code);
+        if (i >= 0) CODES[i] = rec; else CODES.push(rec);
+        saveCodes(CODES);
+      } else if (op === 'del') {
+        const code = normalizeCode(data.code);
+        if (!code) return bad('缺少 code');
+        CODES = CODES.filter((c) => c.code !== code);
+        saveCodes(CODES);
+      } else if (op === 'reset') {
+        CODES = DEFAULT_CODES.map((x) => ({ ...x }));
+        saveCodes(CODES);
+      } else if (op !== 'list') {
+        return bad('未知 op');
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, codes: codesPayload() }));
+    });
+    return;
+  }
+
+  // 管理员密钥校验（编辑器「进门密码」用）。只回 ok，不泄露密钥本身。
+  if (req.method === 'POST' && url.pathname === '/api/admin/verify') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 1e4) req.destroy(); });
+    req.on('end', () => {
+      let data = {};
+      try { data = JSON.parse(body || '{}'); } catch (e) { data = {}; }
+      const ok = !!data.token && String(data.token) === SHOP_ADMIN_TOKEN;
+      res.writeHead(ok ? 200 : 403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok }));
+    });
+    return;
+  }
+
+  // 兑换码：玩家兑换（公开）。服务端校验 + 记账（防清本地缓存重复领 / 防限量码超发），
+  // 只回「该发多少学币」，学币由客户端入账并随账号存档上云。
+  if (req.method === 'POST' && url.pathname === '/api/redeem') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 1e4) req.destroy(); });
+    req.on('end', () => {
+      let data = {};
+      try { data = JSON.parse(body || '{}'); } catch (e) { data = {}; }
+      const r = doRedeem(ownerKeyOfReq(req), data.code);
+      res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r.ok ? { ok: true, value: r.value } : { ok: false, error: r.error }));
     });
     return;
   }

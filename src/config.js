@@ -299,10 +299,10 @@ export const Config = {
   MERCHANT_YAW: Math.PI * 0.25,      // 站姿朝向（弧度），让她面朝出生点方向
   BOSS_COIN_REWARD: 50,              // 击败老师奖励的学币
 
-  // 兑换码：键统一按小写比较，值是要发的学币数。每个账号每个码只能用一次。
-  REDEEM_CODES: {
-    huacaozhongxue: 4000,
-  },
+  // 兑换码：**已搬到服务端**，这里不再保留码表。
+  // 码表在 server-remote 的 data/redeem-codes.json（编辑器「🎟 兑换码」页在线改），
+  // 兑换校验与「谁兑过」的记录也在服务端（POST /api/redeem）。客户端只拿返回的学币数入账。
+  // ⚠ 不要把码写回这里 —— 前端 JS 谁都能翻出来，等于把码公开。
 
   // ---- 棍子（横扫击飞）----
   CLUB_RANGE: 3.6,           // 横扫半径（米）

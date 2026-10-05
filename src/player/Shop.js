@@ -4,6 +4,7 @@
 import { Config } from '../config.js';
 import { getBagKey, loadBag, addToBag, removeFromBag } from './Inventory.js';
 import { markSaveDirty } from './CloudSave.js';
+import { accountApi } from '../net/accountApi.js';
 
 const KEY_PREFIX = 'fp_wallet__';
 
@@ -177,18 +178,24 @@ export function rewardBossKill(profile) {
   return addCoins(profile, Config.BOSS_COIN_REWARD);
 }
 
-// 兑换码：大小写不敏感，每个账号每个码只能用一次。
+// 兑换码：**校验与记账都在服务端**（POST /api/redeem），客户端不再内置码表。
+// 为什么搬走：码表写在前端 = 谁都能从 JS 里翻出来；「用过没有」只记在本地 localStorage
+// = 清一次缓存就能重复领。服务端按身份记账（登录 u:<id> / 游客 anon:<真实 IP>），
+// 这里只负责把服务端返回的学币入账（并存一份本地 redeemed 记录，省掉重复请求）。
+// token：登录会话令牌（游客传空串，服务端按 IP 记账）。
+// 失败（网络不通 / 老服务端没有该接口）给一句人话，**不做本地兜底** —— 兜底就等于把码表又搬回前端。
 // 成功返回 { ok:true, coins, value }，失败返回 { ok:false, reason }。
-export function redeemCode(profile, code) {
-  const c = String(code || '').trim().toLowerCase();
+export async function redeemCode(profile, code, token) {
+  const c = String(code || '').trim();
   if (!c) return { ok: false, reason: '请输入兑换码' };
-  const codes = Config.REDEEM_CODES || {};
-  if (!Object.prototype.hasOwnProperty.call(codes, c)) return { ok: false, reason: '兑换码无效' };
-  const value = Math.max(0, Math.floor(Number(codes[c]) || 0));
+  const out = await accountApi('POST', '/api/redeem', { code: c }, token);
+  if (!out) return { ok: false, reason: '兑换服务暂时不可用，请稍后再试' };
+  if (!out.ok) return { ok: false, reason: out.error || '兑换失败' };
+  const value = Math.max(0, Math.floor(Number(out.value) || 0));
+  const key = c.toLowerCase().replace(/\s+/g, '');
   const w = loadWallet(profile);
-  if (w.redeemed.includes(c)) return { ok: false, reason: '这个兑换码已经兑换过了' };
+  if (!w.redeemed.includes(key)) w.redeemed.push(key);
   w.coins += value;
-  w.redeemed.push(c);
   saveWallet(profile, w);
   return { ok: true, coins: w.coins, value };
 }
