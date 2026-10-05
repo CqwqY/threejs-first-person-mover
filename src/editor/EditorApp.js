@@ -170,8 +170,13 @@ export function createEditor() {
   scene.add(tCtl.getHelper());
   // 复制模式：拖动开始时先复制一份，本次拖动作用于副本，原件原地保留
   tCtl.addEventListener('dragging-changed', (e) => {
-    if (e.value && state.copyMode && state.selected) {
-      duplicateRec(state.selected, true);
+    if (e.value && state.copyMode) {
+      const light = selectedLight();
+      if (light) {
+        duplicateLight(light); // 光源：复制模式此前只对普通物件生效（光源选中时 state.selected 为 null，从未触发）
+      } else if (state.selected) {
+        duplicateRec(state.selected, true);
+      }
     }
     controls.enabled = !e.value;
     // 拖动结束：光源的位置/朝向已回写；缩放必须在这里结算（逐帧结算会被放大成指数级）
@@ -1923,6 +1928,38 @@ export function createEditor() {
     state.lights.push(rec);
     selectLight(rec); // 新建即选中，并把 3D 变换轴挂到该光源上
     markDirty();
+  }
+
+  // 复制光源：拷贝当前选中光源的数据记录并实例化一份（位置先与原件重合，
+  // 复制模式下拖动即作用于副本，原件原地保留——和普通物件的复制模式行为一致）。
+  function duplicateLight(src) {
+    if (!src) return null;
+    const rec = {
+      id: nextId(),
+      type: src.type,
+      x: src.x ?? 0, y: src.y ?? 3, z: src.z ?? 0,
+      color: lightColorHex(src),
+      intensity: src.intensity ?? (src.type === 'area' ? AREA_LIGHT_DEFAULTS.intensity : 20),
+      distance: src.distance ?? (src.type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12),
+      decay: src.decay ?? 2,
+      width: src.width ?? AREA_LIGHT_DEFAULTS.width,
+      height: src.height ?? AREA_LIGHT_DEFAULTS.height,
+      rotY: src.rotY ?? AREA_LIGHT_DEFAULTS.rotY,
+      rotX: src.rotX ?? AREA_LIGHT_DEFAULTS.rotX,
+    };
+    buildLightObject(rec);
+    state.lights.push(rec);
+    // 选中副本：直接挂 gizmo（不先 select(null) 摘原件的 gizmo，否则会打断正在进行的拖动——
+    // 与复制分支调用 select(copy) 对齐，让本次拖动接管副本）。
+    state.selectedLightId = rec.id;
+    if (rec.obj) {
+      tCtl.attach(rec.obj);
+      tCtl.setMode(lightGizmoMode(rec));
+      tCtl.enabled = true;
+    }
+    syncLightPanel();
+    markDirty();
+    return rec;
   }
 
   // 删除光源：从场景移除灯光与辅助器并释放资源
