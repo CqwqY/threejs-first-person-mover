@@ -162,6 +162,13 @@ export class Game {
     // 富余时慢慢升回。老卡/入门卡（填充率是真瓶颈）靠这个自动保帧率。
     this._dynScale = 1;
     this._dynLast = 0;
+    // 帧率采样累加器：主循环每帧 _fpsAcc += dt、_fpsN++，满 0.5s 结算一次
+    // （驱动自适应分辨率 + 帧数角标）。⚠ 必须显式初始化 —— 漏了的话
+    // `undefined += dt` 会变成 NaN，`NaN >= 0.5` 恒为 false，整块永不执行，
+    // 且不报错（静默失效）。这正是此前「帧数角标一直显示 --」与
+    // 「自适应分辨率其实从未生效」的共同根因。
+    this._fpsAcc = 0;
+    this._fpsN = 0;
     // 超分（低分辨率渲染 + 锐化升采样）：_sharpen=0 表示关闭，退回浏览器直接拉伸
     this._sharpen = 0.5;
     this._upRT = null; this._upScene = null; this._upCam = null; this._upMat = null;
