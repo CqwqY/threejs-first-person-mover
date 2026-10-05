@@ -238,6 +238,21 @@ function sampleEnvSource(image) {
   }
 }
 
+// 把「校色后的小像素」还原成 equirect CanvasTexture（供生成已校色时段 PMREM 用）。
+// 反射结果与原图几乎无差（PMREM 靠模糊 mip，高频信息全丢），但去掉了 night/space 的蓝绿失衡（治反射发紫）。
+function colorTexFromSrc(px) {
+  if (!px) return null;
+  try {
+    const cv = document.createElement('canvas');
+    cv.width = ENV_W; cv.height = ENV_H;
+    cv.getContext('2d', { willReadFrequently: true }).putImageData(new ImageData(px, ENV_W, ENV_H), 0, 0);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  } catch (e) { return null; }
+}
+
 // createTimeSky(scene, renderer)：生成四张天空球壳 + 程序化天空兜底，返回 { update(t, camera) }。
 // update 每帧调用：按时刻决定哪张球壳可见并交叉淡入，同时让球壳跟随相机（无视差、不被裁剪）。
 // ⚠ 一定要传 renderer：金属/光滑材质（metalness 高、roughness→0）靠 scene.environment 出颜色，
@@ -295,7 +310,12 @@ export function createTimeSky(scene, renderer, opts = {}) {
     // 4096×2048 的 PMREM 每张几十毫秒，绝不能进帧循环；256×128 只要两三毫秒，才能反复重建。
     envSrc.set(key, sampleEnvSource(texture.image));
     if (renderer) {
-      const rt = buildEnvMap(renderer, texture);
+      // ⚠ 时段环境贴图用「校色后的小图」生成：256×128 校色处理掉 night/space 的蓝绿失衡（治反射发紫），
+      // 反射结果与原图几乎无差（PMREM 本就靠模糊 mip，高频信息全丢）。这样非过渡期也不发紫。
+      const srcPx = envSrc.get(key);
+      const colorTex = srcPx ? colorTexFromSrc(srcPx) : texture;
+      const rt = buildEnvMap(renderer, colorTex);
+      if (colorTex && colorTex !== texture) { try { colorTex.dispose(); } catch (e) { /* ignore */ } }
               if (rt) {
                 envMaps.set(key, rt);
                 if (!curEnvId) {
@@ -332,23 +352,11 @@ export function createTimeSky(scene, renderer, opts = {}) {
       envI *= Math.min(2, Math.max(0, ar / AMBIENT_REF));
     }
     scene.environmentIntensity = envI;
-    if (e.to && !morphDisabled) {
-      const pxFrom = envSrc.get(e.from);
-      const pxTo = envSrc.get(e.to);
-      if (pxFrom && pxTo) {
-        const id = e.from + '>' + e.to + '#' + e.step;
-        if (id !== curEnvId) {
-          const rt = buildMorphEnv(pxFrom, pxTo, e.step / ENV_MORPH_STEPS);
-          if (rt) { curEnvId = id; scene.environment = rt.texture; }
-          else morphDisabled = true; // ⚠ 重建失败就永久降级到"整段贴图"：
-          //   不这么做的话，id 每帧都对不上 → 每帧重试一次 PMREM，直接卡死。
-        }
-      } else {
-        useCachedEnv(e.key); // 小图没准备好（首次加载中）→ 退回时段贴图
-      }
-    } else {
-      useCachedEnv(e.key);
-    }
+    // ⚠ 过渡期不再逐档重建 PMREM：每档一次 buildEnvMap 在弱机是 5~15ms 的卡顿尖峰，
+    // 一昼夜几十次 → 时段切换时明显卡。四个时段已校色的 PMREM 在加载期各生成一份，
+    // 这里只换贴图引用（free），亮度由上面的 environmentIntensity 平滑，
+    // 反射色跳变落在过渡中点（a=0.5，最暗）几乎无感。
+    useCachedEnv(e.key);
   }
 
   // 切回某个时段缓存好的环境贴图；顺手把过渡期那份临时 RT 释放掉（只在已经换走之后才 dispose）。
