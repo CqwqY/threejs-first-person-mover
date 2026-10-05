@@ -312,8 +312,17 @@ function start() {
   state.scenarioIdx = -1;
   state.dist = 0;
   state.lastT = 0;
+  state.compiled = false;
   setControlsEnabled(false);
   UI.btnStop.disabled = false;
+  // 一次性预编译基准（阴影开）的全部材质变体，与 Game._precompileShaders 同源。
+  // 必须在记录 programsAtStart 之前完成，否则基准档会把"首帧编译"误算成 +7 重编译假象。
+  try {
+    applyScenario('baseline');
+    updateShadowBudgets(camera.position);
+    if (renderer && typeof renderer.compile === 'function') renderer.compile(scene, camera);
+  } catch (e) {}
+  state.compiled = true;
   nextScenario();
 }
 
