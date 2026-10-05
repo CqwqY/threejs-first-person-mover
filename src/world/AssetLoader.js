@@ -5,6 +5,7 @@ import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { API_BASE } from '../config.js';
 import { track } from './loadTracker.js';
 import { fetchAsset, isCacheable } from './assetCache.js';
+import { mergeStaticMeshes, countMeshes } from './Merge.js';
 
 let _loader = null;
 
@@ -31,6 +32,37 @@ function resolveUrl(url) {
   return normalizeUrl(url);
 }
 
+// 加载后立刻做一次「同材质小网格合并」（导出模型常是几百个几十三角形的小网格，
+// 三角形不是瓶颈、**提交次数**才是：开阴影后主渲染 + 阴影贴图各一趟）。
+//
+// 为什么放在加载期而不是摆放时：缓存里的原型合并一次，之后每次 instantiate 只是 clone ——
+//   家具 / 组合家具 / 编辑器摆放 / 景物**全部**受益，且不用在每个调用点各写一遍。
+//   （线上那两栋室内模型是 828 / 837 个网格，合并后只剩个位数。）
+//
+// ⚠ 两条硬约束（漏一条就是"模型动不了 / 骨架断了"）：
+//   ① 有**动画**的模型不能合并：合并把顶点烘进 root 局部空间，节点动画就没得动了；
+//   ② 有**骨骼**的模型不能合并：mergeStaticMeshes 内部已整体跳过（连同"清空气节点"，
+//      否则末端骨头会被当成空节点删掉）。
+//   这两类模型本来就只有几个网格，收益为 0，风险却是满的。
+export function optimizeLoadedModel(gltf, url) {
+  try {
+    const scene = gltf && gltf.scene;
+    if (!scene) return null;
+    if (gltf.animations && gltf.animations.length) return null; // ① 动画模型：不合并
+    const before = countMeshes(scene);
+    if (before < 8) return null; // 网格太少，合并收益抵不上开销
+    const st = mergeStaticMeshes(scene);
+    if (st.after < st.before) {
+      console.info('[AssetLoader] ' + (url || 'model') + ' 网格合并 ' + st.before + ' → ' + st.after +
+        '（' + st.mergedGroups + ' 批；主渲染 + 阴影贴图两趟各少 ' + (st.before - st.after) + ' 次 draw call）');
+    }
+    return st;
+  } catch (e) {
+    console.warn('[AssetLoader] 模型合并失败（保持原样）:', url, e);
+    return null;
+  }
+}
+
 // 加载并解析一个 GLB，返回解析结果 gltf（scene + animations）；同一资源只请求一次。
 // 每个实例需自行 clone，因为解析结果只有一个共享的根节点。
 //
@@ -42,7 +74,8 @@ function loadGLB(url) {
 
   if (!_loader) _loader = new GLTFLoader();
   const promise = new Promise((resolve, reject) => {
-    const ok = (gltf) => resolve(gltf);
+    // 解析完立刻合并同材质小网格（缓存的是合并后的原型，之后每个实例都是它的克隆）
+    const ok = (gltf) => { optimizeLoadedModel(gltf, url); resolve(gltf); };
     const bad = (err) => {
       console.warn('[AssetLoader] 加载失败:', url, err);
       reject(err);
