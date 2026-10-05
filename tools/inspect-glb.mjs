@@ -69,4 +69,37 @@ for (const f of files) {
       (hasSG ? '  ⚠ 该材质用 SpecularGlossiness' : '')
     );
   }
+
+  // ---- 光源（KHR_lights_punctual）----
+  // Three.js 的 GLTFLoader **原生支持**这个扩展（会给场景加 PointLight/SpotLight/DirectionalLight），
+  // 但前提是：① Blender 导出时勾了「Punctual Lights」② 灯的类型是 Blender 的 Point/Sun/Spot
+  //   （Area 面光源**不在** glTF 规范里，导出时会被直接丢掉，也不会报错）。
+  // ⚠ 本项目还有额外一层风险：AssetLoader.optimizeLoadedModel 会在加载后合并静态网格，
+  //   而 Mesh 合并与光源无关（光源不是 Mesh），所以灯**能活下来**；但灯不参与「同材质合并」。
+  const lightsExt = (j.extensions && j.extensions.KHR_lights_punctual) || null;
+  const lightDefs = (lightsExt && lightsExt.lights) || [];
+  const nodes = j.nodes || [];
+  const lightNodes = nodes.filter((n) => n.extensions && n.extensions.KHR_lights_punctual);
+  const usedLightIdx = lightNodes.map((n) => n.extensions.KHR_lights_punctual.light);
+  console.log(`lights (KHR_lights_punctual): 定义 ${lightDefs.length} 盏 / 场景里挂了 ${lightNodes.length} 盏`);
+  if (!lightDefs.length) {
+    console.log('  → 模型里**没有**光源。Blender 里放的灯不会被读进来（导出时没勾 Punctual Lights，或用了面光源）。');
+  } else {
+    for (let i = 0; i < lightDefs.length; i++) {
+      const L = lightDefs[i];
+      const onNode = usedLightIdx.includes(i);
+      const type = L.type || '?'; // point | spot | directional
+      const extra = type === 'spot'
+        ? `inner=${L.spot && L.spot.innerConeAngle !== undefined ? L.spot.innerConeAngle : '?'} outer=${L.spot && L.spot.outerConeAngle !== undefined ? L.spot.outerConeAngle : '?'}`
+        : (type === 'point' ? `range=${L.range !== undefined ? L.range : '(无穷)'}` : '');
+      console.log(
+        `  · [${i}] ${L.name || '(未命名)'} type=${type} intensity=${L.intensity === undefined ? 1 : L.intensity}` +
+        ` color=${L.color ? L.color.map((c) => c.toFixed(2)).join(',') : '(白)'} ${extra}` +
+        (onNode ? '' : '  ⚠ 定义了但没有任何 node 引用 → 不会出现在场景里')
+      );
+    }
+    console.log('  ⚠ 注意：Three.js 的 intensity 单位与 Blender 不同（还乘了项目 LIGHT_SCALE），');
+    console.log('    导进来往往**比 Blender 里亮/暗一大截** —— 别指望所见即所得。');
+    console.log('  ⚠ 面光源（Area）无法导出：glTF 规范里没有 area 类型，Blender 导出时会静默丢弃。');
+  }
 }
