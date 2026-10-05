@@ -2,15 +2,40 @@
 // 离线/加载失败时回退到 Three.js 程序化 Sky（无需外部贴图）。两套天空都无缝。
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Config } from '../config.js';
 import { track } from './loadTracker.js';
 import { assetBlobURL } from './assetCache.js';
+
+// ---- 环境贴图（scene.environment）----
+// 为什么必须有：MeshStandardMaterial 的**金属/光滑**部分（metalness 高、roughness 接近 0）不是靠灯光，
+// 而是靠**环境反射**出颜色的。没有 scene.environment 时这类材质会渲染成**纯黑**
+// （导入的模型经常是 metalness=1 / roughness=0，就表现为"全黑、看不见"）。
+// 天空贴图就绪前先用 RoomEnvironment 顶一份，保证任何时刻都有反射。
+let _pmrem = null;
+let _envRT = null;
+
+export function applyEnvironment(scene, renderer, equirectTexture) {
+  if (!scene || !renderer) return;
+  try {
+    if (!_pmrem) _pmrem = new THREE.PMREMGenerator(renderer);
+    const rt = equirectTexture
+      ? _pmrem.fromEquirectangular(equirectTexture)
+      : _pmrem.fromScene(new RoomEnvironment(), 0.04);
+    if (_envRT && _envRT !== rt) { try { _envRT.dispose(); } catch (e) { /* ignore */ } }
+    _envRT = rt;
+    scene.environment = rt.texture;
+  } catch (e) {
+    console.warn('[sky] 环境贴图生成失败（金属材质可能偏黑）:', e);
+  }
+}
 
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
 
 // asyncLoadSky(scene, fin)：异步加载并应用贴图天空，成功时移除程序化 Sky 兜底并设背景。
 // 返回一个 Promise（供需要按时序处理的调用方等待；失败自动静默回退）。
+// resolve 的是 **texture 本身**（原来是 true）—— 调用方写 `if (ok)` 依旧成立，还能顺手拿它做环境贴图。
 export function loadSkyTexture(scene) {
   // 天空贴图也是「进游戏前要等的一件东西」（离线时它会失败并回退程序化天空，同样算完成）
   return track(new Promise((resolve) => {
@@ -24,7 +49,7 @@ export function loadSkyTexture(scene) {
           texture.mapping = THREE.EquirectangularReflectionMapping;
           texture.colorSpace = THREE.SRGBColorSpace;
           scene.background = texture;
-          resolve(true);
+          resolve(texture);
         },
         undefined,
         () => { URL.revokeObjectURL(url); resolve(false); } // 加载失败（离线/缺失）→ 保留程序化天空
@@ -63,10 +88,15 @@ export function createSky(scene, opts = {}) {
 }
 
 // attachSky(scene, opts)：游戏/编辑器统一入口 —— 先加程序化兜底，再异步换成城市贴图。
+// opts.renderer 传了就顺手维护 scene.environment（金属/光滑材质要靠它出颜色，否则全黑）。
 export function attachSky(scene, opts = {}) {
+  const renderer = opts.renderer || null;
+  if (renderer) applyEnvironment(scene, renderer, null); // 立刻给一份基础环境，不等天空贴图
   const sky = createSky(scene, opts);
-  loadSkyTexture(scene).then((ok) => {
-    if (ok) scene.remove(sky); // 贴图天空就绪后移除程序化兜底，避免叠在背景前面
+  loadSkyTexture(scene).then((tex) => {
+    if (!tex) return;
+    scene.remove(sky); // 贴图天空就绪后移除程序化兜底，避免叠在背景前面
+    if (renderer) applyEnvironment(scene, renderer, tex); // 升级成真实天空的环境反射
   });
   return sky;
 }
@@ -112,12 +142,18 @@ function skyBlend(t) {
   return { from: cur.key, to: null, a: 0 };
 }
 
-// createTimeSky(scene)：生成四张天空球壳 + 程序化天空兜底，返回 { update(t, camera) }。
+// createTimeSky(scene, renderer)：生成四张天空球壳 + 程序化天空兜底，返回 { update(t, camera) }。
 // update 每帧调用：按时刻决定哪张球壳可见并交叉淡入，同时让球壳跟随相机（无视差、不被裁剪）。
-export function createTimeSky(scene) {
+// ⚠ 一定要传 renderer：金属/光滑材质（metalness 高、roughness→0）靠 scene.environment 出颜色，
+//   不建环境贴图这些材质会渲染成**纯黑**（导入的模型很常见）。
+export function createTimeSky(scene, renderer) {
   const fallback = createSky(scene); // 贴图没加载出来前的兜底，加载成功后隐藏
   const domes = new Map();
+  const textures = new Map(); // key -> 等距圆柱贴图（时段切换时用来更新环境反射）
   let anyLoaded = false;
+  let envKey = null;
+
+  if (renderer) applyEnvironment(scene, renderer, null); // 基础环境，立刻生效
 
   for (const key of Object.keys(SKYBOX_URLS)) {
     const mat = new THREE.MeshBasicMaterial({
@@ -148,6 +184,7 @@ export function createTimeSky(scene) {
           mat.needsUpdate = true;
           anyLoaded = true;
           fallback.visible = false;
+          textures.set(key, texture); // 留给 update() 生成环境反射
         },
         undefined,
         () => {
@@ -162,6 +199,11 @@ export function createTimeSky(scene) {
 
   function update(t, camera) {
     const { from, to, a } = skyBlend(t);
+    // 时段变化 → 同步换一份环境反射（金属/光滑材质跟着天色走；没这一步它们会一直用初始那份）
+    if (renderer && from !== envKey && textures.has(from)) {
+      envKey = from;
+      applyEnvironment(scene, renderer, textures.get(from));
+    }
     for (const [key, mesh] of domes) {
       let opacity = 0;
       let order = -1;

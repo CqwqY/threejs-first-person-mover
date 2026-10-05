@@ -103,7 +103,7 @@ export function createEditor() {
   renderer.setSize(w0, h0);
 
   const scene = new THREE.Scene();
-  attachSky(scene); // 城市天空贴图（优先）→ 程序化天空兜底
+  attachSky(scene, { renderer }); // 城市天空贴图（优先）→ 程序化天空兜底；同时建环境贴图（金属材质要靠它）
 
   const camera = new THREE.PerspectiveCamera(55, w0 / h0, 0.1, 500);
   camera.position.set(32, 24, 32);

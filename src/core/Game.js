@@ -165,7 +165,7 @@ export class Game {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，时段天空球壳覆盖其上）
     // 时段天空盒：清晨/白天/夜晚/深夜四张全景图，按世界时刻交叉淡入（内部含程序化天空兜底）
-    this._timeSky = createTimeSky(this.scene);
+    this._timeSky = createTimeSky(this.scene, this.renderer); // 传 renderer：要生成环境贴图，否则金属材质全黑
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
