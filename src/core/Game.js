@@ -300,6 +300,11 @@ export class Game {
     // ---- 网络连接 ----
     this.network = new Network(Config.RELAY_URL, this._token);
     this.network.onMessage((msg) => this._onNetworkMessage(msg));
+    // 连接状态 UI：重连中显示角标，5 次失败显示「网络错误」面板
+    this._netBadge = null;   // 顶部「正在重连 (n/5)…」角标
+    this._netErrorEl = null; // 全屏「网络错误」面板
+    this._netWasDown = false; // 是否经历过掉线（用于重连成功时提示「已重新连接」）
+    this.network.onStatus((s, info) => this._onNetworkStatus(s, info));
     this.network.connect();
 
     // 计时器与 RAF 句柄（便于停止）
@@ -4668,6 +4673,109 @@ export class Game {
     mesh.userData.pickup = p;
 
     this._toast('阿花送了你一个：' + name + '，走过去碰到它就有小惊喜');
+  }
+
+  // ============ 网络连接状态 UI ============
+  // 需求：拒绝「静默脱机」。连接掉线 → 顶部角标提示正在重连；重连成功 → 提示已恢复；
+  // 重连 5 次全失败 → 判定网络错误，弹全屏面板 + 手动重试按钮。
+  _onNetworkStatus(status, info) {
+    const attempt = info && info.attempt ? info.attempt : 0;
+    const max = info && info.max ? info.max : 5;
+
+    if (status === 'open') {
+      this._netBadgeHide();
+      this._netErrorHide();
+      // 只有「掉线过一次又恢复」才提示，开局首次连上不打扰用户
+      if (this._netWasDown) {
+        this._netWasDown = false;
+        this._toast('已重新连接服务器');
+      }
+      return;
+    }
+
+    if (status === 'failed') {
+      this._netBadgeHide();
+      this._netWasDown = true;
+      this._netErrorShow();
+      return;
+    }
+
+    if (status === 'reconnecting') {
+      this._netWasDown = true;
+      this._netErrorHide();
+      this._netBadgeShow('正在重连服务器… (' + attempt + '/' + max + ')');
+      return;
+    }
+
+    // connecting：首次连接中，不打扰（加载阶段本来就有 loading）
+    this._netBadgeHide();
+  }
+
+  _netBadgeShow(text) {
+    let el = this._netBadge;
+    if (!el) {
+      el = document.createElement('div');
+      // 顶部居中、toast 下方（toast 在 top:64px），不遮挡顶部按钮行与校卡
+      el.style.cssText =
+        'position:fixed;top:calc(env(safe-area-inset-top, 0px) + 104px);left:50%;' +
+        'transform:translateX(-50%);z-index:9600;pointer-events:none;' +
+        'background:rgba(255,183,77,.95);color:#2b1a05;' +
+        'padding:6px 14px;border-radius:999px;font:600 13px/1.3 var(--kui-font);' +
+        'box-shadow:0 4px 14px rgba(0,0,0,.35);white-space:nowrap;';
+      document.body.appendChild(el);
+      this._netBadge = el;
+    }
+    if (el.textContent !== text) el.textContent = text;
+    el.style.display = '';
+  }
+
+  _netBadgeHide() {
+    if (this._netBadge) this._netBadge.style.display = 'none';
+  }
+
+  _netErrorShow() {
+    let el = this._netErrorEl;
+    if (!el) {
+      el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(8,14,24,.72);backdrop-filter:blur(3px);';
+      const card = document.createElement('div');
+      card.style.cssText =
+        'min-width:min(320px,84vw);max-width:84vw;box-sizing:border-box;text-align:center;' +
+        'background:var(--kui-blue-deep,#123);color:var(--kui-paper,#eef);' +
+        'padding:22px 20px;border-radius:14px;border:1px solid rgba(255,255,255,.14);' +
+        'box-shadow:0 12px 40px rgba(0,0,0,.5);font:14px/1.5 var(--kui-font);';
+      const title = document.createElement('div');
+      title.textContent = '网络错误';
+      title.style.cssText = 'font-size:19px;font-weight:700;margin-bottom:8px;color:#ff8a8a;';
+      const desc = document.createElement('div');
+      desc.textContent = '无法连接到服务器，已重试 5 次均失败。\n请检查网络后重试。';
+      desc.style.cssText = 'opacity:.85;margin-bottom:16px;white-space:pre-line;';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = '重试连接';
+      btn.style.cssText =
+        'cursor:pointer;border:0;border-radius:10px;padding:10px 22px;' +
+        'background:var(--kui-blue,#2b6cb0);color:#fff;font:600 14px var(--kui-font);' +
+        'touch-action:manipulation;';
+      btn.addEventListener('click', () => {
+        this._netErrorHide();
+        this._netBadgeShow('正在重连服务器… (1/5)');
+        if (this.network) this.network.retryNow();
+      });
+      card.appendChild(title);
+      card.appendChild(desc);
+      card.appendChild(btn);
+      el.appendChild(card);
+      document.body.appendChild(el);
+      this._netErrorEl = el;
+    }
+    el.style.display = 'flex';
+  }
+
+  _netErrorHide() {
+    if (this._netErrorEl) this._netErrorEl.style.display = 'none';
   }
 
   // 顶部消息气泡提醒（不带 emoji）

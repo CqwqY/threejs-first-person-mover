@@ -11,8 +11,20 @@ export class Network {
     this._handlers = [];
     // 重连状态
     this._reconnectAttempts = 0;
-    this._maxReconnect = 5; // 最多重试次数
-    this._reconnectDelay = 2000; // 重连间隔（毫秒）
+    this._maxReconnect = 5; // 最多重试次数（5 次全失败即判定「网络错误」）
+    this._reconnectDelay = 2000; // 重连起始间隔（毫秒），之后指数退避
+    this._reconnectMaxDelay = 8000; // 退避上限
+    this._reconnectTimer = null;   // 待执行的重连定时器（失败判定/手动重试时要能取消）
+
+    // 连接状态机：'connecting' | 'open' | 'reconnecting' | 'failed'
+    // 传给 UI 的语义：
+    //   connecting   首次连接中（开局，还没成功过）
+    //   open         已连上（正常游玩）
+    //   reconnecting 掉线后正在重连（attempt: 第几次 / max: 总次数）
+    //   failed       重连 5 次都失败 —— 已脱机，需要提示「网络错误」并提供手动重试
+    this._status = 'connecting';
+    this._statusHandlers = [];
+    this._everOpened = false; // 是否成功连上过（用于区分「首次连接」与「断线重连」）
 
     // 状态上报节流
     this._pendingState = null; // 待发送的最新状态
@@ -22,13 +34,56 @@ export class Network {
     this._stateMuted = false; // true = 暂停上报自身位置（训练场本机兜底用）
   }
 
+  // 当前连接状态（供 UI 主动查询）
+  get status() { return this._status; }
+  get reconnectAttempts() { return this._reconnectAttempts; }
+  get maxReconnect() { return this._maxReconnect; }
+
+  // 注册连接状态回调：cb(status, info)
+  //   info = { attempt, max } —— 仅在 reconnecting / failed 时有意义
+  onStatus(cb) {
+    if (typeof cb !== 'function') return;
+    this._statusHandlers.push(cb);
+    // 注册即回报一次当前状态，避免 UI 错过之前的变化
+    try { cb(this._status, this._statusInfo()); } catch { /* 隔离单个回调的异常 */ }
+  }
+
+  _statusInfo() {
+    return { attempt: this._reconnectAttempts, max: this._maxReconnect };
+  }
+
+  _setStatus(s) {
+    if (this._status === s) return;
+    this._status = s;
+    const info = this._statusInfo();
+    for (const cb of this._statusHandlers) {
+      try { cb(s, info); } catch { /* 隔离单个回调的异常，别让 UI 报错打断网络层 */ }
+    }
+  }
+
   // 建立连接并绑定事件
   connect() {
-    this.ws = new WebSocket(this.url);
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    // 首次连接与断线重连对外状态不同：重连时 UI 要显示「重连中 (n/5)」
+    this._setStatus(this._everOpened || this._reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
+
+    try {
+      this.ws = new WebSocket(this.url);
+    } catch (e) {
+      // 构造 WebSocket 就抛（URL 非法等）：走统一的失败路径，别让异常冒出去
+      this.ws = null;
+      this._scheduleReconnect();
+      return;
+    }
 
     this.ws.onopen = () => {
       // 连接成功：重置重试计数
+      const wasReconnect = this._everOpened;
       this._reconnectAttempts = 0;
+      this._everOpened = true;
+      // ⚠ 先记标志再切状态 —— 状态回调里要立刻读它来区分「首次连上」与「重连恢复」
+      this._lastOpenWasReconnect = wasReconnect;
+      this._setStatus('open');
       // 连接握手：携带 token 登录；游客 token 为空不发送，服务端按未登录处理
       if (this.token) {
         this.send({ t: 'auth', token: this.token });
@@ -53,15 +108,34 @@ export class Network {
 
     this.ws.onerror = () => {
       // 触发 onclose 统一处理重连，这里直接关闭
-      this.ws.close();
+      try { this.ws.close(); } catch { /* 已关闭则忽略 */ }
     };
   }
 
-  // 断线后按间隔重连，超过最大次数则放弃
+  // 断线后按间隔重连；指数退避；超过最大次数则标记 failed（不静默放弃）
   _scheduleReconnect() {
-    if (this._reconnectAttempts >= this._maxReconnect) return;
+    if (this._status === 'failed') return; // 已是终态，等手动 retry
+    if (this._reconnectAttempts >= this._maxReconnect) {
+      // 5 次都失败：判定「网络错误」，通知 UI 并停止自动重连
+      this._setStatus('failed');
+      return;
+    }
     this._reconnectAttempts++;
-    setTimeout(() => this.connect(), this._reconnectDelay);
+    this._setStatus('reconnecting');
+    // 指数退避：2s → 4s → 8s → 8s → 8s（上限 8s）
+    const delay = Math.min(this._reconnectDelay * Math.pow(2, this._reconnectAttempts - 1), this._reconnectMaxDelay);
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  // 手动重试（UI 上「网络错误」面板里的按钮）：清零计数，重新开始连
+  retryNow() {
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    this._reconnectAttempts = 0;
+    this.connect();
   }
 
   // 发送 JSON 消息；未连接时静默丢弃
