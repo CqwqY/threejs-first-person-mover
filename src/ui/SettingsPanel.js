@@ -15,7 +15,7 @@ import { createKeyHints } from './KeyHints.js';
 export const DEFAULT_SETTINGS = {
   ambient: 0.22, // 环境光强度（压暗底色，拉开明暗对比）—— 编辑器中可调，会保存给客户端
   hemi: 0.34, // 半球光强度（模拟弹射光，给室内补明暗层次）—— 编辑器中可调，会保存给客户端
-  sun: 1.0, // 阳光强度（提亮受光面）—— 编辑器中可调，会保存给客户端
+  sun: 2.5, // 阳光强度（提亮受光面）—— 编辑器中可调，会保存给客户端。之前场景整体亮靠环境光撑的 IBL，关掉后只剩太阳照亮受光面，故默认与上限都抬高（max=8）
   sunElev: 48, // 阳光高度角（°）—— 编辑器中可调，会保存给客户端
   sunAz: 56, // 阳光方位角（°）—— 编辑器中可调，会保存给客户端
   viewFar: 500, // 视距（相机远裁剪面 / 绘制距离）—— 客户端本地可调
@@ -148,7 +148,7 @@ const FIELDS = [
   // —— 以下 editorOnly：编辑器的「光照设计」，客户端不显示 ——
   { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01, group: '光照', editorOnly: true },
   { id: 'hemi', label: '半球光(弹射)强度', kind: 'range', min: 0, max: 1, step: 0.01, group: '光照', editorOnly: true },
-  { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05, group: '光照', editorOnly: true },
+  { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 8, step: 0.1, group: '光照', editorOnly: true },
   { id: 'exposure', label: '整体曝光(太亮调低)', kind: 'range', min: 0.3, max: 1.5, step: 0.05, group: '光照', editorOnly: true },
   { id: 'sunElev', label: '阳光高度角', kind: 'range', min: 0, max: 90, step: 1, group: '光照', editorOnly: true },
   { id: 'sunAz', label: '阳光方位角', kind: 'range', min: 0, max: 360, step: 1, group: '光照', editorOnly: true },
