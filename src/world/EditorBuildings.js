@@ -10,6 +10,7 @@ import { editorMapData } from './editorMapData.js';
 import { API_BASE } from '../config.js';
 import { bakeTriMeshAsync } from './collision/trimesh.js';
 import { track } from './loadTracker.js';
+import { registerPointLight, unregisterPointLight } from './Lights.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
 let _addedHolders = [];
@@ -471,8 +472,10 @@ function colorOf(v) {
 }
 
 // 释放光源：Light 本身不占 GPU 资源，但仍按需清理其子树可能携带的几何/材质，避免残留。
+// 同时从阴影管理器注销 —— 本函数会被调用两次（打包数据 + 远端数据），不注销的话旧灯会一直占着名额。
 function disposeLight(obj) {
   obj.traverse((o) => {
+    if (o.isLight) unregisterPointLight(o);
     if (o.geometry && o.geometry.dispose) o.geometry.dispose();
     if (o.material) {
       const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -519,6 +522,9 @@ export function buildEditorLights(scene, dataOverride) {
         finiteOr(it.decay, LIGHT_DEFAULTS.decay)
       );
       light.position.set(x, y, z);
+      // 点光源登记进阴影管理器 → 光被墙挡住，不会照进隔壁房间
+      // （谁真正投影由 Lights.updatePointLightShadows 按离相机远近决定，最多 4 盏）
+      registerPointLight(light);
       group.add(light);
     } else if (it.type === 'area') {
       ensureRectAreaLib(); // 面光源使用前必须初始化一次 LTC 查找表

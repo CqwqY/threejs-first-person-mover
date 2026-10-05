@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { createLights } from '../world/Lights.js';
+import { createLights, updatePointLightShadows } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -884,6 +884,9 @@ export class Game {
   }
 
   _renderFrame() {
+    // 点光源阴影名额：按「离相机最近」分配（最多 4 盏，见 Lights.js）。
+    // 只在渲染前跑一次，成本是几十个灯的距离排序；数量恒定所以不会触发 shader 重编译。
+    updatePointLightShadows(this.camera.position);
     const up = this._useUpscale() && this._ensureUpscale() && this._ensureRT();
     if (!up) {
       this.renderer.setRenderTarget(null);

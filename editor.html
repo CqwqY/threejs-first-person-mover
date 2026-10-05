@@ -203,8 +203,8 @@
       <span class="spacer"></span>
       <button class="action primary" id="btnLibrary">素材库</button>
       <button class="action primary" id="btnSettings">画面</button>
-      <button class="action primary" id="btnAddPointLight">加点光源</button>
-      <button class="action primary" id="btnAddAreaLight">加面光源</button>
+      <button class="action primary" id="btnAddPointLight" title="点光源：会照亮周围，并按需投影（光被墙挡住，最多同时 4 盏，取离相机最近的）">加点光源</button>
+      <button class="action primary" id="btnAddAreaLight" title="面光源：光很柔和，但 Three.js 的 RectAreaLight 不支持阴影 —— 光一定会穿透墙体。室内照明建议用「加点光源」">加面光源</button>
       <a class="action primary" id="btnPlay" href="/" target="_blank">试玩</a>
       <button class="action primary" id="btnSave">保存场景</button>
       <button class="action danger" id="btnClear">清空全部</button>
@@ -405,6 +405,10 @@
         </div>
         <div id="lightPanel">
           <div class="panel-title">光源</div>
+          <div id="lightHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
+            点光源会投影（光被墙挡住；全场景最多同时 4 盏，取离相机最近的）；<br />
+            面光源不投影（Three.js 的 RectAreaLight 限制），做室内照明请用点光源。
+          </div>
           <div id="lightList"></div>
           <div id="lightEditor" style="display:none">
             <div class="field"><label>位置 X</label><input id="lX" type="number" step="0.1" /></div>
@@ -467,6 +471,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261005d"></script>
+  <script type="module" src="./src/editor/main.js?v=20261005e"></script>
 </body>
 </html>

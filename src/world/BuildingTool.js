@@ -12,6 +12,7 @@ import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '.
 import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
 import { Config } from '../config.js';
+import { registerPointLight } from './Lights.js';
 
 const DEG = Math.PI / 180;
 const CLAMP = 24; // 无配置范围时的兜底：钳制在 ±24（地面尺寸 50，半径 25）
@@ -233,7 +234,30 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
 
   // 组合家具：多个模型 + 灯拼成一个 Group。
-  // 灯 = 点光源（照亮周围）+ 一个自发光小球（看起来就是个亮着的灯泡），两者都要。
+  // 灯 = 点光源（照亮周围，带阴影所以不穿墙）+ 一团柔和的光晕（看得出"这儿有个灯"）。
+  //
+  // ⚠ 以前这里挂的是一个 MeshBasicMaterial 的纯色小球当"灯泡"，那东西**不受光照、直接输出颜色**，
+  //   夜里就是一个突兀的硬白点（像渲染坏了），而且完全没有"灯在发光"的观感。
+  //   现在换成一张径向渐变的**光晕 Sprite**（叠加混合、不写深度）：中心亮、边缘透明，
+  //   远处自然缩小、白天几乎看不见 —— 才像一盏灯。
+  let _glowTex = null;
+  function glowTexture() {
+    if (_glowTex) return _glowTex;
+    const S = 64;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.18, 'rgba(255,255,255,0.62)');
+    g.addColorStop(0.45, 'rgba(255,255,255,0.18)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, S, S);
+    _glowTex = new THREE.CanvasTexture(cv);
+    _glowTex.colorSpace = THREE.SRGBColorSpace;
+    return _glowTex;
+  }
   function buildComboProto(item) {
     const c = item.combo || {};
     const parts = Array.isArray(c.parts) ? c.parts : [];
@@ -253,10 +277,21 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
         const pos = new THREE.Vector3(Number(l.x) || 0, Number(l.y) || 3, Number(l.z) || 0);
         const pl = new THREE.PointLight(col, Number(l.intensity) || 1, Number(l.distance) || 12, Number(l.decay) || 2);
         pl.position.copy(pos);
+        registerPointLight(pl); // 交给 Lights 统一分配阴影名额（最近的几盏才投影，避免 6 面立方体阴影把帧数吃光）
         g.add(pl);
-        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), new THREE.MeshBasicMaterial({ color: col }));
-        bulb.position.copy(pos);
-        g.add(bulb);
+        const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: glowTexture(),
+          color: col,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          fog: false,
+          opacity: 0.9,
+        }));
+        glow.position.copy(pos);
+        glow.scale.setScalar(1.0); // 世界单位：约 1 米直径的柔光团
+        glow.renderOrder = 996;
+        g.add(glow);
       }
       return g;
     });
@@ -290,6 +325,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const o = src.clone(true); // geometry 共享，只克隆节点
     o.traverse((n) => {
       if (n.isLight) { n.visible = false; return; } // 组合家具里的点光源不参与描边
+      if (n.isSprite) { n.visible = false; return; } // 灯的光晕也不要在描边壳里再叠一层
       if (!n.isMesh) return;
       n.material = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide });
       n.castShadow = false; n.receiveShadow = false;
