@@ -8,8 +8,8 @@
 //      不重新挂回子树光向就会算错。
 import * as THREE from 'three';
 import {
-  enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, releaseAreaShadow, updateShadowBudgets,
-  clearShadowBudgets, AREA_SHADOW_TUNING,
+  enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
+  releaseAreaShadow, updateShadowBudgets, clearShadowBudgets, AREA_SHADOW_TUNING,
 } from '../src/world/Lights.js';
 
 const T = AREA_SHADOW_TUNING; // 亮度的旋钮（split/gain/angle）—— 期望值跟着真实常量走，改参数不用改自检
@@ -206,6 +206,25 @@ console.log('\n⑥ 近处不许爆亮（代理照度不得超过面光源自身�
     check(`${w}×${h} 在 6m 处仍有理想值的 50% 以上`, (body + e(6)) / ideal >= 0.5, true);
     releaseAreaShadow(a);
   }
+}
+
+// ---------- ⑦ 编辑器改「照射距离」必须真的作用到代理 ----------
+// 面光源自身没有 distance，这个值只喂给阴影代理：既是照射半径，也是阴影贴图的 far。
+// 编辑器面板上能改，就必须能传到代理上，否则拖滑块毫无反应。
+console.log('\n⑦ 改 distance 必须作用到代理（否则编辑器里拖滑块没反应）：');
+{
+  clearShadowBudgets();
+  const a = new THREE.RectAreaLight(0xffffff, 3, 4, 3);
+  scene.add(a);
+  enableAreaShadow(a);
+  const proxy = a.children.find((c) => c.isSpotLight);
+  check('默认取 AREA_SHADOW_DISTANCE', proxy.distance, T.distance, 1e-6);
+  setAreaShadowDistance(a, 6);
+  check('改为 6 后代理 distance = 6', proxy.distance, 6, 1e-6);
+  check('阴影贴图 far 跟着收到 6', proxy.shadow.camera.far, 6, 1e-6);
+  setAreaShadowDistance(a, 0); // 非法值 → 回默认
+  check('传 0 回落到默认值', proxy.distance, T.distance, 1e-6);
+  releaseAreaShadow(a);
 }
 
 console.log(fails ? `\n✗ ${fails} 项失败` : '\n✓ 全部通过');

@@ -26,7 +26,11 @@ import { buildTrackPath, disposeTrackViz } from '../world/TrackViz.js';
 // 复用游戏世界作为编辑器底景与可编辑景物（读取游戏地形/道路/道具）
 import { buildScenery } from '../world/buildScenery.js';
 import { attachSky } from '../world/SkyBox.js';
-import { updateShadowBudgets, registerPointLight, unregisterPointLight, enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, releaseAreaShadow } from '../world/Lights.js';
+import {
+  updateShadowBudgets, registerPointLight, unregisterPointLight,
+  enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
+  releaseAreaShadow, AREA_SHADOW_TUNING,
+} from '../world/Lights.js';
 import { createSettingsPanel, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 
 const DEG = Math.PI / 180;
@@ -187,6 +191,10 @@ export function createEditor() {
   const hit = new THREE.Vector3();
 
   // ---------- 状态 ----------
+  // 光源列表里「投影中 / 未投影」的小标记：rec → DOM 节点。
+  // ⚠ 用 WeakMap 而不是挂在 rec 上 —— rec 是要被序列化进存档的数据，塞 DOM 节点会污染存档。
+  const _shadowBadges = new WeakMap();
+
   const state = {
     mode: 'place',
     currentUrl: LIBRARY[0].url,
@@ -1832,6 +1840,9 @@ export function createEditor() {
       light.height = Math.max(0.01, rec.height ?? 3);
       applyAreaOrientation(light, rec);
       syncAreaShadow(light); // 尺寸/颜色变了也要重算代理亮度（代理照度 ∝ 宽×高）
+      // ⚠ 面光源自己没有 distance，这个只作用于阴影代理：决定照射范围 + 阴影贴图的 far。
+      //   不改的话面板上拖「照射距离」看不到任何变化（阴影范围还是默认的 14 米）。
+      setAreaShadowDistance(light, rec.distance ?? 0);
     } else {
       light.intensity = rec.intensity ?? 0;
       light.distance = Math.max(0, rec.distance ?? 0);
@@ -1893,7 +1904,8 @@ export function createEditor() {
       x: controls.target.x, y: 3, z: controls.target.z,
       color: '#ffffff',
       intensity: type === 'area' ? 3 : 20,
-      distance: 12, decay: 2,
+      // 面光源的 distance 只作用于阴影代理（照到多远 + 阴影贴图多远），默认跟 Lights.js 一致
+      distance: type === 'area' ? AREA_SHADOW_TUNING.distance : 12, decay: 2,
       width: 4, height: 3, rotY: 0, rotX: -90,
     };
     buildLightObject(rec);
@@ -1969,9 +1981,32 @@ export function createEditor() {
       idEl.className = 'oid';
       idEl.textContent = rec.id;
       li.appendChild(idEl);
+      // 面光源：投影名额只有 2 盏（按离相机的距离分配），不给个反馈的话
+      // 用户会以为「面光源根本没接上阴影」。这个标记每 400ms 刷一次（见 refreshLightShadowBadges）。
+      // ⚠ 标记存在 WeakMap 里而不是挂在 rec 上：rec 是要被序列化的存档数据，塞 DOM 节点会污染存档。
+      if (rec.type === 'area') {
+        const bd = document.createElement('span');
+        bd.className = 'oid';
+        bd.style.marginLeft = '6px';
+        li.appendChild(bd);
+        _shadowBadges.set(rec, bd);
+      }
       li.onclick = () => selectLight(rec);
       wrap.appendChild(li);
     });
+    refreshLightShadowBadges();
+  }
+
+  // 刷新列表里「投影中 / 未投影」的标记。名额是每帧按距离重算的，所以要轮询。
+  function refreshLightShadowBadges() {
+    if (!_shadowBadges.size) return;
+    for (const [rec, bd] of _shadowBadges) {
+      if (!rec.obj) continue;
+      const on = isAreaShadowCasting(rec.obj);
+      bd.textContent = on ? '·投影中' : '·未投影';
+      bd.style.color = on ? '#5ecb8a' : '#8a8f98';
+      bd.title = on ? '这盏面光源正在投影' : '名额给了离相机更近的灯（面光源最多 2 盏同时投影），走近它就会投影';
+    }
   }
 
   // 选中光源的属性编辑：位置/颜色/强度 + 按类型显示距离/衰减或宽/高/朝向
@@ -1987,7 +2022,7 @@ export function createEditor() {
     if (StepUI.lZ) StepUI.lZ.value = Math.round((rec.z ?? 0) * 100) / 100;
     if (StepUI.lColor) StepUI.lColor.value = lightColorHex(rec);
     if (StepUI.lIntensity) StepUI.lIntensity.value = rec.intensity ?? 0;
-    if (StepUI.lDistance) StepUI.lDistance.value = rec.distance ?? 0;
+    if (StepUI.lDistance) StepUI.lDistance.value = rec.distance ?? (isArea ? AREA_SHADOW_TUNING.distance : 12);
     if (StepUI.lDecay) StepUI.lDecay.value = rec.decay ?? 2;
     if (StepUI.lWidth) StepUI.lWidth.value = rec.width ?? 4;
     if (StepUI.lHeight) StepUI.lHeight.value = rec.height ?? 3;
@@ -2140,6 +2175,9 @@ export function createEditor() {
           x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0,
           color: lightColorHex(rec),
           intensity: rec.intensity ?? 1,
+          // ⚠ 两种灯都要存 distance：面光源的 distance 不进存档的话，
+          //   阴影代理的范围在保存/重开后就丢回默认值，游戏端也永远拿不到（等于白调）
+          distance: rec.distance ?? (rec.type === 'area' ? AREA_SHADOW_TUNING.distance : 12),
         };
         if (out.type === 'area') {
           out.width = rec.width ?? 4;
@@ -2147,7 +2185,6 @@ export function createEditor() {
           out.rotY = rec.rotY ?? 0;
           out.rotX = rec.rotX ?? 0;
         } else {
-          out.distance = rec.distance ?? 12;
           out.decay = rec.decay ?? 2;
         }
         return out;
@@ -2238,7 +2275,8 @@ export function createEditor() {
         x: num(it.x, 0), y: num(it.y, 3), z: num(it.z, 0),
         color: (typeof it.color === 'string' && it.color) ? it.color : '#ffffff',
         intensity: num(it.intensity, it.type === 'area' ? 3 : 20),
-        distance: num(it.distance, 12),
+        // 面光源的 distance 是阴影代理的范围，默认值跟 Lights.js 对齐（点光源仍是 12）
+        distance: num(it.distance, it.type === 'area' ? AREA_SHADOW_TUNING.distance : 12),
         decay: num(it.decay, 2),
         width: num(it.width, 4),
         height: num(it.height, 3),
@@ -3521,9 +3559,9 @@ export function createEditor() {
     }).filter((p) => /^\/(assets|models)\//.test(p.url));
     if (!parts.length) { setComboHint('草稿里的模型没有有效路径（需要 /assets 或 /models 的 glb）', 'err'); return; }
     const lights = state.lights.map((rec) => {
-      const out = { type: rec.type === 'area' ? 'area' : 'point', x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0, color: lightColorHex(rec), intensity: rec.intensity ?? 1 };
+      const out = { type: rec.type === 'area' ? 'area' : 'point', x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0, color: lightColorHex(rec), intensity: rec.intensity ?? 1, distance: rec.distance ?? (rec.type === 'area' ? AREA_SHADOW_TUNING.distance : 12) };
       if (out.type === 'area') { out.width = rec.width ?? 4; out.height = rec.height ?? 3; out.rotY = rec.rotY ?? 0; out.rotX = rec.rotX ?? 0; }
-      else { out.distance = rec.distance ?? 12; out.decay = rec.decay ?? 2; }
+      else { out.decay = rec.decay ?? 2; }
       return out;
     });
     const id = ((StepUI.comboId && StepUI.comboId.value) || '').trim() || ('combo-' + Date.now());
@@ -3856,6 +3894,7 @@ export function createEditor() {
 
   // 渲染循环
   let _t0 = performance.now();
+  let _badgeAt = 0; // 上一次刷新「投影中」标记的时间戳（节流用）
   function loop() {
     const t = performance.now();
     applyWASDMove(Math.min((t - _t0) / 1000, 0.1));
@@ -3872,8 +3911,11 @@ export function createEditor() {
     );
     sun.position.copy(sunTarget.position).add(sunOffset);
     sunTarget.updateMatrixWorld();
-    // 点光源阴影名额按「离相机最近」分配（最多 4 盏），其余只照亮不遮挡（见 Lights.js）
+    // 阴影名额按「离相机最近」分配（点光源最多 4 盏、面光源代理最多 2 盏），其余只照亮不遮挡（见 Lights.js）
     updateShadowBudgets(camera.position);
+    // 列表里的「投影中 / 未投影」标记跟着名额走，400ms 刷一次就够（不必每帧动 DOM）
+    const now = performance.now();
+    if (now - (_badgeAt || 0) > 400) { _badgeAt = now; refreshLightShadowBadges(); }
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(loop);
   }

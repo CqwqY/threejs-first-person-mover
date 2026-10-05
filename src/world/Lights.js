@@ -51,7 +51,9 @@ const AREA_SHADOW_ANGLE = (60 * Math.PI) / 180; // 张角：够盖住一间屋�
 const AREA_SHADOW_PENUMBRA = 1;             // 全柔边，尽量接近面光的软阴影
 const AREA_SHADOW_GAIN = 0.6;               // 亮度微调：整体偏暗就调大、偏亮调小
 // 调试/自检用：亮度的三个旋钮集中在这里，改完跑 node tools/probe-areashadow.mjs
-export const AREA_SHADOW_TUNING = { split: AREA_SHADOW_SPLIT, gain: AREA_SHADOW_GAIN, angle: AREA_SHADOW_ANGLE };
+export const AREA_SHADOW_TUNING = {
+  split: AREA_SHADOW_SPLIT, gain: AREA_SHADOW_GAIN, angle: AREA_SHADOW_ANGLE, distance: AREA_SHADOW_DISTANCE,
+};
 
 // 代理沿发光方向（本地 -Z）后退多少米。
 // 面积越大，面光的"饱和"发生得越远，代理就得更靠后，否则近处照样爆。
@@ -154,6 +156,29 @@ export function setAreaBaseIntensity(area, v) {
   if (!area || !area.isRectAreaLight) return;
   area.userData.__areaBase = Number(v) || 0;
   syncAreaShadow(area);
+}
+
+// 改代理的衰减半径（面光源自己没有 distance，这个只作用于阴影代理）。
+// 传 0 / 非法值 → 回到 AREA_SHADOW_DISTANCE。衰减半径同时决定阴影贴图的 far，
+// 所以这是面光源阴影唯一需要手调的「范围」旋钮 —— 编辑器面板上必须能看到。
+export function setAreaShadowDistance(area, d) {
+  if (!area || !area.isRectAreaLight) return;
+  const proxy = areaProxyOf(area);
+  if (!proxy) return;
+  const dist = Number(d) > 0 ? Number(d) : AREA_SHADOW_DISTANCE;
+  proxy.distance = dist;
+  configureShadow(proxy, dist);
+  if (proxy.shadow && proxy.shadow.camera) {
+    proxy.shadow.camera.far = dist;
+    proxy.shadow.camera.updateProjectionMatrix();
+  }
+}
+
+// 这盏面光源的代理**此刻**是否在投影（名额只有 MAX_AREA_SHADOW 盏，按离相机的距离分配）。
+// 编辑器用它做可见反馈 —— 否则用户会以为「面光源没接上阴影」。
+export function isAreaShadowCasting(area) {
+  const proxy = areaProxyOf(area);
+  return !!(proxy && proxy.castShadow);
 }
 
 // 面光源要销毁时归还名额，并把它本来的亮度还回去

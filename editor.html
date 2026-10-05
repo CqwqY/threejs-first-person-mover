@@ -418,8 +418,8 @@
             <div class="field"><label>位置 Z</label><input id="lZ" type="number" step="0.1" /></div>
             <div class="field"><label>颜色</label><input id="lColor" type="color" /></div>
             <div class="field"><label>强度</label><input id="lIntensity" type="number" step="0.1" min="0" /></div>
+            <div class="field"><label title="光衰减到 0 的半径（米）。点光源：照不到更远的地方；面光源：阴影代理的照射/投影范围，同时决定阴影贴图的远平面，调小能让阴影更清晰">照射距离</label><input id="lDistance" type="number" step="0.5" min="0" /></div>
             <div id="lightPointFields">
-              <div class="field"><label>照射距离</label><input id="lDistance" type="number" step="0.5" min="0" /></div>
               <div class="field"><label>衰减</label><input id="lDecay" type="number" step="0.1" min="0" /></div>
             </div>
             <div id="lightAreaFields" style="display:none">
@@ -473,6 +473,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261005m"></script>
+  <script type="module" src="./src/editor/main.js?v=20261005n"></script>
 </body>
 </html>
