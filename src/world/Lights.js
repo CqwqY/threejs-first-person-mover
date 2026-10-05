@@ -35,11 +35,32 @@ const _tmpV = new THREE.Vector3(); // rebalance 里取世界坐标用的临时�
 // 单位换算：RectAreaLight 的 intensity 是亮度 L（尼特），正对方向 d 米处照度 ≈ L·A/d²（A = 宽×高）；
 //   聚光灯的 intensity 是光强 I（坎德拉），照度 = I/d²。所以 **I = L·A** 两者才等亮
 //   （three 里两者都是 uniforms.color = color × intensity，没有额外比例因子 —— 已核对源码）。
-const AREA_SHADOW_SPLIT = 0.85;              // 走代理（会被遮挡）的亮度占比
-const AREA_SHADOW_DISTANCE = 14;             // 代理光衰减半径（米）
+//
+// ⚠⚠ 但上面这个等号**只在远场成立**，近处会翻车 —— 这是"面光源怎么突然这么强"的根因：
+//   · 面光源：LTC 算出来的是形状因子，**上限是 1**，所以照度封顶在 **π·L**，贴多近都不会更亮；
+//   · 聚光灯：照度 = I/d²，d 越小越亮，three 只把 pow(d,2) 夹在 0.01（等于没保护）。
+//   例：4×3 的灯、L=3，正下方 1 米 —— 面光源实际照度 ≈ 7，而 I=L·A 的聚光灯给 36，亮 5 倍。
+//
+// 对策两条：
+//   ① 代理沿发光方向**后退**一段（面积越大退越多，见 areaProxyBackoff）——把近处那段 1/d² 削平，
+//      远场 d ≫ 后退量时又自动回到 I/d²，不影响正常照明距离。
+//   ② 整体压一档（GAIN），因为聚光灯把光拢在 60° 锥里，主观上就是比面光"冲"。
+const AREA_SHADOW_SPLIT = 0.55;             // 走代理（会被遮挡）的亮度占比
+const AREA_SHADOW_DISTANCE = 14;            // 代理光衰减半径（米）
 const AREA_SHADOW_ANGLE = (60 * Math.PI) / 180; // 张角：够盖住一间屋子
-const AREA_SHADOW_PENUMBRA = 1;              // 全柔边，尽量接近面光的软阴影
-const AREA_SHADOW_GAIN = 1;                  // 亮度微调：整体偏暗就调大、偏亮调小
+const AREA_SHADOW_PENUMBRA = 1;             // 全柔边，尽量接近面光的软阴影
+const AREA_SHADOW_GAIN = 0.6;               // 亮度微调：整体偏暗就调大、偏亮调小
+// 调试/自检用：亮度的三个旋钮集中在这里，改完跑 node tools/probe-areashadow.mjs
+export const AREA_SHADOW_TUNING = { split: AREA_SHADOW_SPLIT, gain: AREA_SHADOW_GAIN, angle: AREA_SHADOW_ANGLE };
+
+// 代理沿发光方向（本地 -Z）后退多少米。
+// 面积越大，面光的"饱和"发生得越远，代理就得更靠后，否则近处照样爆。
+// 用等面积圆的半径 r = √(A/π) 作尺度：r 正好是「远场公式开始失效」的距离。
+function areaProxyBackoff(area) {
+  const a = Math.max(0.01, (area.width || 1) * (area.height || 1));
+  const r = Math.sqrt(a / Math.PI);
+  return Math.min(1.6, Math.max(0.15, r * 0.35));
+}
 
 // ⚠ 标记只放**布尔/数字**，绝不存 Object3D：Object3D.copy 对 userData 走
 //   `JSON.parse(JSON.stringify(...))`，塞进 Object3D 会因循环引用直接抛错。
@@ -85,8 +106,9 @@ export function enableAreaShadow(area, opts = {}) {
   if (!proxy) {
     proxy = new THREE.SpotLight(new THREE.Color(0xffffff), 0, dist, 2, AREA_SHADOW_ANGLE, AREA_SHADOW_PENUMBRA);
     proxy.userData.__areaProxy = true;
-    // 沿发光方向（本地 -Z）探出一丁点，避免与「安装它的那面墙/天花板」产生自遮挡痤疮
-    proxy.position.set(0, 0, -0.06);
+    // 沿发光方向（本地 -Z）后退一段：既避免与「安装它的那面墙/天花板」产生自遮挡痤疮，
+    // 也把聚光灯 1/d² 在近处的暴涨削平（详见上面「近处会翻车」的说明）
+    proxy.position.set(0, 0, -areaProxyBackoff(area));
     area.add(proxy);
   }
   // ⚠ target 必须重新挂到**自己**的子树上：three 的 SpotLight.copy 做的是
@@ -118,6 +140,9 @@ export function syncAreaShadow(area) {
   area.intensity = base * (1 - AREA_SHADOW_SPLIT);
   proxy.intensity = base * a * AREA_SHADOW_SPLIT * AREA_SHADOW_GAIN;
   proxy.color.copy(area.color);
+  // 尺寸在编辑器里能改 → 后退量跟着重算（面越大退越多，否则近处又爆）。
+  // 光向不受影响：target 是代理的子节点，方向只取决于它相对代理的偏移，与代理自身位置无关。
+  proxy.position.set(0, 0, -areaProxyBackoff(area));
   if (proxy.shadow && proxy.shadow.camera && proxy.distance) {
     proxy.shadow.camera.far = proxy.distance;
     proxy.shadow.camera.updateProjectionMatrix();

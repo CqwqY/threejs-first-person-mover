@@ -9,8 +9,10 @@
 import * as THREE from 'three';
 import {
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, releaseAreaShadow, updateShadowBudgets,
-  clearShadowBudgets,
+  clearShadowBudgets, AREA_SHADOW_TUNING,
 } from '../src/world/Lights.js';
+
+const T = AREA_SHADOW_TUNING; // 亮度的旋钮（split/gain/angle）—— 期望值跟着真实常量走，改参数不用改自检
 
 let fails = 0;
 function check(name, got, want, eps = 1e-6) {
@@ -71,9 +73,9 @@ console.log('\n② 总亮度 = 本体 + 代理，且可重复拆分（不能越�
   scene.add(a);
   enableAreaShadow(a);
   const proxy = a.children.find((c) => c.isSpotLight);
-  const A = 4 * 3, SPLIT = 0.85;
-  check('本体亮度 = L×(1-0.85)', a.intensity, 5 * (1 - SPLIT), 1e-6);
-  check('代理亮度 = L×A×0.85（坎德拉）', proxy.intensity, 5 * A * SPLIT, 1e-6);
+  const A = 4 * 3, SPLIT = T.split, GAIN = T.gain;
+  check(`本体亮度 = L×(1-${SPLIT})`, a.intensity, 5 * (1 - SPLIT), 1e-6);
+  check(`代理亮度 = L×A×${SPLIT}×${GAIN}（坎德拉）`, proxy.intensity, 5 * A * SPLIT * GAIN, 1e-6);
   // 重复同步 5 次亮度必须不变（基准值存在于 userData，不受本体被改影响）
   const i0 = a.intensity, p0 = proxy.intensity;
   for (let i = 0; i < 5; i++) syncAreaShadow(a);
@@ -81,11 +83,11 @@ console.log('\n② 总亮度 = 本体 + 代理，且可重复拆分（不能越�
   check('重复 sync 5 次后代理亮度不变', proxy.intensity, p0, 1e-9);
   // 改强度必须走 setAreaBaseIntensity（编辑器改面板走这条）
   setAreaBaseIntensity(a, 10);
-  check('改为 L=10 后本体 = 10×0.15', a.intensity, 10 * (1 - SPLIT), 1e-6);
-  check('改为 L=10 后代理 = 10×12×0.85', proxy.intensity, 10 * A * SPLIT, 1e-6);
+  check(`改为 L=10 后本体 = 10×(1-${SPLIT})`, a.intensity, 10 * (1 - SPLIT), 1e-6);
+  check('改为 L=10 后代理 = 10×12×SPLIT×GAIN', proxy.intensity, 10 * A * SPLIT * GAIN, 1e-6);
   // 改尺寸后代理照度要跟着面积走
   a.width = 2; a.height = 2; syncAreaShadow(a);
-  check('尺寸改成 2×2 后代理 = 10×4×0.85', proxy.intensity, 10 * 4 * SPLIT, 1e-6);
+  check('尺寸改成 2×2 后代理 = 10×4×SPLIT×GAIN', proxy.intensity, 10 * 4 * SPLIT * GAIN, 1e-6);
   // 归还后亮度要还原
   releaseAreaShadow(a);
   check('release 后本体亮度还原为基准 10', a.intensity, 10, 1e-6);
@@ -114,7 +116,7 @@ console.log('\n③ clone(true) 后重建代理：不许重复挂灯、光向必�
   const d = dirOf(ca);
   check('克隆体挪位后仍朝下 (0,-1,0)', vecEq(d, 0, -1, 0), true);
   const cp = ca.children.find((c) => c.isSpotLight);
-  check('克隆体代理亮度按基准 6 重算', cp.intensity, 6 * 12 * 0.85, 1e-6);
+  check('克隆体代理亮度按基准 6 重算', cp.intensity, 6 * 12 * T.split * T.gain, 1e-6);
   check('target 挂在自己子树里（不是游离节点）', !!cp.target.parent, true);
 }
 
@@ -178,6 +180,32 @@ console.log('\n⑤ 已脱离场景的灯必须让出名额（否则新灯的阴�
   updateShadowBudgets(new THREE.Vector3(0, 3, 0));
   check('新灯能拿回名额', fresh.children.find((c) => c.isSpotLight).castShadow, true);
   releaseAreaShadow(fresh);
+}
+
+// ---------- ⑥ 近处不许爆亮 ----------
+// 面光源的照度有上限（LTC 形状因子 ≤ 1 → 照度 ≤ π·L），聚光灯是 1/d² 没有上限。
+// 代理若不后退、亮度若不压，灯下方 1 米内会比原来亮好几倍（用户反馈"面光源那么强"）。
+console.log('\n⑥ 近处不许爆亮（代理照度不得超过面光源自身的饱和上限 π·L）：');
+{
+  clearShadowBudgets();
+  for (const [w, h] of [[4, 3], [8, 6], [2, 2]]) {
+    const L = 5;
+    const a = new THREE.RectAreaLight(0xffffff, L, w, h);
+    scene.add(a);
+    enableAreaShadow(a);
+    const proxy = a.children.find((c) => c.isSpotLight);
+    const b = -proxy.position.z; // 后退量
+    const cap = Math.PI * L;     // 面光源自己的照度天花板
+    const e = (d) => proxy.intensity / ((d + b) * (d + b)); // 代理在轴向 d 米处的照度
+    console.log(`  ${w}×${h}：后退 ${b.toFixed(2)}m，代理光强 ${proxy.intensity.toFixed(1)}cd`);
+    check(`${w}×${h} 在 0.5m 处不超过 1.6×π·L`, e(0.5) <= cap * 1.6, true);
+    check(`${w}×${h} 在 1m 处不超过 π·L`, e(1) <= cap, true);
+    // 远场别为了压近处把照明也压没了：6m 处总照度至少还有理想值的一半
+    const ideal = (L * w * h) / 36;                 // 远场 L·A/d²
+    const body = ((1 - T.split) * L * w * h) / 36;  // 本体那一份（远场同样成立）
+    check(`${w}×${h} 在 6m 处仍有理想值的 50% 以上`, (body + e(6)) / ideal >= 0.5, true);
+    releaseAreaShadow(a);
+  }
 }
 
 console.log(fails ? `\n✗ ${fails} 项失败` : '\n✓ 全部通过');
