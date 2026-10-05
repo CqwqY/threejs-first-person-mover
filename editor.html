@@ -428,6 +428,17 @@
               <div class="field"><label style="width:58px">水平朝向°</label><input id="lRotY" type="number" step="1" /></div>
               <div class="field"><label style="width:58px">俯仰°</label><input id="lRotX" type="number" step="1" /></div>
             </div>
+            <div class="field" style="margin-top:6px"><label>开启时间</label>
+              <select id="lOnMode">
+                <option value="always">常亮</option>
+                <option value="night">仅夜晚 (18–6)</option>
+                <option value="day">仅白天 (6–18)</option>
+                <option value="custom">自定义时段</option>
+              </select>
+            </div>
+            <div class="field" id="lOnFromField" style="display:none"><label>开始(时)</label><input id="lOnFrom" type="number" step="1" min="0" max="24" value="18" /></div>
+            <div class="field" id="lOnToField" style="display:none"><label>结束(时)</label><input id="lOnTo" type="number" step="1" min="0" max="24" value="6" /></div>
+            <div class="hint" style="margin:2px 0 6px">开启时间只在游戏内的昼夜循环里生效（编辑器不会自动昼夜切换，这里只能设定）。</div>
             <button id="lDel" class="import-btn" type="button" style="margin-top:4px">删除该光源</button>
           </div>
         </div>
@@ -473,6 +484,6 @@
       <button class="import-btn" id="arrGo" type="button">生成阵列</button>
     </div>
   </div>
-  <script type="module" src="./src/editor/main.js?v=20261005w"></script>
+  <script type="module" src="./src/editor/main.js?v=20261005x"></script>
 </body>
 </html>

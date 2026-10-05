@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { createLights, updateShadowBudgets } from '../world/Lights.js';
+import { createLights, updateShadowBudgets, setAreaBaseIntensity } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -109,6 +109,18 @@ const COMBAT_MODES = {
     win: '跑满圈数用时最短者获胜',
   },
 };
+
+// 光源「开启时段」判定：win 由 EditorBuildings.parseOnWindow 给出（{ mode, from, to }），
+// hours 为当前时刻的小时数（0–24）。custom 的窗口允许跨午夜（如 22 点开、6 点关）。
+function lightIsOn(win, hours) {
+  if (win.mode === 'day') return hours >= 6 && hours < 18;     // 仅白天 06:00–18:00
+  if (win.mode === 'night') return hours < 6 || hours >= 18;   // 仅夜晚 18:00–06:00
+  const from = ((win.from % 24) + 24) % 24;
+  const to = ((win.to % 24) + 24) % 24;
+  if (from === to) return true;                                // 起止相同 → 视作常亮
+  if (from < to) return hours >= from && hours < to;
+  return hours >= from || hours < to;                          // 跨午夜
+}
 
 export class Game {
   // 与服务器一致的昼夜周期（秒）：联机时以服务器权威时间为准，这里用于两次快照之间的外推
@@ -371,7 +383,9 @@ export class Game {
           setNameTagsVisible(v);   // 玩家头顶名牌总开关
           setHealthBarsVisible(v); // 血条跟着一起开关
         },
-        dayNight: (v) => { this._dayEnabled = !!v; }, // 昼夜循环开关
+        // 昼夜循环开关。关掉后就没有「当前时刻」的概念了，必须把按时段关掉的灯全部点亮，
+        // 否则上次被时段关掉的灯会一直是黑的（_updateDayNight 在关闭时直接 return，不会重算）。
+        dayNight: (v) => { this._dayEnabled = !!v; if (!v) this._applyEditorLightDayState(null); },
         dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 600); }, // 一昼夜秒数
         bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
         dayOffset: (v) => { this._dayOffset = (Number(v) || 0) / 24; }, // 本地时刻偏移（小时→一天比例）
@@ -1150,6 +1164,29 @@ export class Game {
     if (text !== this._hudTimeText) {
       this._hudTimeText = text;
       if (this.playerHUD && this.playerHUD.setTime) this.playerHUD.setTime(text);
+    }
+
+    // 用户摆放光源的「开启时段」：按当前时刻自动开关灯（路灯天黑亮、白炽灯夜里亮等）
+    this._applyEditorLightDayState(t);
+  }
+
+  // 按当前时刻开关编辑器摆放的光源。tf 为一天的比例（0=00:00，0.5=12:00）；
+  // 传 null 表示「无时刻概念」（昼夜循环关闭）→ 全部按常亮处理。
+  // 每盏灯的开关窗口由 EditorBuildings.buildEditorLights 存在 userData.__onWindow 上。
+  _applyEditorLightDayState(tf) {
+    const grp = this.scene && this.scene.userData ? this.scene.userData.__editorLights : null;
+    if (!grp) return;
+    const hours = (tf === null || tf === undefined) ? null : ((tf * 24) % 24 + 24) % 24;
+    for (const light of grp.children) {
+      const win = light.userData ? light.userData.__onWindow : null;
+      const on = (!win || tf === null || tf === undefined) ? true : lightIsOn(win, hours);
+      if (light.isRectAreaLight) {
+        // 面光源必须走 setAreaBaseIntensity：亮度被拆成本体 + 阴影代理两份，
+        // 直接写 light.intensity 会让基准值失真（下次同步就越调越暗）。
+        setAreaBaseIntensity(light, on ? (light.userData.__onBase || 0) : 0);
+      } else {
+        light.intensity = on ? (light.userData.__baseIntensity || 0) : 0;
+      }
     }
   }
 

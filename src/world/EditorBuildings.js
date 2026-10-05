@@ -321,6 +321,18 @@ function colorOf(v) {
   return new THREE.Color(LIGHT_DEFAULTS.color);
 }
 
+// 开启时段：把存档里的 onMode/onFrom/onTo 解析成「开关窗口」描述，供游戏端昼夜循环判断。
+// 返回 null 表示常亮（无需逐帧判断）；否则 { mode, from, to }（hours，0–24，可跨午夜）。
+function parseOnWindow(it) {
+  const mode = it && it.onMode;
+  if (mode !== 'day' && mode !== 'night' && mode !== 'custom') return null; // 常亮
+  return {
+    mode,
+    from: Number.isFinite(Number(it.onFrom)) ? Number(it.onFrom) : 18,
+    to: Number.isFinite(Number(it.onTo)) ? Number(it.onTo) : 6,
+  };
+}
+
 // 释放光源：Light 本身不占 GPU 资源，但仍按需清理其子树可能携带的几何/材质，避免残留。
 // 同时从阴影管理器注销 —— 本函数会被调用两次（打包数据 + 远端数据），不注销的话旧灯会一直占着名额。
 function disposeLight(obj) {
@@ -512,6 +524,8 @@ export function buildEditorLights(scene, dataOverride) {
       // 点光源登记进阴影管理器 → 光被墙挡住，不会照进隔壁房间
       // （谁真正投影由 Lights.updateShadowBudgets 按离相机远近决定，最多 4 盏）
       registerPointLight(light);
+      light.userData.__baseIntensity = intensity * LIGHT_SCALE; // 开关灯时恢复的基准亮度（含 LIGHT_SCALE）
+      light.userData.__onWindow = parseOnWindow(it);
       group.add(light);
     } else if (it.type === 'area') {
       ensureRectAreaLib(); // 面光源使用前必须初始化一次 LTC 查找表
@@ -533,6 +547,11 @@ export function buildEditorLights(scene, dataOverride) {
       // 面光源自己不能投影（RectAreaLight 没有 shadow 字段，LTC 模型不支持）→ 配一盏阴影代理聚光灯。
       // 代理会分走大部分亮度并真正被墙挡住，本体留一小部分保留面光质感。见 Lights.enableAreaShadow。
       enableAreaShadow(light, { distance: finiteOr(it.distance, AREA_SHADOW_DEFAULT_DISTANCE) });
+      // ⚠ 开关灯要改的是「设计基准亮度」而不是 light.intensity：面光源的亮度被拆成
+      //   本体 + 阴影代理聚光灯两份，直接写 intensity 会让基准值失真（越调越暗），必须走
+      //   setAreaBaseIntensity。这里单独存一份设计值 __onBase 供开关时还原。
+      light.userData.__onBase = intensity;
+      light.userData.__onWindow = parseOnWindow(it);
       group.add(light);
     } else {
       continue; // 未知类型跳过

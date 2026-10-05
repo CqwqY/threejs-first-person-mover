@@ -410,6 +410,9 @@ export function createEditor() {
     lHeight: document.getElementById('lHeight'),
     lRotY: document.getElementById('lRotY'),
     lRotX: document.getElementById('lRotX'),
+    lOnMode: document.getElementById('lOnMode'),
+    lOnFrom: document.getElementById('lOnFrom'),
+    lOnTo: document.getElementById('lOnTo'),
     lDel: document.getElementById('lDel'),
   };
 
@@ -1923,6 +1926,7 @@ export function createEditor() {
       distance: type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12, decay: 2,
       width: AREA_LIGHT_DEFAULTS.width, height: AREA_LIGHT_DEFAULTS.height,
       rotY: AREA_LIGHT_DEFAULTS.rotY, rotX: AREA_LIGHT_DEFAULTS.rotX,
+      onMode: 'always', // 开启时段：always 常亮 / night 仅夜晚 / day 仅白天 / custom 自定义时段（游戏昼夜循环里生效）
     };
     buildLightObject(rec);
     state.lights.push(rec);
@@ -1946,6 +1950,9 @@ export function createEditor() {
       height: src.height ?? AREA_LIGHT_DEFAULTS.height,
       rotY: src.rotY ?? AREA_LIGHT_DEFAULTS.rotY,
       rotX: src.rotX ?? AREA_LIGHT_DEFAULTS.rotX,
+      onMode: src.onMode || 'always',
+      onFrom: src.onFrom ?? 18,
+      onTo: src.onTo ?? 6,
     };
     buildLightObject(rec);
     state.lights.push(rec);
@@ -2076,6 +2083,18 @@ export function createEditor() {
     if (StepUI.lHeight) StepUI.lHeight.value = rec.height ?? AREA_LIGHT_DEFAULTS.height;
     if (StepUI.lRotY) StepUI.lRotY.value = rec.rotY ?? AREA_LIGHT_DEFAULTS.rotY;
     if (StepUI.lRotX) StepUI.lRotX.value = rec.rotX ?? AREA_LIGHT_DEFAULTS.rotX;
+    if (StepUI.lOnMode) StepUI.lOnMode.value = rec.onMode || 'always';
+    if (StepUI.lOnFrom) StepUI.lOnFrom.value = rec.onFrom ?? 18;
+    if (StepUI.lOnTo) StepUI.lOnTo.value = rec.onTo ?? 6;
+    syncOnTimeFieldsVisibility();
+  }
+
+  // 仅「自定义时段」模式才显示起止小时输入
+  function syncOnTimeFieldsVisibility() {
+    const rec = selectedLight();
+    const custom = !!(rec && rec.onMode === 'custom');
+    if (StepUI.lOnFrom && StepUI.lOnFrom.parentElement) StepUI.lOnFrom.parentElement.style.display = custom ? '' : 'none';
+    if (StepUI.lOnTo && StepUI.lOnTo.parentElement) StepUI.lOnTo.parentElement.style.display = custom ? '' : 'none';
   }
 
   function syncLightPanel() {
@@ -2105,6 +2124,9 @@ export function createEditor() {
   bindLightProp(StepUI.lHeight, (r, v) => { r.height = Math.max(0.01, parseFloat(v) || 0.01); });
   bindLightProp(StepUI.lRotY, (r, v) => { r.rotY = parseFloat(v) || 0; });
   bindLightProp(StepUI.lRotX, (r, v) => { r.rotX = parseFloat(v) || 0; });
+  bindLightProp(StepUI.lOnMode, (r, v) => { r.onMode = v; syncOnTimeFieldsVisibility(); });
+  bindLightProp(StepUI.lOnFrom, (r, v) => { r.onFrom = Math.max(0, Math.min(24, parseFloat(v) || 0)); });
+  bindLightProp(StepUI.lOnTo, (r, v) => { r.onTo = Math.max(0, Math.min(24, parseFloat(v) || 0)); });
 
   if (StepUI.btnAddPointLight) StepUI.btnAddPointLight.onclick = () => addLight('point');
   if (StepUI.btnAddAreaLight) StepUI.btnAddAreaLight.onclick = () => addLight('area');
@@ -2235,6 +2257,9 @@ export function createEditor() {
         } else {
           out.decay = rec.decay ?? 2;
         }
+        // 开启时段：游戏昼夜循环里按此窗口自动开关灯（always 常亮 / night 仅夜晚 / day 仅白天 / custom 自定义）
+        out.onMode = rec.onMode || 'always';
+        if (out.onMode === 'custom') { out.onFrom = rec.onFrom ?? 18; out.onTo = rec.onTo ?? 6; }
         return out;
       }),
     };
@@ -2332,6 +2357,9 @@ export function createEditor() {
         // ⚠⚠ 这里早先写死 0（水平），而新建/游戏端是 -90（朝下）—— 存档里没 rotX 字段的老灯
         //    载入后就被横过来 90°，也就是"面光源在家具里横着转"。现在统一取自 AREA_LIGHT_DEFAULTS。
         rotX: num(it.rotX, AREA_LIGHT_DEFAULTS.rotX),
+        onMode: it.onMode || 'always',
+        onFrom: num(it.onFrom, 18),
+        onTo: num(it.onTo, 6),
       };
       buildLightObject(rec);
       state.lights.push(rec);
@@ -3614,6 +3642,8 @@ export function createEditor() {
       const out = { type: rec.type === 'area' ? 'area' : 'point', x: rec.x ?? 0, y: rec.y ?? 3, z: rec.z ?? 0, color: lightColorHex(rec), intensity: rec.intensity ?? 1, distance: rec.distance ?? (rec.type === 'area' ? AREA_LIGHT_DEFAULTS.distance : 12) };
       if (out.type === 'area') { out.width = rec.width ?? AREA_LIGHT_DEFAULTS.width; out.height = rec.height ?? AREA_LIGHT_DEFAULTS.height; out.rotY = rec.rotY ?? AREA_LIGHT_DEFAULTS.rotY; out.rotX = rec.rotX ?? AREA_LIGHT_DEFAULTS.rotX; }
       else { out.decay = rec.decay ?? 2; }
+      out.onMode = rec.onMode || 'always';
+      if (out.onMode === 'custom') { out.onFrom = rec.onFrom ?? 18; out.onTo = rec.onTo ?? 6; }
       return out;
     });
     const id = ((StepUI.comboId && StepUI.comboId.value) || '').trim() || ('combo-' + Date.now());
