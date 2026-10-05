@@ -327,10 +327,21 @@ function clampBuildXZ(x, z) {
   const C = 200; // 没有任何范围配置时的宽兜底（旧行为是 24，太窄）
   return { x: Math.min(C, Math.max(-C, x)), z: Math.min(C, Math.max(-C, z)) };
 }
-// 归属键：登录账号用 userId；游客用 IP（同机重连仍算同一人，避免刷上限）
+// 取真实客户端 IP：中继跑在反向代理后面，socket.remoteAddress 永远是 127.0.0.1。
+// 不读转发头的话，**所有游客的 owner 键会撞成同一个**（互相能删对方家具、共享摆放上限）。
+function clientIpOf(req) {
+  try {
+    const h = (req && req.headers) || {};
+    const xf = String(h['x-forwarded-for'] || '').split(',')[0].trim();
+    if (xf) return xf;
+    if (h['x-real-ip']) return String(h['x-real-ip']).trim();
+    return (req && req.socket && req.socket.remoteAddress) || '';
+  } catch (e) { return ''; }
+}
+// 归属键：登录账号用 userId；游客用真实 IP（同机重连仍算同一人，避免刷上限）
 function ownerKeyOf(ws) {
   if (ws.__profile && ws.__profile.userId) return 'u:' + ws.__profile.userId;
-  const rip = (ws._socket && ws._socket.remoteAddress) || ws.remoteAddress || ws.__id;
+  const rip = ws.__ip || (ws._socket && ws._socket.remoteAddress) || ws.remoteAddress || ws.__id;
   return 'anon:' + rip;
 }
 // 向所有在线客户端广播（建造是全局的，不分房间）
@@ -757,9 +768,10 @@ function worldPlayers() {
   }));
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   const id = newId();
   ws.__id = id; // 记在连接上，便于 hit 广播时按 id 找到目标客户端
+  ws.__ip = clientIpOf(req); // 真实 IP（代理后面 socket.remoteAddress 不可用）
   const num = allocNum(); // 复用最小空闲编号，避免重连把数字推到几十
   const spawn = spawnForNum(num);
   spawns.set(id, spawn);

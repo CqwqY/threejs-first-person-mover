@@ -316,6 +316,7 @@ export function createEditor() {
     furnMsg: document.getElementById('furnMsg'),
     areaList: document.getElementById('areaList'),
     areaAdd: document.getElementById('areaAdd'),
+    areaFromSel: document.getElementById('areaFromSel'),
     areaReset: document.getElementById('areaReset'),
     areaSave: document.getElementById('areaSave'),
     areaFit: document.getElementById('areaFit'),
@@ -3170,7 +3171,13 @@ export function createEditor() {
       cb.dataset.id = b.id;
       cb.style.cssText = 'flex:0 0 auto';
       const item = (lastShopItems || []).find((x) => x.id === b.itemId);
-      const mineMark = b.owner ? (b.owner.startsWith('u:') ? '玩家' : '游客') : '';
+      // 归属标记：登录账号 → 「玩家」；游客 → 「游客 + IP 尾段」（全叫"游客"看不出谁是谁）
+      let mineMark = '';
+      if (b.owner) {
+        mineMark = b.owner.startsWith('u:')
+          ? '玩家'
+          : '游客 ' + String(b.owner.slice(4)).split(':').pop().slice(-11);
+      }
       const txt = document.createElement('span');
       txt.textContent = (item ? item.name : (b.itemId || '?')) +
         '  ·  ' + String(b.id).slice(-6) +
@@ -3371,6 +3378,21 @@ export function createEditor() {
   if (StepUI.areaSave) StepUI.areaSave.onclick = () => saveAreas();
   // 恢复内置默认范围（= src/config.js 的 Config.BUILD_AREAS，与场景里两栋教学楼的实际占地一致）。
   // 线上曾出现「保存的范围和楼的实际位置不重合 → 楼里反而放不下」的事故，给个一键还原。
+  // 用「当前选中物件」的世界包围盒生成一个建造范围 —— 选中教学楼点一下就出矩形，不用手输坐标。
+  if (StepUI.areaFromSel) StepUI.areaFromSel.onclick = () => {
+    const sel = state.selected;
+    if (!sel || !sel.obj) { setAreaMsg('先在场景里左键选中一栋楼，再点这个', 'err'); return; }
+    const box = new THREE.Box3().setFromObject(sel.obj);
+    if (box.isEmpty()) { setAreaMsg('取不到包围盒（该对象没有网格）', 'err'); return; }
+    const r1 = (v) => Math.round(v * 10) / 10;
+    buildAreas.push({
+      name: String(sel.name || '建筑').slice(0, 24),
+      minX: r1(box.min.x), maxX: r1(box.max.x),
+      minZ: r1(box.min.z), maxZ: r1(box.max.z),
+    });
+    renderAreaList(); drawAreaViz();
+    setAreaMsg('已按「' + (sel.name || '选中物件') + '」生成范围 —— 核对后点「保存范围」写入服务器', '');
+  };
   if (StepUI.areaReset) StepUI.areaReset.onclick = () => {
     const defs = (Config && Array.isArray(Config.BUILD_AREAS)) ? Config.BUILD_AREAS : [];
     if (!defs.length) { setAreaMsg('没有内置默认范围', 'err'); return; }

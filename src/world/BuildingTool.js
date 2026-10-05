@@ -76,6 +76,36 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   scene.add(ghostGroup);
   let ghost = null, ghostItemId = null;
 
+  // 允许建造范围的可视化：进入建造模式时画一圈绿框。
+  // 为什么必须画：范围判定完全靠坐标（服务端下发的矩形），玩家看不见就只能"猜"，一旦范围与楼的
+  // 实际位置对不上，现象就是「幽灵不在准星处 / 怎么摆都不对」。画出来一目了然。
+  const areaViz = new THREE.Group();
+  areaViz.name = 'build-area-viz';
+  areaViz.visible = false;
+  scene.add(areaViz);
+  function buildAreaViz() {
+    for (let i = areaViz.children.length - 1; i >= 0; i--) areaViz.remove(areaViz.children[i]);
+    const y = 0.08;
+    for (const a of getBuildAreas()) {
+      const pts = [
+        new THREE.Vector3(a.minX, y, a.minZ), new THREE.Vector3(a.maxX, y, a.minZ),
+        new THREE.Vector3(a.maxX, y, a.maxZ), new THREE.Vector3(a.minX, y, a.maxZ),
+        new THREE.Vector3(a.minX, y, a.minZ),
+      ];
+      areaViz.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color: 0x3fd07a, transparent: true, opacity: 0.9 })
+      ));
+      // 四角竖一小段，让边界更醒目
+      for (const [cx, cz] of [[a.minX, a.minZ], [a.maxX, a.minZ], [a.maxX, a.maxZ], [a.minX, a.maxZ]]) {
+        areaViz.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(cx, y, cz), new THREE.Vector3(cx, y + 1.2, cz)]),
+          new THREE.LineBasicMaterial({ color: 0x3fd07a, transparent: true, opacity: 0.9 })
+        ));
+      }
+    }
+  }
+
   const raycaster = new THREE.Raycaster();
   const hit = new THREE.Vector3();
 
@@ -87,6 +117,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     rotY: 0,         // 放置 / 编辑时的朝向（度）
     pending: [],     // 待服务端确认的乐观摆放：[{ mesh, itemId }]（FIFO，被 rejected 时按序回滚）
     nudgeStep: 0.5,  // 编辑模式三轴微调的步长（米），可在工具条上循环切换
+    wasClamped: false, // 上一帧准星点是否越界（用于"越界提示"只弹一次）
   };
 
   const rendered = new Map();  // id -> { mesh, rec, mine }
@@ -308,12 +339,13 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
   // 建造点：表面高度 + 水平钳制到允许建造的两栋楼范围内。
   // fresh=true 时强制重算（放置瞬间用），否则最多每 4 帧算一次（省开销，幽灵仍然跟手）。
+  // 返回里带 clamped：准星指的点**不在范围内**、被吸附到楼边了（幽灵会变红提示）。
   function groundPoint(fresh) {
     if (fresh || (surfTick++ % 4) === 0) surfCache = surfacePoint();
     const sp = surfCache;
     if (!sp) return null;
     const c = clampToAreas(sp.x, sp.z);
-    return { x: c.x, y: sp.y, z: c.z };
+    return { x: c.x, y: sp.y, z: c.z, clamped: (c.x !== sp.x || c.z !== sp.z) };
   }
   function aimedEntry() {
     raycaster.setFromCamera({ x: 0, y: 0 }, camera);
@@ -368,6 +400,21 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     ghost.visible = true;
     ghost.position.set(pt.x, pt.y || 0, pt.z);
     ghost.rotation.y = state.rotY * DEG;
+    // 准星指的点**不在允许范围内**（被吸附到楼边）→ 幽灵变红，提示"这儿放不了"
+    setGhostTint(pt.clamped ? 0xff5a5a : 0x5fb0ff);
+    if (pt.clamped !== state.wasClamped) {           // 只在「越界/回到界内」的那一刻提示一次
+      state.wasClamped = pt.clamped;
+      if (pt.clamped) onToast('准星指的位置不在建造范围内 —— 看地上的绿色框');
+    }
+  }
+  // 幽灵整体调色：材质是 makeGhost 里 clone 出来的，改它不会污染真模型
+  function setGhostTint(hex) {
+    if (!ghost) return;
+    ghost.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) if (m && m.emissive) m.emissive.setHex(hex);
+    });
   }
 
   // 进建造模式 / 拉到目录后：把所有「有额度」的家具原型预取一遍（进模式即可见方块、可摆）
@@ -482,7 +529,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     else if (msg.ev === 'move') onMove(msg);
     else if (msg.ev === 'owner') setOwnerKey(msg.key);
     else if (msg.ev === 'reload') reloadAll();
-    else if (msg.ev === 'areas') setBuildAreas(msg.areas); // 管理员在编辑器改了建造范围
+    else if (msg.ev === 'areas') { setBuildAreas(msg.areas); if (areaViz.visible) buildAreaViz(); } // 管理员在编辑器改了建造范围
     else if (msg.ev === 'rejected') onRejected(msg.reason);
   }
 
@@ -724,6 +771,8 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     prefetchAll();            // 预取可用家具原型：进模式即有方块可摆、可预览
     ghostItemId = null;
     refreshGhostProto();
+    buildAreaViz();
+    areaViz.visible = true;   // 把「能摆哪儿」画出来
     onActiveChange(true);
     refreshStrip();
     const noStock = !list.length;
@@ -740,6 +789,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     while (state.pending.length) { const p = state.pending.pop(); if (p && p.mesh) placedGroup.remove(p.mesh); }
     if (ghost) { ghostGroup.remove(ghost); ghost = null; }
     ghostItemId = null;
+    areaViz.visible = false;
     state.active = false;
     state.mode = 'place';
     state.editId = null;
