@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import { instantiate } from './AssetLoader.js';
 import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
+import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
 import { Config } from '../config.js';
 
@@ -238,38 +239,41 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     return m;
   }
 
-  // ---------- 对准高亮（发白光） ----------
+  // ---------- 对准描边 ----------
+  // 需求：对准的家具要「有描边」，不是把材质打成白光。
+  // 做法：克隆一份模型，材质换成只画背面的纯色壳，整体略放大 → 包在原模型外面形成一圈轮廓。
+  // 原 mesh 的材质一个字节都不动，退出描边时直接丢掉壳即可，不存在还原不干净的问题。
   let aimId = null;              // 当前对准的已摆家具 id
-  const hlStore = new Map();     // mesh -> 原始 emissive 记录
-  function setHighlight(id, on) {
-    const e = id != null ? rendered.get(id) : null;
-    const mesh = e && e.mesh;
-    if (!mesh) return;
-    if (on) {
-      if (hlStore.has(mesh)) return;
-      const saved = [];
-      mesh.traverse((o) => {
-        if (!o.isMesh || !o.material) return;
-        const mats = Array.isArray(o.material) ? o.material : [o.material];
-        for (const mat of mats) {
-          if (!mat || !('emissive' in mat)) continue;
-          saved.push({ mat, emissive: mat.emissive ? mat.emissive.clone() : null, intensity: mat.emissiveIntensity });
-          mat.emissive = new THREE.Color(0xffffff);
-          mat.emissiveIntensity = 1.15;
-        }
-      });
-      hlStore.set(mesh, saved);
-    } else {
-      const saved = hlStore.get(mesh);
-      if (!saved) return;
-      for (const s of saved) {
-        if (s.emissive) s.mat.emissive.copy(s.emissive);
-        s.mat.emissiveIntensity = s.intensity;
-      }
-      hlStore.delete(mesh);
-    }
+  let outlineObj = null;         // 描边壳（加在 scene 上，不能进 placedGroup）
+  const OUTLINE_COLOR = 0x6fd3ff; // 亮蓝轮廓（比白光在木色家具上更清楚）
+  const OUTLINE_SCALE = 1.06;
+
+  function outlineRemove() {
+    if (!outlineObj) return;
+    if (outlineObj.parent) outlineObj.parent.remove(outlineObj);
+    outlineObj = null;
   }
-  function clearAim() { if (aimId != null) setHighlight(aimId, false); aimId = null; }
+  function outlineShow(entry) {
+    outlineRemove();
+    const src = entry && entry.mesh;
+    if (!src) return;
+    const o = src.clone(true); // geometry 共享，只克隆节点
+    o.traverse((n) => {
+      if (n.isLight) { n.visible = false; return; } // 组合家具里的点光源不参与描边
+      if (!n.isMesh) return;
+      n.material = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide });
+      n.castShadow = false; n.receiveShadow = false;
+      n.scale.multiplyScalar(OUTLINE_SCALE);
+      n.renderOrder = 997;
+    });
+    o.position.copy(src.position);
+    o.rotation.copy(src.rotation);
+    o.scale.copy(src.scale);
+    // ⚠ 必须挂在 scene 上：放进 placedGroup 的话 aimedEntry() 会把描边壳也当成一件家具
+    scene.add(o);
+    outlineObj = o;
+  }
+  function clearAim() { outlineRemove(); aimId = null; }
 
   // ---------- 射线：准星中心 ----------
   // 取准星指到的「实际表面」点：优先命中场景里的地面/台阶/楼板/已摆家具（复杂碰撞体），
@@ -574,7 +578,10 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     updateGhost();
     const a = aimedEntry();
     const newId = a ? a.id : null;
-    if (newId !== aimId) { clearAim(); if (newId != null) { aimId = newId; setHighlight(aimId, true); } }
+    if (newId !== aimId) {
+      clearAim();
+      if (a) { aimId = a.id; outlineShow(a.entry); }
+    }
   }
 
   // ---------- 家具条 / 编辑键 UI ----------
@@ -607,38 +614,50 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   editBtn.type = 'button';
   editBtn.className = 'kui-btn kui-btn--primary';
   editBtn.textContent = '编辑';
-  editBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); startEdit(); });
+  if (!coarse) editBtn.appendChild(keyBadge('g')); // PC：按钮上标出快捷键
+  bindPress(editBtn, startEdit, false);
   actions.appendChild(editBtn);
 
   const exitBtn = document.createElement('button');
   exitBtn.type = 'button';
   exitBtn.className = 'kui-btn kui-btn--red';
   exitBtn.textContent = '退出建造';
-  exitBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); exit(); });
+  if (!coarse) exitBtn.appendChild(keyBadge('b')); // PC：按钮上标出快捷键
+  bindPress(exitBtn, exit, false);
   actions.appendChild(exitBtn);
 
+  // 统一的「点按」绑定：**必须点一下才触发**；手指/鼠标拖动过（想转视角）一律不算点击。
+  // 手机上底部工具条压在右侧视角区上，若沿用 pointerdown 立即触发，一拖动就会误点到按钮。
+  const TAP_MOVE_PX = 8;
+  function bindPress(el, fn, repeat) {
+    let x0 = 0, y0 = 0, moved = false, t1 = null, t2 = null;
+    const stopRepeat = () => { if (t1) clearTimeout(t1); if (t2) clearInterval(t2); t1 = t2 = null; };
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      x0 = e.clientX; y0 = e.clientY; moved = false;
+      if (repeat) t1 = setTimeout(() => { if (!moved) { fn(); t2 = setInterval(fn, 70); } }, 300);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (moved) return;
+      if (Math.abs(e.clientX - x0) > TAP_MOVE_PX || Math.abs(e.clientY - y0) > TAP_MOVE_PX) { moved = true; stopRepeat(); }
+    });
+    el.addEventListener('pointerup', () => {
+      const repeating = !!t2;
+      stopRepeat();
+      if (moved) return;      // 拖动过 → 不当作点击
+      if (!repeating) fn();   // 短按（或未进入连发）触发一次
+    });
+    el.addEventListener('pointercancel', () => { moved = true; stopRepeat(); });
+    el.addEventListener('pointerleave', () => { if (repeat) { moved = true; stopRepeat(); } });
+    return el;
+  }
   function mkChip(text, onClick, variant, active, repeat) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'kui-btn ' + (active ? 'kui-btn--primary' : ('kui-btn--' + (variant || 'grey')));
     b.textContent = text;
-    b.style.cssText = 'flex:0 0 auto;white-space:nowrap;';
-    if (repeat) {
-      // 长按连续微调：按下立即触发一次；按住 300ms 后每 70ms 重复；松手 / 移出 / 取消即停
-      let t1 = null, t2 = null;
-      const stop = () => { if (t1) clearTimeout(t1); if (t2) clearInterval(t2); t1 = t2 = null; };
-      b.addEventListener('pointerdown', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        onClick();
-        t1 = setTimeout(() => { t2 = setInterval(onClick, 70); }, 300);
-      });
-      b.addEventListener('pointerup', stop);
-      b.addEventListener('pointerleave', stop);
-      b.addEventListener('pointercancel', stop);
-    } else {
-      b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
-    }
-    return b;
+    b.style.cssText = 'flex:0 0 auto;white-space:nowrap;touch-action:manipulation;';
+    return bindPress(b, onClick, repeat);
   }
   function mkLabel(text) {
     const d = document.createElement('div');
@@ -665,13 +684,14 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       strip.appendChild(mkChip('Z−', () => nudge(2, -1), 'grey', false, true));
       strip.appendChild(mkChip('Z+', () => nudge(2, 1), 'grey', false, true));
       strip.appendChild(mkChip('移到准星', snapToAim, 'primary'));
-      strip.appendChild(mkChip('旋转 45°', rotateEdit, 'grey'));
-      strip.appendChild(mkChip('删除', deleteEdit, 'red'));
-      strip.appendChild(mkChip('完成', commitEdit, 'green'));
+      strip.appendChild(mkChip(coarse ? '旋转 45°' : '旋转 45° · R', rotateEdit, 'grey'));
+      strip.appendChild(mkChip(coarse ? '删除' : '删除 · X', deleteEdit, 'red'));
+      strip.appendChild(mkChip(coarse ? '完成' : '完成 · G', commitEdit, 'green'));
       return;
     }
     const list = available();
     if (!list.length) { strip.appendChild(mkLabel('没有可摆的家具 · 去商店「家具」页买')); return; }
+    if (!coarse) strip.appendChild(mkLabel('数字键选：')); // PC：1..N 切换
     for (const entry of list) {
       // 模型状态标注：占位(无真模型) / 加载中 / 模型失败 / 就绪(无后缀)
       const st = protoState.get(entry.it.id);

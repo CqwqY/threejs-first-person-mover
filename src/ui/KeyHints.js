@@ -28,7 +28,7 @@ export const KEYBINDS = [
   {
     group: '视角与交互',
     items: [
-      { keys: ['mouseL'], label: '攻击（需先点画面锁定鼠标）' },
+      { keys: ['mouseL'], label: '攻击（鼠标左键；需先点画面锁定鼠标）' },
       { keys: ['f5'], label: '切换第一 / 第三人称' },
       { keys: ['e'], label: '拾取脚下的掉落物' },
       { keys: ['f'], label: '与阿花对话 / 上下车（看靠近谁）' },
@@ -50,6 +50,17 @@ export const KEYBINDS = [
       { keys: ['d1', 'd2', 'd3'], label: '切换技能槽' },
       { keys: ['y', 'd1'], label: '丢弃指定槽位物品' },
       { keys: ['esc'], label: '关闭面板 / 暂停' },
+    ],
+  },
+  {
+    group: '建造模式（装备建造锤后）',
+    items: [
+      { keys: ['mouseL'], label: '放置（准星对准地面 / 已有家具顶面）' },
+      { keys: ['g'], label: '编辑 / 完成（先对准自己摆的家具）' },
+      { keys: ['r'], label: '编辑中：旋转 45°' },
+      { keys: ['x'], label: '编辑中：删除' },
+      { keys: ['b'], label: '退出建造模式' },
+      { keys: ['d1', 'd2', 'd3'], label: '切换要摆放的家具' },
     ],
   },
 ];
