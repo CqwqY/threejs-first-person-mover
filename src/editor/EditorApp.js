@@ -31,7 +31,7 @@ import {
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
   releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
 } from '../world/Lights.js';
-import { createSettingsPanel, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
+import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
