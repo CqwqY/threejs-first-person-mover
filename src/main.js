@@ -8,26 +8,41 @@ import { initMobileLayout } from './ui/MobileLayout.js';
 import { initBgm } from './audio/Bgm.js';
 import { createLoadingScreen } from './ui/LoadingScreen.js';
 import { initSaveSync } from './player/CloudSave.js';
-import { stats, whenIdle } from './world/loadTracker.js';
+import { stats, whenIdle, quietFor } from './world/loadTracker.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms)]);
 
-// 等「模型都到位」：远端场景拉取完（它会触发一批 GLB 加载）→ 加载计数归零。
+// 「加载安静期」：加载是**分批发起**的（先场景模型；玩家角色模型要等 WebSocket 的
+// welcome 到了才发起，手机慢网可能晚好几秒）。所以某瞬间 pending===0 完全不能证明
+// 「都到位了」—— 必须要求连续安静这么久才算完。
+// 这是「手机有些模型没下下来/没加载就放行了」的根因修复。
+const QUIET_MS = 900;
+// 全场兜底：再慢也得放人进来（含弱网、离线）
+const ASSET_TIMEOUT_MS = 40000;
+
+// 等「模型都到位」：场景就绪 → 收到 welcome（玩家模型才开始加载）→ 加载计数归零 + 安静期。
 // 每一段都有超时兜底，且全程可被「不等了」打断（由外层的 race 结束）。
-async function waitAssets(loading) {
-  await sleep(400); // 先给一小段窗口让第一批请求登记进来，否则会误判「都加载完了」
+async function waitAssets(loading, game) {
   const t0 = performance.now();
+  // 第一段：远端场景拉取（它会触发场景那批 GLB 加载）
+  await withTimeout(game.sceneReady(), 12000).catch(() => {});
+  // 第二段：等 welcome —— 玩家角色模型到这一刻才发起加载。
+  // 不等它就会在角色还没开始下载时放行（手机上表现为「人没出来就进游戏了」）。
+  await game.welcomeReady(6000).catch(() => {});
+  // 第三段：等计数归零，且**连续安静 QUIET_MS** 没有新任务进来才算真的完。
+  // 每轮看一眼进度条，并给「不等了」留出打断机会。
   for (;;) {
     if (loading.done) return;
     const { pending, total } = stats();
     loading.setProgress(total - pending, total);
-    if (total > 0 && pending === 0) return;                  // 都到齐了
-    if (total === 0 && performance.now() - t0 > 1600) return; // 一直没有任何模型要加载（离线/纯程序化场景）
-    if (performance.now() - t0 > 25000) return;               // 兜底：再慢也得放人进来
-    await Promise.race([whenIdle(), sleep(250)]);
+    // 关键判据：空闲且安静够久 → 认定加载完
+    if (quietFor(QUIET_MS)) return;
+    if (performance.now() - t0 > ASSET_TIMEOUT_MS) return; // 兜底放行
+    await Promise.race([whenIdle(), sleep(200)]);
   }
 }
+
 
 // 进游戏前登录/注册（游客可选）；拿到 token 与资料后创建游戏
 async function main() {
@@ -53,8 +68,7 @@ async function main() {
   game.start();
   // 场景/模型加载完成后（或用户点了「不等了」）再撤掉遮罩
   const assetsReady = (async () => {
-    await withTimeout(game.sceneReady(), 12000); // 远端场景拉取（慢/离线都不该无限等）
-    await waitAssets(loading);                   // 它触发的那批模型加载
+    await waitAssets(loading, game);
   })();
   await Promise.race([assetsReady, loading.skipped]);
   loading.finish();

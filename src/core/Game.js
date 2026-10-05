@@ -1361,6 +1361,8 @@ export class Game {
         }
         // 服务器为准：移除不在当前在线列表中的远程模型/名牌（清除未加入或已断开连接的残留）
         this.playerManager.pruneTo(msg.players.map((p) => p.id));
+        // 唤醒加载屏：至此玩家模型才刚发起加载，由 loadTracker 计数、调用方继续等归零
+        this._resolveWelcomeWaiters();
         break;
       }
       case 'join': {
@@ -6294,6 +6296,35 @@ export class Game {
   // 那些由 loadTracker 计数，调用方再等一次归零即可）。永不 reject——失败会回退打包数据。
   sceneReady() {
     return this._sceneReady || Promise.resolve();
+  }
+
+  // 供加载屏等待：**收到服务器 welcome**（或超时）。
+  // 为什么必须等它：玩家自己与其他玩家的角色模型（boy-rig/girl-rig.glb，1~1.6MB）
+  // 是 welcome/join 到达后才发起的加载 —— 不等这一步，加载屏会在角色模型**还没开始下载**
+  // 时就被撤掉，手机慢网下就会看到「人没出来就放行了」。
+  //
+  // 语义：本地 id 已被赋值（welcome 处理过）即 resolve；超时则无论如何放行（离线/纯单机不卡人）。
+  welcomeReady(timeoutMs = 6000) {
+    if (this.localState && this.localState.id) return Promise.resolve();
+    if (!this._welcomeWaiters) this._welcomeWaiters = [];
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        // 超时：从等待列表里摘掉自己，别让列表无限增长
+        const i = this._welcomeWaiters.indexOf(done);
+        if (i >= 0) this._welcomeWaiters.splice(i, 1);
+        resolve();
+      }, timeoutMs);
+      const done = () => { clearTimeout(timer); resolve(); };
+      this._welcomeWaiters.push(done);
+    });
+  }
+
+  // welcome 到达时唤醒所有等待者（在下面 case 'welcome' 里调用）
+  _resolveWelcomeWaiters() {
+    if (!this._welcomeWaiters || !this._welcomeWaiters.length) return;
+    const ws = this._welcomeWaiters;
+    this._welcomeWaiters = [];
+    for (const fn of ws) { try { fn(); } catch { /* 忽略单个等待者的异常 */ } }
   }
 
   // 绳索与钩爪。绳索用圆柱 Mesh 而不是 Line：Line 的线宽在绝大多数平台上恒为 1px，
