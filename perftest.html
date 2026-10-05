@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>场景性能测试台 · first-person-mover</title>
+<style>
+  :root { --bg:#0b1017; --panel:#131b26; --line:#22303f; --txt:#dce6f2; --dim:#8fa0b6; --hi:#4ea1ff; --warn:#ffb454; --ok:#5ecb8a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
+  #hud { position:fixed; left:12px; top:12px; z-index:10; width:min(560px,94vw);
+         background:color-mix(in srgb,var(--panel) 92%,transparent); border:1px solid var(--line);
+         border-radius:10px; padding:12px 14px; backdrop-filter:blur(6px); }
+  h1 { margin:0 0 8px; font-size:15px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  button { background:#1d2a3a; color:var(--txt); border:1px solid var(--line); border-radius:6px;
+           padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover:not(:disabled) { background:#26405c; border-color:var(--hi); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:#1b4d80; border-color:#2f6ea8; }
+  label { color:var(--dim); }
+  select, input[type=checkbox] { background:#0e1620; color:var(--txt); border:1px solid var(--line); border-radius:5px; padding:4px 6px; }
+  #stats { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:10px 0 6px; }
+  .stat { background:#0e1620; border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  .stat b { display:block; font-size:17px; color:var(--hi); }
+  .stat span { color:var(--dim); font-size:11px; }
+  #chart { width:100%; height:120px; border:1px solid var(--line); border-radius:6px; display:block; background:#0e1420; }
+  #prog { color:var(--warn); font-size:12px; margin:6px 0; min-height:18px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:12px; }
+  th, td { border:1px solid var(--line); padding:4px 6px; text-align:right; }
+  th { background:#16202c; color:var(--dim); font-weight:600; }
+  td:first-child, th:first-child { text-align:left; }
+  .warn { color:var(--warn); }
+  #log { margin-top:8px; max-height:110px; overflow:auto; background:#0e1620; border:1px solid var(--line);
+         border-radius:6px; padding:6px 8px; font:11px/1.5 ui-monospace,Consolas,monospace; color:var(--dim); white-space:pre-wrap; }
+  .note { color:var(--dim); font-size:11px; margin-top:6px; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>场景性能测试台 <span style="color:var(--dim);font-weight:400">· 真实线上场景 · 一键跑完 5 个对照实验</span></h1>
+
+  <div class="row">
+    <button id="btnStart" class="primary">开始测试</button>
+    <button id="btnStop" disabled>停止</button>
+    <label>时长/场景
+      <select id="selDuration">
+        <option value="5">5 秒</option>
+        <option value="8" selected>8 秒</option>
+        <option value="15">15 秒</option>
+      </select>
+    </label>
+    <label>分辨率
+      <select id="selScale">
+        <option value="0.4">0.4×</option>
+        <option value="0.6">0.6×</option>
+        <option value="1" selected>1.0×</option>
+      </select>
+    </label>
+    <label>时刻
+      <select id="selTime">
+        <option value="0.5" selected>正午 12:00</option>
+        <option value="0.79">黄昏 19:00</option>
+        <option value="0">午夜 00:00</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="chkColliders" checked /> 构建碰撞体</label>
+  </div>
+  <div class="note">数据来源：<span id="src">加载中…</span>（远端 /api/scene 优先，失败回退本地打包数据）。碰撞体开关仅在页面加载时生效。</div>
+
+  <div id="stats">
+    <div class="stat"><b id="statFps">–</b><span>FPS</span></div>
+    <div class="stat"><b id="statMs">–</b><span>帧耗时 ms</span></div>
+    <div class="stat"><b id="statCalls">–</b><span>draw call</span></div>
+    <div class="stat"><b id="statTris">–</b><span>三角面</span></div>
+    <div class="stat"><b id="statProgs">–</b><span>着色器 program</span></div>
+    <div class="stat"><b id="statHeap">–</b><span>堆内存 MB</span></div>
+  </div>
+
+  <canvas id="chart" width="600" height="120"></canvas>
+  <div id="prog">准备中…</div>
+
+  <div class="row">
+    <button id="btnJson">导出 JSON</button>
+    <button id="btnCsv">导出 CSV（摘要+逐帧）</button>
+    <button id="btnCopy">复制摘要</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>场景</th><th>帧数</th><th>平均FPS</th><th>p50 ms</th><th>p95 ms</th><th>最大 ms</th>
+        <th>卡顿帧</th><th>draw</th><th>三角面</th><th>着色器增量</th><th>vs 基线</th><th>draw 差值</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div id="log"></div>
+</div>
+<div id="stage"></div>
+<script type="module" src="./src/perf/PerfBench.js"></script>
+</body>
+</html>
