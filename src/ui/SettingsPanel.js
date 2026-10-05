@@ -32,7 +32,7 @@ export const DEFAULT_SETTINGS = {
   skillLayout: '轮盘', // 手机技能槽排布：轮盘 / 2行竖列（PC 无影响）
   rideView: '视角操控', // 骑车视角：视角操控（自由视角，鼠标可左右掰头看）/ 锁视角（相机恒在车后）
   dayNight: true, // 是否开启昼夜循环
-  dayCycle: 240, // 一昼夜时长（秒），越大变化越慢
+  dayCycle: 600, // 一昼夜时长（秒，默认 10 分钟），越大变化越慢
   bgmVolume: 0.25, // 背景音乐音量（0 = 静音），默认就很小声
   dayOffset: 0, // 本地时刻偏移（小时）：只在本地预览用，不影响服务器权威时间
 };
@@ -46,6 +46,22 @@ export function loadSettings(storeKey = STORE_KEY) {
     saved = JSON.parse(localStorage.getItem(storeKey) || '{}') || {};
   } catch {
     saved = {};
+  }
+  // 一次性迁移：一昼夜默认时长由 240 秒（4 分钟）放慢到 600 秒（10 分钟）。
+  // ⚠ 光改默认值是**没用的** —— 老用户 localStorage 里已经存着 240，会一直盖住默认值。
+  //   所以这里显式抬一次，并用标记保证只做一次（此后用户自己调成多少都尊重）。
+  if (storeKey === GAME_STORE_KEY && typeof localStorage !== 'undefined') {
+    try {
+      if (localStorage.getItem('fpm-daycycle-600') !== '1') {
+        localStorage.setItem('fpm-daycycle-600', '1');
+        if (Number(saved.dayCycle) === 240) {
+          saved.dayCycle = DEFAULT_SETTINGS.dayCycle;
+          saveSettings({ ...DEFAULT_SETTINGS, ...saved }, GAME_STORE_KEY);
+        }
+      }
+    } catch {
+      /* 忽略存储失败 */
+    }
   }
   return { ...DEFAULT_SETTINGS, ...saved };
 }

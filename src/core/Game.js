@@ -112,7 +112,9 @@ const COMBAT_MODES = {
 
 export class Game {
   // 与服务器一致的昼夜周期（秒）：联机时以服务器权威时间为准，这里用于两次快照之间的外推
-  static SYNC_DAY_SECONDS = 240;
+  // ⚠ 必须等于服务端 server-remote/index.js 的 DAY_SECONDS（当前 600 = 一昼夜 10 分钟）。
+  //   两边不一致时，客户端每收到一次快照就会被拉回服务器时刻，表现为世界时间忽快忽慢地「抖」。
+  static SYNC_DAY_SECONDS = 600;
 
   // token：登录会话 token（游客为空串）；profile：登录成功返回的用户资料（点名牌用）
   constructor(token = '', profile = null, gender = 'boy') {
@@ -196,7 +198,7 @@ export class Game {
     // ---- 昼夜循环：以编辑器保存的光照设计作为「正午」基准，随时刻连续变化 ----
     const gset = loadSettings('scene-settings-game-v1');
     this._dayEnabled = gset.dayNight !== undefined ? !!gset.dayNight : true;
-    this._dayCycle = Math.max(30, Number(gset.dayCycle) || 240);
+    this._dayCycle = Math.max(30, Number(gset.dayCycle) || 600);
     this._dayTime = Config.DAY_START;
     this._dayBaseSun = design.sun;
     this._dayBaseAmbient = design.ambient;
@@ -364,7 +366,7 @@ export class Game {
           setHealthBarsVisible(v); // 血条跟着一起开关
         },
         dayNight: (v) => { this._dayEnabled = !!v; }, // 昼夜循环开关
-        dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 240); }, // 一昼夜秒数
+        dayCycle: (v) => { this._dayCycle = Math.max(30, Number(v) || 600); }, // 一昼夜秒数
         bgmVolume: (v) => setBgmVolume(v), // 背景音乐音量（0 = 静音）
         dayOffset: (v) => { this._dayOffset = (Number(v) || 0) / 24; }, // 本地时刻偏移（小时→一天比例）
         // 骑车视角：视角操控（自由视角）/ 锁视角（相机恒在车后）
