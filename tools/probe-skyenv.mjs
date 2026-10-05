@@ -22,23 +22,38 @@ check('12:00 用白天贴图', envAt(at(12)).key, 'day');
 check('12:00 强度', envAt(at(12)).intensity, 1);
 check('06:00 用清晨贴图', envAt(at(6)).key, 'morning');
 check('19:00 用夜晚贴图', envAt(at(19)).key, 'night');
-check('19:00 强度', envAt(at(19)).intensity, 0.8);
+check('19:00 强度', near(envAt(at(19)).intensity, 0.45), true);
 check('02:00 用深夜贴图', envAt(at(2)).key, 'space');
-check('02:00 强度', envAt(at(2)).intensity, 0.7);
+check('02:00 强度', near(envAt(at(2)).intensity, 0.25), true);
 check('23:00 仍是深夜贴图', envAt(at(23)).key, 'space');
 
 console.log('白天→夜晚 的过渡（9 小时段的最后 18%：约 15:22 起，17:00 到位）：');
+// 现在亮度是**单调插值**（1.0 → 0.45 一路变暗），不再是"先压到谷底再回升"的哑铃。
 const mid = envAt(at(16, 0));
 check('16:00 处于过渡中', mid.to, 'night');
 check('16:00 还是白天贴图（未过中点）', mid.key, 'day');
-check('16:00 强度已压低', mid.intensity < 0.95, true);
-check('16:00 强度不低于谷底', mid.intensity >= Math.min(1, 0.8) * 0.8 - 1e-9, true);
-const late = envAt(at(16, 45)); // a≈0.85：已过中点换图，强度在从谷底回升的路上（还没到 0.8）
+check('16:00 强度已在白天(1.0)与夜晚(0.45)之间', mid.intensity < 1 && mid.intensity > 0.45, true);
+const late = envAt(at(16, 45)); // a≈0.85
 check('16:45 已切到夜晚贴图', late.key, 'night');
-check('16:45 强度高于谷底（在回升）', late.intensity > Math.min(1, 0.8) * 0.8 + 1e-9, true);
-check('16:45 强度还没到整值', late.intensity < 0.8 - 1e-9, true);
+// 单调性：过渡过程中强度只能一路往下走，不许出现"暗一下又亮回来"的凹谷
+check('16:45 比 16:00 更暗（单调下降，没有凹谷）', late.intensity < mid.intensity, true);
+// 白天(1.0) 往夜晚(0.45) 降：16:45 应该是"还在往下降、尚未到底"，所以强度仍高于 0.45
+check('16:45 还在往 night 整值降（未到底）', late.intensity > 0.45 + 1e-9, true);
+check('16:45 已降过半程', late.intensity < (1 + 0.45) / 2, true);
 check('17:00 收尾到 night 段', envAt(at(17)).key, 'night');
-check('17:00 强度为 night 的整值', envAt(at(17)).intensity, 0.8);
+check('17:00 强度为 night 的整值', envAt(at(17)).intensity, 0.45);
+
+console.log('明暗对比（"环境光整天一个亮度"就是这里被压平过）：');
+const vals = ['morning', 'day', 'night', 'space'].map((k) => {
+  const h = { morning: 6, day: 12, night: 19, space: 2 }[k];
+  return envAt(at(h)).intensity;
+});
+check('最亮与最暗至少差 3 倍（现在是 ' + (vals[1] / vals[3]).toFixed(2) + ' 倍）', vals[1] / vals[3] >= 3, true);
+
+console.log('反射分档（过渡期按档重建小图 PMREM，别每帧重建）：');
+const s1 = envAt(at(16, 0)).step, s2 = envAt(at(16, 20)).step;
+check('过渡中 step 随进度前进', s2 > s1, true);
+check('非过渡期 step 为 0', envAt(at(12)).step, 0);
 
 console.log('曲线连续性（每 1 分钟采样，相邻两帧强度差必须极小）：');
 let maxJump = 0, jumpAt = '';

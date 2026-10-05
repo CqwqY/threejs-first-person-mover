@@ -43,17 +43,31 @@ export function applyEnvironment(scene, renderer, equirectTexture) {
 }
 
 // ---- 各时段的环境光强度 ----
-// 环境贴图现在**每个时段各有一份**（加载期预生成、缓存，切换时只换引用 → 零成本、不重编译），
-// 所以贴图本身已经带足了色温与明暗（清晨的暖、夜晚的冷暗），这里只是轻微辅助。
-const ENV_INTENSITY = { morning: 0.95, day: 1.0, night: 0.8, space: 0.7 };
-// 过渡走到一半（a = 0.5）时才换贴图，并在前后把环境光压成一个"哑铃"（最低点在切换那一刻）：
-// 亮度先降后升，**换色发生在最暗的一瞬**，肉眼最不容易察觉。
-// ⚠ 这条曲线本身是连续的，所以直接赋值给 environmentIntensity 即可，不需要再做平滑
-//   （再加平滑反而会让谷底对不齐切换点）。
-// ⚠ 谷底不能压太深：一昼夜只有 240 秒，**清晨段仅 3 小时 = 现实 5.4 秒**，
-//   过渡窗口（段的 18%）只有 1 秒出头。压到 0.55 时那 5 秒内会看到"暗一下又亮回来"，
-//   像闪了一下。0.8（只压 20%）既够掩护换色，又在短段里也平缓 —— 每帧变化量控制在千分之几。
-const ENV_DIP = 0.8;
+// 环境贴图现在**每个时段各有一份**（加载期预生成、缓存，平时只换引用 → 零成本、不重编译），
+// 所以贴图本身已经带足了色温（清晨的暖、夜晚的冷暗），这里只负责**明暗**。
+// ⚠ 这几个数就是"白天亮、入夜暗"的全部来源，**别再往 1.0 收**：
+//   之前被压平成 0.7~1.0，结果"环境光整天一个亮度"，昼夜节奏直接没了。
+const ENV_INTENSITY = { morning: 0.85, day: 1.0, night: 0.45, space: 0.25 };
+// 过渡时环境反射**不再瞬切**，而是分时档重建（见 ENV_MORPH_STEPS），所以不需要"哑铃"了。
+// 亮度直接在两个时段之间单调插值：白天→夜晚就是一路变暗，中途不会出现"暗一下又亮回来"的凹谷。
+// ⚠ 历史上这里用过 ENV_DIP（在换贴图那一瞬把亮度压出个谷底来掩护换色）——
+//   那是"环境贴图只能瞬切"时代的权宜之计，代价是亮度曲线出现不自然的凹陷，看着像闪了一下。
+//   现在贴图能渐变，就没有理由再压这个谷了。
+//
+// 过渡期环境反射的分档数：把 a∈[0,1] 切成这么多档，每档重建一次小图 PMREM。
+// 12 档 → 一昼夜 4 个过渡共 48 次重建（一昼夜 600 秒 ≈ 每 12 秒一次，每次两三毫秒），既平滑又无卡顿风险。
+const ENV_MORPH_STEPS = 12;
+// 环境贴图降采样尺寸。反射本来就靠 PMREM 的模糊 mip，高频细节全部丢掉，
+// 所以 256×128 与 4096×2048 的**反射结果几乎没差别**，但生成成本差两个数量级 ——
+// 这也是过渡期能反复重建的前提（4096 的 PMREM 每张几十毫秒，绝不能放进帧循环）。
+const ENV_W = 256, ENV_H = 128;
+// 环境反射的色偏校正（只作用于 PMREM，天空球壳仍用原图 —— 天空该蓝还是蓝）。
+// 为什么要校正：实测 night/space 两张图上半球的「蓝 − 绿」达 +48 / +44，蓝绿比 1.8~2.1
+// （白天同样口径只有 1.25），反射到金属/光滑材质上就是**发紫**。
+//   · ENV_DESAT：整体去饱和（0=不改，1=全灰）
+//   · ENV_PURPLE_CUT：把「蓝比绿高出来」的那部分削掉这么多（专治紫）
+const ENV_DESAT = 0.35;
+const ENV_PURPLE_CUT = 0.55;
 
 // 城市天空贴图（相对当前页面根路径，随构建部署）
 const CITY_SKY_URL = 'sky/city_sky.jpg';
@@ -176,14 +190,49 @@ export function envAt(t) {
   const { from, to, a } = skyBlend(t);
   const iFrom = ENV_INTENSITY[from] ?? 1;
   const iTo = to ? (ENV_INTENSITY[to] ?? iFrom) : iFrom;
-  const dip = Math.min(iFrom, iTo) * ENV_DIP; // 过渡最低点（切换贴图就发生在这里附近）
-  let intensity = iFrom;
-  if (to) {
-    intensity = (a < 0.5)
-      ? iFrom + (dip - iFrom) * (a / 0.5)        // 前半段：压到谷底
-      : dip + (iTo - dip) * ((a - 0.5) / 0.5);   // 后半段：升到目标
+  // 单调插值：过渡就是一路从当前时段的亮度走到下一时段的亮度，中间不再有凹谷。
+  const intensity = to ? iFrom + (iTo - iFrom) * a : iFrom;
+  // 环境反射分档重建（step 变一次才重建一次 PMREM，见 createTimeSky）。
+  // key 仍然给出"当前更接近哪张贴图"，非过渡期用它直接命中缓存。
+  const step = to ? Math.round(a * ENV_MORPH_STEPS) : 0;
+  return { from, to, a, step, key: (to && a >= 0.5) ? to : from, intensity };
+}
+
+// 环境反射的色偏校正（原地改 RGBA 数组）。抽成纯函数是为了能在 Node 里直接断言。
+// 治的是"反射发紫"：夜空/深夜两张图蓝远大于绿，金属材质一反射就是脏紫。
+//   ① 整体往灰度拉一点（ENV_DESAT）—— 反射本来就是低频信息，饱和度高只会显脏；
+//   ② 再把"蓝比绿高出来"的那部分削掉（ENV_PURPLE_CUT）—— 专治紫，蓝天仍是蓝天。
+// ⚠ 只作用于 PMREM 那份降采样图，**天空球壳仍用原图**，所以天空观感不受影响。
+export function correctEnvColor(px) {
+  for (let i = 0; i < px.length; i += 4) {
+    let r = px[i], g = px[i + 1], b = px[i + 2];
+    const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    r += (gray - r) * ENV_DESAT;
+    g += (gray - g) * ENV_DESAT;
+    b += (gray - b) * ENV_DESAT;
+    const excess = b - g;
+    if (excess > 0) b -= excess * ENV_PURPLE_CUT; // 蓝压向绿；暖色（b<g）不动
+    px[i] = r; px[i + 1] = g; px[i + 2] = b;
   }
-  return { from, to, a, key: (to && a >= 0.5) ? to : from, intensity };
+  return px;
+}
+
+// 把一张时段贴图降采样 + 校色成 ENV_W×ENV_H 的像素，供 PMREM 用。失败返回 null（回退到原图）。
+function sampleEnvSource(image) {
+  try {
+    if (typeof document === 'undefined' || !image) return null;
+    const cv = document.createElement('canvas');
+    cv.width = ENV_W; cv.height = ENV_H;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(image, 0, 0, ENV_W, ENV_H);
+    const d = ctx.getImageData(0, 0, ENV_W, ENV_H);
+    correctEnvColor(d.data);
+    return d.data;
+  } catch (e) {
+    console.warn('[sky] 环境贴图降采样失败（沿用原图反射）:', e);
+    return null;
+  }
 }
 
 // createTimeSky(scene, renderer)：生成四张天空球壳 + 程序化天空兜底，返回 { update(t, camera) }。
@@ -195,8 +244,12 @@ export function createTimeSky(scene, renderer) {
   const domes = new Map();
   let anyLoaded = false;
   const envMaps = new Map();   // key -> 该时段的环境贴图（PMREM RT），加载期各生成一份
+  const envSrc = new Map();    // key -> 降采样 + 校色后的小像素（Uint8ClampedArray），过渡期用来混合
   let fallbackRT = null;       // RoomEnvironment 那份临时环境，第一张时段环境就绪后释放
-  let envKey = null;           // 当前 scene.environment 用的是哪个时段
+  let curEnvId = null;         // 当前 scene.environment 用的是谁（时段 key，或过渡的 'from>to#step'）
+  // 过渡期混合用的复用画布/贴图/RT：避免每次重建都新建 canvas 与 texture
+  let morphCanvas = null, morphCtx = null, morphTex = null, morphRT = null;
+  let morphDisabled = false;   // 过渡期重建失败过 → 永久退回"整段贴图"，避免每帧重试 PMREM
 
   if (renderer) fallbackRT = applyEnvironment(scene, renderer, null); // 基础环境，立刻生效
 
@@ -235,12 +288,15 @@ export function createTimeSky(scene, renderer) {
             fallback.visible = false;
             // 每个时段各生成一份环境贴图并缓存（切换时只换引用 = 零成本、不重编译）。
             // 这样清晨是清晨的暖光、夜晚是夜晚的冷暗 —— 而不是一整天都反射白天的天空。
-            if (renderer) {
-              const rt = buildEnvMap(renderer, texture);
+    // 把这张时段贴图**降采样 + 色偏校正**成一份小像素，留着给 PMREM 用（含过渡期的分档混合）。
+    // 4096×2048 的 PMREM 每张几十毫秒，绝不能进帧循环；256×128 只要两三毫秒，才能反复重建。
+    envSrc.set(key, sampleEnvSource(texture.image));
+    if (renderer) {
+      const rt = buildEnvMap(renderer, texture);
               if (rt) {
                 envMaps.set(key, rt);
-                if (!envKey) {
-                  envKey = key;
+                if (!curEnvId) {
+                  curEnvId = key;
                   scene.environment = rt.texture;
                   if (fallbackRT) { try { fallbackRT.dispose(); } catch (e) { /* ignore */ } fallbackRT = null; }
                 }
@@ -259,21 +315,76 @@ export function createTimeSky(scene, renderer) {
   }
 
   function update(t, camera) {
-    // 环境反射随天色走：贴图在过渡中点（a=0.5）才切换（与天空球壳的交叉淡入同步），
-    // 亮度走哑铃曲线（换色发生在最暗的一瞬）。换贴图只是改一个引用，没有 PMREM 重建。
-    // 具体计算见 envAt()（纯函数，有 tools/probe-skyenv.mjs 覆盖）。
-    if (renderer && scene.environment) {
-      const e = envAt(t);
-      scene.environmentIntensity = e.intensity;
-      if (e.key !== envKey) {
-        const rt = envMaps.get(e.key);
-        if (rt) { envKey = e.key; scene.environment = rt.texture; }
-        // 目标时段的环境贴图还没生成好（首次加载中）→ 保持当前这份，下一帧再试
+  // 环境反射随天色走：平时直接用该时段缓存好的 PMREM（只换引用，零成本）；
+  // 过渡期则把两张小图按进度混合后重建，**分档重建**（ENV_MORPH_STEPS 档）而不是每帧重建 ——
+  // 既让反射跟着天空一起渐变（不再"啪"一下换色），又把 PMREM 开销压到每十几毫秒一次。
+  if (renderer && scene.environment) {
+    const e = envAt(t);
+    scene.environmentIntensity = e.intensity;
+    if (e.to && !morphDisabled) {
+      const pxFrom = envSrc.get(e.from);
+      const pxTo = envSrc.get(e.to);
+      if (pxFrom && pxTo) {
+        const id = e.from + '>' + e.to + '#' + e.step;
+        if (id !== curEnvId) {
+          const rt = buildMorphEnv(pxFrom, pxTo, e.step / ENV_MORPH_STEPS);
+          if (rt) { curEnvId = id; scene.environment = rt.texture; }
+          else morphDisabled = true; // ⚠ 重建失败就永久降级到"整段贴图"：
+          //   不这么做的话，id 每帧都对不上 → 每帧重试一次 PMREM，直接卡死。
+        }
+      } else {
+        useCachedEnv(e.key); // 小图没准备好（首次加载中）→ 退回时段贴图
       }
+    } else {
+      useCachedEnv(e.key);
     }
+  }
 
-    const { from, to, a } = skyBlend(t);
-    for (const [key, mesh] of domes) {
+  // 切回某个时段缓存好的环境贴图；顺手把过渡期那份临时 RT 释放掉（只在已经换走之后才 dispose）。
+  function useCachedEnv(key) {
+    if (curEnvId === key) return;
+    const rt = envMaps.get(key);
+    if (!rt) return; // 该时段还没生成好（首次加载中）→ 保持当前这份，下一帧再试
+    scene.environment = rt.texture;
+    curEnvId = key;
+    releaseMorphRT();
+  }
+
+  function releaseMorphRT() {
+    if (morphRT) { try { morphRT.dispose(); } catch (e) { /* ignore */ } morphRT = null; }
+  }
+
+  // 把两张小图按 k 混合 → 写进复用画布 → PMREM。返回新的 RT（旧的由本函数释放）。
+  function buildMorphEnv(pxFrom, pxTo, k) {
+    try {
+      if (!morphCanvas) {
+        morphCanvas = document.createElement('canvas');
+        morphCanvas.width = ENV_W; morphCanvas.height = ENV_H;
+        morphCtx = morphCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      if (!morphCtx) return null;
+      const out = new Uint8ClampedArray(pxFrom.length);
+      for (let i = 0; i < out.length; i++) out[i] = pxFrom[i] + (pxTo[i] - pxFrom[i]) * k;
+      morphCtx.putImageData(new ImageData(out, ENV_W, ENV_H), 0, 0);
+      if (!morphTex) {
+        morphTex = new THREE.CanvasTexture(morphCanvas);
+        morphTex.mapping = THREE.EquirectangularReflectionMapping;
+        morphTex.colorSpace = THREE.SRGBColorSpace;
+      }
+      morphTex.needsUpdate = true;
+      const rt = buildEnvMap(renderer, morphTex);
+      if (!rt) return null;
+      releaseMorphRT(); // ⚠ 先把上一份释放掉，再接管新的（顺序反了会把正在用的贴图释放掉）
+      morphRT = rt;
+      return rt;
+    } catch (e) {
+      console.warn('[sky] 过渡环境贴图重建失败（沿用上一份）:', e);
+      return null;
+    }
+  }
+
+  const { from, to, a } = skyBlend(t);
+  for (const [key, mesh] of domes) {
       let opacity = 0;
       let order = -1;
       if (key === from) {
