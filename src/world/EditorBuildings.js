@@ -253,7 +253,8 @@ function countMeshes(root) {
 // 返回世界空间碰撞体数组 [{cx,cy,cz,hx,hy,hz}]（complex 物体额外异步 push {type:'trimesh',...}）。
 export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
   clearHolders(scene); // 重跑前先移除上一次添加的 holder，避免重复叠加
-  clearLodTargets();  // 场景重建 → 上一轮的 LOD 登记全部作废  const gen = ++_buildGen; // 本次构建代数（异步烘焙回调据此丢弃过期结果）
+  clearLodTargets(); // 场景重建 → 上一轮的 LOD 登记全部作废
+  const gen = ++_buildGen; // 本次构建代数（异步烘焙回调据此丢弃过期结果）
   _pendingLoads = [];  // 本次构建的模型加载 Promise（供 optimizeEditorScene 等待「都加载完」）
   let data = dataOverride || editorMapData || {};
   // 兼容旧格式：纯数组（仅含 placed）
@@ -306,10 +307,13 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       holder.updateMatrixWorld(true);
       bakeTriMeshAsync(holder, { key: bakeKey })
         .then((tm) => {
-          if (gen !== _buildGen) return; // 场景已重建：丢弃过期结果
+          // 场景已重建 → 丢弃过期结果（否则上一份场景的碰撞体会混进新场景）
+          if (gen !== _buildGen) return;
           if (tm && tm.triCount > 0) colliders.push(tm);
         })
-        .catch(() => {});
+        // ⚠ 这里曾经是 .catch(() => {})：2026-10-05 那次「碰撞全没了、控制台却不报错」就是它干的 ——
+        //    回调里一个 ReferenceError 被静默吞掉，碰撞体永远 push 不进去。现在必须打日志。
+        .catch((e) => { console.error('[EditorBuildings] trimesh 烘焙失败:', e); });
     };
 
     // 模型加载完成后的统一处理：合并静态子网格 → 开阴影 → 按需烘焙 trimesh
