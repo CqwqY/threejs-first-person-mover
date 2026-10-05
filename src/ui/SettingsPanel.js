@@ -35,6 +35,8 @@ export const DEFAULT_SETTINGS = {
   dayCycle: 600, // 一昼夜时长（秒，默认 10 分钟），越大变化越慢
   bgmVolume: 0.25, // 背景音乐音量（0 = 静音），默认就很小声
   dayOffset: 0, // 本地时刻偏移（小时）：只在本地预览用，不影响服务器权威时间
+  exposure: 0.85, // 整体曝光（ACES 色调映射）：太亮就往下调；高光不再硬 clip 成死白
+  version: 2, // 光照默认值（ambient/hemi/sun）曾整体调暗，升版本号时清掉旧存档里的高值，落回新默认
 };
 
 const STORE_KEY = 'scene-settings-v1'; // 编辑器「光照设计」键：客户端也读取此键应用光照
@@ -46,6 +48,22 @@ export function loadSettings(storeKey = STORE_KEY) {
     saved = JSON.parse(localStorage.getItem(storeKey) || '{}') || {};
   } catch {
     saved = {};
+  }
+  // 版本迁移：光照默认值（ambient/hemi/sun）曾整体调暗。老存档里存着旧的更亮默认值，
+  // 会因 `{ ...DEFAULT, ...saved }` 把新默认值盖掉 —— 表现为"明明改了默认却还是老亮"。
+  // 升到新 version 时清掉这三项，让用户落回更暗的新默认；用户之后自己调的值不受版本号影响（不再触发）。
+  if (Number(saved.version) !== DEFAULT_SETTINGS.version) {
+    delete saved.ambient;
+    delete saved.hemi;
+    delete saved.sun;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        saved.version = DEFAULT_SETTINGS.version;
+        localStorage.setItem(storeKey, JSON.stringify({ ...DEFAULT_SETTINGS, ...saved }));
+      } catch {
+        /* 忽略存储失败 */
+      }
+    }
   }
   // 一次性迁移：一昼夜默认时长由 240 秒（4 分钟）放慢到 600 秒（10 分钟）。
   // ⚠ 光改默认值是**没用的** —— 老用户 localStorage 里已经存着 240，会一直盖住默认值。
@@ -131,6 +149,7 @@ const FIELDS = [
   { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01, group: '光照', editorOnly: true },
   { id: 'hemi', label: '半球光(弹射)强度', kind: 'range', min: 0, max: 1, step: 0.01, group: '光照', editorOnly: true },
   { id: 'sun', label: '阳光强度', kind: 'range', min: 0, max: 3, step: 0.05, group: '光照', editorOnly: true },
+  { id: 'exposure', label: '整体曝光(太亮调低)', kind: 'range', min: 0.3, max: 1.5, step: 0.05, group: '光照', editorOnly: true },
   { id: 'sunElev', label: '阳光高度角', kind: 'range', min: 0, max: 90, step: 1, group: '光照', editorOnly: true },
   { id: 'sunAz', label: '阳光方位角', kind: 'range', min: 0, max: 360, step: 1, group: '光照', editorOnly: true },
 ];

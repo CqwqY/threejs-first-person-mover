@@ -14,6 +14,9 @@ import { assetBlobURL } from './assetCache.js';
 // 天空贴图就绪前先用 RoomEnvironment 顶一份，保证任何时刻都有反射。
 let _pmrem = null;
 let _envRT = null;
+// 环境光强度基准：IBL（天空反射，scene.environmentIntensity）要跟随"环境光"滑块时用的旧基准。
+// design.ambient = 此值 时 IBL 保持原昼夜亮度；=0 时 IBL 也归零（解决"环境光=0 但还有环境光"）。
+const AMBIENT_REF = 0.32;
 
 // 只负责「等距圆柱贴图 → PMREM 环境贴图」，不动场景、也不释放任何东西 ——
 // 调用方自己持有返回值并负责释放（时段天空要缓存 4 份，不能边生成边释放上一份）。
@@ -239,7 +242,7 @@ function sampleEnvSource(image) {
 // update 每帧调用：按时刻决定哪张球壳可见并交叉淡入，同时让球壳跟随相机（无视差、不被裁剪）。
 // ⚠ 一定要传 renderer：金属/光滑材质（metalness 高、roughness→0）靠 scene.environment 出颜色，
 //   不建环境贴图这些材质会渲染成**纯黑**（导入的模型很常见）。
-export function createTimeSky(scene, renderer) {
+export function createTimeSky(scene, renderer, opts = {}) {
   const fallback = createSky(scene); // 贴图没加载出来前的兜底，加载成功后隐藏
   const domes = new Map();
   let anyLoaded = false;
@@ -320,7 +323,15 @@ export function createTimeSky(scene, renderer) {
   // 既让反射跟着天空一起渐变（不再"啪"一下换色），又把 PMREM 开销压到每十几毫秒一次。
   if (renderer && scene.environment) {
     const e = envAt(t);
-    scene.environmentIntensity = e.intensity;
+    // 把"环境光强度"也作用到 IBL（天空反射）上：IBL 是独立通道，不受 AmbientLight.intensity 控制，
+    // 否则用户把环境光拉到 0 时金属/光滑材质仍被天空照得锃亮（"环境光=0 但还有环境光"）。
+    // ambient 取 design.ambient（游戏端恒定，不随昼夜变）；AMBIENT_REF = 旧基准，ambient=0 → IBL 也归零。
+    let envI = e.intensity;
+    if (opts && typeof opts.ambientRef === 'function') {
+      const ar = Number(opts.ambientRef()) || 0;
+      envI *= Math.min(2, Math.max(0, ar / AMBIENT_REF));
+    }
+    scene.environmentIntensity = envI;
     if (e.to && !morphDisabled) {
       const pxFrom = envSrc.get(e.from);
       const pxTo = envSrc.get(e.to);

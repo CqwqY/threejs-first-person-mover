@@ -97,8 +97,12 @@ export function createEditor() {
     return;
   }
   // ---------- 渲染 / 场景 / 相机 ----------
+  const design = loadSettings('scene-settings-v1'); // 编辑器保存的光照设计（环境光/半球/阳光/曝光），初始化即应用
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
+  // ACES 色调映射：多重光累加柔和压回 [0,1]，高光不爆白；曝光随编辑器设计值（太亮就调低）。
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = (design && Number(design.exposure)) || DEFAULT_SETTINGS.exposure;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   const vp = document.getElementById('viewport');
@@ -115,17 +119,17 @@ export function createEditor() {
   camera.lookAt(0, 0, 0);
 
   // 灯光：默认值跟随画面设置（SettingsPanel），可在「画面」面板里即时调整并持久化
-  const ambient = new THREE.AmbientLight(0xffffff, DEFAULT_SETTINGS.ambient);
+  const ambient = new THREE.AmbientLight(0xffffff, (design && Number(design.ambient)) || DEFAULT_SETTINGS.ambient);
   scene.add(ambient);
   // 半球光：按法线给天空/地面色，模拟弹射光，给室内/暗处补明暗层次（关键：让被主阴影盖住的面不再同色）
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x222230, DEFAULT_SETTINGS.hemi);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x222230, (design && Number(design.hemi)) || DEFAULT_SETTINGS.hemi);
   scene.add(hemi);
   // 阴影跟随相机：阳光的阴影相机始终以 sunTarget 为中心，每帧把 sunTarget 挪到相机附近，
   // 这样近处模型和地面都能收到清晰投射，远处自然淡出，性能也更可控。
   const sunTarget = new THREE.Object3D();
   scene.add(sunTarget);
   const sunOffset = new THREE.Vector3(30, 40, 20); // 阳光相对 target 的固定偏移（保持整体光向不变）
-  const sun = new THREE.DirectionalLight(0xffffff, DEFAULT_SETTINGS.sun);
+  const sun = new THREE.DirectionalLight(0xffffff, (design && Number(design.sun)) || DEFAULT_SETTINGS.sun);
   sun.castShadow = true;
   sun.shadow.mapSize.set(DEFAULT_SETTINGS.shadowSize, DEFAULT_SETTINGS.shadowSize);
   // 阴影痤疮修复：bias 轻微下压深度，normalBias 沿法线推开采样点，消除平面上的「一条一条」条纹
@@ -2407,6 +2411,8 @@ export function createEditor() {
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.85;
     renderer.setSize(180, 210);
     el.appendChild(renderer.domElement);
 
@@ -3925,6 +3931,9 @@ export function createEditor() {
     // 列表里的「投影中 / 未投影」标记跟着名额走，400ms 刷一次就够（不必每帧动 DOM）
     const now = performance.now();
     if (now - (_badgeAt || 0) > 400) { _badgeAt = now; refreshLightShadowBadges(); }
+    // 环境光=0 时让天空 IBL 也跟着归零（IBL 是独立通道，不随 AmbientLight.intensity 变），
+    // 否则编辑器里把环境光拉到 0 金属/光滑材质仍被天空照得发亮。
+    scene.environmentIntensity = Math.min(2, Math.max(0, ambient.intensity / 0.32));
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(loop);
   }
@@ -3969,6 +3978,7 @@ export function createEditor() {
       ambient: (v) => (ambient.intensity = v),
       hemi: (v) => (hemi.intensity = v),
       sun: (v) => (sun.intensity = v),
+      exposure: (v) => (renderer.toneMappingExposure = Number(v) || DEFAULT_SETTINGS.exposure),
       sunElev: (v) => {
         sunElev = v;
         applySunAngle();
@@ -3983,7 +3993,7 @@ export function createEditor() {
     },
     // 编辑器面板：光照设计(环境光/半球光/阳光强度+角度) + 阴影，不透出视距（视距由游戏客户端可调）
     // liveApply：编辑器要边调边看场景，控件改动即时生效（游戏端则用「应用设置」暂存提交）。
-    { fields: ['ambient', 'hemi', 'sun', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'], liveApply: true }
+    { fields: ['ambient', 'hemi', 'sun', 'exposure', 'sunElev', 'sunAz', 'shadowR', 'shadowSize', 'castShadow'], liveApply: true }
   );
   const btnSettings = document.getElementById('btnSettings');
   if (btnSettings) btnSettings.onclick = () => settingsPanel.toggle();

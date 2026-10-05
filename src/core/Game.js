@@ -4,7 +4,7 @@ import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
 import { createLights, updateShadowBudgets } from '../world/Lights.js';
-import { createSettingsPanel, loadSettings, computeSunOffset } from '../ui/SettingsPanel.js';
+import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
 import { fullscreenSupported, isFullscreen, toggleFullscreen, onFullscreenChange } from '../ui/fullscreen.js';
@@ -162,13 +162,17 @@ export class Game {
     this.renderer.shadowMap.autoUpdate = false;
     this._shadowTick = 0;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    // 色调映射：用 ACES 把（太阳光 + 环境 IBL + 用户摆放的灯）的累加柔和压回 [0,1]，
+    // 高光不再硬 clip 成死白 —— 解决"白天光跟着太阳叠加更亮、且发硬不柔"。
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = DEFAULT_SETTINGS.exposure; // 之后会被编辑器设计值覆盖
     document.getElementById('app').appendChild(this.renderer.domElement);
 
     // ---- 场景与相机 ----
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87ceeb); // 天空浅蓝（兜底，时段天空球壳覆盖其上）
     // 时段天空盒：清晨/白天/夜晚/深夜四张全景图，按世界时刻交叉淡入（内部含程序化天空兜底）
-    this._timeSky = createTimeSky(this.scene, this.renderer); // 传 renderer：要生成环境贴图，否则金属材质全黑
+    this._timeSky = createTimeSky(this.scene, this.renderer, { ambientRef: () => this._ambient.intensity }); // 传 renderer：要生成环境贴图，否则金属材质全黑；ambientRef 让环境光=0 时 IBL 也归零
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 500);
@@ -192,6 +196,8 @@ export class Game {
     this._ambient.intensity = design.ambient;
     this._hemi.intensity = design.hemi;
     this._sun.intensity = design.sun;
+    // 曝光随编辑器设计值：编辑器里调"整体曝光"滑块会写进同一份设计键。
+    this.renderer.toneMappingExposure = Number(design.exposure) || DEFAULT_SETTINGS.exposure;
     const dOff = computeSunOffset(design.sunElev, design.sunAz);
     this._sunOffset.set(dOff.x, dOff.y, dOff.z);
 
