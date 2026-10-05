@@ -12,7 +12,7 @@ import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUnifo
 import { ConvexMeshDecomposition } from 'vhacd-js';
 import { instantiate } from '../world/AssetLoader.js';
 import { generateSimple } from '../world/collision/simpleGen.js';
-import { API_BASE } from '../config.js';
+import { API_BASE, Config } from '../config.js';
 // 场地边界（空气墙）：与游戏运行时共用同一份数据/几何，见 world/Boundary.js
 import {
   defaultBoundary, normalizeBoundary, boundaryWallSpecs, boundarySpan,
@@ -316,6 +316,7 @@ export function createEditor() {
     furnMsg: document.getElementById('furnMsg'),
     areaList: document.getElementById('areaList'),
     areaAdd: document.getElementById('areaAdd'),
+    areaReset: document.getElementById('areaReset'),
     areaSave: document.getElementById('areaSave'),
     areaFit: document.getElementById('areaFit'),
     areaMsg: document.getElementById('areaMsg'),
@@ -3368,6 +3369,15 @@ export function createEditor() {
     renderAreaList(); drawAreaViz();
   };
   if (StepUI.areaSave) StepUI.areaSave.onclick = () => saveAreas();
+  // 恢复内置默认范围（= src/config.js 的 Config.BUILD_AREAS，与场景里两栋教学楼的实际占地一致）。
+  // 线上曾出现「保存的范围和楼的实际位置不重合 → 楼里反而放不下」的事故，给个一键还原。
+  if (StepUI.areaReset) StepUI.areaReset.onclick = () => {
+    const defs = (Config && Array.isArray(Config.BUILD_AREAS)) ? Config.BUILD_AREAS : [];
+    if (!defs.length) { setAreaMsg('没有内置默认范围', 'err'); return; }
+    buildAreas = defs.map((a) => ({ ...a }));
+    renderAreaList(); drawAreaViz();
+    setAreaMsg('已载入内置默认范围（还要点「保存范围」才会写进服务器）', '');
+  };
   if (StepUI.areaFit) StepUI.areaFit.onclick = () => {
     const a = buildAreas[0];
     if (!a) return;

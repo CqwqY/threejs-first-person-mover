@@ -77,7 +77,6 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   let ghost = null, ghostItemId = null;
 
   const raycaster = new THREE.Raycaster();
-  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const hit = new THREE.Vector3();
 
   const state = {
@@ -276,9 +275,13 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   function clearAim() { outlineRemove(); aimId = null; }
 
   // ---------- 射线：准星中心 ----------
-  // 取准星指到的「实际表面」点：优先命中场景里的地面/台阶/楼板/已摆家具（复杂碰撞体），
-  // 拿它的高度 y；没命中再退回水平地面平面（y=0）。
+  // 取准星指到的「可站立表面」点：地面 / 台阶 / 楼板 / 已有家具顶面。
+  // ⚠ 只认**朝上的面**（法线 y > 0.6）：否则对着教学楼墙面/天花板时，家具会被贴到墙上去（表现为"放不进楼里"）。
+  //   墙面全部被跳过时回退到地面高度；射线朝上/水平拿不到地面交点时，退化为「前方 12 米的地面点」，
+  //   保证**永远能给出一个落点**，不会出现"怎么点都放不下"。
   const surfaceHits = [];
+  const _nrm = new THREE.Vector3();
+  const _nmat = new THREE.Matrix3();
   let surfTick = 0, surfCache = null;
   function surfacePoint() {
     raycaster.setFromCamera({ x: 0, y: 0 }, camera);
@@ -289,11 +292,19 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     for (const h of surfaceHits) {
       const p = h.point;
       if (!Number.isFinite(p.y)) continue;
-      if (p.y < -8 || p.y > 60) continue; // 排除天空穹顶 / 异常高的面
+      if (p.y < -2 || p.y > 10) continue; // 与服务端 build_move 的 y 钳制保持一致
+      if (h.face && h.face.normal && h.object) {
+        _nrm.copy(h.face.normal).applyMatrix3(_nmat.getNormalMatrix(h.object.matrixWorld)).normalize();
+        if (_nrm.y < 0.6) continue; // 墙面 / 天花板 → 不算可摆放面，继续看下一个交点
+      }
       return { x: p.x, y: p.y, z: p.z };
     }
-    const p = raycaster.ray.intersectPlane(groundPlane, hit);
-    return p ? { x: p.x, y: 0, z: p.z } : null;
+    // 回退：把视线延长到 y=0 平面上；视线朝上/水平时退化为「前方 12 米」
+    const dir = raycaster.ray.direction;
+    const t = dir.y < -1e-4 ? (-raycaster.ray.origin.y / dir.y) : 12;
+    const tt = (Number.isFinite(t) && t > 0) ? Math.min(t, 60) : 12;
+    raycaster.ray.at(tt, hit);
+    return { x: hit.x, y: 0, z: hit.z };
   }
   // 建造点：表面高度 + 水平钳制到允许建造的两栋楼范围内。
   // fresh=true 时强制重算（放置瞬间用），否则最多每 4 帧算一次（省开销，幽灵仍然跟手）。
