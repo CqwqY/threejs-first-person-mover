@@ -50,14 +50,20 @@ export function enableDynamicLighting(obj) {
   obj.traverse((o) => { if (o.layers) o.layers.enable(LAYER_DYNAMIC); });
 }
 
-// 光照烘焙总开关（kill-switch）：默认开启；URL 带 ?bake=0 时关闭（太阳回退为全层普照、
-// 运行时跳过 lightMap 应用）→ 任何烘焙相关问题都能一键回退到改动前行为。
+// 光照烘焙总开关（kill-switch）：**默认关闭**。原因（用户实测反馈 + 本项目 perf JSON）：
+// 烘焙会让被烘焙的建筑失去实时太阳阴影（receiveShadow=false + 踢出太阳第 1 层），而关阴影实测只 +2.4fps，
+// 代价却是建筑阴影肉眼可见地消失、且烘焙阴影被「冻」在烘焙那一刻（游戏太阳昼夜移动，方向对不上）→ 净亏。
+// 故默认关：游戏回到「全实时阴影」的正常观感。极弱机若愿用「无建筑阴影」换帧率，手动 ?bake=1 开启。
 export function bakeFeatureEnabled() {
   if (BAKE_FEATURE_OVERRIDE !== null) return BAKE_FEATURE_OVERRIDE;
   try {
-    if (typeof location !== 'undefined' && location.search.includes('bake=0')) return false;
+    if (typeof location !== 'undefined') {
+      const p = new URLSearchParams(location.search);
+      if (p.get('bake') === '1') return true;   // 显式开启
+      if (p.get('bake') === '0') return false;  // 显式关闭
+    }
   } catch (e) { /* 非浏览器环境（Node 自检）忽略 */ }
-  return true;
+  return false; // 默认关闭：保留实时阴影，烘焙仅作极弱机可选项
 }
 // 单测可注入的强制值（null=按 URL 判断）。
 export let BAKE_FEATURE_OVERRIDE = null;

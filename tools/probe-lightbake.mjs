@@ -54,8 +54,9 @@ ok(files.lights.includes('export function bakeFeatureEnabled'), 'bakeFeatureEnab
 ok(files.lights.includes('export function setBakeFeatureEnabled'), 'setBakeFeatureEnabled 导出（供单测注入）');
 ok(files.lights.includes('if (bakeFeatureEnabled()) directional.layers.set(LAYER_DYNAMIC)') &&
   files.lights.includes('else directional.layers.enable(LAYER_DYNAMIC)'),
-  '太阳层按 kill-switch：开→只照第1层；关(?bake=0)→第0+1层全照');
-ok(files.lights.includes("location.search.includes('bake=0')"), 'kill-switch 读 ?bake=0');
+  '太阳层按 kill-switch：开→只照第1层；关→第0+1层全照');
+ok(files.lights.includes("p.get('bake') === '1'") && files.lights.includes('return false; // 默认关闭'),
+  'kill-switch 默认关闭（?bake=1 才开启），游戏回到全实时阴影');
 
 console.log('[EditorApp] 编辑器接线');
 ok(files.editor.includes("id=\"btnBake\"") || (files.html.includes('id="btnBake"')), '烘焙按钮存在');
