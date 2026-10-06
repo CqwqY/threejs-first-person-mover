@@ -4,6 +4,7 @@
 //   而 EditorBuildings 又依赖 AssetLoader —— 合并工具留在 EditorBuildings 里会造成循环依赖。
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { optimizeVertexCache, vertexCacheOptEnabled } from './vertexCacheOpt.js';
 
 // ===========================================================================
 // 静态网格合并（draw call 优化）
@@ -251,6 +252,13 @@ export function mergeStaticMeshes(root, opts = {}) {
       continue; // 属性布局意外不一致：保留原件，画面不受影响
     }
     for (const g of geos) g.dispose(); // 中间克隆体已烘进 merged
+
+    // 顶点缓存优化：合并后的大网格只动索引重排三角形顺序，把 GPU post-transform 缓存命中率拉高，
+    // 省顶点着色器调用（纯导入期、零观感风险；桌面端帧率帮助有限，但手机端/CPU 侧正该做）。
+    // 顶点数据一个字节都不动，三角面集合不变 —— 见 vertexCacheOpt.js 的红线。
+    if (vertexCacheOptEnabled()) {
+      try { optimizeVertexCache(merged); } catch (e) { /* 失败保持原样 */ }
+    }
 
     const mesh = new THREE.Mesh(merged, grp.material);
     mesh.name = (grp.material && grp.material.name) ? 'merged-' + grp.material.name : 'merged';
