@@ -47,6 +47,7 @@ import { clearAssetCache } from '../world/assetCache.js';
 import { ensureTheme } from '../ui/theme.js';
 import { installUiHotkey } from '../util/UiVisibility.js';
 import { startRenderSample, sampleFrame, waitRenderSample, report as reportTelemetry } from '../util/Telemetry.js';
+import { applyFragmentPrecisionToScene, applyFragmentPrecision } from '../world/FragmentPrecision.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
 // target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
@@ -604,12 +605,14 @@ export class Game {
       hemi: this._hemi.color.clone(),
     };
     // 玩家身上的护盾罩子（只在三阶段开盾时显示）
+    const shieldMat = new THREE.MeshBasicMaterial({
+      color: 0x7fe3ff, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    applyFragmentPrecision(shieldMat);
     this._shieldMesh = new THREE.Mesh(
       new THREE.SphereGeometry(1.15, 20, 14),
-      new THREE.MeshBasicMaterial({
-        color: 0x7fe3ff, transparent: true, opacity: 0.3,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-      })
+      shieldMat
     );
     this._shieldMesh.visible = false;
     this.scene.add(this._shieldMesh);
@@ -1043,6 +1046,24 @@ export class Game {
     if (!r) return;
     // LOD 候选登记（只需一次；世界重建时由 _rescanLod 重新扫）：世界已在加载屏期间构建好
     if (this._lodCands.length === 0) this._scanLodCandidates();
+    // 片元降 mediump：移动 GPU 填充率 ~2×（顶点保持 highp，见 FragmentPrecision.js 的论证）。
+    // ⚠ 必须排在下面的 compile 之前 —— 注入改的是 shader 源码，注入后再 compile 才是新程序；
+    //   反过来（先编再注入）会白编一遍、游戏中首次看见材质时重编 = 卡顿尖峰。
+    // ⚠ 也会把材质标 needsUpdate，让本来已缓存的高精度程序失效。注入是幂等的，重复调用安全。
+    let _fragN = 0;
+    try {
+      _fragN = applyFragmentPrecisionToScene(this.scene);
+      if (_fragN > 0) {
+        this.scene.traverse((o) => {
+          const m = o && o.material;
+          if (!m) return;
+          if (Array.isArray(m)) { for (const mm of m) { if (mm) mm.needsUpdate = true; } }
+          else m.needsUpdate = true;
+        });
+      }
+    } catch (e) {
+      console.warn('[Game] 片元精度注入失败（忽略，保留 highp）:', e);
+    }
     try {
       if (typeof updateShadowBudgets === 'function') updateShadowBudgets(this.camera.position);
       // ① 当前视锥内的主 pass（最便宜的一层，也会把 renderer 内部状态预热好）
@@ -3069,12 +3090,14 @@ export class Game {
       new THREE.MeshBasicMaterial({ color: 0x08000f })
     );
     group.add(core);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x9a4cff, transparent: true, opacity: 0.5,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    applyFragmentPrecision(ringMat);
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(1.1, 1.45, 32),
-      new THREE.MeshBasicMaterial({
-        color: 0x9a4cff, transparent: true, opacity: 0.5,
-        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
-      })
+      ringMat
     );
     ring.rotation.x = -Math.PI / 2;
     group.add(ring);
@@ -4547,12 +4570,14 @@ export class Game {
     this.scene.add(group);
 
     // 中心闪光球（叠加混合，看起来更亮）
+    const ballMat = new THREE.MeshBasicMaterial({
+      color: 0xffd27a, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    applyFragmentPrecision(ballMat);
     const ball = new THREE.Mesh(
       new THREE.SphereGeometry(Math.max(0.45, radius * 0.45), 16, 12),
-      new THREE.MeshBasicMaterial({
-        color: 0xffd27a, transparent: true, opacity: 0.85,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-      })
+      ballMat
     );
     group.add(ball);
 
