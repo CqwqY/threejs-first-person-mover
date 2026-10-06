@@ -154,32 +154,38 @@ const SKYBOX_URLS = {
   space: 'sky/skybox-space.png',     // 深夜
 };
 
-// 时段划分（世界时刻 t：0 = 00:00，0.5 = 12:00）。按现实作息切：
-//   05:00-08:00 清晨 / 08:00-17:00 白天 / 17:00-22:00 夜晚 / 22:00-05:00 深夜（跨零点）
-// 数组按 start 升序；每段的结束时间即下一段的开始时间（最后一段绕回第一段）。
+// 时段划分（世界时刻 t：0 = 00:00，0.5 = 12:00）。与光照曲线对齐：
+//   光照日出在 t=0.25（6:00，sunUp 起为正）、日落在 t=0.75（18:00）。
+//   天空四段：清晨 05:30 起（日出前微光）/ 白天 08:00 / 黄昏 17:30（日落前转夜）/ 深夜 21:00；
+//   跨零点段 = 深夜 21:00 → 次日 05:30。破晓的预淡入由 Config.SKY_FADE_DUR 固定成 30 分钟，
+//   不再随段长放大，避免「游戏钟 4:00 天已亮」的失真。
+// 数组按 start 升序；每段结束时间即下一段开始时间（最后一段绕回第一段）。
 const SKY_PHASES = [
-  { key: 'morning', start: 5 / 24 },
-  { key: 'day', start: 8 / 24 },
-  { key: 'night', start: 17 / 24 },
-  { key: 'space', start: 22 / 24 },
+  { key: 'morning', start: 5.5 / 24 },  // 05:30 清晨（日出 6:00 前的微光）
+  { key: 'day', start: 8 / 24 },        // 08:00 白天
+  { key: 'night', start: 17.5 / 24 },   // 17:30 黄昏（日落 18:00 前转夜）
+  { key: 'space', start: 21 / 24 },     // 21:00 深夜
 ];
 
 // 计算当前时刻的天空混合：返回正在显示的时段 from、即将接替的时段 to，以及过渡进度 a（0~1）。
-// a = 0 表示完全显示 from（不处于过渡期）。
+// a = 0 表示完全显示 from（不处于过渡期）。预淡入用「距下一段开始的固定绝对时长」判定，
+// 与段长无关 —— 这样长夜段不会把破晓提前一两小时（见 Config.SKY_FADE_DUR 说明）。
 function skyBlend(t) {
   const n = SKY_PHASES.length;
-  let i = n - 1; // 默认落在最后一段（深夜），它跨越 22:00-05:00
+  let i = n - 1; // 默认落在最后一段（深夜），它跨越 21:00-05:30 跨零点
   for (let k = 0; k < n; k++) {
     if (t >= SKY_PHASES[k].start) i = k;
   }
   const cur = SKY_PHASES[i];
   const next = SKY_PHASES[(i + 1) % n];
-  const end = next.start > cur.start ? next.start : next.start + 1; // 处理跨零点
-  const len = end - cur.start;
-  const p = (t >= cur.start ? t - cur.start : t + 1 - cur.start) / len; // 本段进度 0~1
-  const FADE = Config.SKY_FADE_RATIO; // 每段结尾这段比例用于交叉淡入下一张
-  if (p > 1 - FADE) {
-    return { from: cur.key, to: next.key, a: (p - (1 - FADE)) / FADE };
+  // 当前段结束（= 下一段开始）的绝对时刻：跨零点时 +1 解卷。
+  const curEnd = next.start > cur.start ? next.start : next.start + 1;
+  // 距下一段开始的剩余时间（天比例）。t 已绕回 cur.start 之前时（跨零点延续段），
+  // 终点就是本周期的 next.start，不能再 +1，否则会算出 20+ 小时的荒谬值。
+  const rem = (t >= cur.start) ? (curEnd - t) : (next.start - t);
+  const FADE = Config.SKY_FADE_DUR; // 固定绝对时长（不再按段长比例）
+  if (rem > 0 && rem < FADE) {
+    return { from: cur.key, to: next.key, a: 1 - rem / FADE };
   }
   return { from: cur.key, to: null, a: 0 };
 }

@@ -263,6 +263,11 @@ export class Game {
     // 太阳的投影开关跟随总开关：createLights 里默认开了，这里按存档/默认值纠正一次。
     this._sun.castShadow = this._shadowOn;
 
+    // ---- 手电筒：沿相机视线方向（含俯仰）照射，用于夜里补光 / 氛围 ----
+    // 不挂成相机子节点（相机未必在场景图里，子节点 matrixWorld 不保证更新）；
+    // 改为每帧把灯位置/目标点同步到相机世界坐标，方向用 camera.getWorldDirection（含 yaw+pitch）。
+    this._initFlashlight();
+
     // 应用编辑器保存的「光照设计」：环境光/半球光/阳光强度、阳光角度，使客户端与编辑器保持一致；
     // 若编辑器从未保存过，则自动落到 DEFAULT_SETTINGS 的默认值。
     const design = loadSettings('scene-settings-v1');
@@ -384,6 +389,11 @@ export class Game {
         e.preventDefault(); // 阻止浏览器默认刷新
         this.toggleThirdPerson();
       }
+    });
+
+    // ---- 手电筒开关（L）：沿视线方向照，夜里补光/氛围 ----
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyL' && !e.repeat) this._toggleFlashlight();
     });
 
     // ---- 一键隐藏 / 显示全部游戏 UI（截图、录屏、沉浸看画面用）----
@@ -1557,6 +1567,39 @@ export class Game {
 
     // 用户摆放光源的「开启时段」：按当前时刻自动开关灯（路灯天黑亮、白炽灯夜里亮等）
     this._applyEditorLightDayState(t);
+  }
+
+  // ---- 手电筒：沿相机视线方向（含俯仰）照射，L 键开关 ----
+  _initFlashlight() {
+    if (this._flash) return;
+    // 暖白光锥：半角 ~25°，半影 0.45，射程 60m，decay 1.3（比物理 2 软，远处也够亮）。
+    // 强度按现有光照量级调（白天 sun=2.5 / 夜晚 ambient 地板 ~0.07）：夜里能清晰照亮前方墙面。
+    const fl = new THREE.SpotLight(0xfff2cc, 0, 60, Math.PI / 7.2, 0.45, 1.3);
+    fl.castShadow = false; // 默认不投影：夜里氛围靠光锥打在墙面/地面即可，投影另开成本高
+    fl.visible = false;
+    this.scene.add(fl);
+    this.scene.add(fl.target); // 目标点每帧同步到「相机位置 + 视线方向」
+    this._flash = fl;
+    this._flashDir = new THREE.Vector3();
+    this._flashOn = false;
+    this._flashMax = 11; // 开灯强度（可调）
+  }
+
+  _toggleFlashlight() {
+    if (!this._flash) return;
+    this._flashOn = !this._flashOn;
+    this._flash.visible = this._flashOn;
+    if (this._flashOn) this._flash.intensity = this._flashMax;
+    this._toast(this._flashOn ? '手电筒 开（按 L 关）' : '手电筒 关');
+  }
+
+  _updateFlashlight() {
+    if (!this._flash || !this._flash.visible) return;
+    const cam = this.camera;
+    cam.getWorldPosition(this._flash.position);
+    cam.getWorldDirection(this._flashDir); // 视线方向（含俯仰）
+    this._flash.target.position.copy(this._flash.position).add(this._flashDir);
+    this._flash.target.updateMatrixWorld();
   }
 
   // 按当前时刻开关编辑器摆放的光源。tf 为一天的比例（0=00:00，0.5=12:00）；
@@ -7434,6 +7477,7 @@ export class Game {
 
     // 昼夜循环：先更新太阳角度与光照，后面阴影定位要用到最新的 _sunOffset
     this._updateDayNight(dt);
+    this._updateFlashlight(); // 手电筒每帧跟随相机视线（含俯仰）
 
     // 控制枪：抢在玩家更新之前处理，这样挣脱输入能先消费掉空格、
     // 且被控侧的 velocityHold 能在本次物理里生效
