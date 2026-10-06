@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>花草中学 · 下载 / 直接开玩</title>
+<meta name="description" content="花草中学 —— 一所你随时能冲进去的第一人称 3D 校园。打开浏览器就玩，也能下载安卓版，拉朋友联机、自己造地图。" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Zhi+Mang+Xing&family=Long+Cang&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --paper:#fcf6e8;
+    --paper2:#f7eed8;
+    --ink:#2b2b2b;
+    --ink-soft:#5a5246;
+    --sun:#ffd23f;
+    --pink:#ff9eb5;
+    --blue:#9bd0ff;
+    --green:#9be79b;
+    --hl:#ffe066;
+    --line:#e7dcc2;
+    --shadow:#2b2b2b;
+  }
+  *{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  body{
+    margin:0;
+    font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--ink);
+    background-color:var(--paper);
+    background-image:
+      linear-gradient(transparent 28px, var(--line) 28px, transparent 29px),
+      linear-gradient(90deg, rgba(255,120,120,.35) 0 2px, transparent 2px 38px);
+    background-size:100% 29px, 100% 100%;
+    line-height:1.7;
+    overflow-x:hidden;
+  }
+  a{ color:inherit; text-decoration:none; }
+
+  /* 手绘矩形：不规则圆角 + 粗墨边 + 硬阴影（贴纸感） */
+  .sketch{
+    border:2.6px solid var(--ink);
+    border-radius:255px 14px 225px 16px/16px 225px 14px 255px;
+    background:var(--paper);
+    box-shadow:4px 4px 0 var(--shadow);
+  }
+  .sketch.alt{ border-radius:14px 225px 16px 255px/225px 16px 255px 14px; }
+  .sketch.alt2{ border-radius:230px 18px 200px 20px/20px 200px 18px 230px; }
+
+  .hand{ font-family:"Ma Shan Zheng","XingKai SC","STXingkai",cursive; }
+  .hand2{ font-family:"Zhi Mang Xing","Long Cang","XingKai SC",cursive; }
+
+  .wrap{ max-width:1040px; margin:0 auto; padding:0 18px; }
+
+  /* 马克笔高亮 */
+  .mark{
+    background:linear-gradient(120deg,var(--hl) 0,var(--hl) 100%);
+    background-repeat:no-repeat;
+    background-size:100% .62em;
+    background-position:0 86%;
+    padding:0 .12em;
+  }
+  .mark.pink{ background-image:linear-gradient(120deg,var(--pink) 0,var(--pink) 100%); }
+  .mark.blue{ background-image:linear-gradient(120deg,var(--blue) 0,var(--blue) 100%); }
+  .mark.green{ background-image:linear-gradient(120deg,var(--green) 0,var(--green) 100%); }
+
+  /* 顶栏 */
+  nav{
+    position:sticky; top:0; z-index:50;
+    display:flex; align-items:center; gap:14px;
+    padding:10px 18px;
+    background:rgba(252,246,232,.86);
+    backdrop-filter:blur(4px);
+    border-bottom:3px dashed var(--ink);
+  }
+  nav .logo{ font-size:26px; transform:rotate(-2deg); }
+  nav .links{ margin-left:auto; display:flex; gap:18px; align-items:center; }
+  nav .links a{ font-weight:700; padding:2px 4px; border-bottom:3px solid transparent; }
+  nav .links a:hover{ border-bottom-color:var(--sun); }
+  .pill{
+    display:inline-block; padding:6px 16px; font-weight:800;
+    border:2.6px solid var(--ink); border-radius:30px 8px 26px 10px/8px 26px 10px 30px;
+    background:var(--sun); box-shadow:3px 3px 0 var(--shadow);
+    transform:rotate(-1.5deg); transition:.15s;
+  }
+  .pill:hover{ transform:rotate(0) translate(-1px,-1px); box-shadow:5px 5px 0 var(--shadow); }
+
+  /* HERO */
+  .hero{ position:relative; padding:54px 0 30px; }
+  .hero h1{
+    font-size:clamp(56px,11vw,116px); line-height:.95; margin:0;
+    transform:rotate(-2deg); text-shadow:5px 5px 0 #fff, 7px 7px 0 var(--shadow);
+  }
+  .hero .sub{ font-size:clamp(18px,2.6vw,26px); max-width:560px; margin:18px 0 6px; font-weight:600; }
+  .hero .cta{ display:flex; flex-wrap:wrap; gap:16px; margin-top:26px; }
+  .btn{
+    display:inline-flex; align-items:center; gap:10px;
+    padding:14px 26px; font-size:19px; font-weight:800; cursor:pointer;
+    border:3px solid var(--ink);
+    border-radius:255px 14px 225px 16px/16px 225px 14px 255px;
+    box-shadow:5px 5px 0 var(--shadow); transition:.15s; background:var(--ink); color:#fff;
+  }
+  .btn.primary{ background:var(--sun); color:var(--ink); }
+  .btn.ghost{ background:var(--paper); color:var(--ink); }
+  .btn:hover{ transform:translate(-2px,-2px) rotate(-1deg); box-shadow:8px 8px 0 var(--shadow); }
+  .hero .note{ margin-top:18px; font-weight:700; color:var(--ink-soft); }
+  .hero .note span{ display:inline-block; transform:rotate(-1deg); }
+
+  /* 涂鸦装饰 */
+  .doodle{ position:absolute; pointer-events:none; }
+  .doodle.sun{ top:-6px; right:6%; width:120px; transform:rotate(8deg); }
+  .doodle.flower{ bottom:-10px; left:-2%; width:90px; transform:rotate(-12deg); }
+  .doodle.arrow{ right:0; top:46%; width:120px; transform:rotate(4deg); }
+
+  .wave{ width:100%; height:24px; margin:8px 0 0; display:block; }
+
+  /* 区块标题 */
+  .sec{ padding:46px 0 10px; }
+  .sec h2{ font-size:clamp(34px,6vw,56px); margin:0 0 6px; transform:rotate(-1.5deg); display:inline-block; }
+  .sec .tag{ font-weight:700; color:var(--ink-soft); }
+
+  /* 便签卡 */
+  .cards{ display:grid; grid-template-columns:repeat(2,1fr); gap:24px; margin-top:26px; }
+  .card{ padding:22px 22px 24px; transform:rotate(var(--r,0deg)); }
+  .card:nth-child(1){ --r:-1.4deg; background:var(--paper); }
+  .card:nth-child(2){ --r:1.2deg; background:#fff; }
+  .card:nth-child(3){ --r:1deg; background:#fff; }
+  .card:nth-child(4){ --r:-1.2deg; background:var(--paper); }
+  .card .ic{ font-size:38px; }
+  .card h3{ font-size:24px; margin:8px 0 6px; }
+  .card p{ margin:0; color:var(--ink-soft); }
+
+  /* 玩法网格 */
+  .grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:22px; margin-top:26px; }
+  .tile{ padding:20px; transform:rotate(var(--r,0deg)); }
+  .tile:nth-child(odd){ --r:-1deg; }
+  .tile:nth-child(even){ --r:1deg; }
+  .tile .ic{ font-size:34px; }
+  .tile h3{ margin:8px 0 4px; font-size:21px; }
+  .tile p{ margin:0; font-size:14.5px; color:var(--ink-soft); }
+
+  /* 平台 */
+  .platforms{ display:grid; grid-template-columns:repeat(3,1fr); gap:22px; margin-top:24px; }
+  .pf{ padding:24px; text-align:center; }
+  .pf .ic{ font-size:46px; }
+  .pf h3{ font-size:26px; margin:10px 0 4px; }
+  .pf p{ margin:0; color:var(--ink-soft); }
+
+  /* 数据带 */
+  .stats{ display:flex; flex-wrap:wrap; justify-content:center; gap:30px; margin-top:24px; }
+  .stat{ text-align:center; }
+  .stat .num{
+    display:inline-block; font-family:"Ma Shan Zheng",cursive; font-size:46px;
+    padding:8px 18px; border:3px solid var(--ink); border-radius:50% 48% 52% 50%/50% 52% 48% 50%;
+    background:var(--sun); box-shadow:3px 3px 0 var(--shadow);
+  }
+  .stat .lab{ display:block; margin-top:8px; font-weight:700; }
+
+  /* 编辑器横幅 */
+  .banner{ margin:46px 0; padding:34px 30px; text-align:center; transform:rotate(-.8deg); background:#fff; }
+  .banner h2{ font-size:clamp(30px,5vw,46px); margin:0 0 10px; transform:none; }
+  .banner p{ margin:0 0 18px; color:var(--ink-soft); font-weight:600; }
+
+  /* FAQ */
+  .faq{ margin-top:22px; display:grid; gap:16px; }
+  details.sketch{ padding:0 20px; background:#fff; }
+  details.sketch summary{
+    cursor:pointer; padding:16px 0; font-weight:800; font-size:18px; list-style:none;
+    display:flex; align-items:center; gap:10px;
+  }
+  details.sketch summary::-webkit-details-marker{ display:none; }
+  details.sketch summary::before{ content:"✦"; color:var(--pink); font-size:20px; }
+  details.sketch[open] summary::before{ content:"✚"; }
+  details.sketch .body{ padding:0 0 18px; color:var(--ink-soft); }
+
+  /* 页脚 */
+  footer{ margin-top:56px; padding:30px 18px 50px; border-top:3px dashed var(--ink); text-align:center; }
+  footer .big{ font-size:30px; transform:rotate(-2deg); display:inline-block; }
+  footer p{ margin:8px 0 0; color:var(--ink-soft); }
+
+  @media (max-width:760px){
+    .cards,.grid,.platforms{ grid-template-columns:1fr; }
+    nav .links a:not(.pill){ display:none; }
+    .doodle.arrow,.doodle.sun{ opacity:.5; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="logo hand" href="#top">花草中学</a>
+  <div class="links">
+    <a href="#why">为什么玩</a>
+    <a href="#play">玩法</a>
+    <a href="#platform">平台</a>
+    <a href="#faq">问答</a>
+    <a class="pill" href="./index.html">在浏览器开玩 →</a>
+  </div>
+</nav>
+
+<header class="hero wrap" id="top">
+  <!-- 手绘涂鸦：太阳 -->
+  <svg class="doodle sun" viewBox="0 0 100 100" fill="none" stroke="#2b2b2b" stroke-width="2.4">
+    <circle cx="50" cy="50" r="26" fill="#ffd23f"/>
+    <g stroke-linecap="round">
+      <line x1="50" y1="8" x2="50" y2="20"/><line x1="50" y1="80" x2="50" y2="92"/>
+      <line x1="8" y1="50" x2="20" y2="50"/><line x1="80" y1="50" x2="92" y2="50"/>
+      <line x1="19" y1="19" x2="28" y2="28"/><line x1="72" y1="72" x2="81" y2="81"/>
+      <line x1="81" y1="19" x2="72" y2="28"/><line x1="28" y1="72" x2="19" y2="81"/>
+    </g>
+    <circle cx="42" cy="48" r="2.6" fill="#2b2b2b" stroke="none"/>
+    <circle cx="58" cy="48" r="2.6" fill="#2b2b2b" stroke="none"/>
+    <path d="M40 60 q10 8 20 0" stroke-linecap="round"/>
+  </svg>
+  <!-- 手绘涂鸦：花草 -->
+  <svg class="doodle flower" viewBox="0 0 100 100" fill="none" stroke="#2b2b2b" stroke-width="2.6" stroke-linecap="round">
+    <path d="M50 92 V44"/>
+    <path d="M50 60 q-22 -6 -26 -26 q22 4 26 26" fill="#9be79b"/>
+    <path d="M50 70 q22 -6 26 -24 q-22 2 -26 24" fill="#9be79b"/>
+    <g fill="#ff9eb5" stroke="#2b2b2b" stroke-width="2"><circle cx="50" cy="30" r="9"/><circle cx="38" cy="38" r="7"/><circle cx="62" cy="38" r="7"/></g>
+    <circle cx="50" cy="34" r="4" fill="#ffd23f" stroke="none"/>
+  </svg>
+
+  <h1 class="hand">花草中学</h1>
+  <p class="sub">一所你<span class="mark">随时能冲进去</span>的第一人称 3D 校园。<br/>打开浏览器就玩，也能装进手机。</p>
+  <div class="cta">
+    <a class="btn primary" href="./index.html">▶ 在浏览器开玩</a>
+    <a class="btn ghost" href="./assets/fpm-release.apk">⬇ 下载安卓版</a>
+  </div>
+  <p class="note"><span>不用下载 · 打开就玩 · 进度自动存</span></p>
+
+  <svg class="wave" viewBox="0 0 1000 24" preserveAspectRatio="none" fill="none" stroke="#2b2b2b" stroke-width="2.4">
+    <path d="M0 14 q25 -14 50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0 t50 0"/>
+  </svg>
+</header>
+
+<!-- 为什么玩 -->
+<section class="sec wrap" id="why">
+  <h2 class="hand">为什么玩？</h2>
+  <p class="tag">四张便签，看懂这所学校</p>
+  <div class="cards">
+    <div class="card sketch">
+      <div class="ic">⚡</div>
+      <h3 class="hand2">打开即玩</h3>
+      <p>网页点开就进校门，不装客户端、不读条。课间三分钟也能跑两圈。</p>
+    </div>
+    <div class="card sketch alt">
+      <div class="ic">👥</div>
+      <h3 class="hand2">拉朋友联机</h3>
+      <p>同一座校园实时同屏，对战、竞速、闲逛都行。服务器帮你把位置同步得稳稳的。</p>
+    </div>
+    <div class="card sketch alt2">
+      <div class="ic">🏗️</div>
+      <h3 class="hand2">自己造地图</h3>
+      <p>内置编辑器，搭楼、挖洞、铺赛道，造完一键分享给朋友来玩你设计的校园。</p>
+    </div>
+    <div class="card sketch">
+      <div class="ic">🐢</div>
+      <h3 class="hand2">老电脑也溜</h3>
+      <p>自适应分辨率 + 中低画质档，集显本、旧手机照样跑得动，卡了会自动降清。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 玩法 -->
+<section class="sec wrap" id="play">
+  <h2 class="hand">怎么玩</h2>
+  <p class="tag">六种打开方式</p>
+  <div class="grid">
+    <div class="tile sketch"><div class="ic">🏃</div><h3 class="hand2">校园狂飙</h3><p>第一人称在走廊、操场、天台乱窜，找近道、卡身位，纯跑图也上头。</p></div>
+    <div class="tile sketch alt"><div class="ic">⚔️</div><h3 class="hand2">对战混战</h3><p>回合制 / 混战，和朋友约一架，谁先占位谁就赢。</p></div>
+    <div class="tile sketch alt2"><div class="ic">🧩</div><h3 class="hand2">地图编辑器</h3><p>方块搭世界，从空地造出你的母校。造好直接进游戏试。</p></div>
+    <div class="tile sketch"><div class="ic">🌗</div><h3 class="hand2">昼夜光影</h3><p>太阳会落山，校园从正午亮堂变成傍晚暖橘，氛围随时在变。</p></div>
+    <div class="tile sketch alt"><div class="ic">🎚️</div><h3 class="hand2">自适应性能</h3><p>掉帧自动降分辨率、流畅了再拉回来，你只管玩，卡顿交给它。</p></div>
+    <div class="tile sketch alt2"><div class="ic">📱</div><h3 class="hand2">跨端联机</h3><p>网页和手机进同一个房间，谁用什么设备都能一起玩。</p></div>
+  </div>
+</section>
+
+<!-- 平台 -->
+<section class="sec wrap" id="platform">
+  <h2 class="hand">在哪玩</h2>
+  <p class="tag">两条路，都通校园</p>
+  <div class="platforms">
+    <div class="pf sketch"><div class="ic">🌐</div><h3 class="hand2">网页版</h3><p>任意带浏览器的设备，点开就玩。无需安装。</p></div>
+    <div class="pf sketch alt"><div class="ic">🤖</div><h3 class="hand2">安卓版</h3><p>装成 APK 带走，离线也能进、手感更跟手。</p></div>
+    <div class="pf sketch alt2"><div class="ic">🔗</div><h3 class="hand2">实时联机</h3><p>两端同服，和朋友随时凑进一座校园。</p></div>
+  </div>
+</section>
+
+<!-- 数据带 -->
+<section class="sec wrap">
+  <div class="stats">
+    <div class="stat"><span class="num">0</span><span class="lab">安装步骤</span></div>
+    <div class="stat"><span class="num">60</span><span class="lab">帧自适应封顶</span></div>
+    <div class="stat"><span class="num">2</span><span class="lab">端互通</span></div>
+    <div class="stat"><span class="num">∞</span><span class="lab">实时同步</span></div>
+  </div>
+</section>
+
+<!-- 编辑器横幅 -->
+<section class="wrap">
+  <div class="banner sketch alt2">
+    <h2 class="hand">自己当校长 🏫</h2>
+    <p>不想只玩现成的？打开编辑器，造一座属于你的花草中学。</p>
+    <a class="btn primary" href="./editor.html">去编辑器 →</a>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section class="sec wrap" id="faq">
+  <h2 class="hand">常问</h2>
+  <div class="faq">
+    <details class="sketch" open><summary>怎么开始？</summary><div class="body">点右上角「在浏览器开玩」，几秒后就在校门口了。不用注册、不用下东西。</div></details>
+    <details class="sketch alt"><summary>一定要下载吗？</summary><div class="body">不用。网页版能玩全部内容。只有想装进手机离线玩，才下安卓 APK。</div></details>
+    <details class="sketch alt2"><summary>手机能玩吗？</summary><div class="body">能。安卓装 APK 进；苹果手机用 Safari 开网页版也能玩，只是没独立安装包。</div></details>
+    <details class="sketch"><summary>联机收费吗？</summary><div class="body">免费。拉朋友进同一个房间就行，服务器不收钱。</div></details>
+    <details class="sketch alt"><summary>进度存哪？</summary><div class="body">存在本地浏览器 / 手机里，自动保存。换设备玩同一房间靠联机同步，不是云存档。</div></details>
+    <details class="sketch alt2"><summary>卡了怎么办？</summary><div class="body">游戏会自己降分辨率保流畅。还卡就到设置里手动把画质调到 low、关阴影。</div></details>
+  </div>
+</section>
+
+<footer>
+  <div class="big hand">花草中学</div>
+  <p>第一人称 3D 校园 · 用 Three.js 造的 · 打开就玩，造完就分享</p>
+</footer>
+
+</body>
+</html>
