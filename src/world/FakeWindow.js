@@ -480,6 +480,9 @@ export function injectHoleCode(shader) {
  */
 export function patchBuildingMaterial(mat) {
   if (!mat || typeof mat.onBeforeCompile !== 'function') return false;
+  // ⚠ 洞壁材质绝不能打挖洞补丁：洞壁的世界坐标正好贴在洞盒的边界上，
+  //   打了补丁就会被同一份 discard 逻辑挖掉 —— 表现为「洞壁时隐时现 / 整片消失」。
+  if (isRevealMaterial(mat)) return false;
   if (_holeAppliedMats.has(mat)) return false;
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = function (shader, renderer) {
@@ -558,4 +561,136 @@ export function applyWindowHoles(wins, mats, lights, opts = {}) {
 // 两种情况都不需要重置。保留此导出仅供「确知材质被整体换掉且想强制重打」的场景。
 export function resetHolePatches() {
   _holeAppliedMats = new WeakSet();
+}
+
+// ===========================================================================
+// 洞壁 / reveal —— 洞口那一圈「墙的剖面」，让墙看起来有厚度
+// ---------------------------------------------------------------------------
+// 只 discard 出一个通孔时，从洞里看进去是「墙的两层壳 + 中间空腔」：
+//   外表面被挖了个洞、内表面也被挖了个洞，但**连接这两个洞口的侧壁并不存在** ——
+//   视觉上就是一个没有厚度的纸片洞（贴在很厚的墙上尤其明显，像墙上开了个"窗口贴图"）。
+// 这里补一个**矩形管**：4 个内壁面，从窗面沿墙内方向延伸 REVEAL_DEPTH。
+//
+// 三个刻意的取舍：
+//  ① **只渲染内壁**（几何绕序让法线朝管中轴 + 材质 side = FrontSide）：
+//     管壁的"外侧面"是背面 → 被剔除。于是即便管子比墙厚长、伸到墙面之外，
+//     站在墙外也**看不到**它，不会出现「墙上戳出一根方管」。这是它可以不精确测量墙厚的前提。
+//  ② **单向延伸**（沿窗户局部 −Z）：窗户是**贴到墙面上**的，所以"墙在窗户背面"是摆窗的必然结果，
+//     法线反方向就是墙内。摆反了只会退化成"没有侧壁"（不穿帮），不会戳出来。
+//  ③ **共享一份材质 + 独立于建筑材质**：建筑材质打了挖洞补丁，而洞壁的世界坐标恰好落在洞盒里，
+//     用建筑材质会被自己挖掉；patchBuildingMaterial 也会显式跳过带 fpmReveal 标记的材质（双保险）。
+// ===========================================================================
+
+// 视觉洞深（米）：即"假定墙有多厚"。单向延伸这么长。
+// ⚠ 洞**盒**的深度是另一回事（computeHoleBox 用的是调用方传的 depth，本项目 1.2m）——
+//   洞盒负责"一定要挖穿"，洞壁负责"看起来有厚度"，两者独立。
+export const REVEAL_DEPTH = 0.35;
+// 洞壁颜色（中性灰，接近水泥/石膏的剖面）。太暗在洞里会糊成一片黑，太亮又不像墙。
+export const REVEAL_COLOR = '#94918a';
+
+// 模块级共享材质：所有洞壁共用一个。共享的理由同窗户——减少 program 与状态切换。
+let _revealMaterial = null;
+
+// 这份材质是不是"洞壁专用"？（挖洞补丁靠它跳过洞壁，见 patchBuildingMaterial）
+export function isRevealMaterial(mat) {
+  return !!(mat && mat.userData && mat.userData.fpmReveal === true);
+}
+
+export function getRevealMaterial() {
+  if (_revealMaterial) return _revealMaterial;
+  const mat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(REVEAL_COLOR),
+    roughness: 0.92,
+    metalness: 0.0,
+    // 只画内壁：几何的正面（法线朝管中轴）才渲染，管壁外面被背面剔除。
+    side: THREE.FrontSide,
+  });
+  mat.userData.fpmReveal = true;
+  mat.name = 'hole-reveal';
+  _revealMaterial = mat;
+  return mat;
+}
+
+/**
+ * 造一个「矩形管」几何：内壁法线全部朝向管中轴。
+ *
+ * 局部坐标与窗户一致：窗面在 z = 0、法线 +z，管体沿 **−z** 延伸到 z = −depth。
+ * 每个面用 (u, v, n) 右手基生成，保证 (P00, P10, P11) 的绕向给出的法线正是 n ——
+ * 于是 computeVertexNormals() 算出来的就是"朝管内"的法线，不需要手写 normal 属性。
+ *
+ * @param {number} w 洞口宽（米）
+ * @param {number} h 洞口高（米）
+ * @param {number} depth 向墙内的延伸长度（米）
+ * @returns {THREE.BufferGeometry}
+ */
+export function createRevealGeometry(w, h, depth) {
+  const hw = Math.max(0.01, w) / 2;
+  const hh = Math.max(0.01, h) / 2;
+  const d = Math.max(0.01, depth);
+  // 4 个内壁面：n = 朝管中轴的面法线；c = 面中心；u/v = 面内两个正交方向（满足 u × v = n）
+  const faces = [
+    // 左壁（x = −hw）：法线朝 +x
+    { c: [-hw, 0, -d / 2], u: [0, 0, -1], hu: d / 2, v: [0, 1, 0], hv: hh },
+    // 右壁（x = +hw）：法线朝 −x  ⇒ u × v = (0,0,1)×(0,1,0) = (−1,0,0)
+    { c: [hw, 0, -d / 2], u: [0, 0, 1], hu: d / 2, v: [0, 1, 0], hv: hh },
+    // 下壁（y = −hh）：法线朝 +y  ⇒ (1,0,0)×(0,0,−1) = (0,1,0)
+    { c: [0, -hh, -d / 2], u: [1, 0, 0], hu: hw, v: [0, 0, -1], hv: d / 2 },
+    // 上壁（y = +hh）：法线朝 −y  ⇒ (1,0,0)×(0,0,1) = (0,−1,0)
+    { c: [0, hh, -d / 2], u: [1, 0, 0], hu: hw, v: [0, 0, 1], hv: d / 2 },
+  ];
+  // ⚠ 四角的**枚举顺序就是绕向**，必须与下面的索引严格配套 —— 写反了法线就朝管外，
+  //   表现是"墙外戳出一根方管 / 洞里看不见侧壁"，而且编译运行零报错（探针 §3 专门钉这条）。
+  //   这里取逆时针：0=(−u,−v) 1=(+u,−v) 2=(+u,+v) 3=(−u,+v)；
+  //   三角 (0,1,2) 与 (0,2,3) 的法线由 (P1−P0)∝u、(P2−P1)∝v 得 = u×v = +n ✔
+  const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  const pos = new Float32Array(faces.length * 4 * 3);
+  const uv = new Float32Array(faces.length * 4 * 2);
+  const idx = new Uint16Array(faces.length * 6);
+  let pi = 0, ui = 0, ii = 0, base = 0;
+  for (const f of faces) {
+    for (const [su, sv] of CORNERS) {
+      pos[pi++] = f.c[0] + f.u[0] * f.hu * su + f.v[0] * f.hv * sv;
+      pos[pi++] = f.c[1] + f.u[1] * f.hu * su + f.v[1] * f.hv * sv;
+      pos[pi++] = f.c[2] + f.u[2] * f.hu * su + f.v[2] * f.hv * sv;
+      uv[ui++] = su > 0 ? 1 : 0;
+      uv[ui++] = sv > 0 ? 1 : 0;
+    }
+    idx[ii++] = base; idx[ii++] = base + 1; idx[ii++] = base + 2;
+    idx[ii++] = base; idx[ii++] = base + 2; idx[ii++] = base + 3;
+    base += 4;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.computeVertexNormals(); // 顶点不共享 → 每个顶点拿到所在面的面法线
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/**
+ * 创建一块洞壁（挂在窗户 holder 下，与窗户 mesh 同为子节点，跟随同一个变换）。
+ * @param {object} [opts]
+ * @param {number} [opts.w] 洞口宽
+ * @param {number} [opts.h] 洞口高
+ * @param {number} [opts.depth] 向墙内延伸长度
+ * @returns {THREE.Mesh}
+ */
+export function createRevealMesh(opts = {}) {
+  const w = opts.w != null ? opts.w : WINDOW_DEFAULTS.w;
+  const h = opts.h != null ? opts.h : WINDOW_DEFAULTS.h;
+  const depth = opts.depth != null ? opts.depth : REVEAL_DEPTH;
+  const mesh = new THREE.Mesh(createRevealGeometry(w, h, depth), getRevealMaterial());
+  mesh.name = 'hole-reveal';
+  mesh.castShadow = false;   // 洞壁本身不投影（洞口很小，投了也看不出，白花一趟阴影）
+  mesh.receiveShadow = true; // 但要能吃到墙的阴影：洞里暗、洞口亮，厚度感靠它
+  mesh.frustumCulled = true;
+  mesh.userData.fpmReveal = true; // 识别标记：挖洞补丁 / 合并流程都要绕开它
+  return mesh;
+}
+
+/** 释放一块洞壁。⚠ 共享材质（getRevealMaterial 的产物）**不释放**。 */
+export function disposeReveal(mesh) {
+  if (!mesh) return;
+  try { if (mesh.geometry) mesh.geometry.dispose(); } catch (e) { /* ignore */ }
 }

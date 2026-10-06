@@ -24,6 +24,24 @@ function ok(cond, msg) {
 function has(src, needle, msg) { ok(src.includes(needle), msg); }
 function miss(src, needle, msg) { ok(!src.includes(needle), msg); }
 
+// 从 decl 出现处开始，用花括号配对抽出**最外层一整个代码块**（含 {}）。
+// 用途：把「某函数/分支里不许出现 X」这类断言限定在块内 ——
+// 直接 `src.slice(indexOf(decl))` 会一路扫到文件末尾，后面新加的函数会把断言带崩（本探针踩过）。
+// 花括号配对能正确穿过对象字面量与嵌套块；本项目被抽的几个块内没有含花括号的字符串字面量。
+function blockAt(src, decl) {
+  const i = src.indexOf(decl);
+  if (i < 0) return '';
+  const j = src.indexOf('{', i);
+  if (j < 0) return '';
+  let depth = 0;
+  for (let k = j; k < src.length; k++) {
+    const c = src[k];
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return src.slice(j, k + 1); }
+  }
+  return src.slice(j);
+}
+
 // ------------------------------------------------------- 六步清单
 console.log('\n[1] 编辑器工具页签「六步清单」逐条核对');
 // ① editor.html：按钮 + 面板
@@ -80,8 +98,13 @@ ok(ebWinIdx < ebScaleIdx, '窗户分支在 normScale(it.scale) **之前**（否�
 has(ebPlaced, 'createWindowMesh(', 'EditorBuildings 用 createWindowMesh 建窗户');
 has(ebPlaced, 'holder.rotation.set(', '窗户用三轴旋转（贴斜墙需要 rotX/rotZ）');
 has(ebPlaced, 'windowMeshes.push(mesh)', '窗户登记进 windowMeshes 便于后续同步环境贴图');
-ok(/it\.kind === 'window'[\s\S]{0,1400}?return;/.test(ebPlaced.slice(ebWinIdx)),
-  '窗户分支及时 return（不参与碰撞体/LOD/批次合并）');
+// ⚠ 必须在**窗户分支自己的块**里找 return —— 别用"从分支起点往后 N 字符"的窗口，
+//   那段代码本来就会随功能增加而变长（加洞壁时就撑破过 1400 的窗口）。
+{
+  const winBody = blockAt(ebPlaced, "if (it.kind === 'window') {");
+  ok(/\breturn;/.test(winBody), '窗户分支及时 return（不参与碰撞体/LOD/批次合并）');
+  ok(!/instantiate\(/.test(winBody), '窗户分支不走 instantiate(模型加载)');
+}
 has(eb, 'export function syncFakeWindowEnvs', '导出 syncFakeWindowEnvs');
 has(eb, 'syncFakeWindowEnvs(scene)', 'buildEditorBuildings 结束时同步一次环境贴图');
 
@@ -151,7 +174,10 @@ ok(eb.indexOf('applyEditorHoles(scene)') < eb.indexOf('mergeSceneBatches(scene)'
 
 console.log('\n[10] 挖洞的性能契约：零额外 draw call / 三角面 / 渲染趟数');
 // 挖洞是纯 shader discard —— 不得引入任何新的 Mesh / 渲染 pass
-const holeApplySrc = fwSrc.slice(fwSrc.indexOf('export function applyWindowHoles'));
+// ⚠ 只扫 applyWindowHoles **自己的函数体**。用 slice 切到文件末尾是不行的 ——
+//   同文件后面新加的 createRevealMesh 就会 `new THREE.Mesh`，属于误伤。
+const holeApplySrc = blockAt(fwSrc, 'export function applyWindowHoles');
+ok(holeApplySrc.length > 0, '抽到了 applyWindowHoles 的函数体（配对成功的自证）');
 ok(!/new THREE\.Mesh/.test(holeApplySrc), 'applyWindowHoles 不新建任何 Mesh（不增加 draw call）');
 ok(!/new THREE\.WebGLRenderTarget/.test(fwSrc), 'FakeWindow 不创建 RenderTarget（不增加渲染趟数/显存）');
 ok(!/PlaneGeometry/.test(holeApplySrc), 'applyWindowHoles 不建几何（不增加三角面）');

@@ -374,7 +374,7 @@
         <div id="windowPanel" style="display:none">
           <div class="panel-title">障眼法窗户</div>
           <div id="winHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
-            没有额外渲染开销：窗户只是一块贴墙的面片，用**已有的环境贴图**按视线方向采样，
+            没有额外渲染开销：窗户只是一块贴墙的面片，用<b>已有的环境贴图</b>按视线方向采样，
             做出「窗外有景色」的错觉。镜子原理——头一转窗里景色跟着转。<br />
             用法：点下面「添加窗户」，再用移动/旋转轴把它贴到墙面的窗洞上；
             朝向要对准墙面法线（贴反了看不出窗外）。
@@ -386,9 +386,10 @@
             <input id="winHole" type="checkbox" />
           </div>
           <div style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
-            勾上后这扇窗会在墙上**真正打一个洞**（不是贴纸）——洞后面是什么就看见什么。
+            勾上后这扇窗会在墙上<b>真正打一个洞</b>（不是贴纸）——洞后面是什么就看见什么。
             零额外开销：只多一次片元丢弃，draw call / 三角面 / 渲染趟数都不增加。<br />
-            ⚠ 洞是按「窗户外接的世界轴对齐盒」挖的，请把窗户贴**平**在墙上、朝向对准墙面法线；
+            洞口会补一圈<b>墙厚剖面</b>（洞壁），洞看起来才是有厚度的、不是一张纸。<br />
+            ⚠ 洞是按「窗户对应的世界轴对齐盒」挖的，请把窗户贴<b>平</b>在墙上、朝向对准墙面法线；
             斜着贴会让洞比窗户大一圈。
           </div>
           <div class="panel-title" style="margin-top:8px">尺寸</div>

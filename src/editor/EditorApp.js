@@ -36,12 +36,15 @@ import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset }
 import {
   createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS,
   applyWindowHoles, resetHolePatches, MAX_HOLES,
+  createRevealMesh, disposeReveal, REVEAL_DEPTH,
 } from '../world/FakeWindow.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
 // 挖洞厚度（米）：窗洞盒在**墙面法线方向**的厚度。必须大于最厚的墙，否则洞打不穿、
 // 会在墙内留下一层"膜"。1.2m 覆盖本项目所有建筑外墙（含厚墙）。
+// ⚠ 注意它与 REVEAL_DEPTH 的分工：洞**盒**只负责"一定挖穿"；洞**壁**（可见的墙剖面）
+//   另有自己的深度，两者独立，别把其中一个的值套到另一个上。
 const HOLE_DEPTH = 1.2;
 // 视角飞行速度（米/秒，WASD 移动）。滚轮缩放会按远近再动态加倍，见 speedScale()
 const CAM_SPEED = 55;
@@ -512,11 +515,50 @@ export function createEditor() {
   // 编辑器侧只负责：建对象 / 摆位置 / 调参数 / 序列化；不涉及额外渲染趟数。
 
   // 把 rec 的变换写进 rec.obj。窗户走独立路径（没有 scale 字段，用 xw/xh 表示宽高）。
+  // 取窗户本身的 mesh（**不要**用 children[0]：勾了挖洞后 holder 里还有一块洞壁）
+  function windowMeshOf(rec) {
+    if (!rec || !rec.obj) return null;
+    for (const c of rec.obj.children) if (c.userData && c.userData.editorWindow) return c;
+    return null;
+  }
+  function revealMeshOf(rec) {
+    if (!rec || !rec.obj) return null;
+    for (const c of rec.obj.children) if (c.userData && c.userData.fpmReveal) return c;
+    return null;
+  }
+  // 释放 holder 下的全部子节点（窗户 + 洞壁）。⚠ 洞壁材质是共享的，disposeReveal 不碰它。
+  function clearWindowChildren(rec) {
+    if (!rec || !rec.obj) return;
+    for (const c of rec.obj.children.slice()) {
+      if (c.userData && c.userData.editorWindow) disposeWindow(c);
+      else if (c.userData && c.userData.fpmReveal) disposeReveal(c);
+    }
+    rec.obj.clear();
+  }
+
+  // 按当前参数（重新）生成洞壁 —— 洞口那一圈"墙的剖面"，让挖穿的洞看起来有厚度。
+  // 勾选状态变化 / 宽高变化时调用；未勾挖洞则不挂。
+  function rebuildReveal(rec) {
+    if (!rec || !rec.obj) return;
+    const old = revealMeshOf(rec);
+    if (old) { rec.obj.remove(old); disposeReveal(old); }
+    if (rec.hole !== true) return;
+    const rv = createRevealMesh({
+      w: rec.xw ?? WINDOW_DEFAULTS.w,
+      h: rec.xh ?? WINDOW_DEFAULTS.h,
+      depth: Number.isFinite(rec.holeDepth) ? rec.holeDepth : REVEAL_DEPTH,
+    });
+    rv.userData.editorReveal = true;
+    // 记下当前尺寸：applyWindowTransform 靠它判断"洞口变了、该重建洞壁了"
+    rv.userData.revealSize = { w: rec.xw ?? WINDOW_DEFAULTS.w, h: rec.xh ?? WINDOW_DEFAULTS.h };
+    rec.obj.add(rv);
+  }
+
   function applyWindowTransform(rec) {
     if (!rec || !rec.obj) return;
     rec.obj.position.set(rec.x ?? 0, rec.y ?? 0, rec.z ?? 0);
     rec.obj.rotation.set(rec.rotX ?? 0, rec.rotY ?? 0, rec.rotZ ?? 0);
-    const mesh = rec.obj.children[0];
+    const mesh = windowMeshOf(rec);
     if (mesh && mesh.isMesh) {
       const w = rec.xw ?? WINDOW_DEFAULTS.w;
       const h = rec.xh ?? WINDOW_DEFAULTS.h;
@@ -527,6 +569,13 @@ export function createEditor() {
         mesh.geometry = new THREE.PlaneGeometry(w, h, 1, 1);
       }
       mesh.userData.windowSize = { w, h };
+      // 洞口的尺寸跟着变，洞壁也要一起重建（否则洞壁比洞口大/小，露出缝隙）。
+      // ⚠ 别读 geometry.parameters —— createRevealGeometry 是裸 BufferGeometry，没有该字段。
+      const rv = revealMeshOf(rec);
+      if (rv) {
+        const s = rv.userData.revealSize;
+        if (!s || s.w !== w || s.h !== h) rebuildReveal(rec);
+      }
     }
   }
 
@@ -534,6 +583,7 @@ export function createEditor() {
   function buildWindowObject(rec) {
     if (!rec || !rec.obj) return;
     const env = scene.environment || null;
+    clearWindowChildren(rec); // 先释放旧子节点（含洞壁）——obj.clear() 只摘不释放，会漏
     const mesh = createWindowMesh({
       w: rec.xw ?? WINDOW_DEFAULTS.w,
       h: rec.xh ?? WINDOW_DEFAULTS.h,
@@ -543,15 +593,15 @@ export function createEditor() {
       mirror: rec.mirror != null ? rec.mirror : WINDOW_DEFAULTS.mirror,
     });
     mesh.userData.editorWindow = true;
-    rec.obj.clear();
     rec.obj.add(mesh);
+    rebuildReveal(rec);
     applyWindowTransform(rec);
   }
 
   // 面板改动后即时刷新窗户材质（不重建网格，避免拖动时反复 dispose）
   function refreshWindowMaterial(rec) {
     if (!rec || !rec.obj) return;
-    const mesh = rec.obj.children[0];
+    const mesh = windowMeshOf(rec);
     if (!mesh || !mesh.isMesh) return;
     const u = mesh.material.uniforms;
     if (!u) return;
@@ -594,11 +644,10 @@ export function createEditor() {
     return rec;
   }
 
-  // 删除一扇窗（释放自己的几何/材质；环境贴图是共享的，不会被释放）
+  // 删除一扇窗（释放自己的几何；环境贴图与洞壁材质是共享的，不会被释放）
   function removeFakeWindow(rec) {
     if (!rec || !rec.obj) return;
-    const mesh = rec.obj.children[0];
-    if (mesh && mesh.isMesh && mesh.userData.editorWindow) disposeWindow(mesh);
+    clearWindowChildren(rec);
     scene.remove(rec.obj);
   }
 
@@ -4220,12 +4269,13 @@ export function createEditor() {
   bindWinNum(StepUI.winGlass, (r, v) => { r.glass = v; }, false);
   bindWinNum(StepUI.winOpacity, (r, v) => { if (Number.isFinite(v)) r.opacity = Math.min(1, Math.max(0, v)); }, false);
   bindWinNum(StepUI.winMirror, (r, v) => { if (Number.isFinite(v)) r.mirror = Math.min(1.5, Math.max(0, v)); }, false);
-  // 挖穿墙体开关：勾选/取消立即重挖（同步共享 uniform，不重建任何几何）
+  // 挖穿墙体开关：勾选/取消立即重挖（同步共享 uniform），并挂上/摘掉洞壁（洞口那一圈墙的剖面）
   if (StepUI.winHole) {
     StepUI.winHole.addEventListener('change', () => {
       const rec = selectedWindow();
       if (!rec) return;
       rec.hole = !!StepUI.winHole.checked;
+      rebuildReveal(rec); // 勾上补洞壁、取消摘掉；只重建这一扇的几何，不动材质
       markDirty();
       const st = syncHoles();
       if (StepUI.winInfo) {

@@ -17,6 +17,7 @@ import {
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
+  createRevealMesh, REVEAL_DEPTH,
 } from './FakeWindow.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
@@ -197,9 +198,17 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       });
       holder.add(mesh);
       windowMeshes.push(mesh);
-      // 勾了「挖穿墙体」的窗户要在墙上真开洞。这里只**登记数据**（角度已是弧度），
-      // 真正的补丁在 applyEditorHoles() 里打 —— 那时建筑模型才加载完、材质才存在。
+      // 勾了「挖穿墙体」的窗户：墙上真开洞（fragment discard）+ 补一圈洞壁（洞口侧壁）。
+      // ⚠ 洞壁必须挂在同一个 holder 下（跟着窗户的变换走），且用共享的独立材质 ——
+      //   若用建筑材质会被挖洞补丁自己挖掉（见 FakeWindow.js 洞壁小节）。
+      // 洞的**位置**数据在这里登记（角度已是弧度），真正的挖洞补丁在 applyEditorHoles() 里打
+      // —— 那时建筑模型才加载完、材质才存在。
       if (it.hole === true) {
+        holder.add(createRevealMesh({
+          w: it.xw ?? WINDOW_DEFAULTS.w,
+          h: it.xh ?? WINDOW_DEFAULTS.h,
+          depth: REVEAL_DEPTH,
+        }));
         _holeWins.push({
           x: it.x ?? 0, y: it.y ?? 0, z: it.z ?? 0,
           rotX: it.rotX ?? 0, rotY: it.rotY ?? 0, rotZ: it.rotZ ?? 0,
