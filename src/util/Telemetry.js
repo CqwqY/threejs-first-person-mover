@@ -227,6 +227,26 @@ async function post(payload) {
   }
 }
 
+// ---- 自动上报开关（持久化在 localStorage，默认开启）----
+// 用户要「采集苹果用户的加载/渲染数据上报服务器」，所以默认开：
+//   普通链接进游戏也会自动测 20 秒上报，不必每条都带 ?tel=1；不想上报可在设置里关。
+// ?tel=1 / ?tel=0 可临时覆盖（见 main.js / Game._telemetryAutoEnabled）。
+const AUTO_KEY = 'fpm-telemetry-auto';
+export function telemetryAutoGet() {
+  try {
+    if (typeof localStorage === 'undefined') return true; // 非浏览器（node 自检）：视为开启
+    const v = localStorage.getItem(AUTO_KEY);
+    if (v === null) return true; // 未设置过 → 默认开
+    return v === '1' || v === 'true';
+  } catch (e) { return true; }
+}
+export function telemetryAutoSet(on) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(AUTO_KEY, on ? '1' : '0');
+  } catch (e) { /* 忽略（隐私模式等） */ }
+}
+
 // 供自检：不联网，只验证 payload 结构（纯函数部分）。
 export function buildPayload(extra = {}) {
   return {

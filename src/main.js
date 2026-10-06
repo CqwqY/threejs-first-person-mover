@@ -118,10 +118,16 @@ async function main() {
     setInterval(debugCalibFrame, 400);
   }
 
-  // ?tel=1 自动采集：进游戏稳定几秒后自动跑一次数据采集并上报（免手动点按钮）。
-  // 用于「发一条链接给苹果用户，让他打开就自动回传」的取数场景。
-  // ?tel=0 显式关闭（即使设置了也不采）。默认（无参数）不自动采，只在玩家点按钮时采。
-  if (/\btel\b/.test(location.search) && !/\btel=0\b/.test(location.search)) {
+  // 自动采集触发条件（优先级从高到低）：
+  //   ?tel=0 → 强制关闭（即使开关开着也不采）；
+  //   ?tel=1 → 强制开启；
+  //   无 tel 参数 → 看设置里的「自动上报」总开关（默认开，见 Telemetry.telemetryAutoGet）。
+  // 这样普通链接进游戏也会自动回传性能数据，不必每条都带 ?tel=1。
+  const _telParam = (typeof URLSearchParams !== 'undefined')
+    ? new URLSearchParams(location.search).get('tel') : null;
+  const _autoTel = _telParam === '0' ? false
+    : (_telParam === '1' ? true : game._telemetryAutoEnabled());
+  if (_autoTel) {
     setTimeout(() => { try { game._runTelemetry(); } catch (e) { /* 忽略 */ } }, 8000);
   }
 }

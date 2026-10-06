@@ -46,7 +46,7 @@ import { setBgmVolume } from '../audio/Bgm.js';
 import { clearAssetCache } from '../world/assetCache.js';
 import { ensureTheme } from '../ui/theme.js';
 import { installUiHotkey } from '../util/UiVisibility.js';
-import { startRenderSample, sampleFrame, waitRenderSample, report as reportTelemetry } from '../util/Telemetry.js';
+import { startRenderSample, sampleFrame, waitRenderSample, report as reportTelemetry, telemetryAutoGet, telemetryAutoSet } from '../util/Telemetry.js';
 import { applyFragmentPrecisionToScene, applyFragmentPrecision } from '../world/FragmentPrecision.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
@@ -482,6 +482,8 @@ export class Game {
         assetCache: () => this._clearAssetCache(),
         // 数据采集：测帧率 + 收集加载耗时/设备信息并上报（见 _runTelemetry）
         telemetry: () => this._runTelemetry(),
+        // 自动上报总开关：写持久化键；若开启且已在游戏中，立即安排一次自动采集
+        telemetryAuto: (v) => { telemetryAutoSet(!!v); if (v && this._started) this._scheduleTelemetry(); },
       },
       {
         fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'showFps', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
@@ -7537,6 +7539,15 @@ export class Game {
 
     // 数据采集：正在采样时每帧喂一次（未采样时 sampleFrame 内部立刻 return，零开销）
     sampleFrame(dt, this);
+  }
+
+  // 自动上报开关是否生效（?tel=0 强制关、?tel=1 强制开、否则看持久化键，见 main.js）。
+  _telemetryAutoEnabled() { return telemetryAutoGet(); }
+
+  // 进游戏稳定几秒后自动跑一次采集（8 秒延迟，和原 ?tel=1 行为一致）。
+  _scheduleTelemetry() {
+    if (this._telRunning) return;
+    setTimeout(() => { try { this._runTelemetry(); } catch (e) { /* 忽略 */ } }, 8000);
   }
 
   // ---- 数据采集（设置面板「数据采集」按钮 / ?tel=1）----

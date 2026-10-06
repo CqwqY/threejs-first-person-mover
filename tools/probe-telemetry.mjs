@@ -8,7 +8,7 @@
 // 跑：node tools/probe-telemetry.mjs（退出码非 0 = 有回归）
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -164,6 +164,25 @@ console.log('\n【8】服务端清洗 sanitizeTelemetry 真跑（脏数据被钳
   const r2 = sanitize({}, '');
   ok(r2 && typeof r2.id === 'string', '空对象输入不抛，返回结构完整');
 }
+
+console.log('');
+// ===== 【9】自动上报总开关（telemetryAutoGet/Set + 接线）=====
+console.log('\n[9] 自动上报总开关（开关本身 + 接线）');
+const teleUrl = pathToFileURL(path.join(ROOT, 'src/util/Telemetry.js')).href;
+const Tele = await import(teleUrl);
+ok(Tele.telemetryAutoGet() === true, '默认（node 无 localStorage）开启自动上报');
+let setThrew = false;
+try { Tele.telemetryAutoSet(false); Tele.telemetryAutoSet(true); } catch (e) { setThrew = true; }
+ok(!setThrew, 'telemetryAutoSet 不抛（node 无 localStorage 时静默）');
+const sp = read('src/ui/SettingsPanel.js');
+ok(/id:\s*'telemetryAuto'/.test(sp) && /kind:\s*'toggle'/.test(sp), 'SettingsPanel 有 telemetryAuto 持久化 toggle 项');
+ok(/telemetryAutoGet\(\)/.test(sp), 'SettingsPanel 用真实开关值初始化显示');
+const game = read('src/core/Game.js');
+ok(/telemetryAuto:\s*\(v\)\s*=>/.test(game), 'Game binds 接了 telemetryAuto（切换即持久化）');
+ok(/_telemetryAutoEnabled\(\)\s*\{[^}]*return telemetryAutoGet\(\)/.test(game), 'Game 有 _telemetryAutoEnabled 读开关');
+const mainJs = read('src/main.js');
+ok(/_telemetryAutoEnabled\(\)/.test(mainJs), 'main.js 进游戏时读开关决定是否自动采集');
+ok(/_telParam\s*===\s*'0'\s*\?\s*false/.test(mainJs), '?tel=0 强制关优先级最高');
 
 console.log('');
 if (fails) { console.log('✗ 数据采集探针失败 ' + fails + ' 项'); process.exit(1); }

@@ -11,6 +11,7 @@
 //   外部（如 HUD 按钮）想立即改某项，调 setField(id, value)（立即提交 + 同步控件）。
 import { ensureTheme } from './theme.js';
 import { createKeyHints } from './KeyHints.js';
+import { telemetryAutoGet } from '../util/Telemetry.js';
 
 export const DEFAULT_SETTINGS = {
   ambient: 0.22, // 环境光强度（压暗底色，拉开明暗对比）—— 编辑器中可调，会保存给客户端
@@ -40,6 +41,7 @@ export const DEFAULT_SETTINGS = {
   bgmVolume: 0.25, // 背景音乐音量（0 = 静音），默认就很小声
   dayOffset: 0, // 本地时刻偏移（小时）：只在本地预览用，不影响服务器权威时间
   exposure: 0.85, // 整体曝光（ACES 色调映射）：太亮就往下调；高光不再硬 clip 成死白
+  telemetryAuto: true, // 自动上报性能数据（默认开；仅用于优化，可在设置关闭）
   version: 2, // 光照默认值（ambient/hemi/sun）曾整体调暗，升版本号时清掉旧存档里的高值，落回新默认
 };
 
@@ -180,11 +182,23 @@ const FIELDS = [
     gameOnly: true,
     hint: '模型/天空贴图下载一次就存在本机，之后不再重下；换了模型或想腾空间时清一下。',
   },
+  // 自动上报总开关（持久化，默认开）：进游戏后自动测约 20 秒并上报。
+  // 单一数据源在 Telemetry.telemetryAutoGet/Set（localStorage 'fpm-telemetry-auto'），
+  // 设置面板只负责显示与切换，真正读开关的是 Game._telemetryAutoEnabled（main.js 进游戏时取）。
+  {
+    id: 'telemetryAuto',
+    label: '自动上报性能数据（测帧率）',
+    kind: 'toggle',
+    defaultValue: true,
+    group: '缓存',
+    gameOnly: true,
+    hint: '开启后每次进游戏会自动测约 20 秒帧率、记录加载耗时与设备信息并上报给开发者，仅用于优化（不含账号/隐私内容）。不想上报可关掉。',
+  },
   // 数据采集：点一下会实时测帧率并把「加载耗时 + 渲染指标 + 设备信息」上报到服务器，
   // 供我们在桌面上复盘手机（尤其 iOS）的真实性能。采集约 20 秒，期间正常游玩即可。
   {
     id: 'telemetry',
-    label: '数据采集（测帧率并上报）',
+    label: '立即采集一次（测帧率上报）',
     kind: 'action',
     group: '缓存',
     gameOnly: true,
@@ -232,6 +246,9 @@ export function createSettingsPanel(binds, opts = {}) {
 
   // 本场景的默认值（编辑器/游戏端可能不同，见 STORE_KEY_DEFAULTS）
   const BASE = defaultsFor(storeKey);
+  // 自动上报开关的单一数据源是 Telemetry.telemetryAutoGet()（localStorage 独立键），
+  // 这里用真实值覆盖默认，确保面板打开时显示的就是当前生效的开关状态。
+  if (storeKey === GAME_STORE_KEY) BASE.telemetryAuto = telemetryAutoGet();
   const loaded = loadSettings(storeKey);
   // settings = 已提交；draft = 暂存草稿（控件改的是它，点「应用设置」才合并进 settings）。
   const settings = {};
