@@ -60,6 +60,13 @@ export const SHOP_ITEMS = [
     desc: '装备到技能槽，按对应数字键（手机点技能键）进入建造模式：攻击键变「放置」，血条变可滚动家具条，另有「编辑」键。',
     effect: { k: 'hammer' },
   },
+  {
+    id: 'flashlight',
+    name: '手电筒',
+    price: 120,
+    desc: '照亮你正对的方向（含抬头/低头）。夜里探路、找人、搞氛围都好用。装备到技能槽，按对应键开关；电脑也可直接按 L。',
+    effect: { k: 'flashlight' },
+  },
 ];
 
 // 目录可被服务端覆盖：GET /api/shop 拉到的最新商品表。为 null 时回退到上面写死的 SHOP_ITEMS。

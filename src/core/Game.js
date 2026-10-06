@@ -16,7 +16,7 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName } from '../player/Shop.js';
+import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName, isOwned } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene, syncFakeWindowEnvs } from '../world/EditorBuildings.js';
 import { updateLod } from '../world/Lod.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
@@ -392,8 +392,15 @@ export class Game {
     });
 
     // ---- 手电筒开关（L）：沿视线方向照，夜里补光/氛围 ----
+    // 必须拥有（在小满的杂货铺买过）才能用；没买按 L 提示去哪买
     window.addEventListener('keydown', (e) => {
-      if (e.code === 'KeyL' && !e.repeat) this._toggleFlashlight();
+      if (e.code === 'KeyL' && !e.repeat) {
+        if (!isOwned(this._profile, 'flashlight')) {
+          this._toast('手电筒要先去小满的杂货铺买（喷泉边找小满）');
+          return;
+        }
+        this._toggleFlashlight();
+      }
     });
 
     // ---- 一键隐藏 / 显示全部游戏 UI（截图、录屏、沉浸看画面用）----
@@ -1587,10 +1594,15 @@ export class Game {
 
   _toggleFlashlight() {
     if (!this._flash) return;
+    // 防御：任何路径触发前都确认拥有（在小满的杂货铺买过），避免被免费调起
+    if (!isOwned(this._profile, 'flashlight')) {
+      this._toast('手电筒要先去小满的杂货铺买（喷泉边找小满）');
+      return;
+    }
     this._flashOn = !this._flashOn;
     this._flash.visible = this._flashOn;
     if (this._flashOn) this._flash.intensity = this._flashMax;
-    this._toast(this._flashOn ? '手电筒 开（按 L 关）' : '手电筒 关');
+    this._toast(this._flashOn ? '手电筒 已开（再按一次关）' : '手电筒 已关');
   }
 
   _updateFlashlight() {
@@ -4930,6 +4942,13 @@ export class Game {
         return {
           label: '建造锤',
           run: () => { if (this._buildTool) this._buildTool.toggle(); },
+        };
+      case 'flashlight':
+        return {
+          label: '手电筒',
+          // 开关型工具：不要技能槽的防连点间隔，否则刚关掉要等一下才能再开
+          noCd: true,
+          run: () => this._toggleFlashlight(),
         };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果

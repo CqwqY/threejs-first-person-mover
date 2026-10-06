@@ -207,6 +207,7 @@ function seedShop() {
     { id: 'ctrlgun', name: '控制枪', price: 180, desc: '激光抓住别人，移动视角拖着走；对方按空格挣脱。', kind: 'item', effect: { k: 'control' } },
     { id: 'grapple', name: '抓钩', price: 160, desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去。', kind: 'item', effect: { k: 'grapple' } },
     { id: 'hammer', name: '建造锤', price: 300, desc: '装备到技能槽，按对应数字键（手机点技能键）进入建造模式：攻击键变放置，血条变家具条。', kind: 'item', effect: { k: 'hammer' } },
+    { id: 'flashlight', name: '手电筒', price: 120, desc: '照亮你正对的方向（含抬头/低头）。夜里探路、找人、搞氛围都好用。装备到技能槽，按对应键开关；电脑也可直接按 L。', kind: 'item', effect: { k: 'flashlight' } },
     { id: 'furn_chair', name: '木椅', url: 'placeholder', price: 80, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [0.5, 0.9, 0.5] },
     { id: 'furn_table', name: '木桌', url: 'placeholder', price: 120, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.2, 0.8, 0.8] },
     { id: 'furn_sofa', name: '布艺沙发', url: 'placeholder', price: 200, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.8, 0.8, 0.9] },
@@ -266,6 +267,12 @@ let SHOP = (() => {
   if (SHOP.some((x) => x.effect && x.effect.k === 'hammer')) return;
   const h = seedShop().find((x) => x.id === 'hammer');
   if (h) { SHOP.push(h); saveShop(SHOP); }
+})();
+// 确保「手电筒」在售（老 shop.json 已存在时不会自动带上新种子）
+(function ensureFlashlight() {
+  if (SHOP.some((x) => x.id === 'flashlight')) return;
+  const f = seedShop().find((x) => x.id === 'flashlight');
+  if (f) { SHOP.push(f); saveShop(SHOP); }
 })();
 // 组合家具的部件 / 灯光消毒：只放行已知字段并逐项钳制（防脏数据 / 超大对象）
 // ⚠⚠ 单位：客户端的 rotY/rotX 一律是**度**（不是弧度）—— 早先这里按弧度写了钳制范围
