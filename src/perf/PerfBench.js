@@ -77,6 +77,8 @@ const state = {
   lastT: 0,         // 上一帧开始时间（用于算真实帧间隔）
   scenarioIdx: -1,
   scenarioStart: 0,
+  device: null,     // 设备信息（GPU/CPU 核心数/内存近似值/浏览器；驱动版本·显存·温度 Web 拿不到）
+  quality: null,    // 画质预设 —— 没有它，两份数据之间没有可比性
   warmupMs: 1500,
   durationMs: 8000,
   baseScale: 1,
@@ -117,6 +119,28 @@ async function buildScene() {
   renderer.toneMappingExposure = DEFAULT_SETTINGS.exposure ?? 0.85;
   UI.stage.appendChild(renderer.domElement);
   log('渲染器已创建：pixelRatio=' + state.baseScale);
+
+  // 设备信息必须**在 renderer 建好之后**采集（GPU 型号要从 WebGL context 里取）
+  state.device = collectDevice().info;
+  state.quality = (DEFAULT_SETTINGS && DEFAULT_SETTINGS.quality) || 'mid';
+  // UA-CH 高熵值（平台版本/架构/位数）是异步的，拿不到就不填，不阻塞启动
+  try {
+    const uad = navigator.userAgentData;
+    if (uad && typeof uad.getHighEntropyValues === 'function') {
+      uad.getHighEntropyValues(['platform', 'platformVersion', 'architecture', 'bitness', 'model'])
+        .then((h) => {
+          if (!state.device) return;
+          state.device.platform = h.platform || null;
+          state.device.platformVersion = h.platformVersion || null;
+          state.device.arch = h.architecture || null;
+          state.device.bitness = h.bitness || null;
+          state.device.model = h.model || null;
+        })
+        .catch(() => { /* 权限被拒也无所谓 */ });
+    }
+  } catch (e) { /* ignore */ }
+  log('GPU: ' + (state.device.gpu || '未知') + '｜CPU 核心: ' + (state.device.cpuCores || '?')
+    + '｜内存≈' + (state.device.deviceMemoryGB || '?') + 'GB｜画质: ' + state.quality);
 
   // 1) 地形/地面（阴影成本的大头，必须包含）
   let t = performance.now();
@@ -464,11 +488,60 @@ function drawChart() {
 }
 
 // ---------------- 导出 ----------------
+// ---- 设备信息采集（评测报告可比性的前提）----
+// Web 平台拿得到什么、拿不到什么，必须**如实标注**，否则数据看着专业、实际不可比：
+//   ✅ GPU 型号（WEBGL_debug_renderer_info 的 UNMASKED_RENDERER_WEBGL，Chromium 系可用）
+//   ✅ CPU 逻辑核心数（hardwareConcurrency）；⚠ **拿不到 CPU 型号**
+//   ✅ 设备内存近似值（navigator.deviceMemory，Chrome/Edge，单位为 GB 且被粗粒度取整）
+//   ✅ UA-CH 高熵值：平台版本 / 架构 / 位数 / 机型（Chromium 系）
+//   ❌ **驱动版本**（Web 无 API；只有 ANGLE 串里偶尔带一点信息）
+//   ❌ **真实显存占用 / 温度 / 功耗**（Web 全无 API）→ 只能用 GPU 资源对象数做代理
+function collectDevice() {
+  const out = {
+    gpu: null, gpuVendor: null, gpuApi: null,
+    cpuCores: (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || null,
+    deviceMemoryGB: (typeof navigator !== 'undefined' && navigator.deviceMemory) || null,
+    platform: null, arch: null, bitness: null, model: null,
+    browser: null,
+    // 如实列出 Web 拿不到的项，避免报告里"缺项无声"
+    unavailable: ['driverVersion', 'vramBytes', 'temperature', 'powerDraw'],
+  };
+  try {
+    const gl = renderer && renderer.getContext && renderer.getContext();
+    if (gl) {
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      // ⚠ 隐私策略：部分浏览器/配置下这两个扩展会被屏蔽（返回 null），要能优雅降级
+      if (ext) {
+        out.gpu = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || null;
+        out.gpuVendor = gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) || null;
+      }
+      try {
+        const gv = gl.getParameter(gl.VERSION);
+        out.gpuApi = gv ? String(gv) : null; // 含 "WebGL 2.0 (OpenGL ES 3.0 ...)" 等后端信息
+      } catch (e) { /* ignore */ }
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const ua = navigator.userAgent;
+    if (/Edg\//.test(ua)) out.browser = 'Edge ' + (ua.match(/Edg\/([\d.]+)/) || [])[1];
+    else if (/Chrome\//.test(ua)) out.browser = 'Chrome ' + (ua.match(/Chrome\/([\d.]+)/) || [])[1];
+    else if (/Firefox\//.test(ua)) out.browser = 'Firefox ' + (ua.match(/Firefox\/([\d.]+)/) || [])[1];
+    else if (/Safari\//.test(ua)) out.browser = 'Safari';
+    else out.browser = 'unknown';
+  } catch (e) { /* ignore */ }
+  // UA-CH 高熵值（异步）——拿不到就算了，不阻塞导出
+  return { info: out, pending: null };
+}
+
 function buildExport() {
   return {
     meta: {
       exportedAt: new Date().toISOString(),
       userAgent: navigator.userAgent,
+      // ---- 评测必备：设备与画质（没有这些，两份数据之间没有可比性）----
+      device: state.device || collectDevice().info,
+      qualityPreset: state.quality || null,
+      viewport: window.innerWidth + 'x' + window.innerHeight, // 实际渲染视口（≠ 屏幕分辨率）
       screen: window.screen.width + 'x' + window.screen.height,
       devicePixelRatio: window.devicePixelRatio,
       renderScale: state.baseScale,
