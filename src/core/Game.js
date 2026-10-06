@@ -1579,17 +1579,18 @@ export class Game {
   // ---- 手电筒：沿相机视线方向（含俯仰）照射，L 键开关 ----
   _initFlashlight() {
     if (this._flash) return;
-    // 暖白光锥：半角 ~25°，半影 0.45，射程 60m，decay 1.3（比物理 2 软，远处也够亮）。
-    // 强度按现有光照量级调（白天 sun=2.5 / 夜晚 ambient 地板 ~0.07）：夜里能清晰照亮前方墙面。
-    const fl = new THREE.SpotLight(0xfff2cc, 0, 60, Math.PI / 7.2, 0.45, 1.3);
+    // 暖白光锥：半角 30°，半影 0.4，射程 80m，decay 1.1（比物理 2 软，远处也够亮）。
+    // 强度按现有光照量级调：three r170 是物理光照（SpotLight 强度单位为 candela），
+    // 衰减随距离上升，11cd 在 10~15m 处已接近 0，夜里根本看不见 → 提到 40cd 才能保证「有光」。
+    const fl = new THREE.SpotLight(0xfff2cc, 0, 80, Math.PI / 6, 0.4, 1.1);
     fl.castShadow = false; // 默认不投影：夜里氛围靠光锥打在墙面/地面即可，投影另开成本高
     fl.visible = false;
     this.scene.add(fl);
     this.scene.add(fl.target); // 目标点每帧同步到「相机位置 + 视线方向」
     this._flash = fl;
-    this._flashDir = new THREE.Vector3();
+    this._flashDir = new THREE.Vector3(0, 0, -1);
     this._flashOn = false;
-    this._flashMax = 11; // 开灯强度（可调）
+    this._flashMax = 40; // 开灯强度（candela，可调）
   }
 
   _toggleFlashlight() {
@@ -1608,10 +1609,18 @@ export class Game {
   _updateFlashlight() {
     if (!this._flash || !this._flash.visible) return;
     const cam = this.camera;
-    cam.getWorldPosition(this._flash.position);
-    cam.getWorldDirection(this._flashDir); // 视线方向（含俯仰）
-    this._flash.target.position.copy(this._flash.position).add(this._flashDir);
-    this._flash.target.updateMatrixWorld();
+    if (!cam || !this._flash.target) return;
+    // 防御：每帧同步绝不能抛异常——一旦这里抛错，主循环（requestAnimationFrame 已在帧首排好下一帧）
+    // 会每帧卡在 update 之前，表现为「点了手电筒就动不了/转不了头」。相机矩阵异常时跳过本帧即可。
+    try {
+      cam.getWorldPosition(this._flash.position);
+      cam.getWorldDirection(this._flashDir); // 视线方向（含俯仰）
+      if (!(Number.isFinite(this._flashDir.x) && Number.isFinite(this._flashDir.y) && Number.isFinite(this._flashDir.z))) return;
+      this._flash.target.position.copy(this._flash.position).add(this._flashDir);
+      this._flash.target.updateMatrixWorld();
+    } catch (e) {
+      if (!this._flashErr) { this._flashErr = true; console.warn('[flashlight] 每帧跟随失败，已跳过（不影响主循环）:', e); }
+    }
   }
 
   // 按当前时刻开关编辑器摆放的光源。tf 为一天的比例（0=00:00，0.5=12:00）；

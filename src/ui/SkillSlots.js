@@ -372,20 +372,25 @@ export function createSkillSlots(opts = {}) {
       if (mobileMode === 'wheel') return;
       e.preventDefault();
       e.stopPropagation();
-      try { slot.el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      // 桌面端（coarse=false）不做指针捕获：setPointerCapture 会顶掉指针锁定对画布的隐式捕获，
+      // 触发浏览器退出指针锁定 → 鼠标视角丢失（点了技能槽就转不了头）。桌面丢弃走「按住 Y + 数字键」，无需长按。
+      // 触摸端（coarse=true）保留捕获：长按上滑丢弃依赖它把后续 pointer 事件收拢到本槽。
+      if (coarse) { try { slot.el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ } }
       pressT = performance.now();
       pressY = e.clientY;
       armed = false;
       consumed = false;
       clearTimer();
-      timer = setTimeout(() => {
-        timer = 0;
-        armed = true;
-        slot.el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
-      }, gestureMs);
+      if (coarse) {
+        timer = setTimeout(() => {
+          timer = 0;
+          armed = true;
+          slot.el.style.transform = 'scale(0.92)'; // 长按反馈：轻微收缩，提示「可上滑丢弃」
+        }, gestureMs);
+      }
     });
     slot.el.addEventListener('pointermove', (e) => {
-      if (mobileMode === 'wheel' || !armed || consumed) return;
+      if (!coarse || mobileMode === 'wheel' || !armed || consumed) return;
       if (pressY - e.clientY >= gestureDy) { // 上滑超过阈值 → 丢弃
         consumed = true;
         armed = false;
@@ -400,8 +405,9 @@ export function createSkillSlots(opts = {}) {
       slot.el.style.transform = '';
       const wasArmed = armed;
       armed = false;
-      if (canceled || consumed || wasArmed) return; // 取消 / 已丢弃 / 长按过但没上滑 → 都不触发技能
-      if (performance.now() - pressT < gestureMs) fire(slot); // 轻点 → 触发技能
+      if (canceled || consumed) return; // 取消 / 已丢弃 → 不触发
+      // 桌面端：任何一次抬起都触发（无长按丢弃态）；触摸端：仅在未进入长按态且短按时才触发。
+      if (!coarse || (!wasArmed && performance.now() - pressT < gestureMs)) fire(slot);
     };
     slot.el.addEventListener('pointerup', () => endPress(false));
     slot.el.addEventListener('pointercancel', () => endPress(true));
