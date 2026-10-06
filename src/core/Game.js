@@ -884,19 +884,25 @@ export class Game {
     return { el, frames: 0, phys: 0, render: 0, acc: 0, t: 0, txt: '', gpu: null };
   }
 
-  // GPU 型号（用于判断是否落到软件渲染：SwiftShader / Software 意味着浏览器没开硬件加速，
-  // 此时再怎么优化场景都没用 —— 那是浏览器设置问题，不是代码问题）
+  // GPU 型号（用于判断是否落到软件渲染：SwiftShader / WARP 意味着浏览器没开硬件加速，
+  // 此时再怎么优化场景都没用 —— 那是浏览器设置问题，不是代码问题）。
+  // ⚠ 旧实现依赖 this._perf（性能 HUD 对象）才去查 WebGL，导致 HUD 未创建时自动上报拿到 '-'、
+  // 根本没读 GPU。改为自缓存、与 HUD 解耦；扩展被屏蔽时再退 gl.RENDERER。
   _gpuName() {
-    const p = this._perf;
-    if (!p) return '-';
-    if (p.gpu !== null) return p.gpu;
-    let name = '未知';
+    if (this._gpuCache !== undefined) return this._gpuCache;
+    let name = '-';
     try {
-      const gl = this.renderer.getContext();
-      const ext = gl.getExtension('WEBGL_debug_renderer_info');
-      if (ext) name = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '未知';
-    } catch (e) { /* 扩展被禁用时保持“未知” */ }
-    p.gpu = name;
+      const gl = this.renderer && this.renderer.getContext();
+      if (gl) {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        const raw = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)
+                        : gl.getParameter(gl.RENDERER);
+        name = String(raw || '未知').slice(0, 160);
+      }
+    } catch (e) { /* 扩展被屏蔽时保持 '-' */ }
+    this._gpuCache = name;
+    this._gpuIsSoftware = /swiftshader|software|llvmpipe|microsoft basic render|mesa offscreen|angle \(google, vulkan.*swiftshader/i.test(name);
+    if (this._gpuIsSoftware) console.warn('[fpm] 检测到软件渲染(GPU 回退): ' + name + ' —— 帧率受限于 CPU，请在浏览器开启硬件加速（edge://gpu / chrome://gpu）');
     return name;
   }
 
@@ -1313,7 +1319,7 @@ export class Game {
       '缓冲 ' + (this.renderer.domElement.width || 0) + '×' + (this.renderer.domElement.height || 0) +
       '   内部 ' + (this._dynScale || 1).toFixed(2) + '×' +
       (this._useUpscale() ? ' 超分锐化' + (this._sharpen || 0).toFixed(1) : '') + '\n' +
-      'GPU ' + this._gpuName();
+      'GPU ' + this._gpuName() + (this._gpuIsSoftware ? '  ⚠软件渲染·请开硬件加速' : '');
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }
 
