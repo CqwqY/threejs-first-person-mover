@@ -25,6 +25,10 @@ export class LocalPlayer {
 
     // 物理模块（内部只持有速度，位置读写 state）
     this.physics = new PlayerPhysics();
+    // 碰撞体宽相位网格的显式失效入口（见 PlayerPhysics.markCollidersDirty）。
+    // Game 原地改写 colliders（竞技场切换 / 赛道增删 / 拉到远程场景）后**必须**调它 ——
+    // 原地改写时数组长度可能恰好不变，光靠长度检测抓不到。
+    this.markCollidersDirty = () => this.physics.markCollidersDirty();
     // 走路晃动状态：相位按实际移动距离推进；bobEnabled 由 Game 按视角切换（仅第一人称开启）
     this.bobEnabled = true;
     this._bobPhase = 0;

@@ -6,6 +6,35 @@ import { Config } from '../config.js';
 import { resolveMove } from '../world/collision/characterSolver.js';
 import { clampToBoundary } from '../world/Boundary.js';
 
+// ---- 碰撞体宽相位参数（模块级常量：探针要断言它们，别散落成魔法数字）----
+// 网格边长：取 8m —— 玩家半径 ~0.4m、一帧位移 ~0.2m，8m 格保证"一次查询只碰 1~4 格"，
+// 同时不至于让一栋楼被切进上百个格子里。
+const BP_CELL = 8;
+// 单个碰撞体最多插入多少格；超过（超长跑道/巨型地面）就丢进常驻列表，每次查询都带上。
+// 不设上限的话，一个 400m 长的地面会被插进 50×50=2500 个格子，重建一次就卡住。
+const BP_MAX_CELLS = 256;
+// 兜底重建周期（帧）。碰撞体是"基本静态"的，但 Game 会原地增删（竞技场切换 / 赛道），
+// 万一漏了显式通知，也要在一个可接受的时间内自愈。300 帧 ≈ 5 秒，重建成本 O(N) 可忽略。
+const BP_REBUILD_EVERY = 300;
+// 查询外扩（米）：碰撞解析会把玩家推开、位置随之变化，而宽相位是推开**之前**算的。
+const BP_PAD = 0.6;
+
+// SAT 候选轴复用缓冲（见 _resolveConvex）：
+// 长度 = 世界三轴(3) + 凸包面法线封顶(45) + 余量。**槽位复用、只挪游标，绝不每帧分配**。
+// ⚠ 模块级共享是安全的：_resolveConvex 是同步的、不重入；而 minAxis 存的是槽位里的**对象引用**，
+//   后续凸包只覆盖数组槽位、不改对象本身，所以引用始终有效。
+const _SAT_AXES = new Array(64);
+const _AX_X = { x: 1, y: 0, z: 0 };
+const _AX_Y = { x: 0, y: 1, z: 0 };
+const _AX_Z = { x: 0, y: 0, z: 1 };
+
+// 宽相位结果的排序比较器（模块级具名函数：写成内联箭头 = 每次查询分配一个闭包）。
+// ⚠ 为什么必须排序：碰撞解析是**顺序相关**的 —— 先解决的碰撞体会改写 state，进而影响
+//   后面那个碰撞体的判定。宽相位是按"格子"收集的，顺序与 colliders 数组不同，
+//   随机对拍里就出现过 300 次有 1 次结果不同。排回原数组顺序后，行为与优化前**逐字等价**，
+//   这样"加了优化"就绝不会在某个刁钻位置悄悄改变物理表现。
+const _byOriginalOrder = (a, b) => a._bpIdx - b._bpIdx;
+
 export class PlayerPhysics {
   constructor() {
     // 速度是物理过程量，仍由物理模块内部维护
@@ -38,6 +67,108 @@ export class PlayerPhysics {
     // 场地边界（空气墙）：null = 用 Config.GROUND_* 推导的默认矩形。
     // 由 Game 在拉到编辑器保存的 boundary 后注入，四边独立，可不对称于原点。
     this.bound = null;
+    // ---- 碰撞体宽相位（XZ 均匀网格）----
+    this._bpBuckets = new Map(); // 数值格键 → 碰撞体数组
+    this._bpBig = [];            // 体积大到横跨很多格子的碰撞体（每次查询都带上）
+    this._bpSrc = null;          // 上次建网格时的数组引用
+    this._bpLen = -1;            // 上次建网格时的元素个数
+    this._bpAge = 0;             // 距上次重建的帧数（兜底重建用）
+    this._bpDirty = true;        // 显式失效标记（Game 改完 colliders 调 markCollidersDirty）
+    this._bpStamp = 0;           // 去重戳（每次查询自增，写在碰撞体的 _bpStamp 上）
+    this._near = [];             // 宽相位查询输出缓冲（复用，不每帧分配）
+    // 网格统计（供自检/诊断读，不参与逻辑）
+    this._bpStat = { cells: 0, big: 0, lastRaw: 0, lastNear: 0 };
+  }
+
+  // 外部改了 colliders 数组内容后调用（原地改写时长度可能不变，所以需要显式通知）。
+  markCollidersDirty() { this._bpDirty = true; }
+
+  // 重建碰撞体宽相位网格。
+  // 插入用的是每个碰撞体的**世界空间 XZ 包围盒**（不是中心点）—— 这样"碰撞体在邻格、
+  // 体积伸进玩家这一格"的情况也不会漏，查询侧只要覆盖玩家 AABB 所在的格子就是完备的。
+  // 凸包必须先把 _prepareConvex 跑过（它才算得出 minX/maxX/minZ/maxZ）。
+  _rebuildBroadphase(colliders) {
+    const B = this._bpBuckets;
+    B.clear();
+    this._bpBig.length = 0;
+    const inv = 1 / BP_CELL;
+    for (let bi = 0; bi < colliders.length; bi++) {
+      const b = colliders[bi];
+      if (!b) continue;
+      b._bpIdx = bi; // 查询后按它排回原顺序（见 _byOriginalOrder 的注释）
+      let hx, hz;
+      if (b.type === 'convex') {
+        if (!b._cvPrepared) this._prepareConvex(b);
+        // 用包围盒的真实半尺寸（比 hx/hz 准，凸包没有这两个字段）
+        const cxm = (b.minX + b.maxX) * 0.5, czm = (b.minZ + b.maxZ) * 0.5;
+        hx = (b.maxX - b.minX) * 0.5; hz = (b.maxZ - b.minZ) * 0.5;
+        b.__bpcx = cxm; b.__bpcz = czm;
+      } else {
+        // 绕 Y 旋转的盒：旋转后的 AABB 半宽最大是 hx+hz（保守外扩，只多不少）
+        const rot = b.rotY || 0;
+        const e = rot ? Math.abs(Math.cos(rot)) + Math.abs(Math.sin(rot)) : 1;
+        hx = b.hx * e; hz = b.hz * e;
+        b.__bpcx = b.cx; b.__bpcz = b.cz;
+      }
+      const i0 = Math.floor((b.__bpcx - hx) * inv), i1 = Math.floor((b.__bpcx + hx) * inv);
+      const k0 = Math.floor((b.__bpcz - hz) * inv), k1 = Math.floor((b.__bpcz + hz) * inv);
+      const span = (i1 - i0 + 1) * (k1 - k0 + 1);
+      if (!Number.isFinite(span) || span > BP_MAX_CELLS) { this._bpBig.push(b); continue; } // 超大物体：全局常驻
+      for (let ix = i0; ix <= i1; ix++) {
+        for (let iz = k0; iz <= k1; iz++) {
+          const key = (ix + 4096) * 8192 + (iz + 4096);
+          let arr = B.get(key);
+          if (!arr) { arr = []; B.set(key, arr); }
+          arr.push(b);
+        }
+      }
+    }
+    this._bpStat.cells = B.size;
+    this._bpStat.big = this._bpBig.length;
+    this._bpSrc = colliders;
+    this._bpLen = colliders.length;
+    this._bpAge = 0;
+    this._bpDirty = false;
+  }
+
+  // 取 (x, z) 附近的碰撞体列表（返回**复用数组**，调用方别存引用）。
+  // 失效判定三重保险：显式通知 / 长度变化 / 引用变化，另加固定帧数兜底重建。
+  _nearby(colliders, x, z) {
+    if (this._bpSrc !== colliders || this._bpLen !== colliders.length || this._bpDirty ||
+      this._bpAge >= BP_REBUILD_EVERY) {
+      this._rebuildBroadphase(colliders);
+    }
+    this._bpAge++;
+    this._bpStat.lastRaw = colliders.length;
+
+    const out = this._near;
+    out.length = 0;
+    const stamp = ++this._bpStamp;
+    for (const b of this._bpBig) { b._bpStamp = stamp; out.push(b); }
+
+    // ⚠ 外扩 BP_PAD：_resolveWorldCollisions 会沿最小穿透轴把玩家推出去，
+    //   推出后位置可能跨到邻格；宽相位是在推出**之前**算的，外扩一圈才不会漏。
+    const pad = Config.PLAYER_RADIUS * this.sizeScale + BP_PAD;
+    const inv = 1 / BP_CELL;
+    const i0 = Math.floor((x - pad) * inv), i1 = Math.floor((x + pad) * inv);
+    const k0 = Math.floor((z - pad) * inv), k1 = Math.floor((z + pad) * inv);
+    const B = this._bpBuckets;
+    for (let ix = i0; ix <= i1; ix++) {
+      for (let iz = k0; iz <= k1; iz++) {
+        const arr = B.get((ix + 4096) * 8192 + (iz + 4096));
+        if (!arr) continue;
+        for (let n = 0; n < arr.length; n++) {
+          const b = arr[n];
+          if (b._bpStamp === stamp) continue; // 跨格重复 / 已在 big 列表里
+          b._bpStamp = stamp;
+          out.push(b);
+        }
+      }
+    }
+    // 排回 colliders 的原数组顺序 —— 碰撞解析顺序相关，保持顺序才能做到"行为逐字等价"
+    if (out.length > 1) out.sort(_byOriginalOrder);
+    this._bpStat.lastNear = out.length;
+    return out;
   }
 
   // 移动模式对应的基础速度系数：走路 1、奔跑 1.6、游泳 0.6、飞行 1.2
@@ -175,12 +306,19 @@ export class PlayerPhysics {
     // 终点安全由 Game 侧负责（光点抓钩在结束时直接把人放到柱顶），所以这里不需要兜底解析。
     // 注意：trimesh 的位移走上面的 resolveMove（自带碰撞），抓钩场景里只有盒碰撞体，不受影响。
     if (!this.noClip) {
-      this._resolveWorldCollisions(state, simples);
+      // ---- 宽相位：先按玩家所在的 XZ 网格，把"可能碰到"的碰撞体挑出来 ----
+      // 编辑器场景里一栋楼能拆出上百个凸包，而每一步真正可能接触的只有身边那两三个；
+      // 不分拣的话每个凸包都要跑一遍 SAT（每帧最贵的一段）。这里一次分拣、两步共用。
+      const near = this._nearby(simples, state.x, state.z);
+
+      this._resolveWorldCollisions(state, near);
 
       // ---- 5.6 地面吸附：脚底仍贴近可站立地面（坡面 / 盒顶 / 平地）时把 y 吸附上去（simple 碰撞体）----
       // 目的：重力每帧把玩家往坡面里嵌、再被碰撞解析推出，会让玩家沿坡持续下滑（像踩冰）。
       // 吸附只做竖直修正（不产生任何水平位移），因此输入为零时玩家能稳稳停在坡上。
-      this._snapToGround(state, simples);
+      // ⚠ 复用上面那份 near 列表：吸附用的是「碰撞解析推出之后」的位置，而 _nearby 已按 BP_PAD
+      //   外扩过一圈，位置的小幅变化不会漏掉新碰撞体。
+      this._snapToGround(state, near);
     }
 
     // ---- 6. 地面碰撞：防止下穿地面，落到 PLAYER_HEIGHT 处即认为着地 ----
@@ -400,21 +538,22 @@ export class PlayerPhysics {
         pz + pr < b.minZ || pz - pr > b.maxZ) return;
 
     const V = b.vertices;
-    const F = b.faces;
-    const pC = { x: px, y: py, z: pz };
-    const cC = { x: b.cx, y: b.cy, z: b.cz };
 
-    // 候选轴：世界三轴 + 预计算的去重凸包面法线（_prepareConvex 已算好，避免每帧叉乘/字符串去重）
-    const axes = [{ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }];
+    // 候选轴：世界三轴 + 预计算的去重凸包面法线（_prepareConvex 已算好，避免每帧叉乘/字符串去重）。
+    // ⚠ 复用模块级缓冲：原写法每帧每凸包 new 一个数组 + 3 个 {x,y,z} 字面量对象 ——
+    //   上百个凸包 × 60fps 就是持续的 minor GC 压力（表现：稳定掉帧 + 偶发微卡）。
     const satN = b.satNormals;
-    for (let i = 0; i < satN.length; i++) axes.push(satN[i]);
+    let nAx = 0;
+    _SAT_AXES[nAx++] = _AX_X; _SAT_AXES[nAx++] = _AX_Y; _SAT_AXES[nAx++] = _AX_Z;
+    for (let i = 0; i < satN.length && nAx < _SAT_AXES.length; i++) _SAT_AXES[nAx++] = satN[i];
 
     let minOverlap = Infinity;
     let minAxis = null;
-    for (const L of axes) {
+    for (let ai = 0; ai < nAx; ai++) {
+      const L = _SAT_AXES[ai];
       // 玩家 AABB 在该轴上的投影半宽 = pr*|Lx| + hh*|Ly| + pr*|Lz|
       const wA = pr * (Math.abs(L.x) + Math.abs(L.z)) + hh * Math.abs(L.y);
-      const cA = pC.x * L.x + pC.y * L.y + pC.z * L.z;
+      const cA = px * L.x + py * L.y + pz * L.z;
       // 凸包顶点在该轴上的投影范围
       let vMin = Infinity, vMax = -Infinity;
       for (let i = 0; i < V.length; i += 3) {
@@ -457,7 +596,7 @@ export class PlayerPhysics {
     }
 
     // 统一把最小穿透轴的方向翻向「玩家所在的一侧」（翻转不改变推出量，只让后续符号判断简单）
-    const sd = (px - cC.x) * minAxis.x + (py - cC.y) * minAxis.y + (pz - cC.z) * minAxis.z;
+    const sd = (px - b.cx) * minAxis.x + (py - b.cy) * minAxis.y + (pz - b.cz) * minAxis.z;
     const dir = sd >= 0 ? 1 : -1;
     const nx = minAxis.x * dir, ny = minAxis.y * dir, nz = minAxis.z * dir;
 

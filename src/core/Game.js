@@ -80,6 +80,25 @@ function perfEnabled() {
 // 圆锥几何默认朝 +Y，制导导弹用它转到飞行方向
 const UP_Y = new THREE.Vector3(0, 1, 0);
 
+// ---- 投掷物共享资源（对象池 + 共享几何/材质）----
+// 原实现每发都 `new SphereGeometry + new MeshStandardMaterial`，命中后再 `dispose()` 两者。
+// 互掷起来（能量球 / 粉笔头 / 陨石 / 技能投掷）就是**每次开火一次 GPU 几何上传 + 一次材质分配**，
+// 以及命中时的一次释放 —— 高频时是典型"打起来就掉帧、还偶尔卡一下"的来源。
+// 现在：几何全场共用一份，材质按颜色缓存（本项目只用到 4 种色），mesh 走池复用。
+// ⚠ 共享资源**绝不能 dispose**（一处误 dispose = 全场投掷物变黑/报错），所以销毁路径统一走
+//   _releaseProjMesh()，别再写 mesh.geometry.dispose()/material.dispose()。
+const PROJ_RADIUS = 0.16;
+const PROJ_GEO = new THREE.SphereGeometry(PROJ_RADIUS, 12, 12);
+const PROJ_POOL_MAX = 32; // 池上限：超过就真回收，避免一波爆发后常驻占内存
+const _projMats = new Map();
+function projMaterial(color) {
+  let m = _projMats.get(color);
+  if (m) return m;
+  m = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.1 });
+  _projMats.set(color, m);
+  return m;
+}
+
 // 每帧复用的临时向量（抓钩绳索起点 / 光点瞄准方向 / 子弹朝向），避免在热路径里新建对象
 const _gpA = new THREE.Vector3();
 const _gHand = new THREE.Vector3();
@@ -254,7 +273,11 @@ export class Game {
     // 之后再跑一次「场景优化」：跨物件同材质合并 + 登记距离分级（Lod.js）。
     // 放在加载屏期间做，玩家看不到合并那一下的开销；失败也不影响玩法。
     this._sceneReady = _fetchRemoteScene(this, this.scene, roots, this.colliders)
-      .then(() => optimizeEditorScene(this.scene))
+      .then(() => {
+        // 远端场景是**原地改写** this.colliders 的 → 碰撞体宽相位网格必须重建
+        if (this.localPlayer) this.localPlayer.markCollidersDirty();
+        return optimizeEditorScene(this.scene);
+      })
       .then(() => this._precompileShaders())   // 预编译材质变体，灭掉首帧重编译冻结（在加载屏期间执行）
       .catch((e) => { console.warn('[Game] 场景优化失败（保持原样）:', e); });
 
@@ -711,6 +734,7 @@ export class Game {
     this._dead = false;
     this._createHealthBar();
     this._projectiles = []; // 在飞的投掷物
+    this._projPool = [];    // 投掷物 mesh 复用池（回收时 visible=false 并移出场景）
     this._projSeq = 0;      // 投掷物自增 id，用于和别人同步「哪一颗爆炸了」
     this._fx = [];          // 在播的爆炸特效
 
@@ -1487,9 +1511,7 @@ export class Game {
         for (let i = this._projectiles.length - 1; i >= 0; i--) {
           const pr = this._projectiles[i];
           if (pr.visualOnly && pr.id === rid) {
-            this.scene.remove(pr.mesh);
-            pr.mesh.geometry.dispose();
-            pr.mesh.material.dispose();
+            this._releaseProjMesh(pr.mesh);
             this._projectiles.splice(i, 1);
           }
         }
@@ -2561,17 +2583,21 @@ export class Game {
     }
     const me = this.localState;
     const bpos = this.boss.pos;
-    const players = [{ id: me.id || '__local', x: me.x, y: me.y, z: me.z }];
+    // 找最近目标：**不建中间数组**。
+    // 原实现每帧 new 一个 players 数组 + 每个玩家一个 {id,x,y,z} 字面量对象 ——
+    // Boss 战期间这是稳定的每帧分配（人数越多越多），只在最后用到一个 target。
+    // 现在直接边遍历边比距离，每帧最多分配 1 个对象（真正的 target）。
+    let target = null;
+    let best = Config.BOSS_CHASE_RANGE;
+    {
+      const d = Math.hypot(me.x - bpos.x, me.z - bpos.z);
+      if (d < best) { best = d; target = { id: me.id || '__local', x: me.x, y: me.y, z: me.z }; }
+    }
     for (const [id, rp] of this.playerManager.players) {
       if (id === me.id) continue;
       const st = rp.state;
-      players.push({ id, x: st.x, y: st.y, z: st.z });
-    }
-    let target = null;
-    let best = Config.BOSS_CHASE_RANGE;
-    for (const p of players) {
-      const d = Math.hypot(p.x - bpos.x, p.z - bpos.z);
-      if (d < best) { best = d; target = p; }
+      const d = Math.hypot(st.x - bpos.x, st.z - bpos.z);
+      if (d < best) { best = d; target = { id, x: st.x, y: st.y, z: st.z }; }
     }
 
     // 护盾：本帧是否生效 + 罩子跟随玩家
@@ -4177,6 +4203,31 @@ export class Game {
   }
 
   // 投掷物：沿视线方向抛出一个小球，飞行中受重力，撞地或撞到玩家后爆开结算范围效果
+  // 取一个投掷物 mesh：优先复用池里的，池空才新建（几何/材质都是共享的，不新建资源）
+  _obtainProjMesh(color) {
+    const m = this._projPool.pop();
+    if (m) {
+      m.material = projMaterial(color);
+      m.visible = true;
+      m.rotation.set(0, 0, 0);
+      this.scene.add(m);
+      return m;
+    }
+    const nm = new THREE.Mesh(PROJ_GEO, projMaterial(color));
+    this.scene.add(nm);
+    return nm;
+  }
+
+  // 回收投掷物 mesh。**只把它移出场景并放进池**，共享的几何与材质一个都不动。
+  _releaseProjMesh(mesh) {
+    if (!mesh) return;
+    this.scene.remove(mesh);
+    mesh.visible = false;
+    mesh.material = null; // 断掉对共享材质的引用，避免持有到被回收的那一份
+    if (this._projPool.length < PROJ_POOL_MAX) this._projPool.push(mesh);
+    // 超出池上限的 mesh 自然被 GC 掉：几何/材质是共享的，所以没有资源泄漏
+  }
+
   _throwProjectile(spec) {
     const s = this.localState;
     const cosP = Math.cos(s.pitch);
@@ -4184,12 +4235,8 @@ export class Game {
     const dir = new THREE.Vector3(-Math.sin(s.yaw) * cosP, sinP, -Math.cos(s.yaw) * cosP);
     const start = new THREE.Vector3(s.x, s.y, s.z).addScaledVector(dir, 0.8);
     const color = spec.color || 0xff6a3c;
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.16, 12, 12),
-      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.1 })
-    );
+    const mesh = this._obtainProjMesh(color);
     mesh.position.copy(start);
-    this.scene.add(mesh);
     const vel = dir.clone().multiplyScalar(spec.speed || Config.PROJECTILE_SPEED);
     const id = spec.visualOnly ? (spec.id || '') : String(this.localState.id || 'me') + '-' + (++this._projSeq);
     this._projectiles.push({
@@ -4222,12 +4269,8 @@ export class Game {
     const z = Number(msg.z);
     if (![x, y, z].every(Number.isFinite)) return;
     const vel = new THREE.Vector3(Number(msg.vx) || 0, Number(msg.vy) || 0, Number(msg.vz) || 0);
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.16, 12, 12),
-      new THREE.MeshStandardMaterial({ color: 0xff6a3c, emissive: 0xff6a3c, emissiveIntensity: 1.1 })
-    );
+    const mesh = this._obtainProjMesh(0xff6a3c);
     mesh.position.set(x, y, z);
-    this.scene.add(mesh);
     this._projectiles.push({
       mesh, vel, life: 4, damage: 0, radius: 0, onHit: null,
       id: String(msg.id || ''), visualOnly: true,
@@ -4272,9 +4315,7 @@ export class Game {
       if (!hit) continue;
       // 别人扔的只静默移除（爆炸由对方的 boom 消息负责播特效，避免重复播两遍）
       if (!p.visualOnly) this._explode(p);
-      this.scene.remove(p.mesh);
-      p.mesh.geometry.dispose();
-      p.mesh.material.dispose();
+      this._releaseProjMesh(p.mesh); // 归池；共享几何/材质一个都不动
       this._projectiles.splice(i, 1);
     }
   }
@@ -5531,6 +5572,8 @@ export class Game {
     this._beacons = this._arena.beacons || null; // 抓钩模式的柱顶光点（瞄准靶）；其它模式为 null
     this.colliders.length = 0; // 原地改写：LocalPlayer 持有的数组引用保持不变
     for (const c of this._arena.colliders) this.colliders.push(c);
+    // 原地改写后碰撞体**内容**全变了（长度还可能撞巧一样）→ 必须显式让宽相位网格重建
+    if (this.localPlayer) this.localPlayer.markCollidersDirty();
 
     // 玩家落到出生点（抓钩模式出生在平台顶面，spawn.y 是脚底高度；换算见 _feetToTop）
     this.localState.x = sp.x;
@@ -5589,6 +5632,7 @@ export class Game {
     // 还原主世界碰撞体（原地改回，保持 LocalPlayer 的数组引用不变）
     this.colliders.length = 0;
     for (const c of this._mainColliders) this.colliders.push(c);
+    if (this.localPlayer) this.localPlayer.markCollidersDirty();
 
     // 玩家回大厅出生点
     const sp = lobbySpawn || this._lobbySpawn || { x: 2, z: 144, yaw: 0 };
@@ -6036,7 +6080,7 @@ export class Game {
 
   // 清掉在飞的投掷物 / 黑洞 / 爆炸特效 / 追踪导弹（切换场景时调用，避免跨场景残留）
   _clearTransients() {
-    for (const p of this._projectiles) { if (p && p.mesh) this.scene.remove(p.mesh); }
+    for (const p of this._projectiles) { if (p && p.mesh) this._releaseProjMesh(p.mesh); }
     this._projectiles.length = 0;
     for (const h of this._holes) { const g = h && (h.group || h.mesh); if (g) this.scene.remove(g); }
     this._holes.length = 0;
@@ -6849,6 +6893,8 @@ export class Game {
     } else if (i >= 0) {
       this.colliders.splice(i, 1);
     }
+    // 增删后通知宽相位重建（跑狂飙时路面碰撞体是 trimesh，但 simples 侧同样会因增删而错位）
+    if (this.localPlayer) this.localPlayer.markCollidersDirty();
   }
 
   // 赛道路面的碰撞体：把「与视觉路面同一条曲线、同半宽」的实体板烘成 trimesh 缓存起来。
@@ -6859,6 +6905,8 @@ export class Game {
       const i = this.colliders.indexOf(this._trackCollider);
       if (i >= 0) this.colliders.splice(i, 1);
       this._trackCollider = null;
+      // 立刻通知：下面「赛道不可跑」会提前 return，来不及走到 _syncTrackCollider 那一句
+      if (this.localPlayer) this.localPlayer.markCollidersDirty();
     }
     const t = this.track;
     if (!isTrackRunnable(t)) return;
