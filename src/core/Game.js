@@ -1168,8 +1168,9 @@ export class Game {
     let c = this._cheapCache.get(base.uuid);
     if (c) return c;
     c = base.clone();
-    c.receiveShadow = false;   // 主 pass 少一次阴影采样
-    c.envMapIntensity = 0;     // 少一次环境贴图采样（IBL）
+    c.receiveShadow = false;   // 主 pass 少一次阴影采样（阴影才是远处 LOD 的主要省帧来源）
+    // ⚠ 不再把 envMapIntensity 归零：远处金属/光滑物体一旦失去 IBL 反射会明显变暗发黑，
+    //   而 perf E4 实测「关 IBL」只省 ~0.3fps（收益可忽略、视觉代价大），故保留 IBL 反射。
     c.needsUpdate = true;
     this._cheapCache.set(base.uuid, c);
     return c;
