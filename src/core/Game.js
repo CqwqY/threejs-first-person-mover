@@ -1610,8 +1610,8 @@ export class Game {
         break;
       }
       case 'leave': {
-        // 玩家断开：移除模型
-        this.playerManager.removePlayer(msg.id);
+        // 玩家断开：移除模型（leave 是删除的权威来源，立即生效，不吃快照缺席的宽限）
+        this.playerManager.removePlayer(msg.id, 'leave 消息');
         // 对战中有人退房 = 出局（按「出局」，不是按「阵亡」记，结算里会区分显示）
         if (this._matchStats.has(String(msg.id))) this._markGone(msg.id);
         break;

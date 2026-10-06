@@ -281,6 +281,7 @@ export function debugPlayerBodies(pm) {
       size: p.state.size === undefined ? 1 : p.state.size,
       body: bh ? bh.children.length : -1,
       meshes, skinned, hidden, sides,
+      miss: pm.miss ? (pm.miss.get(id) || 0) : 0,
     });
   }
   return rows;

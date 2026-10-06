@@ -25,7 +25,14 @@ export function installPlayerDebugOverlay(game) {
     const head = 'pdbg  players=' + rows.length + '  localId=' + String(pm.localId).slice(0, 8) +
       '  cam=' + (cam ? [f(cam.x), f(cam.y), f(cam.z)].join(',') : '-') +
       '  shadow=' + !!(g.renderer && g.renderer.shadowMap && g.renderer.shadowMap.enabled);
-    el.textContent = head + '\n' + rows.map((r) => JSON.stringify(r)).join('\n');
+    // 增删流水：「出现一下就消失」这类问题只看画面定性不了，流水直接写明何时、为何增删
+    const churn = Array.isArray(pm.churn) ? pm.churn : [];
+    const ts = (t) => { const d = new Date(t); return d.toTimeString().slice(0, 8); };
+    const lines = churn.map((c) =>
+      ts(c.at) + ' ' + (c.kind === 'add' ? '+加入' : '-移除') + ' ' + c.id +
+      (c.why ? '  (' + c.why + ')' : ''));
+    el.textContent = head + '\n' + rows.map((r) => JSON.stringify(r)).join('\n') +
+      (lines.length ? '\n--- 最近增删 ---\n' + lines.join('\n') : '');
   };
   tick();
   const timer = setInterval(tick, 500);

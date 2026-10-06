@@ -42,7 +42,9 @@ export class RemotePlayer {
 
     // 快照缓冲：时间轴插值 + 外推 + 自适应延迟（INTERP_MODE = 'off' 时退回旧的指数平滑）
     this.buf = new SnapshotBuffer();
-    this.buf.push(stateData);
+    // ⚠ 入库要给**全量**：stateData 可能是增量（服务端 delta 只发 {id}），
+    //   直接入库会让插值采到 undefined → NaN → 人整只消失。state 已是「默认值 + 增量」的合并结果。
+    this.buf.push(this.state);
 
     // 初始对齐，避免首帧瞬移
     this.syncModel();
@@ -51,15 +53,21 @@ export class RemotePlayer {
   // 把模型位置/朝向/体型同步到插值状态。
   // 模型原点在脚底，而 state.y 是相机高度（眼睛），所以脚底高度 = state.y - PLAYER_HEIGHT * 体型。
   syncModel() {
+    // ⚠ NaN 防线：位置里只要有一个非有限数，模型就会整只消失（NaN 渲染不出来，
+    //   且任何比较都是 false → 射线/攻击也判定不到）。与其让它隐身挂在场上，
+    //   不如停在上一帧的位置，等下一份全量快照把状态修正回来。
+    const nx = this.state.x, ny = this.state.y, nz = this.state.z;
+    if (!Number.isFinite(nx + ny + nz)) return;
     const s = this.state.size || 1;
     setModelScale(this.model, s);
     setHeldItem(this.model, this.state.wep || '', this.state.hold || '');
     setHealthBar(this.model, this.state.health, Config.HEALTH_MAX); // 头顶血量条
-    this.model.position.set(this.state.x, this.state.y - Config.PLAYER_HEIGHT * s, this.state.z);
+    this.model.position.set(nx, ny - Config.PLAYER_HEIGHT * s, nz);
     this.model.rotation.set(0, this.state.yaw, 0);
   }
 
   // 收到新快照时：入缓冲（带本地接收时间戳），同时仍更新 target 作为旧逻辑兜底
+  // （增量补全由 SnapshotBuffer.push 内部做：缺的字段沿用上一份样本）
   applyState(stateData) {
     this.target.fromJSON(stateData);
     this.buf.push(stateData);

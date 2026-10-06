@@ -21,6 +21,13 @@ export class SnapshotBuffer {
   }
 
   // 收到新快照：入缓冲 + 更新到达间隔直方图。data 会被拷贝，外部复用同一对象也无妨。
+  //
+  // ⚠⚠ 服务端快照是**增量**的（没变的字段只发 {id}，见 server-remote/index.js 的
+  //   diffSnapshotPlayers）。这里**绝不能把半条直接入库**：_clone 出来缺的字段全是
+  //   undefined，插值 `a.x + (b.x - a.x) * α` 与外推一碰就是 NaN —— 表现是
+  //   「玩家加进来的一瞬间模型出现在正确位置（新连接会让服务端下一帧发全量），
+  //   随后整只消失，而且朝他攻击也判定不到」（NaN 的任何比较都是 false，射线打不中）。
+  //   所以入库前必须把增量**补全成全量**：缺的字段沿用上一份样本。
   push(data, tRecvMs = performance.now()) {
     if (!data) return;
     if (this._lastPush) {
@@ -31,8 +38,29 @@ export class SnapshotBuffer {
       }
     }
     this._lastPush = tRecvMs;
-    this._buf.push({ t: tRecvMs, data: this._clone(data) });
+    const cur = this._clone(data);
+    const last = this._buf.length ? this._buf[this._buf.length - 1].data : null;
+    const full = last ? this._merge(last, cur) : cur;
+    this._buf.push({ t: tRecvMs, data: full });
     if (this._buf.length > this.maxHistory) this._buf.shift();
+  }
+
+  // 增量补全：cur 里缺（undefined）的字段沿用 prev 的旧值，凑成一份全量样本。
+  _merge(prev, cur) {
+    const pick = (a, b) => (a === undefined ? b : a);
+    return {
+      x: pick(cur.x, prev.x),
+      y: pick(cur.y, prev.y),
+      z: pick(cur.z, prev.z),
+      yaw: pick(cur.yaw, prev.yaw),
+      pitch: pick(cur.pitch, prev.pitch),
+      size: pick(cur.size, prev.size),
+      health: pick(cur.health, prev.health),
+      hold: pick(cur.hold, prev.hold),
+      ride: pick(cur.ride, prev.ride),
+      veh: pick(cur.veh, prev.veh),
+      onGround: pick(cur.onGround, prev.onGround),
+    };
   }
 
   // 最新一份快照数据（用于同步 health/hold/ride 等非插值字段）
