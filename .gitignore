@@ -48,3 +48,6 @@ _esb_*.out.js
 _perftmp/
 _tmp_remote_scene.json
 _tmp_*.json
+
+# 会话/记忆数据（.workbuddy 目录由工具写入，**不要删**，但也不该进版本库）
+.workbuddy/
