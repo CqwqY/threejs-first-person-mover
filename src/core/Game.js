@@ -19,6 +19,11 @@ import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene, syncFakeWindowEnvs } from '../world/EditorBuildings.js';
 import { updateLod } from '../world/Lod.js';
+// 遮挡剔除：被前面的东西完全挡住的静态网格，这一帧不提交渲染（Minecraft 那套 chunk 遮挡的 CPU 版）。
+// ⚠ 它改的是 mesh.layers（不是 visible）—— visible 被 trimesh 烘焙 / 编辑器拾取依赖，动不得。
+import {
+  scanOcclusion, updateOcclusion, resetOcclusion, occlusionStats, occlusionCandidates,
+} from '../world/OcclusionCull.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
 import { defaultTrack, normalizeTrack, gateSpecs, isTrackRunnable, startPose, inGate, nextGateIndex } from '../world/Track.js';
@@ -365,6 +370,8 @@ export class Game {
 
     // 调试：URL 带 ?rigdebug 时，在场景中放一个可见调试模型并画出骨骼与坐标轴
     this.debugRig = /\brigdebug\b/.test(location.search) ? addDebugRig(this.scene) : null;
+    // 遮挡剔除的观测开关：?occdebug 每秒打一次「候选 / 剔除 / 耗时」，与 ?occ=0 配对做 A/B
+    this._occDebug = /\boccdebug\b/.test(location.search);
 
     // 第三人称相机（F5 切换，可看到自己的角色）
     this.thirdPerson = false;
@@ -1160,6 +1167,42 @@ export class Game {
   _rescanLod() {
     this._scanLodCandidates();
     this._updateLod(this.camera ? this.camera.position : null);
+    // 世界重建后遮挡体/候选全部变了：先把旧的 layers 全放回来（旧对象可能只是被隐藏复用），再重扫
+    resetOcclusion();
+    this._occCount = scanOcclusion(this.scene);
+    if (this._occCount > 0) this._updateOcclusion(true);
+  }
+
+  // 每帧跑遮挡剔除
+  _updateOcclusion(force) {
+    if (!this.camera) return;
+    try {
+      // 兜底补扫：场景是异步建起来的（GLB 一批一批到），首帧往往还没东西可扫。
+      // 候选为空时每 60 帧补扫一次，扫到非空就停（与 LOD 那套补扫同一个套路）。
+      if (occlusionCandidates() === 0) {
+        this._occRescanT = (this._occRescanT || 0) + 1;
+        if (force || this._occRescanT >= 60) {
+          this._occRescanT = 0;
+          this._occCount = scanOcclusion(this.scene);
+        }
+      }
+      updateOcclusion(this.camera, !!force);
+      this._occStats = occlusionStats();
+      // ?occdebug：把「剔掉了多少」打出来，方便与 ?occ=0 做 A/B 对照
+      if (this._occDebug) {
+        this._occLogT = (this._occLogT || 0) + 1;
+        if (this._occLogT >= 60) {
+          this._occLogT = 0;
+          const s = this._occStats;
+          console.log('[occ] 候选 ' + s.candidates + ' 剔除 ' + s.culled
+            + '（' + s.culledTris + ' 三角面）遮挡体 ' + s.occluders + ' 耗时 ' + s.ms.toFixed(2) + 'ms');
+        }
+      }
+    } catch (e) {
+      // ⚠ 绝不静默：算挂了就把所有东西放回来并报出来（宁可慢，也不能画面缺东西）
+      console.error('[occ] 遮挡剔除异常，已全部恢复渲染', e);
+      resetOcclusion();
+    }
   }
 
   _renderFrame() {
@@ -1171,6 +1214,9 @@ export class Game {
     // 距离分级：远处物体不投影、更远整块隐藏（内部 300ms 节流）。
     // 对战中城市建筑已整组隐藏，这边不再插手（否则会把它们设回可见，与对战隐藏打架）。
     if (!this._combat) updateLod(this.camera.position);
+    // 遮挡剔除：必须放在 updateLod **之后** —— 两边都会写 castShadow，
+    // 让剔除（更严格、变化更频繁）最后拍板，Lod 那边读 userData.__occHidden 让路。
+    this._updateOcclusion(false);
     const up = this._useUpscale() && this._ensureUpscale() && this._ensureRT();
     if (!up) {
       this.renderer.setRenderTarget(null);

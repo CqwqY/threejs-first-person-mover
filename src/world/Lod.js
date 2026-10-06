@@ -81,7 +81,12 @@ export function updateLod(cameraPos, force) {
     }
     const cast = d <= t.shadowDist;
     for (const it of t.meshes) {
-      const want = it.base && cast;
+      // ⚠ 遮挡剔除（OcclusionCull.js）也在写 castShadow，且它跑在本函数**之后**。
+      //   这里必须给它让路：被剔除（layers 已关）的网格不能把 castShadow 又设回 true ——
+      //   否则会留下「墙上没物体、却有它的影子」的穿帮（three 的阴影 pass 看 light.layers，
+      //   不看 camera.layers，只关 layers 是挡不住投影的）。
+      const hidden = it.mesh.userData && it.mesh.userData.__occHidden === true;
+      const want = it.base && cast && !hidden;
       if (it.mesh.castShadow !== want) it.mesh.castShadow = want;
     }
   }
