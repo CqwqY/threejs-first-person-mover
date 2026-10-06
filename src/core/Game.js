@@ -149,6 +149,9 @@ export class Game {
   // ⚠ 必须等于服务端 server-remote/index.js 的 DAY_SECONDS（当前 600 = 一昼夜 10 分钟）。
   //   两边不一致时，客户端每收到一次快照就会被拉回服务器时刻，表现为世界时间忽快忽慢地「抖」。
   static SYNC_DAY_SECONDS = 600;
+  // 联机世界时刻突变（进服/重连/重进房间）→ 平滑过渡，避免整屏明暗硬跳（"突然变很暗"）
+  static DAY_SYNC_BLEND = 4;   // 过渡时长（秒）
+  static DAY_SYNC_JUMP = 0.2;  // 显示时刻与服务器目标相差超过此比例（≈4.8h）才触发过渡
 
   // token：登录会话 token（游客为空串）；profile：登录成功返回的用户资料（点名牌用）
   constructor(token = '', profile = null, gender = 'boy') {
@@ -283,6 +286,9 @@ export class Game {
     // 服务器时间同步：快照里带世界时刻，收到后以此为基准帧间外推，保证所有客户端时间一致
     this._netDayTime = null;
     this._netDayAt = 0;
+    this._netDayBlending = false; // 联机世界时刻突变时是否正在平滑过渡
+    this._dayBlendFrom = 0;       // 过渡起点（本地显示时刻，一天比例）
+    this._dayBlendT = 0;          // 过渡进度 0~1
     this._hudTimeText = '';
     // 本地时刻偏移（小时→一天比例）：只用于本地预览（想马上看夜晚就拖它），不参与联机同步
     this._dayOffset = (Number(gset.dayOffset) || 0) / 24;
@@ -1473,6 +1479,20 @@ export class Game {
     this._toast('已在出生点重生');
   }
 
+  // 一天比例（0~1）的最短弧线性插值：处理跨零点（0.95→0.05 应走 +0.1 而非 -0.9）
+  _lerpDay(a, b, t) {
+    let d = b - a;
+    while (d > 0.5) d -= 1;
+    while (d < -0.5) d += 1;
+    return ((a + d * t) % 1 + 1) % 1;
+  }
+  // 两个一天比例之间的最短弧距离（0~0.5）
+  _circularDayDist(a, b) {
+    let d = Math.abs(b - a) % 1;
+    return d > 0.5 ? 1 - d : d;
+  }
+  _smoothstep(t) { return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t); }
+
   // 昼夜循环推进：0 = 午夜、0.5 = 正午。太阳高度角与强度、环境光/半球光、
   // 天空亮度与夜空贴图都随时间连续变化；关闭时保持编辑器设计的光照。
   _updateDayNight(dt) {
@@ -1483,7 +1503,22 @@ export class Game {
     let base;
     if (this._netDayTime !== null) {
       const elapsed = (performance.now() - this._netDayAt) / 1000;
-      base = (this._netDayTime + elapsed / Game.SYNC_DAY_SECONDS) % 1;
+      const target = (this._netDayTime + elapsed / Game.SYNC_DAY_SECONDS) % 1;
+      // ⚠ 进服/重连/重进房间时，本地显示时刻（多半在正午附近）与服务器权威时刻可能相差很大。
+      // 若直接采用 target，太阳/环境光/半球光/背景强度会整屏同时突变 → 即"突然变很暗"。
+      // 改为：相差超过阈值时启动几秒平滑过渡，期间按最短弧从本地时刻滑向服务器时刻。
+      if (this._netDayBlending) {
+        this._dayBlendT = Math.min(1, this._dayBlendT + dt / Game.DAY_SYNC_BLEND);
+        base = this._lerpDay(this._dayBlendFrom, target, this._smoothstep(this._dayBlendT));
+        if (this._dayBlendT >= 1) this._netDayBlending = false;
+      } else if (this._circularDayDist(this._dayTime, target) > Game.DAY_SYNC_JUMP) {
+        this._dayBlendFrom = this._dayTime;
+        this._dayBlendT = 0;
+        this._netDayBlending = true;
+        base = this._dayBlendFrom; // 首帧保持当前，下一帧起平滑滑出
+      } else {
+        base = target;
+      }
     } else {
       base = (this._dayTime + dt / this._dayCycle) % 1;
     }
