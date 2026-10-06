@@ -152,7 +152,8 @@ export function createEditor() {
   sun.shadow.camera.top = SHADOW_R;
   sun.shadow.camera.bottom = -SHADOW_R;
   sun.shadow.camera.near = 0.5;
-  sun.shadow.camera.far = 120;
+  // ⚠ far 收紧到 SHADOW_R+80（同 Lights.createLights）：阴影 pass 少渲深度范围 → 填充更省
+  sun.shadow.camera.far = SHADOW_R + 80;
   sun.target = sunTarget; // 方向光朝向跟随目标，阴影随其框
   sun.position.copy(sunTarget.position).add(sunOffset);
   scene.add(sun);

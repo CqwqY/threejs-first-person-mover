@@ -361,7 +361,10 @@ export function createLights() {
   directional.shadow.camera.top = R;
   directional.shadow.camera.bottom = -R;
   directional.shadow.camera.near = 0.5;
-  directional.shadow.camera.far = 120;
+  // ⚠ far 收紧到 R+80：方向光从 target 偏移约 54 单位，R 是水平半宽，最坏情况下最远投影物
+  //   距光源 ≈ sqrt(R²+54²) < R+60；多留 20 缓冲。阴影 pass 只渲 far 内的投影物，
+  //   收紧后少渲一截深度范围 → 阴影 pass 填充更省，且 texel 密度更高（同样的 mapSize 覆盖更实）。
+  directional.shadow.camera.far = R + 80;
   directional.target = sunTarget;
   directional.position.copy(sunTarget.position).add(offset);
   group.add(directional);

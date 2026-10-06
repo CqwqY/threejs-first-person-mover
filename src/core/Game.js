@@ -200,6 +200,19 @@ export class Game {
     this.renderer.shadowMap.autoUpdate = false;
     this._shadowTick = 0;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    // ---- 距离分级材质 LOD（填充率优化，对应文章的 LOD / 削减片元成本思路）----
+    // 不透明材质没有 discard（之前修过 early-Z 污染），所以「墙后的房间」已被 early-Z 在深度阶段剔除，
+    // 真正烧填充率的是**看得见**的像素跑完整 PBR + 阴影采样。
+    // 这台机器的杠杆：离相机够远（只看水平 XZ 距离）的表面，换成一份"不接收阴影 + 关环境反射"的
+    // 廉价副本材质 —— 远处本就看不清阴影/IBL 细节，主 pass 每像素少一次阴影采样 + 一次环境贴图采样，
+    // 直接砍掉远处像素的片元成本。近处（玩家身边）永远是原材质，观感零变化。
+    // ⚠ 只换 material 引用、**绝不碰 visible**（碰 visible 会连碰撞/烘焙一起干掉，见 MEMORY 静默失效#3）；
+    //   副本按 base.uuid 缓存，共享几何/贴图，材质程序在 _precompileShaders 里一次性预热，游戏中零重编译。
+    this._lodCands = [];        // [{ mesh, base, cx, cz }]
+    this._cheapCache = new Map(); // base.uuid -> 廉价副本材质
+    this._lodOn = true;         // 默认开；_applyQuality 按画质档纠正（high 关）
+    this._lodDist = 42;         // 水平距离阈值（米），超过即视为"远处"
+    this._lodFrame = 0;         // 每 6 帧评估一次，摊薄遍历成本
     // 色调映射：用 ACES 把（太阳光 + 环境 IBL + 用户摆放的灯）的累加柔和压回 [0,1]，
     // 高光不再硬 clip 成死白 —— 解决"白天光跟着太阳叠加更亮、且发硬不柔"。
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1002,6 +1015,8 @@ export class Game {
     this._shadersCompiled = true; // 先置位：失败也不重入（否则每帧重试 = 每帧卡）
     const r = this.renderer;
     if (!r) return;
+    // LOD 候选登记（只需一次；世界重建时由 _rescanLod 重新扫）：世界已在加载屏期间构建好
+    if (this._lodCands.length === 0) this._scanLodCandidates();
     try {
       if (typeof updateShadowBudgets === 'function') updateShadowBudgets(this.camera.position);
       // ① 当前视锥内的主 pass（最便宜的一层，也会把 renderer 内部状态预热好）
@@ -1026,6 +1041,19 @@ export class Game {
         for (const o of toggled) o.frustumCulled = true;
       }
 
+      // ②·补 LOD 廉价材质预热：临时把所有候选挂上廉价副本再 compile 一次，
+      //   把"不接收阴影/关 IBL"的那套 program 也编掉，避免游戏中首次切到远处时当场编译卡顿。
+      if (this._lodCands.length) {
+        const prevMats = new Array(this._lodCands.length);
+        for (let i = 0; i < this._lodCands.length; i++) {
+          prevMats[i] = this._lodCands[i].mesh.material;
+          this._lodCands[i].mesh.material = this._lodCheap(this._lodCands[i].base);
+          this._lodCands[i].mesh.userData.__lodFar = false;
+        }
+        try { if (typeof r.compile === 'function') r.compile(this.scene, this.camera); } catch (e2) { /* 忽略 */ }
+        for (let i = 0; i < this._lodCands.length; i++) this._lodCands[i].mesh.material = prevMats[i];
+      }
+
       // ③ 超分那套（HalfFloat RT + 锐化着色器）平时要等自适应把分辨率压下去才第一次建，
       //    第一帧会同时吃「分配 RT + 编锐化程序」两笔开销 → 表现为"某次掉帧特别深"。
       //    这里提前备好：程序用 compile 编掉（不真渲染，不会闪一帧黑屏）。
@@ -1036,9 +1064,86 @@ export class Game {
         this._dynScale = 0.7; // 用一个"一定会走超分"的系数把 RT 真建出来（换系数时会自动 dispose 旧的）
         try { if (typeof this._ensureRT === 'function') this._ensureRT(); } finally { this._dynScale = prevScale; }
       }
-    } catch (e) {
+      } catch (e) {
       console.warn('[Game] 着色器预热失败（忽略，退回运行时编译）:', e);
     }
+  }
+
+  // ============ 距离分级材质 LOD（填充率优化）============
+  // 收集场景里所有"不透明 MeshStandardMaterial"网格作为候选（排除透明/天空/线/精灵/UI）。
+  // 中心用世界坐标的 XZ 缓存，静态建筑只算一次。
+  _scanLodCandidates() {
+    this._lodCands.length = 0;
+    this._cheapCache.clear();
+    const tmp = new THREE.Vector3();
+    this.scene.traverse((o) => {
+      if (!o.isMesh) return;
+      const m = o.material;
+      if (!m || !m.isMeshStandardMaterial || m.transparent) return; // 天空(Basic)/精灵/线/透明 UI 自然排除
+      if (o.userData && o.userData.__noLod) return;
+      o.updateWorldMatrix(true, false);
+      let bs = o.geometry && o.geometry.boundingSphere;
+      if (!bs || !isFinite(bs.radius)) { o.geometry.computeBoundingSphere(); bs = o.geometry.boundingSphere; }
+      if (!bs || !isFinite(bs.radius)) return;
+      tmp.copy(bs.center).applyMatrix4(o.matrixWorld); // 世界中心
+      this._lodCands.push({ mesh: o, base: m, cx: tmp.x, cz: tmp.z });
+    });
+  }
+
+  // 拿 base 的廉价副本：关 receiveShadow + 关 envMapIntensity（远处这两者贡献≈0，见 perf JSON E1/E4）。
+  // 按 base.uuid 缓存 → 同一份基础材质的所有网格共享一个副本，材质程序也只编译一次。
+  _lodCheap(base) {
+    let c = this._cheapCache.get(base.uuid);
+    if (c) return c;
+    c = base.clone();
+    c.receiveShadow = false;   // 主 pass 少一次阴影采样
+    c.envMapIntensity = 0;     // 少一次环境贴图采样（IBL）
+    c.needsUpdate = true;
+    this._cheapCache.set(base.uuid, c);
+    return c;
+  }
+
+  // 每 6 帧评估一次：远处挂廉价副本、近处还原原材质。__lodFar 标记避免重复赋值。
+  _updateLod(camPos) {
+    if (!this._lodOn || !camPos) return;
+    // 兜底：若预热期世界还没建好导致候选为空，首次评估时补扫一次（之后 _lodCands 非空就跳过）
+    if (this._lodCands.length === 0) this._scanLodCandidates();
+    if (this._lodCands.length === 0) return;
+    this._lodFrame = (this._lodFrame + 1) % 6;
+    if (this._lodFrame !== 0) return;
+    const d2 = this._lodDist * this._lodDist;
+    for (let i = 0; i < this._lodCands.length; i++) {
+      const e = this._lodCands[i];
+      const dx = e.cx - camPos.x, dz = e.cz - camPos.z;
+      const far = (dx * dx + dz * dz) > d2;
+      const isFar = e.mesh.userData.__lodFar === true;
+      if (far && !isFar) {
+        e.mesh.userData.__lodFar = true;
+        e.mesh.material = this._lodCheap(e.base);
+      } else if (!far && isFar) {
+        e.mesh.userData.__lodFar = false;
+        e.mesh.material = e.base;
+      }
+    }
+  }
+
+  // 切画质档时调用：high 关 LOD 并把所有已切换的网格还原原材质；low/mid 开。
+  _setLod(on) {
+    const was = this._lodOn;
+    this._lodOn = on;
+    if (!on && was) {
+      for (let i = 0; i < this._lodCands.length; i++) {
+        const e = this._lodCands[i];
+        if (e.mesh.userData.__lodFar) { e.mesh.userData.__lodFar = false; e.mesh.material = e.base; }
+      }
+    }
+  }
+
+  // 世界重建（进了新一局 / 编辑器重新生成场景）后调用：重新登记候选并立即按当前档位评估一次。
+  // ⚠ 不清空 _cheapCache —— 基础材质副本可跨局复用（几何/贴图引用共享，不泄漏）。
+  _rescanLod() {
+    this._scanLodCandidates();
+    this._updateLod(this.camera ? this.camera.position : null);
   }
 
   _renderFrame() {
@@ -1405,6 +1510,8 @@ export class Game {
     }
     this._qualityDpr = p.dpr;
     this._quality = q; // 供 _autoStartScale 按档取起点
+    // 距离分级材质 LOD：high 关（原材质最保真），low/mid 开（远处换廉价副本砍片元成本）
+    this._setLod(q !== 'high');
     // 画质档变了：自动模式从一个更低的起点重新探测（弱档开局就给 0.7~0.85×，
     //   跳过"1.0× 只有 ~18fps、自适应爬 5 秒才降到甜点"的卡顿观感）；手动模式保留用户钉的比例。
     //   主意：起点不是越低越好——太低会先糊一帧再升回，0.7/0.85 是"开局即接近稳态"的折中。
@@ -7329,6 +7436,8 @@ export class Game {
     const _pt3 = this._perf ? performance.now() : 0;
     // 超分：分辨率被压低时，先渲进低分辨率 RT，再用锐化着色器放大到屏幕
     this._renderFrame();
+    // 距离分级材质 LOD：每 6 帧评估一次（内部节流），远处换廉价副本砍片元成本
+    this._updateLod(this.camera.position);
 
     // 自适应分辨率（始终生效，不依赖 ?perf）：每 0.5s 用真实帧率判一次，
     // 掉到 42 以下就降分辨率、回到 54 以上才升回（迟滞防横跳），让弱卡自动保住帧率。
