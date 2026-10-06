@@ -23,6 +23,7 @@ import { updateLod } from '../world/Lod.js';
 // ⚠ 它改的是 mesh.layers（不是 visible）—— visible 被 trimesh 烘焙 / 编辑器拾取依赖，动不得。
 import {
   scanOcclusion, updateOcclusion, resetOcclusion, occlusionStats, occlusionCandidates,
+  setOcclusionEnabled, occlusionEnabled,
 } from '../world/OcclusionCull.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
@@ -528,6 +529,21 @@ export class Game {
       if (isEditableTarget(document.activeElement)) return;
       if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
       this._toggleVehicle();
+    });
+
+    // ---- 遮挡剔除测试键：按下实时开关，现场比对「关掉后有没有东西突然冒出来」= 验证有没有误剔 ----
+    // 关掉后本被剔除的网格会重新出现：如果某样你明明看得见的东西在开着时消失了，按一下它就回来了，
+    // 这就是误剔，要反馈。也可用 ?occ=0 在地址栏永久关（无需按此键）。
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.OCC_KEY) return;
+      if (isEditableTarget(document.activeElement)) return;
+      setOcclusionEnabled(!occlusionEnabled());
+      const on = occlusionEnabled();
+      this._toast('遮挡剔除已' + (on ? '开启' : '关闭（测试：被挡的会重新出现）'));
+      if (this._occDebug && this._occStats) {
+        console.log('[occ] 手动切换 →', on ? 'on' : 'off', '候选', this._occStats.candidates,
+          '剔除', this._occStats.culled);
+      }
     });
 
     // ---- 玩家聊天：PC 按 T 开输入框，手机点左下角的「聊」按钮 ----

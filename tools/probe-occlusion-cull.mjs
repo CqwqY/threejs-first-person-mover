@@ -286,5 +286,17 @@ console.log('\n【10】天空球壳必须排除遮挡剔除（否则夜晚剔球
   resetOcclusion();
 }
 
+console.log('\n【11】测试键：按下实时开关遮挡剔除（现场 A/B 比对误剔）');
+{
+  const g = src('src/core/Game.js');
+  // Game 必须引入可手动开关的两个函数
+  ok(/setOcclusionEnabled,\s*occlusionEnabled/.test(g), 'Game 引入了 setOcclusionEnabled/occlusionEnabled');
+  // 绑定到 OCC_KEY（KeyO），按下即翻转当前开关
+  ok(/Config\.OCC_KEY/.test(g) && /setOcclusionEnabled\(!occlusionEnabled\(\)\)/.test(g),
+    '按下 OCC_KEY 翻转遮挡剔除开关（关掉后被剔的网格会重新出现 = 验证误剔）');
+  const cfg = src('src/config.js');
+  ok(/OCC_KEY:\s*'KeyO'/.test(cfg), 'Config 定义了 OCC_KEY=KeyO（与已占用的 F/Q/P/E/Y/T 不冲突）');
+}
+
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}`);
 process.exit(fails === 0 ? 0 : 1);
