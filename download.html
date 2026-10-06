@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>花草中学 · 浏览器里跑起来的 3D 校园</title>
+  <meta name="description" content="花草中学 —— 在浏览器里跑起来的第一人称 3D 校园游戏。射击、竞速、自己画地图，打开网页即玩，手机电脑还能一起联机。免费、无需注册。" />
+  <style>
+    :root {
+      --ink: #0d1117;
+      --ink-soft: #4b5563;
+      --ink-faint: #8b94a3;
+      --line: #e7e9ee;
+      --bg: #ffffff;
+      --bg-soft: #f6f8fb;
+      --bg-dark: #0d1117;
+      --primary: #4f46e5;
+      --primary-ink: #4338ca;
+      --accent: #fb7185;
+      --accent-2: #22c55e;
+      --radius: 16px;
+      --shadow: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
+      --maxw: 1120px;
+      --font: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+    .eyebrow {
+      display: inline-block; font-size: 13px; font-weight: 600; letter-spacing: .04em;
+      color: var(--primary-ink); background: #eef0fe; padding: 5px 12px; border-radius: 999px;
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px; font: inherit; font-weight: 600;
+      padding: 13px 24px; border-radius: 12px; border: 1px solid transparent; cursor: pointer;
+      transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn--primary { background: var(--primary); color: #fff; box-shadow: 0 6px 18px rgba(79,70,229,.28); }
+    .btn--primary:hover { background: var(--primary-ink); }
+    .btn--ghost { background: #fff; color: var(--ink); border-color: var(--line); }
+    .btn--ghost:hover { border-color: #c9ced8; }
+    .btn--ondark { background: #fff; color: var(--ink); }
+    .btn--ondark:hover { background: #eef0fe; }
+
+    /* ---------- Nav ---------- */
+    header.nav {
+      position: sticky; top: 0; z-index: 50; backdrop-filter: saturate(180%) blur(12px);
+      background: rgba(255,255,255,.82); border-bottom: 1px solid var(--line);
+    }
+    .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; }
+    .brand .dot { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--primary), var(--accent)); }
+    .nav-links { display: flex; gap: 28px; font-size: 15px; color: var(--ink-soft); }
+    .nav-links a:hover { color: var(--ink); }
+    .nav-cta { display: flex; align-items: center; gap: 12px; }
+
+    /* ---------- Hero ---------- */
+    .hero {
+      position: relative; color: #fff; overflow: hidden;
+      background:
+        radial-gradient(1200px 600px at 80% -10%, rgba(79,70,229,.45), transparent 60%),
+        radial-gradient(900px 500px at 0% 110%, rgba(251,113,133,.30), transparent 55%),
+        var(--bg-dark);
+    }
+    .hero::before {
+      content: ""; position: absolute; inset: 0; opacity: .35;
+      background-image: linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px);
+      background-size: 44px 44px; mask-image: radial-gradient(70% 70% at 50% 30%, #000, transparent);
+    }
+    .hero-inner { position: relative; padding: 92px 0 100px; text-align: center; }
+    .hero h1 { font-size: clamp(40px, 7vw, 72px); margin: 18px 0 0; letter-spacing: -.01em; line-height: 1.05; }
+    .hero .sub { max-width: 640px; margin: 20px auto 0; font-size: clamp(16px, 2.4vw, 20px); color: #c9d1e0; }
+    .hero-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 34px; }
+    .hero-note { margin-top: 18px; font-size: 13.5px; color: #9aa4b6; }
+
+    /* ---------- Sections ---------- */
+    section { padding: 84px 0; }
+    section.soft { background: var(--bg-soft); }
+    .sec-head { text-align: center; max-width: 680px; margin: 0 auto 48px; }
+    .sec-head h2 { font-size: clamp(26px, 4vw, 38px); margin: 14px 0 10px; letter-spacing: -.01em; }
+    .sec-head p { color: var(--ink-soft); font-size: 17px; margin: 0; }
+
+    .grid { display: grid; gap: 20px; }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid-2 { grid-template-columns: repeat(2, 1fr); }
+    @media (max-width: 860px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 26px; box-shadow: var(--shadow);
+    }
+    .card .ic {
+      width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center;
+      background: #eef0fe; color: var(--primary); margin-bottom: 16px;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 19px; }
+    .card p { margin: 0; color: var(--ink-soft); font-size: 15px; }
+
+    /* feature grid with accent icons */
+    .feat .ic { color: var(--primary-ink); }
+    .feat:nth-child(2) .ic { background: #ffe8ec; color: var(--accent); }
+    .feat:nth-child(3) .ic { background: #e7f9ee; color: var(--accent-2); }
+    .feat:nth-child(4) .ic { background: #fff3e0; color: #ea8a08; }
+    .feat:nth-child(5) .ic { background: #e6f4ff; color: #0a84ff; }
+    .feat:nth-child(6) .ic { background: #f1ecff; color: #7c3aed; }
+
+    /* ---------- Platform ---------- */
+    .plat { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; }
+    @media (max-width: 860px) { .plat { grid-template-columns: 1fr; } }
+    .plat .card { text-align: center; }
+    .plat .ic { margin: 0 auto 16px; }
+    .plat .tag { font-size: 13px; color: var(--ink-faint); }
+
+    /* ---------- Stats ---------- */
+    .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 24px; text-align: center; }
+    @media (max-width: 860px) { .stats { grid-template-columns: repeat(2,1fr); } }
+    .stat .n { font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -.02em;
+      background: linear-gradient(135deg, var(--primary), var(--accent)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .stat .l { color: var(--ink-soft); font-size: 15px; margin-top: 4px; }
+
+    /* ---------- Editor highlight ---------- */
+    .editor-cta {
+      display: flex; align-items: center; gap: 32px; flex-wrap: wrap; justify-content: space-between;
+      background: linear-gradient(135deg, #11162a, #1b1140); color: #fff; border-radius: 22px; padding: 40px 44px;
+    }
+    .editor-cta h3 { font-size: 26px; margin: 0 0 8px; }
+    .editor-cta p { color: #c3c9de; margin: 0; max-width: 560px; }
+
+    /* ---------- FAQ ---------- */
+    .faq { max-width: 820px; margin: 0 auto; }
+    details {
+      border: 1px solid var(--line); border-radius: 12px; padding: 4px 20px; margin-bottom: 12px; background: #fff;
+    }
+    summary { cursor: pointer; font-weight: 600; padding: 14px 0; list-style: none; display: flex; justify-content: space-between; align-items: center; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; font-size: 22px; color: var(--ink-faint); transition: transform .15s ease; }
+    details[open] summary::after { content: "\2212"; }
+    details p { margin: 0 0 16px; color: var(--ink-soft); }
+
+    /* ---------- Footer ---------- */
+    footer { background: var(--bg-dark); color: #aeb6c6; padding: 48px 0; font-size: 14px; }
+    .foot-inner { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 20px; align-items: center; }
+    .foot-inner a:hover { color: #fff; }
+    .foot-links { display: flex; gap: 22px; flex-wrap: wrap; }
+    .foot-brand { display: flex; align-items: center; gap: 10px; color: #fff; font-weight: 700; }
+  </style>
+</head>
+<body>
+
+  <!-- ============ NAV ============ -->
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="./download.html"><span class="dot"></span>花草中学</a>
+      <nav class="nav-links">
+        <a href="#why">为什么</a>
+        <a href="#modes">玩法</a>
+        <a href="#platforms">平台</a>
+        <a href="#editor">地图编辑器</a>
+        <a href="#faq">常见问题</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="btn btn--primary" href="./index.html">在浏览器玩 →</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ HERO ============ -->
+  <div class="hero">
+    <div class="wrap hero-inner">
+      <span class="eyebrow">免费 · 浏览器即玩 · 无需注册</span>
+      <h1>花草中学</h1>
+      <p class="sub">在浏览器里跑起来的第一人称 3D 校园。射击、竞速、自己画地图——打开网页就能玩，手机电脑还能一起联机。</p>
+      <div class="hero-cta">
+        <a class="btn btn--primary" href="./index.html">立即在浏览器玩</a>
+        <!-- TODO: 把 Android APK 放到 public/assets/fpm-release.apk，下面链接即生效 -->
+        <a class="btn btn--ondark" href="./assets/fpm-release.apk" download>下载 Android APK ↓</a>
+      </div>
+      <div class="hero-note">不用下载客户端 · 进度自动存在本机 · Web / Android 同服联机</div>
+    </div>
+  </div>
+
+  <!-- ============ WHY ============ -->
+  <section id="why">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">为什么是花草中学</span>
+        <h2>打开即玩，还能自己造</h2>
+        <p>不是又一个要你等加载、蹲更新的游戏。网页一点就进，世界还能由你和老师、同学一起搭。</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="ic">⚡</div>
+          <h3>打开即玩</h3>
+          <p>纯网页，Chrome / Edge / Safari 直接进，手机浏览器也行。Web 端 0 安装，不用等商店审核、不用清空间。</p>
+        </div>
+        <div class="card">
+          <div class="ic">🔗</div>
+          <h3>实时联机</h3>
+          <p>服务端权威同步，和朋友同场竞技、同图建造。你做的改动，线上所有人立刻看得见。</p>
+        </div>
+        <div class="card">
+          <div class="ic">🛠️</div>
+          <h3>自己造地图</h3>
+          <p>内置地图编辑器：画线造赛道、摆楼、调光影，保存即同步到线上游戏，无需发版。</p>
+        </div>
+        <div class="card">
+          <div class="ic">📉</div>
+          <h3>弱机也流畅</h3>
+          <p>自适应分辨率 + 材质分级 + 片元优化，集显和手机也能稳住帧率，不靠堆配置。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MODES ============ -->
+  <section id="modes" class="soft">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">玩法</span>
+        <h2>一个校园，好几种玩法</h2>
+        <p>从第一人称竞速到联机混战，再到亲手搭建的世界——同一座校园，随你切换。</p>
+      </div>
+      <div class="grid grid-3">
+        <div class="card feat">
+          <div class="ic">🏎️</div>
+          <h3>校园狂飙</h3>
+          <p>在编辑器画的赛道上第一人称飙车 / 跑酷，码表计时冲榜，弯道见真章。</p>
+        </div>
+        <div class="card feat">
+          <div class="ic">💥</div>
+          <h3>对战混战</h3>
+          <p>联机竞技场：躲陨石、甩能量球，阵亡转观战，活到最后才算赢。</p>
+        </div>
+        <div class="card feat">
+          <div class="ic">🗺️</div>
+          <h3>地图编辑器</h3>
+          <p>赛道 / 建筑 / 光照 / 对战 arena 全可改，保存后线上游戏立即生效。</p>
+        </div>
+        <div class="card feat">
+          <div class="ic">🌗</div>
+          <h3>昼夜光影</h3>
+          <p>连续昼夜循环，阳光与天空随时辰平滑变化，黄昏和深夜是另一种气氛。</p>
+        </div>
+        <div class="card feat">
+          <div class="ic">📐</div>
+          <h3>自适应性能</h3>
+          <p>掉帧自动降分辨率、富余再升回，全程不卡顿；高低画质档随手切。</p>
+        </div>
+        <div class="card feat">
+          <div class="ic">🤝</div>
+          <h3>跨端联机</h3>
+          <p>Web 与 Android 同服匹配，手机和电脑能在同一张图里同场竞技。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PLATFORMS ============ -->
+  <section id="platforms">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">平台</span>
+        <h2>在哪都能玩</h2>
+        <p>网页打开就进，手机装个 APK 也行，联机不分端。</p>
+      </div>
+      <div class="plat">
+        <div class="card">
+          <div class="ic">🌐</div>
+          <h3>Web</h3>
+          <p class="tag">任意现代浏览器</p>
+          <p style="margin-top:8px">打开 <a href="./index.html" style="color:var(--primary-ink);font-weight:600">play.caiyz.dpdns.org</a> 即玩，无需下载。</p>
+        </div>
+        <div class="card">
+          <div class="ic">🤖</div>
+          <h3>Android</h3>
+          <p class="tag">APK 直装</p>
+          <p style="margin-top:8px">不走应用商店，下载 APK 直接装，触控已适配。</p>
+        </div>
+        <div class="card">
+          <div class="ic">🔗</div>
+          <h3>联机</h3>
+          <p class="tag">同服实时同步</p>
+          <p style="margin-top:8px">Web 与 Android 玩家在同一张图里同场竞技。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section class="soft" style="padding:56px 0">
+    <div class="wrap">
+      <div class="stats">
+        <div class="stat"><div class="n">0</div><div class="l">安装（Web 端）</div></div>
+        <div class="stat"><div class="n">60<small style="font-size:.5em">fps</small></div><div class="l">自适应帧率目标</div></div>
+        <div class="stat"><div class="n">2</div><div class="l">端（Web + Android）</div></div>
+        <div class="stat"><div class="n">∞</div><div class="l">编辑器实时同步</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ EDITOR HIGHLIGHT ============ -->
+  <section id="editor">
+    <div class="wrap">
+      <div class="editor-cta">
+        <div>
+          <h3>你的校园，你做主</h3>
+          <p>赛道、楼房、灯光、对战场地——全在地图编辑器里调。保存之后，线上游戏里的所有人都立刻看到新世界，不用等发版。</p>
+        </div>
+        <a class="btn btn--ondark" href="./editor.html">打开地图编辑器 →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FAQ ============ -->
+  <section id="faq" class="soft">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">常见问题</span>
+        <h2>开始之前，先说清楚</h2>
+      </div>
+      <div class="faq">
+        <details open>
+          <summary>怎么开始玩？</summary>
+          <p>打开 <a href="./index.html" style="color:var(--primary-ink);font-weight:600">play.caiyz.dpdns.org</a> 即可，无需下载、无需注册。点「在浏览器玩」直接进。</p>
+        </details>
+        <details>
+          <summary>要下载客户端吗？</summary>
+          <p>Web 端不用。想装到手机，可下载 Android APK 直装，不走应用商店。</p>
+        </details>
+        <details>
+          <summary>手机能玩吗？</summary>
+          <p>能。手机浏览器直接开网页即可，或安装 Android APK，触控操作已做适配。</p>
+        </details>
+        <details>
+          <summary>联机要收费吗？</summary>
+          <p>免费。联机走自建服务端，代码开源，没有订阅门槛。</p>
+        </details>
+        <details>
+          <summary>进度存在哪里？</summary>
+          <p>本机浏览器（localStorage / IndexedDB）保存你的缓存与设置；编辑器对场景的改动走服务端，全服即时生效。</p>
+        </details>
+        <details>
+          <summary>卡顿怎么办？</summary>
+          <p>默认就是自动档：掉帧会自动降分辨率、富余再升回。也可以在设置里手动选低画质档，进一步释放性能。</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <footer>
+    <div class="wrap foot-inner">
+      <div class="foot-brand"><span class="dot" style="width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,var(--primary),var(--accent))"></span>花草中学</div>
+      <div class="foot-links">
+        <a href="./index.html">立即游玩</a>
+        <a href="./editor.html">地图编辑器</a>
+        <a href="#modes">玩法</a>
+        <a href="#faq">常见问题</a>
+      </div>
+      <div>© 2026 花草中学 · Made with Three.js</div>
+    </div>
+  </footer>
+
+</body>
+</html>
