@@ -17,9 +17,25 @@ import { DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 //   numPointLightShadows / numSpotLightShadows（都是**数量**），数量不变时换成员命中的是
 //   同一份已编译 shader，**不会重编译**；一旦数量抖动就会全场材质重编译 → 卡顿。
 // ===========================================================================
-const MAX_POINT_SHADOW = 4;
+// ⚠⚠ 点光源的阴影名额是**趟数**的乘数：每盏 = cube 6 面 = 6 趟全场景投影。
+//   4 盏 = 24 趟/阴影帧，30Hz 重渲 ≈ 每秒 3.6 万~4.5 万次 draw call 纯为阴影，
+//   而且**完全不受 renderScale 影响**（所以"分辨率拉到最低还是卡"）。
+//   这是最强的单一杠杆 → 改成**可调**（按画质档/设备给值，见 DEFAULT_MAX_POINT_SHADOW）。
 const MAX_AREA_SHADOW = 2;   // 面光源的阴影代理（聚光灯，单张 2D 阴影贴图，比点光源便宜得多）
 const SHADOW_MAP = 512;
+// 默认名额：手机/触摸设备给 1（只保身边最近那盏），桌面给 3。
+// 0 = 完全关掉点光源阴影（只留太阳方向光）—— 成本直接砍到 0，是弱机最有效的一档。
+const DEFAULT_MAX_POINT_SHADOW = (() => {
+  try {
+    const coarse = typeof window !== 'undefined' &&
+      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    if (coarse) return 1;
+  } catch (e) { /* ignore */ }
+  return 3;
+})();
+let _maxPointShadow = DEFAULT_MAX_POINT_SHADOW;
+// ⚠⚠ 点光源阴影相机的 far **硬上限**（米）。绝不能交给 Three 按 light.distance 走 —— 见 configureShadow。
+const POINT_SHADOW_FAR = 32;
 
 // 全局「用户摆放光源」亮度倍率：想把所有面光源/点光源（编辑器与游戏端都算）统一调亮或调暗，改这一个值。
 // 它压在每盏**用户灯**最终赋强度的地方，不影响编辑器面板/存档里你填的"设计值"——
@@ -99,8 +115,25 @@ function configureShadow(light, farOverride) {
   sh.normalBias = 0.06;
   if (sh.camera) {
     sh.camera.near = light.isSpotLight ? 0.15 : 0.25;
-    // 点光源：没设 distance 时兜一个值（Three 会按 distance 自动收紧 far）
-    if (!light.isSpotLight && !light.distance) { sh.camera.far = 30; sh.camera.updateProjectionMatrix(); }
+    // ⚠⚠ 点光源阴影相机的 far **必须无条件钳制**（2026-10-06 「一靠近建筑就卡卡卡」的根因）。
+    //
+    //   旧写法是"没设 distance 时才兜 30m，设了就交给 Three 按 distance 收紧" ——
+    //   这条假设只有在 distance 是**合理值**（20~30m）时才成立。而线上编辑器的灯
+    //   大量 `distance: 100`（用户想"照得远"），Three 的 PointLightShadow.updateMatrices()
+    //   直接拿 light.distance 当 cube shadow 的 camera.far
+    //   → 每盏灯的阴影要覆盖**半径 100 米的球**，几乎整张地图。
+    //
+    //   代价：点光源阴影是 cube（6 面），4 盏带影 = 24 趟/阴影帧，每趟都要把 100m 内的
+    //   物体全部重渲一遍 → 实测每秒 3.6 万~4.5 万次 draw call 纯粹为了阴影。
+    //   而且**完全不受 renderScale 影响** —— 这正是「把分辨率拉到最低还是卡」的原因，
+    //   也解释了「朝空方向看很快、一靠近建筑就卡」（建筑进得多，阴影 pass 就爆）。
+    //
+    //   far 只决定"这盏灯的影子能投多远"，32m 足够（超出范围的物体本来也不该被它照亮）。
+    if (!light.isSpotLight) {
+      const d = Number.isFinite(light.distance) && light.distance > 0 ? light.distance : POINT_SHADOW_FAR;
+      sh.camera.far = Math.min(d, POINT_SHADOW_FAR);
+      sh.camera.updateProjectionMatrix();
+    }
     if (light.isSpotLight && farOverride) { sh.camera.far = farOverride; sh.camera.updateProjectionMatrix(); }
   }
 }
@@ -260,6 +293,26 @@ function rebalance(cands, max, cameraPos) {
 // 场景整体重建时调用：把上一轮登记的名额全部作废（旧灯随后会被 disposeLight 逐个注销）。
 // ⚠ 不清理的话，已删掉的灯会一直留在候选集合里抢名额，新灯的阴影就永远排不上。
 //   在**渲染之前**同步调用，不会造成「有阴影的灯数量抖动」。
+/**
+ * 改「最多几盏点光源投影」。0 = 全关。
+ *
+ * ⚠ 调用时机：只有切画质档时（低频）。改这个值会改变 shader 里的 `numPointLightShadows`，
+ *   Three 的 program 缓存键含它 → **全场景材质会重编译一次**。所以绝不能每帧调。
+ *   重编译一次换掉 24 趟/帧的阴影，对弱机是明确的划算；对强机（保持 3~4 盏）没有影响。
+ *
+ * @returns {boolean} 值是否发生变化
+ */
+export function setMaxPointShadow(n) {
+  const v = Math.max(0, Math.min(4, Math.floor(Number(n)) || 0));
+  if (v === _maxPointShadow) return false;
+  _maxPointShadow = v;
+  // 先把所有候选灯关掉，避免出现"数量短暂抖动"以外的中间态；随后下一帧 rebalance 会按新名额开回来
+  for (const l of _pointCands) if (l) l.castShadow = false;
+  return true;
+}
+
+export function getMaxPointShadow() { return _maxPointShadow; }
+
 export function clearShadowBudgets() {
   for (const l of _pointCands) if (l) l.castShadow = false;
   for (const l of _areaCands) if (l) l.castShadow = false;
@@ -270,7 +323,7 @@ export function clearShadowBudgets() {
 // 每帧调用一次（内部很轻：几十个灯的距离排序）。
 export function updateShadowBudgets(cameraPos) {
   if (!cameraPos) return;
-  rebalance(_pointCands, MAX_POINT_SHADOW, cameraPos);
+  rebalance(_pointCands, _maxPointShadow, cameraPos); // 可调名额，见 setMaxPointShadow
   rebalance(_areaCands, MAX_AREA_SHADOW, cameraPos);
 }
 

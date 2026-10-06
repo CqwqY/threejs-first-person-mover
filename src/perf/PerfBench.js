@@ -73,6 +73,7 @@ const state = {
   running: false,
   rafId: 0,
   dist: 0,          // 相机沿航点已走过的距离
+  yaw: 0,           // 固定机位模式的水平朝向（弧度，FIXED_VIEW 时每帧自增）
   lastT: 0,         // 上一帧开始时间（用于算真实帧间隔）
   scenarioIdx: -1,
   scenarioStart: 0,
@@ -219,13 +220,35 @@ function restoreLights() {
 const _camPos = new THREE.Vector3();
 const _camAhead = new THREE.Vector3();
 
+// ---- 固定机位模式（2026-10-06 用户指定）----
+// 把相机钉在 (0, 77) 原地**缓慢旋转**，用来稳定复现「朝向决定卡不卡」的现象：
+// 朝空地方向帧率立刻回升、转到建筑那侧就开始掉 —— 说明瓶颈随**可见几何量**走
+// （填充率 / draw call / 阴影 pass 的物体数），而不是随位置或时间走。
+// 固定机位的好处是两次跑（改前 / 改后）能拿到**可逐帧对齐**的数据，不受路径漂移干扰。
+// ⚠ 想回到原来的航点巡航模式：把 FIXED_VIEW 改成 false 即可。
+const FIXED_VIEW = true;
+const FIXED_POS = { x: 0, y: 1.7, z: 77 }; // 眼高 1.7m
+const FIXED_YAW_SPEED = 0.15;              // 弧度/秒 ≈ 8.6°/s → 转一圈约 42 秒（"缓慢"）
+
 function renderFrame(dtSec) {
-  // 相机沿航点前进（确定性）
-  state.dist += CAM_SPEED * dtSec;
-  samplePath(path, state.dist, _camPos);
-  camera.position.copy(_camPos);
-  samplePath(path, state.dist + LOOK_AHEAD, _camAhead);
-  camera.lookAt(_camAhead);
+  if (FIXED_VIEW) {
+    state.yaw = (state.yaw || 0) + FIXED_YAW_SPEED * dtSec;
+    camera.position.set(FIXED_POS.x, FIXED_POS.y, FIXED_POS.z);
+    // 朝向约定与游戏一致：前方 = (-sin yaw, 0, -cos yaw)
+    _camAhead.set(
+      FIXED_POS.x - Math.sin(state.yaw) * 10,
+      FIXED_POS.y,
+      FIXED_POS.z - Math.cos(state.yaw) * 10
+    );
+    camera.lookAt(_camAhead);
+  } else {
+    // 相机沿航点前进（确定性）
+    state.dist += CAM_SPEED * dtSec;
+    samplePath(path, state.dist, _camPos);
+    camera.position.copy(_camPos);
+    samplePath(path, state.dist + LOOK_AHEAD, _camAhead);
+    camera.lookAt(_camAhead);
+  }
 
   // 与游戏一致：阴影相机以 sunTarget 为中心跟随相机，点/面光源阴影名额按距离分配
   lightsBundle.sunTarget.position.copy(camera.position);

@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { createLights, updateShadowBudgets, setAreaBaseIntensity } from '../world/Lights.js';
+import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -1311,12 +1311,20 @@ export class Game {
   // 画质档：聚合控制阴影贴图分辨率 / dpr 封顶 / 阴影采样类型，一键降级提帧。
   // 在画面设置面板初始化与改动时都会被调用（bind 'quality'）；默认 'mid'。
   _applyQuality(q) {
+    // ⚠ pointShadow = 允许几盏**点光源**投影。这是阴影成本的最大乘数：
+    //   每盏点光源 = cube 6 面 = 6 趟全场景投影，30Hz 重渲。
+    //   4 盏 ≈ 每秒 3.6~4.5 万次 draw call 纯为阴影，**且不受 renderScale 影响** ——
+    //   这就是"分辨率拉到最低还是卡 / 一靠近建筑就卡"的地板。
+    //   低档直接 0（只留太阳阴影），中档 1（保身边最近那盏），高档 3。
     const presets = {
-      high: { shadowSize: 2048, dpr: 2, type: THREE.PCFSoftShadowMap },
-      mid:  { shadowSize: 1024, dpr: 1.5, type: THREE.PCFShadowMap },
-      low:  { shadowSize: 512,  dpr: 1,   type: THREE.BasicShadowMap },
+      high: { shadowSize: 2048, dpr: 2, type: THREE.PCFSoftShadowMap, pointShadow: 3 },
+      mid: { shadowSize: 1024, dpr: 1.5, type: THREE.PCFShadowMap, pointShadow: 1 },
+      low: { shadowSize: 512, dpr: 1, type: THREE.BasicShadowMap, pointShadow: 0 },
     };
     const p = presets[q] || presets.mid;
+    // ⚠ 会触发一次全场景材质重编译（shader 里的 numPointLightShadows 变了）——
+    //   所以只在切画质档时调，别放进每帧路径。
+    try { setMaxPointShadow(p.pointShadow); } catch (e) { /* 老版本没有这个导出时忽略 */ }
     if (this._sun && this._sun.shadow) {
       this._sun.shadow.mapSize.set(p.shadowSize, p.shadowSize);
       if (this._sun.shadow.map) {
