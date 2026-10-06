@@ -108,17 +108,24 @@ function segmentHitsAabb(ax, ay, az, bx, by, bz, hx, hy, hz) {
 }
 
 // 把凸包 faces 识别为「顶点索引三元组」；识别不了返回 null
+// 凸包能否按真实三角形判定（faces 是一组合法的顶点索引三元组）。
+// ⚠ 结果**缓存在碰撞体上**：原来每次调用都要把整个 faces 数组扫一遍做范围校验，
+//   而碰撞体是静态的（编辑器保存的场景），faces 不会变 —— 属于纯粹的白扫。
 function convexIndexTriples(b) {
+  if (b.__convexIdx !== undefined) return b.__convexIdx;
+  let result = null;
   const f = b.faces;
   const verts = b.vertices;
-  if (!Array.isArray(f) || !verts) return null;
-  if (f.length < 3 || f.length % 3 !== 0) return null;
-  const n = verts.length / 3;
-  for (let i = 0; i < f.length; i++) {
-    const k = f[i];
-    if (!Number.isInteger(k) || k < 0 || k >= n) return null;
+  if (Array.isArray(f) && verts && f.length >= 3 && f.length % 3 === 0) {
+    const n = verts.length / 3;
+    result = f;
+    for (let i = 0; i < f.length; i++) {
+      const k = f[i];
+      if (!Number.isInteger(k) || k < 0 || k >= n) { result = null; break; }
+    }
   }
-  return f;
+  b.__convexIdx = result; // null 也缓存：表示"这个凸包没有可用索引"
+  return result;
 }
 
 // 球是否剖到 trimesh 的真实三角形（BVH 粗筛 + 精确球/线段求交）
@@ -147,15 +154,70 @@ function sphereHitsTrimesh(tm, x, y, z, r, fx, fy, fz) {
   return false;
 }
 
+// 碰撞体的世界空间 AABB（**惰性缓存到碰撞体上**）。只用于主循环最前面那道廉价分离测试。
+// 为什么值得：本函数每个投掷物每帧要跑一遍全部碰撞体，而其中凸包的成本是**遍历它所有的面**
+//   （distSqPointTri + segmentHitsTri）。上百个凸包里真正在投掷物附近的通常一两个，
+//   其余全在做无用功。用一次 AABB 比较把它们剔掉 —— 这正是 Unity/PhysX 说的 broadphase 思想，
+//   只是这里不需要整张网格：投掷物数量少，一层线性 AABB 预筛就够。
+// ⚠ 只对**静态**碰撞体安全：本项目碰撞体来自编辑器保存的场景（运行时几何不变），
+//   缓存不会失配。若将来出现运行时改几何的碰撞体，必须清掉它的 __bbox。
+function colliderAabb(b) {
+  if (b.__bbox !== undefined) return b.__bbox;
+  let box = null;
+  if (b.type === 'convex') {
+    if (Number.isFinite(b.minX) && Number.isFinite(b.maxX)) {
+      box = { minX: b.minX, maxX: b.maxX, minY: b.minY, maxY: b.maxY, minZ: b.minZ, maxZ: b.maxZ };
+    } else {
+      const src = b.vertices;
+      if (src && src.length >= 3) {
+        let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        for (let i = 0; i < src.length; i += 3) {
+          const px = src[i], py = src[i + 1], pz = src[i + 2];
+          if (px < minX) minX = px; if (px > maxX) maxX = px;
+          if (py < minY) minY = py; if (py > maxY) maxY = py;
+          if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
+        }
+        box = { minX, maxX, minY, maxY, minZ, maxZ };
+      }
+    }
+  } else if (b.hx !== undefined) {
+    // 盒 / 绕 Y 旋转盒：旋转后 XZ 半宽最多是 hx+hz（保守外扩，只多不少）
+    const rot = b.rotY || 0;
+    const e = rot ? Math.abs(Math.cos(rot)) + Math.abs(Math.sin(rot)) : 1;
+    box = {
+      minX: b.cx - b.hx * e, maxX: b.cx + b.hx * e,
+      minY: b.cy - b.hy, maxY: b.cy + b.hy,
+      minZ: b.cz - b.hz * e, maxZ: b.cz + b.hz * e,
+    };
+  }
+  b.__bbox = box; // null 也缓存：表示"算不出 AABB" → 该碰撞体不做预筛
+  return box;
+}
+
 // 投掷物是否被世界碰撞体挡住：prev=(fx,fy,fz) 上一帧位置，cur=(x,y,z) 当前帧位置，r 球半径
 export function projectileHitsWorld(colliders, x, y, z, r, fx, fy, fz) {
   if (!colliders || !colliders.length) return false;
+  // 扫掠包围盒（当前球 ∪ 上一帧到当前帧的线段）—— 与 sphereHitsTrimesh 里那个盒同一口径。
+  // 用同一个盒对每个碰撞体做一次廉价分离测试：不相交就跳过它整段昂贵的三角形遍历。
+  const sxMin = Math.min(x, fx) - r, sxMax = Math.max(x, fx) + r;
+  const syMin = Math.min(y, fy) - r, syMax = Math.max(y, fy) + r;
+  const szMin = Math.min(z, fz) - r, szMax = Math.max(z, fz) + r;
   for (const b of colliders) {
     if (!b) continue;
 
     if (b.type === 'trimesh') {
       if (sphereHitsTrimesh(b, x, y, z, r, fx, fy, fz)) return true;
       continue;
+    }
+
+    // ---- 廉价 AABB 预筛（凸包/盒）----
+    // ⚠ 必须在 convex 的 `convexIndexTriples(b)` **之前**：那个函数会建索引表，
+    //   而它才是每帧的大头。AABB 不相交时连索引都不用建。
+    {
+      const bb = colliderAabb(b);
+      if (bb && (sxMax < bb.minX || sxMin > bb.maxX ||
+        syMax < bb.minY || syMin > bb.maxY ||
+        szMax < bb.minZ || szMin > bb.maxZ)) continue;
     }
 
     if (b.type === 'convex') {
