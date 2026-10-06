@@ -937,12 +937,27 @@ export class Game {
     }
   }
 
+  // 超分 RT 的多重采样档。**填充率瓶颈下 MSAA 是纯像素带宽开销**：RT 的样本数就是它的带宽倍数，
+  // 4× 样本 ≈ 4 倍 RT 写入/解析带宽；而低内部分辨率下 MSAA 的边际价值本来就在下降
+  // （写进去的像素变少了，代价却没变），且随后那趟锐化会把边缘对比拉回来。
+  // 所以按内部分辨率分档：≤0.7× 直接关、≤0.85× 用 2×、其余才 4×。
+  // ⚠ 画质档 dpr 封顶已降级时（手机）画布本来就没开 MSAA，`_aaOn` 为 false → 一律 0。
+  _upSamples(s) {
+    if (!this._aaOn) return 0;
+    if (s <= 0.7) return 0;
+    if (s <= 0.85) return 2;
+    return 4;
+  }
+
   _ensureRT() {
     const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
     const s = this._dynScale || 1;
     const w = Math.max(2, Math.floor(window.innerWidth * base * s));
     const h = Math.max(2, Math.floor(window.innerHeight * base * s));
-    if (this._upRT && this._upRT.width === w && this._upRT.height === h) return true;
+    const samples = this._upSamples(s);
+    // ⚠ 复用判据必须连 samples 一起比：分辨率刚好没变但采样档变了（跨 0.85 边界）时必须重建，
+    //   否则 samples 永远停在旧值上。
+    if (this._upRT && this._upRT.width === w && this._upRT.height === h && this._upRT.samples === samples) return true;
     try {
       if (this._upRT) this._upRT.dispose();
       this._upRT = new THREE.WebGLRenderTarget(w, h, {
@@ -952,8 +967,8 @@ export class Game {
         depthBuffer: true,
         stencilBuffer: false,
         // 多重采样：场景渲进 RT 后就没了画布那层 MSAA，必须在 RT 上补回来，
-        // 否则降分辨率 + 锐化会把锯齿放大得很明显。这里按内部分辨率做，比全分辨率便宜。
-        samples: this._aaOn ? 4 : 0,
+        // 否则降分辨率 + 锐化会把锯齿放大得很明显。但样本数是 RT 带宽的直接倍数，故分档（见 _upSamples）。
+        samples,
       });
       return true;
     } catch (e) {
@@ -962,19 +977,58 @@ export class Game {
     }
   }
 
-  // 加载期预编译所有材质变体（含阴影），把首帧/边走边卡的"多秒重编译冻结"挪到加载屏里。
+  // 加载期预热：把"第一次看见某个材质 / 第一次渲阴影"才会发生的**着色器编译**全部挪到加载屏里，
+  // 避免游戏中边走边卡（单帧几百毫秒~数秒的长帧，是"卡一下"最主要的来源）。
+  //
+  // ⚠⚠ 这里**只有一句 renderer.compile(scene, camera) 是不够的**（旧版就这一句，注释还写着"含阴影"——错的）：
+  //   Three 的 WebGLRenderer.compile() 只遍历**当前视锥内**的可见对象、且**只编主 pass**：
+  //     · 不覆盖阴影深度（depth）材质变体 —— 阴影 pass 用另一套 depth 程序
+  //     · 不覆盖背对相机 / 视锥外的材质 —— 转个身第一次看见那栋楼就当场编译
+  //   所以下面补两步：① 临时关掉视锥剔除渲一帧，把所有材质都提交给编译器；
+  //                   ② 临时打开阴影自动更新，让深度变体也编掉。两者都在 finally 里还原。
   // 前提：投影灯数量恒定（Lights.updateShadowBudgets 永远恰好 MAX_POINT_SHADOW+MAX_AREA_SHADOW 盏），
-  // 编译出的 program 在游戏中可复用，不会随走动触发全场重编译。
+  //   编译出的 program 在游戏中可复用，不会随走动触发全场重编译。
   _precompileShaders() {
     if (this._shadersCompiled) return;
+    this._shadersCompiled = true; // 先置位：失败也不重入（否则每帧重试 = 每帧卡）
+    const r = this.renderer;
+    if (!r) return;
     try {
       if (typeof updateShadowBudgets === 'function') updateShadowBudgets(this.camera.position);
-      if (this.renderer && typeof this.renderer.compile === 'function') {
-        this.renderer.compile(this.scene, this.camera);
+      // ① 当前视锥内的主 pass（最便宜的一层，也会把 renderer 内部状态预热好）
+      if (typeof r.compile === 'function') r.compile(this.scene, this.camera);
+
+      // ② 视锥剔除临时全关 → 一帧之内把所有对象的材质都提交上去（含背对/远处/画面外）
+      const toggled = [];
+      this.scene.traverse((o) => {
+        if (o && o.frustumCulled === true) { toggled.push(o); o.frustumCulled = false; }
+      });
+      const prevAuto = r.shadowMap.autoUpdate;
+      const prevNeed = r.shadowMap.needsUpdate;
+      const prevTarget = r.getRenderTarget();
+      try {
+        r.shadowMap.autoUpdate = true;   // 平时是关的（主循环隔帧置 needsUpdate），这里强制渲一次
+        r.shadowMap.needsUpdate = true;
+        r.render(this.scene, this.camera);
+      } finally {
+        r.shadowMap.autoUpdate = prevAuto;
+        r.shadowMap.needsUpdate = prevNeed;
+        r.setRenderTarget(prevTarget);
+        for (const o of toggled) o.frustumCulled = true;
       }
-      this._shadersCompiled = true;
+
+      // ③ 超分那套（HalfFloat RT + 锐化着色器）平时要等自适应把分辨率压下去才第一次建，
+      //    第一帧会同时吃「分配 RT + 编锐化程序」两笔开销 → 表现为"某次掉帧特别深"。
+      //    这里提前备好：程序用 compile 编掉（不真渲染，不会闪一帧黑屏）。
+      if ((this._sharpen || 0) > 0.001 && typeof this._ensureUpscale === 'function') {
+        this._ensureUpscale();
+        if (this._upScene && typeof r.compile === 'function') r.compile(this._upScene, this._upCam);
+        const prevScale = this._dynScale;
+        this._dynScale = 0.7; // 用一个"一定会走超分"的系数把 RT 真建出来（换系数时会自动 dispose 旧的）
+        try { if (typeof this._ensureRT === 'function') this._ensureRT(); } finally { this._dynScale = prevScale; }
+      }
     } catch (e) {
-      console.warn('[Game] 着色器预编译失败（忽略，退回运行时编译）:', e);
+      console.warn('[Game] 着色器预热失败（忽略，退回运行时编译）:', e);
     }
   }
 

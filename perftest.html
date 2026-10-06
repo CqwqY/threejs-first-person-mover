@@ -2,12 +2,17 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
 <title>场景性能测试台 · first-person-mover</title>
 <style>
   :root { --bg:#0b1017; --panel:#131b26; --line:#22303f; --txt:#dce6f2; --dim:#8fa0b6; --hi:#4ea1ff; --warn:#ffb454; --ok:#5ecb8a; }
   * { box-sizing: border-box; }
+  /* 手机实测清单：不发 touch-action:none 的话，拖动/双击会被页面滚动与双击缩放抢走手势，
+     表现成"控件点不动 / 一拖就滚" —— 而这页本来要用来量帧率，被抢手势数据就废了。
+     overscroll-behavior 顺带禁掉下拉刷新（手机上误触发会直接打断整轮测试）。 */
+  html, body { touch-action:none; overscroll-behavior:none; -webkit-text-size-adjust:100%; }
   body { margin:0; background:var(--bg); color:var(--txt); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
+  /* 刘海屏：HUD 别陷进状态栏/圆角里 */
   #hud { position:fixed; left:12px; top:12px; z-index:10; width:min(560px,94vw);
          background:color-mix(in srgb,var(--panel) 92%,transparent); border:1px solid var(--line);
          border-radius:10px; padding:12px 14px; backdrop-filter:blur(6px); }
@@ -34,11 +39,20 @@
   #log { margin-top:8px; max-height:110px; overflow:auto; background:#0e1620; border:1px solid var(--line);
          border-radius:6px; padding:6px 8px; font:11px/1.5 ui-monospace,Consolas,monospace; color:var(--dim); white-space:pre-wrap; }
   .note { color:var(--dim); font-size:11px; margin-top:6px; }
+  /* 渲染画布固定在视口底层，HUD 浮在上面；画布自身也吃掉触摸（否则手机上一拖就滚 HUD） */
+  #stage { position:fixed; inset:0; z-index:0; }
+  #stage canvas { display:block; width:100%; height:100%; touch-action:none; }
+  @media (max-width:640px) {
+    /* 手机：HUD 让出刘海/圆角与底部手势条，并给画布留出可点区域 */
+    #hud { left:max(8px, env(safe-area-inset-left)); top:max(8px, env(safe-area-inset-top));
+           right:max(8px, env(safe-area-inset-right)); width:auto;
+           padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+  }
 </style>
 </head>
 <body>
 <div id="hud">
-  <h1>场景性能测试台 <span style="color:var(--dim);font-weight:400">· 真实线上场景 · 一键跑完 5 个对照实验</span></h1>
+  <h1>场景性能测试台 <span style="color:var(--dim);font-weight:400">· 真实线上场景 · 一键跑完全部对照实验</span></h1>
 
   <div class="row">
     <button id="btnStart" class="primary">开始测试</button>

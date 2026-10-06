@@ -290,11 +290,11 @@ function renderFrame(dtSec) {
   lightsBundle.sun.position.copy(lightsBundle.sunTarget.position).add(lightsBundle.offset);
   updateShadowBudgets(camera.position);
 
-  // 首帧一次性预编译所有材质变体（含阴影），避免基准档把"首帧重编译"算进统计。
-  // 与游戏的 Game._precompileShaders 同源思路；编译发生在 warmup 内（首帧），不计入帧耗时。
+  // 首帧兜底预热（正常情况在 start() 已经做过；这里防"没点开始就先渲染"的路径）。
+  // 与 Game._precompileShaders 同源思路：compile 之后还要真渲一帧才覆盖阴影深度变体。
   if (!state.compiled) {
-    try { if (renderer && typeof renderer.compile === 'function') renderer.compile(scene, camera); } catch (e) {}
     state.compiled = true;
+    warmupRender();
   }
 
   // 天空与环境反射（固定时刻，不推进昼夜）。关环境反射的场景要跳过 update，
@@ -363,6 +363,42 @@ function collectSample(now, ms, elapsed) {
 function round2(v) { return Math.round(v * 100) / 100; }
 
 // ---------------- 流程控制 ----------------
+
+// 预热：把「第一次看见某材质 / 第一次渲阴影 / 第一次换 shader 变体」触发的着色器编译
+// 全部吃掉，且**不计入任何统计**。
+//
+// ⚠⚠ 只用 renderer.compile(scene, camera) 是不够的 —— 它只编**当前视锥内**的**主 pass**：
+//   · 不含阴影深度（depth）变体（那是另一套程序）
+//   · 不含背对相机 / 视锥外的材质
+//   · 更不含「切了场景开关之后的新变体」：no-shadow 改 shadowMap.enabled、
+//     no-sky-env 把 scene.environment 置 null —— 两者都会改 SHADOWMAP / USE_ENVMAP
+//     这类编译期宏 → **全部标准材质重编译**。
+// 上一批数据的两个假结果就是这么来的：基线（第一个跑）吃掉整个冷启动，
+// 于是 maxMs 5816ms、1% Low 0.2；E4「关环境反射」maxMs 3666ms，也是变体重编译而非渲染慢。
+// 现在：每个场景**先切一次状态并真渲一帧**（视锥剔除临时全关 → 所有材质都被提交），
+// 再回去从基线开始正式测量。
+function warmupRender() {
+  if (!renderer || !scene || !camera) return;
+  try { if (typeof renderer.compile === 'function') renderer.compile(scene, camera); } catch (e) { /* 忽略 */ }
+  const toggled = [];
+  scene.traverse((o) => { if (o && o.frustumCulled === true) { toggled.push(o); o.frustumCulled = false; } });
+  const prevAuto = renderer.shadowMap.autoUpdate;
+  const prevNeed = renderer.shadowMap.needsUpdate;
+  const prevTarget = renderer.getRenderTarget();
+  try {
+    renderer.shadowMap.autoUpdate = true; // 强制渲一次阴影，让深度变体也编掉
+    renderer.shadowMap.needsUpdate = true;
+    renderer.render(scene, camera);
+  } catch (e) {
+    /* 忽略：预热失败不该让测试台挂掉 */
+  } finally {
+    renderer.shadowMap.autoUpdate = prevAuto;
+    renderer.shadowMap.needsUpdate = prevNeed;
+    renderer.setRenderTarget(prevTarget);
+    for (const o of toggled) o.frustumCulled = true;
+  }
+}
+
 function start() {
   if (!state.ready || state.running) return;
   state.samples = [];
@@ -374,13 +410,17 @@ function start() {
   state.compiled = false;
   setControlsEnabled(false);
   UI.btnStop.disabled = false;
-  // 一次性预编译基准（阴影开）的全部材质变体，与 Game._precompileShaders 同源。
-  // 必须在记录 programsAtStart 之前完成，否则基准档会把"首帧编译"误算成 +7 重编译假象。
+  // 逐场景预热 shader 变体（必须在记录 programsAtStart 之前完成，否则会把"首帧编译"误算成重编译）。
+  // 顺序：全部场景各切一次 + 真渲一帧 → 再回到 baseline 正式开跑。
   try {
+    for (const sc of SCENARIOS) {
+      applyScenario(sc.id);
+      updateShadowBudgets(camera.position);
+      warmupRender();
+    }
     applyScenario('baseline');
     updateShadowBudgets(camera.position);
-    if (renderer && typeof renderer.compile === 'function') renderer.compile(scene, camera);
-  } catch (e) {}
+  } catch (e) { /* 忽略 */ }
   state.compiled = true;
   nextScenario();
 }
