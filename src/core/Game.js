@@ -851,11 +851,18 @@ export class Game {
   }
 
   // 渲染分辨率设置项：'auto' 交给自适应；数字串（'80'）钉死为该百分比，不再自动调整。
+  // 自动模式下按画质档给一个"接近稳态"的起点：弱档开局就低，跳过 1.0× 卡顿爬坡。
+  // 集中在这里，_applyQuality 与 _setRenderScale 共用，避免初始化顺序把起点冲掉。
+  _autoStartScale() {
+    const q = this._quality || 'mid';
+    return q === 'high' ? 1 : q === 'mid' ? 0.85 : 0.7;
+  }
+
   _setRenderScale(v) {
     const n = Number(v);
     if (v === 'auto' || !isFinite(n) || n <= 0) {
       this._autoScale = true;
-      this._dynScale = 1; // 自动模式从原生分辨率起步再往下探
+      this._dynScale = this._autoStartScale(); // 自动模式从"接近稳态"的起点往下探
     } else {
       this._autoScale = false;
       this._dynScale = Math.max(0.4, Math.min(1, n / 100));
@@ -1065,14 +1072,22 @@ export class Game {
   // 自适应分辨率：按实测真实帧率动态调整 pixelRatio。
   // 老卡/入门卡（如 640 级）是真·填充率瓶颈，画面分辨率是唯一有效杠杆 ——
   // 与其让用户手动调画质档，不如自动保帧率：掉帧就降，富余就慢慢升回。
-  // 节流 1.5s：改 pixelRatio 会重建 drawingBuffer，频繁做本身就会卡顿。
+  // 节流 1s：改 pixelRatio 会重建 drawingBuffer，频繁做本身会卡，但 1s 足够跟手又不抖。
+  //
+  // ⚠ 地板 0.5 是实测定的（见 fpm-perf-20261006-102317.json）：GT640 上
+  //   0.5× → 49.4fps（对比 1.0× 的 18.2，2.7×）；再低画面发虚、且 0.5 已把
+  //   像素量砍到 1/4，继续降收益递减、锯齿/噪点反而更扎眼。故锁 0.5。
+  // ⚠ DROP/RAISE 之间留 12 帧迟滞：避免"刚降到 44 又升回、升到 55 又降"的横跳。
   _adaptResolution(fps) {
     if (this._autoScale === false) return; // 用户手钉了分辨率，不再自动干预
     const now = performance.now();
-    if (now - this._dynLast < 1500) return;
+    if (now - this._dynLast < 1000) return;
+    const FLOOR = 0.5;   // 实测甜点（E5）：再低不划算
+    const DROP = 42;     // 低于此帧率就降（留余量，别等卡到 30 才动）
+    const RAISE = 54;    // 高于此才升回（与 DROP 拉开迟滞，防横跳）
     let s = this._dynScale;
-    if (fps < 45 && s > 0.6) s = Math.max(0.6, s - 0.2);
-    else if (fps > 57 && s < 1) s = Math.min(1, s + 0.1);
+    if (fps < DROP && s > FLOOR) s = Math.max(FLOOR, s - 0.15);
+    else if (fps > RAISE && s < 1) s = Math.min(1, s + 0.08);
     else return;
     if (Math.abs(s - this._dynScale) < 0.01) return;
     this._dynScale = s;
@@ -1387,12 +1402,15 @@ export class Game {
       }
     }
     this._qualityDpr = p.dpr;
-    // 画质档变了：自动模式回满重新探测；手动模式保留用户钉的比例
-    if (this._autoScale !== false) this._dynScale = 1;
+    this._quality = q; // 供 _autoStartScale 按档取起点
+    // 画质档变了：自动模式从一个更低的起点重新探测（弱档开局就给 0.7~0.85×，
+    //   跳过"1.0× 只有 ~18fps、自适应爬 5 秒才降到甜点"的卡顿观感）；手动模式保留用户钉的比例。
+    //   主意：起点不是越低越好——太低会先糊一帧再升回，0.7/0.85 是"开局即接近稳态"的折中。
+    if (this._autoScale !== false) this._dynScale = this._autoStartScale();
     this.renderer.shadowMap.type = p.type;
     this.renderer.shadowMap.needsUpdate = true; // 类型变了要重渲
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
-    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    // 用统一入口落 dynScale（含超分 RT 复用判据），替代手写 setPixelRatio/setSize
+    this._applyRenderScale();
   }
 
   // 设置面板里「清除模型缓存」：清掉本机那份 GLB/天空贴图缓存，下次进游戏重新下载
@@ -7299,16 +7317,19 @@ export class Game {
     }
 
     // 渲染当前帧
-    // 阴影隔帧重渲：autoUpdate 已关，这里每 2 帧置一次 needsUpdate（≈30Hz），
-    // 平衡掉阴影贴图那一份 GPU 开销；玩家快速移动时阴影最多滞后 1 帧，不可感知。
-    this._shadowTick = (this._shadowTick + 1) & 1;
+    // 阴影每 3 帧重渲：autoUpdate 已关，这里每 3 帧置一次 needsUpdate。
+    // 改 2→3 的依据（见 fpm-perf-20261006-102317.json）：基线帧在 50/67ms 间交替，
+    //   那批 67ms 巨帧正是阴影重渲帧（每 2 帧一次 → 半数帧吃 +17ms）。
+    //   改每 3 帧后只有 1/3 帧付这笔开销，稳态平均帧耗时下降、且仍属填充率红利范畴；
+    //   阴影在 20fps 下最多滞后 2 帧（~100ms）、60fps 下 ~20Hz，均不可感知。
+    this._shadowTick = (this._shadowTick + 1) % 3;
     this.renderer.shadowMap.needsUpdate = this._shadowTick === 0;
     const _pt3 = this._perf ? performance.now() : 0;
     // 超分：分辨率被压低时，先渲进低分辨率 RT，再用锐化着色器放大到屏幕
     this._renderFrame();
 
     // 自适应分辨率（始终生效，不依赖 ?perf）：每 0.5s 用真实帧率判一次，
-    // 掉到 45 以下就降分辨率、回到 57 以上就慢慢升回，让弱卡自动保住帧率。
+    // 掉到 42 以下就降分辨率、回到 54 以上才升回（迟滞防横跳），让弱卡自动保住帧率。
     this._fpsAcc += dt; this._fpsN++;
     if (this._fpsAcc >= 0.5) {
       const fps = this._fpsN / this._fpsAcc;
