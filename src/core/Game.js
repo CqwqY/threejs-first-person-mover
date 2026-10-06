@@ -1600,6 +1600,16 @@ export class Game {
     this._flashDir = new THREE.Vector3(0, 0, -1);
     this._flashOn = false;
     this._flashMax = 60; // 开灯强度（candela，可调）
+    // 调试浮层（仅 ?flashdbg 时）：实时打印 owned/可见/强度/世界坐标，定位「没光」到底是没开还是渲染问题
+    if (location.search.indexOf('flashdbg') >= 0) {
+      const d = document.createElement('div');
+      d.id = 'flashdbg';
+      d.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;background:rgba(0,0,0,.72);color:#3f6;font:12px/1.5 monospace;padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none';
+      document.body.appendChild(d);
+      this._flashDbg = d;
+      this._flashDbgV = new THREE.Vector3();
+      this._flashDbgT = new THREE.Vector3();
+    }
   }
 
   _toggleFlashlight() {
@@ -1622,6 +1632,18 @@ export class Game {
     // 这里仅做强度兜底：开启后若强度被别处重置，重新拉回 _flashMax。
     if (this._flash && this._flash.visible && this._flash.intensity !== this._flashMax) {
       this._flash.intensity = this._flashMax;
+    }
+    // 调试浮层
+    if (this._flashDbg) {
+      this._flash.getWorldPosition(this._flashDbgV);
+      this._flash.target.getWorldPosition(this._flashDbgT);
+      const prof = this._profile ? (this._profile.username || this._profile.nickname || '?') : 'NULL';
+      this._flashDbg.textContent =
+        'FLASH dbg (vis=' + this._flash.visible + ' I=' + this._flash.intensity + ')\n' +
+        'owned=' + isOwned(this._profile, 'flashlight') + '  prof=' + prof + '\n' +
+        'pos=' + this._flashDbgV.x.toFixed(1) + ',' + this._flashDbgV.y.toFixed(1) + ',' + this._flashDbgV.z.toFixed(1) + '\n' +
+        'tgt=' + this._flashDbgT.x.toFixed(1) + ',' + this._flashDbgT.y.toFixed(1) + ',' + this._flashDbgT.z.toFixed(1) + '\n' +
+        'lightInScene=' + (this.scene.getObjectById(this._flash.id) != null);
     }
   }
 
