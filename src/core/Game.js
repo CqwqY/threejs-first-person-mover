@@ -894,12 +894,29 @@ export class Game {
     return name;
   }
 
+  // 设备是否移动端：仅用于「画质起点更保守」这类默认，不用于控制功能开关。
+  // 判定：UA 命中移动关键字，或「触屏 + 粗指针」（手机/平板，排除桌面 fine 指针鼠标）。
+  _isMobileDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    if (/iPhone|iPad|iPod|Android|Mobile|Windows Phone|webOS|BlackBerry|IEMobile/i.test(ua)) return true;
+    try {
+      if ((navigator.maxTouchPoints || 0) > 0 && typeof matchMedia === 'function'
+          && matchMedia('(pointer: coarse)').matches) return true;
+    } catch (e) { /* matchMedia 不可用时忽略 */ }
+    return false;
+  }
+
   // 渲染分辨率设置项：'auto' 交给自适应；数字串（'80'）钉死为该百分比，不再自动调整。
   // 自动模式下按画质档给一个"接近稳态"的起点：弱档开局就低，跳过 1.0× 卡顿爬坡。
   // 集中在这里，_applyQuality 与 _setRenderScale 共用，避免初始化顺序把起点冲掉。
+  // ⚠ 移动端（尤其苹果 3× DPR）起点额外压低：前几秒别烧满分辨率，自适应再慢慢升回
+  //   （_adaptResolution 在 fps>54 时会 s+=0.08 回升，不会把强机永久锁死在低画质）。
   _autoStartScale() {
     const q = this._quality || 'mid';
-    return q === 'high' ? 1 : q === 'mid' ? 0.85 : 0.7;
+    let s = q === 'high' ? 1 : q === 'mid' ? 0.85 : 0.7;
+    if (this._isMobileDevice()) s = Math.min(s, q === 'high' ? 0.8 : q === 'mid' ? 0.6 : 0.5);
+    return s;
   }
 
   _setRenderScale(v) {

@@ -45,10 +45,23 @@ export function loadPhases() {
 // 明确留 undefined，服务端也不补 —— 免得下游把假数据当真。
 function deviceInfo() {
   const nav = (typeof navigator !== 'undefined') ? navigator : {};
+  const ua = String(nav.userAgent || '');
+  // 设备类别（移动/桌面）：服务端按它分段复盘（你要的就是「苹果用户」那一份）。
+  // 判定：UA 命中移动关键字，或「触屏 + 粗指针」（手机/平板，排除桌面鼠标）。
+  const uaMobile = /iPhone|iPad|iPod|Android|Mobile|Windows Phone|webOS|BlackBerry|IEMobile/i.test(ua);
+  let touchMobile = false;
+  try {
+    const tp = nav.maxTouchPoints || 0;
+    if (tp > 0) {
+      const coarse = (typeof matchMedia === 'function') && matchMedia('(pointer: coarse)').matches;
+      touchMobile = !!coarse; // 粗指针触屏 = 手机/平板，桌面鼠标是 fine 指针，不误判
+    }
+  } catch (e) { /* matchMedia 不可用时忽略 */ }
   const info = {
-    ua: String(nav.userAgent || '').slice(0, 300),
+    ua: ua.slice(0, 300),
     platform: String(nav.platform || ''),
     lang: String(nav.language || ''),
+    mobile: (uaMobile || touchMobile) ? 1 : 0, // 1=移动端；服务端据此筛「苹果用户」那批
     cores: Number(nav.hardwareConcurrency) || null,   // 逻辑核心数（iPhone 常见 6~8）
     memGB: Number(nav.deviceMemory) || null,          // Chrome 系有；Safari 无
     dpr: Number((typeof window !== 'undefined' && window.devicePixelRatio) || 1),
