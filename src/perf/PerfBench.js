@@ -96,8 +96,10 @@ const SCENARIOS = [
   { id: 'baseline', name: '基线（原样）' },
   { id: 'no-shadow', name: 'E1 关阴影' },
   { id: 'no-light', name: 'E2 编辑器灯全灭' },
+  { id: 'no-area', name: 'E3 只关面光源(3 盏 LTC)' },
   { id: 'no-sky-env', name: 'E4 关天空环境反射' },
   { id: 'low-res', name: 'E5 分辨率 0.5×' },
+  { id: 'res-075', name: 'E6 分辨率 0.75×' },
 ];
 
 // ---------------- 场景构建 ----------------
@@ -186,6 +188,11 @@ function applyScenario(id) {
   } else if (id === 'no-light') {
     // ⚠ 只改 intensity：改 castShadow / visible 会改变带阴影灯的数量 → 全场材质重编译
     dimLights();
+  } else if (id === 'no-area') {
+    // 只关面光源（RectAreaLight，本场景 3 盏）：它走 LTC 模型 —— 每像素要查 LTC 矩阵纹理，
+    // 是「逐像素光照」里最贵的一档。单独隔离它，用来判断填充率瓶颈里有多少是面光贡献的。
+    // ⚠ 只改 intensity（不改 visible/castShadow），避免动到「带阴影灯的数量」触发全场重编译。
+    dimLights((o) => o.isRectAreaLight);
   } else if (id === 'no-sky-env') {
     // 关天空 IBL：金属/光滑材质不再采样环境贴图，用于隔离环境反射的着色成本
     scene.environment = null;
@@ -193,13 +200,17 @@ function applyScenario(id) {
     active.skyEnv = false;
   } else if (id === 'low-res') {
     renderer.setPixelRatio(state.baseScale * 0.5);
+  } else if (id === 'res-075') {
+    // 0.75×：像素数 -44%。用来找「画质与帧率的甜点」，0.5× 太糊时可以落在这里
+    renderer.setPixelRatio(state.baseScale * 0.75);
   }
 }
 
-function dimLights() {
+function dimLights(filter) {
   if (!editorLightsGroup) return;
   editorLightsGroup.traverse((o) => {
     if (!o.isLight) return;
+    if (filter && !filter(o)) return; // 传了过滤（如只关面光源）就只动匹配的那些
     if (o.userData.__perfBase === undefined) o.userData.__perfBase = o.intensity; // 存原件，便于还原
     o.intensity = 0;
   });
@@ -334,6 +345,7 @@ function start() {
   state.summaries = [];
   state.scenarioIdx = -1;
   state.dist = 0;
+  state.yaw = 0;      // 与 nextScenario 一致：从同一朝向开跑，各场景才可比
   state.lastT = 0;
   state.compiled = false;
   setControlsEnabled(false);
@@ -354,6 +366,11 @@ function nextScenario() {
   if (state.scenarioIdx >= SCENARIOS.length) { finishAll(); return; }
   const sc = SCENARIOS[state.scenarioIdx];
   applyScenario(sc.id);
+  // ⚠⚠ 每个场景必须从**同一个机位与朝向**重新开始，否则各场景看到的世界完全不同、数据不可比。
+  //   上一版只重置了航点距离、没重置 yaw：固定机位模式下 5 个场景各自扫过 69° 的**不同扇区**，
+  //   avgTris 在 45k~131k 之间乱跳，于是得出了"关阴影反而更慢"这种假结论（实际是朝向不同）。
+  state.yaw = 0;
+  state.dist = 0;
   state.scenarioStart = performance.now();
   state.lastT = 0;
   // 记录本场景开始时的 program 数量，用于探测重编译
