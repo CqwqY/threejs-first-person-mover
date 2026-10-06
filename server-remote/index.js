@@ -996,6 +996,9 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ t: 'welcome', id, num, spawn, players: existing }));
   // 建造归属键：客户端据此判断「这条家具是不是我摆的」（跨设备/清缓存也准，比本地记录可靠）
   ws.send(JSON.stringify({ t: 'build', ev: 'owner', key: ownerKeyOf(ws) }));
+  // 有人刚进来 → 丢掉快照 delta 缓存，让下一帧对所有人发一次全量。
+  // 否则新玩家在两次"兜底全量"之间看到的老玩家可能缺 nick/color 这类静态字段。
+  invalidateSnapshotDelta();
 
   ws.on('message', (data) => {
     let msg;
@@ -1501,6 +1504,59 @@ let dayTime = 0.35;
 // 两边不一致时，客户端每收到一次快照就会被拉回去，表现为世界时间忽快忽慢地"抖"。
 const DAY_SECONDS = 600;
 
+// ===========================================================================
+// 快照增量压缩（delta）—— 只发**变了的字段**
+// ---------------------------------------------------------------------------
+// 背景（实测）：8 人快照 1406 字节，其中
+//   · nick / color / room / num 占 31%，这些字段**一辈子都不变**，每帧重发纯属浪费
+//   · hold / wep / veh 常态是 null，每帧再占约 20%
+// 20Hz 下这是每人 549KB/20 秒的下行。手机上行下行都贵，弱网更明显。
+//
+// 为什么**不用改客户端、不用版本协商**：客户端 PlayerState.fromJSON 的写法是
+//   `if (data.x !== undefined) this.x = data.x;`  —— 缺字段 = 保持旧值。
+//   所以"省略没变的字段"对**旧客户端天然安全**，服务端单方面上就够了。
+//
+// 两条兜底：
+//   ① 每 FULL_SNAPSHOT_EVERY 帧发一次全量（防长期省略后客户端状态漂移）；
+//   ② 有新连接进来时清掉缓存 → 下一帧所有人全量一次，保证新玩家立刻拿到 nick/color。
+// ===========================================================================
+const FULL_SNAPSHOT_EVERY = 40;          // 40 帧 = 2 秒兜底全量一次
+const _lastSent = new Map();             // 玩家 id → 上一帧发出去的那份字段对象
+let _snapSeq = 0;
+
+// 把本帧的完整玩家列表压成"只含变化字段"的列表。
+// 自检 tools/probe-snapshot-delta.mjs 用**锚点抽取**在 Node 里跑它 —— 不 import 本文件
+// （import 会真的 bind 端口起服务），也**不复制一份逻辑**（复制品必然漂移）。
+function diffSnapshotPlayers(list, forceFull) {
+  _snapSeq++;
+  const full = !!forceFull || (_snapSeq % FULL_SNAPSHOT_EVERY) === 0;
+  const out = [];
+  for (const p of list) {
+    const prev = _lastSent.get(p.id);
+    const o = { id: p.id }; // id 必须每帧都发：客户端靠它认人
+    if (full || !prev) {
+      for (const k in p) if (k !== 'id') o[k] = p[k];
+    } else {
+      for (const k in p) {
+        if (k === 'id') continue;
+        if (prev[k] !== p[k]) o[k] = p[k];
+      }
+    }
+    _lastSent.set(p.id, p);
+    out.push(o);
+  }
+  // 清掉已离线玩家的缓存，避免 Map 随"来过的人"无限增长
+  if (_lastSent.size > list.length) {
+    const alive = new Set();
+    for (const p of list) alive.add(p.id);
+    for (const k of _lastSent.keys()) if (!alive.has(k)) _lastSent.delete(k);
+  }
+  return out;
+}
+
+// 新连接进来 / 玩家换房时调用：丢掉缓存，让下一帧全量一次。
+function invalidateSnapshotDelta() { _lastSent.clear(); }
+
 // 周期广播所有玩家状态（20Hz）：按房间分组，使对战玩家只收到同房的快照
 setInterval(() => {
   const list = worldPlayers();
@@ -1513,8 +1569,16 @@ setInterval(() => {
     if (!byRoom.has(r)) byRoom.set(r, []);
     byRoom.get(r).push(p);
   }
+  // 全量/增量是**整帧**的决定（不能按房间各自算，否则 same 玩家在不同房间里字段会互相矛盾）
+  const forceFull = (_snapSeq + 1) % FULL_SNAPSHOT_EVERY === 0;
+  const slim = diffSnapshotPlayers(list, forceFull);
+  const byId = new Map();
+  for (const p of slim) byId.set(p.id, p);
+  // 时间戳量化到 6 位小数：dayTime 是长浮点，全精度要 18 字节，这里砍掉一半
+  const t = Math.round(dayTime * 1e6) / 1e6;
   for (const [r, players] of byRoom) {
-    roomBroadcast(r, { t: 'snapshot', players, time: dayTime });
+    const out = players.map((p) => byId.get(p.id) || { id: p.id });
+    roomBroadcast(r, { t: 'snapshot', players: out, time: t });
   }
 }, SNAPSHOT_INTERVAL);
 
