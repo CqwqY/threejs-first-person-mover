@@ -280,7 +280,7 @@ export function createTimeSky(scene, renderer, opts = {}) {
       map: null,
       color: 0x000000, // 贴图未就绪时先保持全黑，避免闪白
       side: THREE.BackSide,
-      transparent: true,
+      transparent: true,   // update 里按是否处于过渡期动态切 opaque/transparent（见下）：当前时段恒不透明，杜绝两张透明球壳抢序
       opacity: 0,
       depthWrite: false,
       fog: false,
@@ -419,7 +419,15 @@ export function createTimeSky(scene, renderer, opts = {}) {
         opacity = a; // 下一时段叠在上面淡入，最终呈现 = a*下一张 + (1-a)*当前张
         order = -1;
       }
-      mesh.material.opacity = opacity;
+      const mat = mesh.material;
+      // ⚠ 防整屏白黑闪（尤其手机 TBDR）：过渡期「当前(from)」与「下一(to)」两张球壳若都为
+      //   transparent 且同位，部分 GPU 逐帧深度排序不确定 → 整屏在亮(白天)/暗(夜晚)间闪。
+      //   解法：当前时段(from)始终设为不透明背景层，透明球壳数量恒 ≤ 1（只剩 to），
+      //   不再有两张同位透明球壳抢序。transparent 翻转要 needsUpdate，只在翻转那一帧置位
+      //   （每昼夜仅 4 次相位切换），不每帧重编译。
+      const wantTransparent = opacity < 0.999;
+      if (mat.transparent !== wantTransparent) { mat.transparent = wantTransparent; mat.needsUpdate = true; }
+      mat.opacity = opacity;
       mesh.renderOrder = order;
       mesh.visible = opacity > 0.001;
       if (!mesh.visible) continue;

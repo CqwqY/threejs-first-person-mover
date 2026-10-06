@@ -271,14 +271,18 @@ function inScene(o) {
 }
 
 // 按「离相机最近」重新分配阴影名额（点光源一组、面光源代理一组，各自独立计数）
+// ⚠⚠ 距离判据只用 XZ 平面（忽略 Y）：灯的阴影该不该开，取决于「你在它水平方向多远」，
+//   而不是「你在它楼上还是楼下」。旧写法把 dy² 也算进去 → 站在一楼抬头看二楼的灯，
+//   因为高度差大、3D 距离超阈值，灯就丢了阴影（用户反馈"离灯有点距离就开始失去阴影"）。
+//   改成纯水平距离后：同一竖井上下的灯（如楼梯间、复式）照样保住阴影，只有真水平走远才让出名额。
 function rebalance(cands, max, cameraPos) {
   const list = [];
   const dead = [];
   for (const l of cands) {
     if (!l.parent || !inScene(l)) { dead.push(l); continue; } // 已从场景移除 → 顺便清出去
     l.getWorldPosition(_tmpV); // ⚠ 灯多数挂在 Group 里（家具），position 是局部坐标，必须取世界坐标
-    const dx = _tmpV.x - cameraPos.x, dy = _tmpV.y - cameraPos.y, dz = _tmpV.z - cameraPos.z;
-    list.push([dx * dx + dy * dy + dz * dz, l]);
+    const dx = _tmpV.x - cameraPos.x, dz = _tmpV.z - cameraPos.z; // 只看水平距离，忽略 Y
+    list.push([dx * dx + dz * dz, l]);
   }
   for (const l of dead) { cands.delete(l); l.castShadow = false; }
   list.sort((a, b) => a[0] - b[0]);

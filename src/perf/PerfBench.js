@@ -85,6 +85,9 @@ const state = {
   baseScale: 1,
   timeOfDay: 0.5,   // 0=00:00 0.5=12:00，固定不推进，保证可比
   buildColliders: true,
+  autoScale: false, // 分辨率模式：'auto' = 跟随游戏的自适应分辨率（弱机自动降到 0.5×）；否则固定 pixelRatio
+  dynScale: 1,      // auto 模式当前收敛到的系数（最终 pixelRatio = basePR × dynScale）
+  dynLast: 0,
   samples: [],      // 全部原始样本（含 scenario 字段）
   summaries: [],
   programsAtStart: 0,
@@ -119,7 +122,7 @@ async function buildScene() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = DEFAULT_SETTINGS.exposure ?? 0.85;
   UI.stage.appendChild(renderer.domElement);
-  log('渲染器已创建：pixelRatio=' + state.baseScale);
+  log('渲染器已创建：pixelRatio=' + currentPR() + (state.autoScale ? '（auto 模式，会按帧率自适应）' : ''));
 
   // 设备信息必须**在 renderer 建好之后**采集（GPU 型号要从 WebGL context 里取）
   state.device = collectDevice().info;
@@ -197,6 +200,31 @@ async function buildScene() {
 }
 
 // ---------------- 场景开关（只在场景边界调用）----------------
+// 画质档对应的 dpr 封顶（与游戏 _applyQuality 的 presets.dpr 对齐：high=2/mid=1.5/low=1）
+const QUALITY_DPR = ({ high: 2, mid: 1.5, low: 1 })[(DEFAULT_SETTINGS && DEFAULT_SETTINGS.quality) || 'mid'] || 1.5;
+// auto 模式的基准 pixelRatio（与游戏一致：min(设备像素比, 画质档 dpr 封顶)）
+function basePR() { return state.autoScale ? Math.min(window.devicePixelRatio || 1, QUALITY_DPR) : Number(state.baseScale) || 1; }
+// 当前生效的 pixelRatio（导出/读数用）
+function currentPR() { return state.autoScale ? basePR() * state.dynScale : basePR(); }
+
+// auto 模式自适应分辨率：与游戏 _adaptResolution 同源（地板 0.5、DROP42/RAISE54 迟滞、步长 0.15/0.08、1s 节流）。
+// 目的：让测试台在弱机上的帧率**等于真实游戏**（实机就是这么跑的），否则固定 1.0× 会把弱机帧率
+// 低估 2~3 倍，与"游戏实际很流畅"的体感直接相悖。固定模式（0.4/0.6/1.0）仍钉死，用于手动对照。
+function adaptResolution(fps) {
+  if (!state.autoScale) return;
+  const now = performance.now();
+  if (now - state.dynLast < 1000) return;
+  const FLOOR = 0.5;
+  let s = state.dynScale;
+  if (fps < 42 && s > FLOOR) s = Math.max(FLOOR, s - 0.15);
+  else if (fps > 54 && s < 1) s = Math.min(1, s + 0.08);
+  else return;
+  if (Math.abs(s - state.dynScale) < 0.01) return;
+  state.dynScale = s;
+  state.dynLast = now;
+  renderer.setPixelRatio(basePR() * s);
+}
+
 function applyScenario(id) {
   // 先完整还原上一个场景的所有状态
   renderer.shadowMap.enabled = true;
@@ -204,7 +232,8 @@ function applyScenario(id) {
   restoreLights();
   active.skyEnv = true; // 恢复环境反射开关（下面 sky.update 会把 environment 与强度设回去）
   if (sky) sky.update(state.timeOfDay, camera);
-  renderer.setPixelRatio(state.baseScale);
+  // 还原像素比：auto 模式交给自适应分辨率（每帧按真实帧率收敛），固定模式直接钉死
+  renderer.setPixelRatio(currentPR());
 
   if (id === 'no-shadow') {
     // 关阴影：会触发一次着色器重编译（programs 数会变），靠 warmup 消化掉
@@ -224,10 +253,10 @@ function applyScenario(id) {
     if ('environmentIntensity' in scene) scene.environmentIntensity = 0;
     active.skyEnv = false;
   } else if (id === 'low-res') {
-    renderer.setPixelRatio(state.baseScale * 0.5);
+    renderer.setPixelRatio(basePR() * 0.5); // 0.5×：像素数 -75%（与游戏 renderScale 同语义，乘基准）
   } else if (id === 'res-075') {
     // 0.75×：像素数 -44%。用来找「画质与帧率的甜点」，0.5× 太糊时可以落在这里
-    renderer.setPixelRatio(state.baseScale * 0.75);
+    renderer.setPixelRatio(basePR() * 0.75);
   }
 }
 
@@ -326,6 +355,9 @@ function tick(now) {
 
   if (ms > 0) collectSample(now, ms, elapsed);
 
+  // auto 模式：按真实帧率收敛分辨率（与游戏一致），让弱机测试帧率 = 实机
+  if (state.autoScale && ms > 0) adaptResolution(1000 / ms);
+
   const sc = SCENARIOS[state.scenarioIdx];
   const left = (state.warmupMs + state.durationMs - elapsed) / 1000;
   setProg(sc.name + ' · 采样中 ' + Math.max(0, left).toFixed(1) + 's');
@@ -411,6 +443,7 @@ function start() {
   state.yaw = 0;      // 与 nextScenario 一致：从同一朝向开跑，各场景才可比
   state.lastT = 0;
   state.compiled = false;
+  state.dynScale = 1; state.dynLast = 0; // auto 模式从原生分辨率起步重新收敛（每轮独立、可比）
   setControlsEnabled(false);
   UI.btnStop.disabled = false;
   // 手机上跑测试时自动收起面板 —— 否则整屏被 HUD 盖住，看不到在渲染什么。
@@ -592,7 +625,8 @@ function buildExport() {
       viewport: window.innerWidth + 'x' + window.innerHeight, // 实际渲染视口（≠ 屏幕分辨率）
       screen: window.screen.width + 'x' + window.screen.height,
       devicePixelRatio: window.devicePixelRatio,
-      renderScale: state.baseScale,
+      renderScale: currentPR(),
+      renderScaleAuto: state.autoScale,
       timeOfDay: state.timeOfDay,
       warmupMs: state.warmupMs,
       durationMs: state.durationMs,
@@ -658,9 +692,11 @@ function setControlsEnabled(on) {
 
 function readControls() {
   state.durationMs = Number(UI.selDuration.value) * 1000;
-  state.baseScale = Number(UI.selScale.value);
+  const sv = UI.selScale.value;
+  state.autoScale = (sv === 'auto');
+  state.baseScale = state.autoScale ? 1 : Number(sv); // auto 模式 baseScale 闲置（由 basePR/dynScale 决定）
   state.timeOfDay = Number(UI.selTime.value);
-  if (renderer) renderer.setPixelRatio(state.baseScale);
+  if (renderer) renderer.setPixelRatio(currentPR());
 }
 
 // 面板收起/展开。

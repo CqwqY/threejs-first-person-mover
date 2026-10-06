@@ -951,9 +951,11 @@ export class Game {
   // ⚠ 画质档 dpr 封顶已降级时（手机）画布本来就没开 MSAA，`_aaOn` 为 false → 一律 0。
   _upSamples(s) {
     if (!this._aaOn) return 0;
-    if (s <= 0.7) return 0;
-    if (s <= 0.85) return 2;
-    return 4;
+    // ⚠ 仅**原生分辨率**才上 MSAA：降分辨率时主 pass 像素已被砍到 1/4~1/2，
+    //   MSAA 的 2~4× 填充乘数不划算（填充率是大头，见 fpm-perf-20261006-102317.json）。
+    //   锐化升采样已把降采样的锯齿补回来，弱机（恒在降分辨率）直接省掉这层填充 → 帧率更稳。
+    if (s >= 0.999) return 4;
+    return 0;
   }
 
   _ensureRT() {
