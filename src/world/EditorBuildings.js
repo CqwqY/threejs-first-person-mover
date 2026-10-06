@@ -12,8 +12,11 @@ import { bakeTriMeshAsync } from './collision/trimesh.js';
 import { track } from './loadTracker.js';
 import {
   registerPointLight, unregisterPointLight, enableAreaShadow, releaseAreaShadow, clearShadowBudgets,
-  AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
+  AREA_LIGHT_DEFAULTS, LIGHT_SCALE, enableDynamicLighting, bakeFeatureEnabled,
 } from './Lights.js';
+import {
+  markBakedLayers, collectBakeableMeshes, applyBakedLightmapsToMeshes,
+} from './LightBaker.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
@@ -268,16 +271,29 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     const setupModel = (m) => {
       holder.add(m);
       holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
-      const st = mergeStaticMeshes(m);
-      if (st.after < st.before) {
-        console.info('[EditorBuildings] ' + (holder.name || 'model') + ' 网格合并 ' + st.before + ' → ' + st.after +
-          '（主渲染 + 阴影贴图两趟各少 ' + (st.before - st.after) + ' 次 draw call）');
+      const lightmaps = (it.lightmaps && it.lightmaps.length) ? it.lightmaps : null;
+      // ⚠ 烘焙过的物体：绝不做跨子网格合并 —— 合并会把网格名改掉，烘焙按「网格名」存的 key 就对不上了。
+      //   保留原始网格结构，烘焙结果才能按名套回；同时静态体改走 lightMap（关第 1 层、收实时太阳）。
+      const doMerge = !lightmaps;
+      if (doMerge) {
+        const st = mergeStaticMeshes(m);
+        if (st.after < st.before) {
+          console.info('[EditorBuildings] ' + (holder.name || 'model') + ' 网格合并 ' + st.before + ' → ' + st.after +
+            '（主渲染 + 阴影贴图两趟各少 ' + (st.before - st.after) + ' 次 draw call）');
+        }
       }
       enableShadows(m);
       // 标记「可以参与跨物件合并」：complex 物体要靠渲染网格烘 trimesh 碰撞，
       // 合并会把网格搬走，可能让还在后台跑的烘焙算一半 —— 宁可少合也不出错。
-      holder.userData.__batchable = !isComplex;
+      holder.userData.__batchable = !isComplex && doMerge;
       if (isComplex) bakeComplex();
+      // 光照烘焙分层：默认开第 1 层（受太阳实时照）；下面若带烘焙结果则关掉第 1 层改走 lightMap。
+      enableDynamicLighting(holder);
+      if (bakeFeatureEnabled() && lightmaps) {
+        applyBakedLightmapsToMeshes(collectBakeableMeshes(holder), lightmaps)
+          .then(() => markBakedLayers(holder))
+          .catch((e) => console.error('[EditorBuildings] 烘焙光照应用失败（退回实时太阳）:', e));
+      }
     };
 
     // 统一绝对路径 /assets/xxx.glb 调用；兼容旧的内嵌 data URL 记录

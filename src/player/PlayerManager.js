@@ -1,5 +1,6 @@
 // 职责：管理所有玩家（本地 + 远程）的注册、快照同步与插值更新，作为联机的玩家中心枢纽。
 import { RemotePlayer } from './RemotePlayer.js';
+import { enableDynamicLighting } from '../world/Lights.js';
 
 export class PlayerManager {
   constructor(scene) {
@@ -24,6 +25,8 @@ export class PlayerManager {
 
     const remote = new RemotePlayer(id, stateData, name, color, gender);
     this.scene.add(remote.model);
+    // 远程玩家是动态角色：开第 1 层让太阳实时照它（否则只剩环境光、发灰）。
+    enableDynamicLighting(remote.model);
 
     // 本地玩家第一人称看不到自己，模型设为不可见
     if (id === this.localId) {

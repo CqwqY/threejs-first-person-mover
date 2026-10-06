@@ -37,6 +37,32 @@ let _maxPointShadow = DEFAULT_MAX_POINT_SHADOW;
 // ⚠⚠ 点光源阴影相机的 far **硬上限**（米）。绝不能交给 Three 按 light.distance 走 —— 见 configureShadow。
 const POINT_SHADOW_FAR = 32;
 
+// 光照烘焙分层：太阳（方向光）只照「动态层」，静态体改用烘焙 lightMap，
+// 从而静态世界每像素不再做实时阴影采样（填充率红利）。见 LightBaker.js / EditorBuildings.js。
+// 约定：默认所有物体在第 0 层（环境光/半球光/编辑器点面光源都照第 0 层）；
+// 太阳只照第 1 层；需要被太阳照的物体（动态角色 + 未烘焙的静态体）用 enableDynamicLighting 开第 1 层。
+export const LAYER_DYNAMIC = 1;
+
+// 给对象及其子树开启「动态光照层」（第 1 层）：使其仍受太阳实时照亮。
+// 烘焙过的静态体不要调用这个 —— 它只走 lightMap，开太阳层会双重照亮。
+export function enableDynamicLighting(obj) {
+  if (!obj) return;
+  obj.traverse((o) => { if (o.layers) o.layers.enable(LAYER_DYNAMIC); });
+}
+
+// 光照烘焙总开关（kill-switch）：默认开启；URL 带 ?bake=0 时关闭（太阳回退为全层普照、
+// 运行时跳过 lightMap 应用）→ 任何烘焙相关问题都能一键回退到改动前行为。
+export function bakeFeatureEnabled() {
+  if (BAKE_FEATURE_OVERRIDE !== null) return BAKE_FEATURE_OVERRIDE;
+  try {
+    if (typeof location !== 'undefined' && location.search.includes('bake=0')) return false;
+  } catch (e) { /* 非浏览器环境（Node 自检）忽略 */ }
+  return true;
+}
+// 单测可注入的强制值（null=按 URL 判断）。
+export let BAKE_FEATURE_OVERRIDE = null;
+export function setBakeFeatureEnabled(v) { BAKE_FEATURE_OVERRIDE = v; }
+
 // 全局「用户摆放光源」亮度倍率：想把所有面光源/点光源（编辑器与游戏端都算）统一调亮或调暗，改这一个值。
 // 它压在每盏**用户灯**最终赋强度的地方，不影响编辑器面板/存档里你填的"设计值"——
 // 滑块上看到的 20 仍是 20，只是实际渲染时统一乘了 LIGHT_SCALE。
@@ -352,6 +378,12 @@ export function createLights() {
   const directional = new THREE.DirectionalLight(0xffffff, DEFAULT_SETTINGS.sun);
   directional.castShadow = true;
   directional.shadow.mapSize.set(DEFAULT_SETTINGS.shadowSize, DEFAULT_SETTINGS.shadowSize);
+  // ⚠ 光照烘焙分层：太阳只照「动态层」（第 1 层）。未烘焙的静态体 + 动态角色由
+  //   enableDynamicLighting 开启第 1 层；烘焙过的静态体留在第 0 层，只靠 lightMap，
+  //   避免实时太阳与它叠加成双重照亮。环境光/半球光/编辑器点面光源仍在第 0 层（普照）。
+  //   kill-switch：?bake=0 时太阳回到「第 0+1 层全照」，光照烘焙整体失效、行为回退到改动前。
+  if (bakeFeatureEnabled()) directional.layers.set(LAYER_DYNAMIC);
+  else directional.layers.enable(LAYER_DYNAMIC);
   // 阴影痤疮修复：bias 轻微下压深度，normalBias 沿法线推开采样点，消除平面上的「一条一条」条纹
   directional.shadow.bias = -0.0004;
   directional.shadow.normalBias = 1.0;

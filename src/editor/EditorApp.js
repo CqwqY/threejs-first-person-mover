@@ -30,7 +30,7 @@ import { syncFakeWindowEnvs } from '../world/EditorBuildings.js';
 import {
   updateShadowBudgets, registerPointLight, unregisterPointLight,
   enableAreaShadow, syncAreaShadow, setAreaBaseIntensity, setAreaShadowDistance, isAreaShadowCasting,
-  releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS, LIGHT_SCALE,
+  releaseAreaShadow, AREA_SHADOW_TUNING, AREA_LIGHT_DEFAULTS, LIGHT_SCALE, enableDynamicLighting,
 } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset } from '../ui/SettingsPanel.js';
 import {
@@ -38,6 +38,10 @@ import {
   applyWindowHoles, resetHolePatches, MAX_HOLES,
   createRevealMesh, disposeReveal, REVEAL_DEPTH, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
+// 光照烘焙：把太阳直射+阴影烤进各网格 lightMap（静态建筑降填充率）。编辑器点「烘焙光照」触发。
+import {
+  bakeMeshLightmaps, collectBakeableMeshes, applyBakedLightmapsToMeshes, markBakedLayers,
+} from '../world/LightBaker.js';
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -299,6 +303,7 @@ export function createEditor() {
     colliderList: document.getElementById('colliderList'),
     sceneryList: document.getElementById('sceneryList'),
     btnSave: document.getElementById('btnSave'),
+    btnBake: document.getElementById('btnBake'),
     status: document.getElementById('status'),
     btnLibrary: document.getElementById('btnLibrary'),
     libModal: document.getElementById('libModal'),
@@ -452,6 +457,9 @@ export function createEditor() {
     // buildScenery 与游戏共用同一份构建逻辑，返回统一的可编辑根列表，
     // 数组下标即稳定 key（两侧顺序一致），用于保存/还原景物变换。
     const groups = buildScenery(scene);
+    // 太阳只照第 1 层（LAYER_DYNAMIC）；让整个场景（地形/景物/景物网格）默认开第 1 层，
+    // 这样没烘焙的物体仍被太阳实时照亮。烘焙过的静态体再由 markBakedLayers 关掉第 1 层。
+    enableDynamicLighting(scene);
     groups.forEach((child, key) => {
       const rec = {
         id: nextId(), key, kind: 'scenery', name: child.name || '景物',
@@ -2540,6 +2548,8 @@ export function createEditor() {
             ? { vertices: rec.convex.vertices.slice(), faces: rec.convex.faces.slice() } : null,
           convexParts: (Array.isArray(rec.convexParts) && rec.convexParts.length)
             ? rec.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
+          // 烘焙光照结果：随场景存档进游戏运行时，按 key(meshName) 套回材质。无烘焙则为 undefined（旧行为）。
+          lightmaps: (Array.isArray(rec.lightmaps) && rec.lightmaps.length) ? rec.lightmaps.map((l) => ({ ...l })) : undefined,
         };
         // 兼容旧的内嵌 data URL 记录
         if (!out.url && rec.data) out.data = rec.data;
@@ -2650,11 +2660,22 @@ export function createEditor() {
           ? { vertices: it.convex.vertices.slice(), faces: it.convex.faces.slice() } : null,
         convexParts: (Array.isArray(it.convexParts) && it.convexParts.length)
           ? it.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
+        // 烘焙光照结果：数组 [{ key: meshName, dataURL, w, h }]，运行时游戏端按 key 套回材质。
+        lightmaps: (Array.isArray(it.lightmaps) && it.lightmaps.length) ? it.lightmaps.map((l) => ({ ...l })) : null,
         obj,
       };
       obj.name = nm;
       if (it.url) {
-        instantiate(it.url).then((m) => { obj.add(m); enableShadows(m); syncHoles(); }).catch(() => {});
+        instantiate(it.url).then((m) => {
+          obj.add(m); enableShadows(m); syncHoles();
+          // 默认开第 1 层（受太阳实时照）；下面若带烘焙结果，markBakedLayers 会把烘焙体关掉第 1 层。
+          enableDynamicLighting(rec.obj);
+          // 存档里带了烘焙结果 → 编辑器内也回放预览（静态体改走 lightMap，太阳只照动态层）
+          if (rec.lightmaps && rec.lightmaps.length) {
+            applyBakedLightmapsToMeshes(collectBakeableMeshes(rec.obj), rec.lightmaps)
+              .then(() => markBakedLayers(rec.obj));
+          }
+        }).catch(() => {});
       } else if (it.data) {
         const g = new GLTFLoader();
         g.load(it.data, (gltf) => { obj.add(gltf.scene); enableShadows(gltf.scene); }, undefined, () => {});
@@ -2735,6 +2756,62 @@ export function createEditor() {
     }
   }
   StepUI.btnSave.onclick = saveToFile;
+
+  // ---------- 光照烘焙：把太阳直射+阴影烤进各网格 lightMap ----------
+  // 烘焙后静态建筑不再做实时阴影采样（手机填充率更低），实时太阳只照动态角色。
+  // 改了建筑/灯光后务必重新点一次；结果随场景存档进游戏运行时。
+  // （markBakedLayers 已抽到 LightBaker.js 作为共享实现，游戏运行时也用它。）
+
+  async function bakeLights() {
+    if (!StepUI.btnBake) return;
+    StepUI.btnBake.disabled = true;
+    StepUI.status.textContent = '烘焙中：收集网格…';
+    StepUI.status.className = 'save-status';
+    try {
+      // 收集所有 placed 对象的可烘焙网格，按 rec.id 命名空间避免跨对象重名
+      const all = [];
+      for (const rec of state.placed) {
+        if (!rec || !rec.obj || rec.kind === 'window') continue;
+        const meshes = collectBakeableMeshes(rec.obj);
+        for (const { mesh, key } of meshes) all.push({ rec, mesh, key: rec.id + '::' + key });
+      }
+      if (!all.length) {
+        StepUI.status.textContent = '没有可烘焙的静态网格（先放置建筑/模型）';
+        StepUI.status.className = 'save-status err';
+        return;
+      }
+      StepUI.status.textContent = '烘焙中：渲染 ' + all.length + ' 张光照图…';
+      const targets = all.map(({ mesh, key }) => ({ mesh, key }));
+      const results = await bakeMeshLightmaps(renderer, scene, targets, { size: 256 });
+      // 按 rec 归组：rec.id::meshName → 该 rec 的 lightmaps 数组（key 还原为 meshName）
+      const byRec = new Map();
+      for (const r of results) {
+        const ci = r.key.indexOf('::');
+        const recId = Number(r.key.slice(0, ci));
+        const mkey = r.key.slice(ci + 2);
+        let arr = byRec.get(recId);
+        if (!arr) { arr = []; byRec.set(recId, arr); }
+        arr.push({ key: mkey, dataURL: r.dataURL, w: r.w, h: r.h });
+      }
+      for (const rec of state.placed) {
+        const arr = byRec.get(rec.id);
+        rec.lightmaps = arr && arr.length ? arr : null;
+        if (rec.obj && rec.lightmaps) {
+          await applyBakedLightmapsToMeshes(collectBakeableMeshes(rec.obj), rec.lightmaps);
+          markBakedLayers(rec.obj);
+        }
+      }
+      StepUI.status.textContent = '烘焙完成：' + results.length + ' 张光照图（记得点保存场景）';
+      StepUI.status.className = 'save-status saved';
+    } catch (e) {
+      console.error('[editor] 烘焙失败:', e);
+      StepUI.status.textContent = '烘焙失败：' + (e && e.message ? e.message : e);
+      StepUI.status.className = 'save-status err';
+    } finally {
+      StepUI.btnBake.disabled = false;
+    }
+  }
+  if (StepUI.btnBake) StepUI.btnBake.onclick = bakeLights;
 
   // ---------- 素材库：集中读取 public/models 目录 + 旧导入（悬浮预览） ----------
   StepUI.library.innerHTML = '';

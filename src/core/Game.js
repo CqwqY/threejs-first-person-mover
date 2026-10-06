@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow } from '../world/Lights.js';
+import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting } from '../world/Lights.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -237,6 +237,9 @@ export class Game {
 
     // ---- 静态世界（地面/道路/墙体 + 道具），返回统一的可编辑根列表 ----
     const roots = buildScenery(this.scene);
+    // 太阳只照第 1 层：让整个静态世界默认开第 1 层（受太阳实时照）；
+    // 烘焙过的静态体在 buildEditorBuildings 里会被 markBakedLayers 关掉第 1 层改走 lightMap。
+    enableDynamicLighting(this.scene);
     this._cityRoots = roots; // 进入对战时整组隐藏（换成竞技场），退出再整组恢复
     // 灯光单独挂载（不作为可编辑景物）；阴影聚焦目标随玩家移动
     const lights = createLights();
@@ -495,6 +498,8 @@ export class Game {
 
     // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
     this.vehicle = createVehicle(this.scene);
+    // 载具是动态物体：开第 1 层让太阳实时照它（createVehicle 内部异步加载的模型也会在加载后补开）。
+    if (this.vehicle && this.vehicle.group) enableDynamicLighting(this.vehicle.group);
     this._vehDriver = null; // 后座时记住驾驶员的玩家 id
     this._vehPaxResend = 0; // 刚坐上后座时的上报重发窗口（秒）：让服务器尽快知道有乘客，好让驾驶员开始代报
     // 触屏不显示按键提示，桌面端补上 "(F)"（coarsePointer 在上面设置面板前已判好）
@@ -4400,9 +4405,11 @@ export class Game {
       m.visible = true;
       m.rotation.set(0, 0, 0);
       this.scene.add(m);
+      enableDynamicLighting(m); // 投掷物是动态物体，开第 1 层受太阳实时照（池复用一次即可，层级持久）
       return m;
     }
     const nm = new THREE.Mesh(PROJ_GEO, projMaterial(color));
+    enableDynamicLighting(nm);
     this.scene.add(nm);
     return nm;
   }

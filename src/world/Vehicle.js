@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
+import { enableDynamicLighting } from './Lights.js';
 
 export function createVehicle(scene) {
   const group = new THREE.Group();
@@ -38,6 +39,9 @@ export function createVehicle(scene) {
       holder.rotation.y = Config.VEHICLE_YAW_OFFSET;
       holder.add(model);
       group.add(holder);
+      // 载具是动态物体：开第 1 层让太阳实时照它（group 已在 createVehicle 同步开了，
+      // 这里给异步加载进来的子模型补一层，确保车体网格也受太阳照）。
+      enableDynamicLighting(group);
       ready = true;
     })
     .catch(() => {
