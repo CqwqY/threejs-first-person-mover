@@ -233,6 +233,11 @@ export function debugCalibFrame() {
 // 创建玩家模型；label 为头顶名牌文字（如"玩家1"），gender 决定使用 girl/boy 素材，color 为名牌文字颜色
 export function createPlayerModel(label = '', gender = 'boy', color = '#ffffff') {
   const group = new THREE.Group();
+  // ⚠ 人物整组不参与「背面剔除收敛」：身体是 SkinnedMesh，骨骼矩阵可能带镜像（负行列式）
+  //   把三角形绕向翻掉，而 three 只看 object.matrixWorld 的行列式 ⇒ 收敛成单面后身体会整只消失
+  //   （头顶名牌/手持物是独立对象，照样显示 —— 表现为"人在但模型没了"）。
+  //   人物占屏像素本来就少，这点填充率收益不值得冒这个险。
+  group.userData.noCull = true;
 
   // ---- 占位身体：GLB 加载前的简单人形，避免一开始就“隐形” ----
   const bodyHolder = new THREE.Group();

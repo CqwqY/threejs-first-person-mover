@@ -109,6 +109,25 @@ console.log('【4】该跳过的必须跳过');
   noCull.userData.noCull = true;
   eq('显式 noCull 标记 → 跳过', applyBackfaceCulling(
     new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), noCull)).flipped, 0);
+
+  // ⚠⚠ 回归用例：人物身体是 SkinnedMesh —— 骨骼矩阵可能带镜像把绕向翻掉，three 只看 matrixWorld
+  //   感知不到 ⇒ 收敛成单面会让整个人消失。这类必须**无条件排除**，哪怕几何是闭合的。
+  const skin = new THREE.SkinnedMesh(
+    new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }));
+  ok(skin.isSkinnedMesh === true, '构造出了 SkinnedMesh（用例前提）');
+  const skinMat = skin.material;
+  eq('SkinnedMesh（人物身体）→ 无条件跳过', applyBackfaceCulling(skin).flipped, 0);
+  eq('  且 side 保持 DoubleSide', skinMat.side, THREE.DoubleSide);
+
+  // 标记挂在**根节点**时，子树必须整棵剪掉（traverse 会钻进去，所以实现里是显式栈）
+  const holder = new THREE.Group();
+  holder.userData.noCull = true;
+  const subMat = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide });
+  const inner = new THREE.Group();
+  inner.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), subMat));
+  holder.add(inner);
+  eq('根节点 noCull → 深层子网格也跳过（整棵剪枝）', applyBackfaceCulling(holder).flipped, 0);
+  eq('  且 side 保持 DoubleSide', subMat.side, THREE.DoubleSide);
 }
 
 console.log('【5】兜底开关 ?cull=0（A/B 对照用）');
@@ -175,8 +194,19 @@ console.log('【8】源码断言：背面剔除接进场景优化，且排在合
   ok(/culled:\s*cull\.flipped/.test(eb), '优化报告里带回剔除条数');
   const vh = src('src/world/Vehicle.js');
   const pm = src('src/player/PlayerManager.js');
-  ok(vh.includes('applyBackfaceCulling(group)'), '载具模型也收敛');
-  ok(pm.includes('applyBackfaceCulling(remote.model)'), '远程玩家模型也收敛');
+  const pmodel = src('src/player/PlayerModel.js');
+  // ⚠ 回归闸门：人物**不许**再被收敛（曾导致"人在但模型没了 + 打不到"）
+  //   去掉行尾注释再找调用，否则注释里提到这个函数名也会误判
+  const strip = (s) => s.replace(/\/\/.*$/gm, '');
+  ok(!/applyBackfaceCulling\s*\(/.test(strip(pm)), 'PlayerManager 不再对玩家模型做剔除');
+  ok(!/applyBackfaceCulling\s*\(/.test(strip(vh)), 'Vehicle 不再对载具做剔除');
+  ok(!/applyBackfaceCulling/.test(strip(pm)) && !/applyBackfaceCulling/.test(strip(vh)),
+    '两者也不再 import 它');
+  ok(/group\.userData\.noCull\s*=\s*true/.test(pmodel), '人物模型整组打 noCull 标记');
+  ok(/group\.userData\.noCull\s*=\s*true/.test(vh), '载具整组打 noCull 标记');
+  const bc = src('src/world/BackfaceCull.js');
+  ok(/if\s*\(o\.isSkinnedMesh\)\s*return;/.test(bc), 'BackfaceCull 无条件排除 SkinnedMesh');
+  ok(/o\.userData\.noCull === true\)\s*continue/.test(bc), 'BackfaceCull 对 noCull 子树整棵剪枝（非 traverse）');
 }
 
 console.log('【9】情报（非断言）：仓库里 doubleSided 材质的占比');

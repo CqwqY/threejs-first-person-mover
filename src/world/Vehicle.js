@@ -5,10 +5,11 @@ import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
 import { enableDynamicLighting } from './Lights.js';
-import { applyBackfaceCulling } from './BackfaceCull.js';
 
 export function createVehicle(scene) {
   const group = new THREE.Group();
+  // 载具是动态体：不参与背面剔除收敛（材质在实例间共享，且动态体的收益远不如静态建筑值得冒险）
+  group.userData.noCull = true;
   group.position.set(Config.VEHICLE_POS.x, 0, Config.VEHICLE_POS.z);
   group.rotation.y = Config.VEHICLE_YAW;
   scene.add(group);
@@ -43,8 +44,6 @@ export function createVehicle(scene) {
       // 载具是动态物体：开第 1 层让太阳实时照它（group 已在 createVehicle 同步开了，
       // 这里给异步加载进来的子模型补一层，确保车体网格也受太阳照）。
       enableDynamicLighting(group);
-      // 车模型也是导出器默认 doubleSided 的实心体：收敛成单面，少画一半内壁
-      applyBackfaceCulling(group);
       ready = true;
     })
     .catch(() => {

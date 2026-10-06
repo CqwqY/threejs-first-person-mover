@@ -128,17 +128,36 @@ export function planBackfaceCulling(root, opts = {}) {
   const groups = new Map(); // Material -> { mat, closed, open }
   let scanned = 0;
   let budgetHit = false;
-  if (!root || typeof root.traverse !== 'function') return { scanned, flips: [], groups: 0, budgetHit };
+  if (!root || typeof root.children === 'undefined') return { scanned, flips: [], groups: 0, budgetHit };
 
-  root.traverse((o) => {
-    if (budgetHit) return;
+  // ⚠ 用显式栈而不用 root.traverse：**要能整棵剪掉子树**。
+  //   noCull 标记挂在物件根节点上（如人物/载具的 group），traverse 仍会钻进它的网格里去。
+  const stack = [root];
+  while (stack.length) {
+    const o = stack.pop();
+    if (!o || budgetHit) continue;
+    // 整棵子树排除（人物、载具等动态体：材质在克隆实例间共享，翻一条影响所有同类）
+    if (o.userData && o.userData.noCull === true) continue;
+    if (o.isMesh || o.isLine || o.isPoints || o.isSprite) visit(o);
+    const ch = o.children;
+    for (let i = 0; i < ch.length; i++) stack.push(ch[i]);
+  }
+
+  function visit(o) {
     if (!o.isMesh || !o.material) return;
     if (o.isLine || o.isPoints || o.isSprite) return; // 线/点本来就没有背面概念
     const mat = o.material;
     if (Array.isArray(mat)) return; // 多材质网格：保守跳过
+    // ⚠⚠ 蒙皮网格（带骨骼动画的人物/怪物）**一律不碰** —— 这是踩过的坑：
+    //   three.js 判断"哪面是正面"只看 `object.matrixWorld` 的行列式（frontFaceCW），
+    //   而**骨骼矩阵本身可以带镜像（负行列式）**：蒙皮后三角形的实际绕向会被骨头翻掉，
+    //   这一部分 three 完全感知不到。DoubleSide 时正反都画、看不出问题；
+    //   一旦收敛成 FrontSide，被骨头翻过的面整片消失 —— 表现为「人物模型整只不见了」，
+    //   而头顶名牌 / 手持物是挂在锚点上的独立 Sprite 与网格，照样看得见。
+    //   人物本来也只占很少像素，收益≈0，风险却是最大的一档 ⇒ 直接排除。
+    if (o.isSkinnedMesh) return;
     // 洞壁 / 障眼法窗户等自定义 shader：它们自己管 side，别碰
     if (mat.userData && (mat.userData.fpmReveal === true || mat.userData.noCull === true)) return;
-    if (o.userData && o.userData.noCull === true) return;
     if (mat.userData && mat.userData.fpmFakeWindow === true) return;
     // 半透明 / alphaTest / 线框：双面是"必须"的（薄片、玻璃、公告板），不能剔
     if (mat.transparent || mat.wireframe) return;
@@ -160,7 +179,7 @@ export function planBackfaceCulling(root, opts = {}) {
     }
     if (st.tris >= 2 && st.ratio >= ratio) e.closed++;
     else e.open++;
-  });
+  }
 
   // 只有「用它的所有网格都是闭合体」才收敛 —— 漏一个薄片就是一次静默回归
   const flips = [];
