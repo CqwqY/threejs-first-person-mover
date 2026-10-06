@@ -18,7 +18,6 @@ export default {
         index: path.join(root, 'index.html'),
         editor: path.join(root, 'editor.html'),
         perftest: path.join(root, 'perftest.html'),
-        download: path.join(root, 'download.html'),
       },
     },
   },
