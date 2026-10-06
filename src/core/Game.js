@@ -1579,18 +1579,27 @@ export class Game {
   // ---- 手电筒：沿相机视线方向（含俯仰）照射，L 键开关 ----
   _initFlashlight() {
     if (this._flash) return;
-    // 暖白光锥：半角 30°，半影 0.4，射程 80m，decay 1.1（比物理 2 软，远处也够亮）。
+    // 暖白光锥：半角 30°，半影 0.35，射程 100m，decay 1.2（比物理 2 软，远处也够亮）。
     // 强度按现有光照量级调：three r170 是物理光照（SpotLight 强度单位为 candela），
-    // 衰减随距离上升，11cd 在 10~15m 处已接近 0，夜里根本看不见 → 提到 40cd 才能保证「有光」。
-    const fl = new THREE.SpotLight(0xfff2cc, 0, 80, Math.PI / 6, 0.4, 1.1);
+    // 衰减随距离上升，11cd 在 10~15m 处已接近 0，夜里根本看不见 → 提到 60cd 保证「有光」。
+    const fl = new THREE.SpotLight(0xfff2cc, 0, 100, Math.PI / 6, 0.35, 1.2);
     fl.castShadow = false; // 默认不投影：夜里氛围靠光锥打在墙面/地面即可，投影另开成本高
     fl.visible = false;
-    this.scene.add(fl);
-    this.scene.add(fl.target); // 目标点每帧同步到「相机位置 + 视线方向」
+    // 挂在相机上：光照方向 = 相机视线，自动跟随位置与朝向（含俯仰），
+    // 由 three 渲染管线同步 worldMatrix，无需每帧手动填世界坐标。
+    // 旧实现每帧 cam.getWorldPosition + getWorldDirection 手填，相机矩阵未刷新时会退化成
+    // 零向量/重合点 → 光锥方向退化 → 整灯不亮（表现为「按了没光」）。挂相机子节点彻底规避。
+    this.camera.add(fl);
+    fl.position.set(0, 0, 0.15); // 略前移，避免与眼睛精确重合
+    this.camera.add(fl.target);
+    fl.target.position.set(0, 0, -1); // 相机本地坐标：正前方 1m
+    fl.target.updateMatrixWorld();
+    // 相机加入场景图：确保其 worldMatrix（及子光源）在渲染前被 scene.updateMatrixWorld 更新
+    if (this.camera.parent !== this.scene) this.scene.add(this.camera);
     this._flash = fl;
     this._flashDir = new THREE.Vector3(0, 0, -1);
     this._flashOn = false;
-    this._flashMax = 40; // 开灯强度（candela，可调）
+    this._flashMax = 60; // 开灯强度（candela，可调）
   }
 
   _toggleFlashlight() {
@@ -1607,19 +1616,12 @@ export class Game {
   }
 
   _updateFlashlight() {
-    if (!this._flash || !this._flash.visible) return;
-    const cam = this.camera;
-    if (!cam || !this._flash.target) return;
-    // 防御：每帧同步绝不能抛异常——一旦这里抛错，主循环（requestAnimationFrame 已在帧首排好下一帧）
-    // 会每帧卡在 update 之前，表现为「点了手电筒就动不了/转不了头」。相机矩阵异常时跳过本帧即可。
-    try {
-      cam.getWorldPosition(this._flash.position);
-      cam.getWorldDirection(this._flashDir); // 视线方向（含俯仰）
-      if (!(Number.isFinite(this._flashDir.x) && Number.isFinite(this._flashDir.y) && Number.isFinite(this._flashDir.z))) return;
-      this._flash.target.position.copy(this._flash.position).add(this._flashDir);
-      this._flash.target.updateMatrixWorld();
-    } catch (e) {
-      if (!this._flashErr) { this._flashErr = true; console.warn('[flashlight] 每帧跟随失败，已跳过（不影响主循环）:', e); }
+    // 手电筒已作为相机子节点，跟随位置/朝向由 three 渲染管线自动处理，无需手动同步世界坐标
+    // （旧逻辑每帧 cam.getWorldPosition + getWorldDirection 手填，相机矩阵未刷新时会退化成零向量
+    //  → 光锥方向退化 → 整灯不亮；且与「挂相机子节点」的局部坐标冲突，必须弃用）。
+    // 这里仅做强度兜底：开启后若强度被别处重置，重新拉回 _flashMax。
+    if (this._flash && this._flash.visible && this._flash.intensity !== this._flashMax) {
+      this._flash.intensity = this._flashMax;
     }
   }
 

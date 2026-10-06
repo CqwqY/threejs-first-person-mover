@@ -71,8 +71,15 @@ export const SHOP_ITEMS = [
 
 // 目录可被服务端覆盖：GET /api/shop 拉到的最新商品表。为 null 时回退到上面写死的 SHOP_ITEMS。
 let CATALOG = null;
+// 合并而非整体替换：以服务端列表覆盖同名商品（价格/描述），但保留客户端写死、
+// 而服务端漏发的商品（如手电筒）。否则服务端旧版本没部署时会把 flashlight 整条冲掉，
+// 导致小满店里买不到、isOwned 恒 false、按 L 只剩一句「去小满买」的提示，灯永远开不了。
 export function setCatalog(items) {
-  if (Array.isArray(items)) CATALOG = items;
+  if (!Array.isArray(items)) return;
+  const byId = new Map();
+  for (const it of SHOP_ITEMS) if (it && it.id) byId.set(it.id, it); // 客户端基准
+  for (const it of items) if (it && it.id) byId.set(it.id, it);       // 服务端覆盖/补充
+  CATALOG = [...byId.values()];
 }
 export function getCatalog() {
   return CATALOG || SHOP_ITEMS;
