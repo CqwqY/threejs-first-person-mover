@@ -75,6 +75,7 @@ const state = {
   dist: 0,          // 相机沿航点已走过的距离
   yaw: 0,           // 固定机位模式的水平朝向（弧度，FIXED_VIEW 时每帧自增）
   lastT: 0,         // 上一帧开始时间（用于算真实帧间隔）
+  hudCollapsed: false, // 面板是否收起（手机跑测试时要让出画面）
   scenarioIdx: -1,
   scenarioStart: 0,
   device: null,     // 设备信息（GPU/CPU 核心数/内存近似值/浏览器；驱动版本·显存·温度 Web 拿不到）
@@ -319,7 +320,7 @@ function tick(now) {
   if (elapsed < state.warmupMs) {
     // warmup：跳过统计，消化着色器编译尖峰
     const sc = SCENARIOS[state.scenarioIdx];
-    UI.prog.textContent = sc.name + ' · 预热中 ' + ((state.warmupMs - elapsed) / 1000).toFixed(1) + 's';
+    setProg(sc.name + ' · 预热中 ' + ((state.warmupMs - elapsed) / 1000).toFixed(1) + 's');
     return;
   }
 
@@ -327,7 +328,7 @@ function tick(now) {
 
   const sc = SCENARIOS[state.scenarioIdx];
   const left = (state.warmupMs + state.durationMs - elapsed) / 1000;
-  UI.prog.textContent = sc.name + ' · 采样中 ' + Math.max(0, left).toFixed(1) + 's';
+  setProg(sc.name + ' · 采样中 ' + Math.max(0, left).toFixed(1) + 's');
 
   if (elapsed >= state.warmupMs + state.durationMs) finishScenario();
 }
@@ -356,6 +357,8 @@ function collectSample(now, ms, elapsed) {
   UI.calls.textContent = s.calls;
   UI.tris.textContent = s.tris.toLocaleString();
   UI.progs.textContent = programs + (programs - state.programsAtStart > 0 ? ' (+' + (programs - state.programsAtStart) + ')' : '');
+  // 收起后细条是唯一可见的读数区：至少把实时 FPS 挂上去
+  if (UI.miniFps) UI.miniFps.textContent = s.fps.toFixed(0) + ' FPS';
   if (s.heap) UI.heap.textContent = (s.heap / 1048576).toFixed(0);
   drawChart();
 }
@@ -410,6 +413,9 @@ function start() {
   state.compiled = false;
   setControlsEnabled(false);
   UI.btnStop.disabled = false;
+  // 手机上跑测试时自动收起面板 —— 否则整屏被 HUD 盖住，看不到在渲染什么。
+  // 收起后留一条细条（进度 + 实时 FPS），照样能读关键数。
+  if (isSmallScreen()) setHudCollapsed(true);
   // 逐场景预热 shader 变体（必须在记录 programsAtStart 之前完成，否则会把"首帧编译"误算成重编译）。
   // 顺序：全部场景各切一次 + 真渲一帧 → 再回到 baseline 正式开跑。
   try {
@@ -466,7 +472,8 @@ function finishAll() {
   applyScenario('baseline');
   if (sky) sky.update(state.timeOfDay, camera);
   renderFrame(0);
-  UI.prog.textContent = '测试完成 · 共 ' + state.summaries.length + ' 个场景';
+  setProg('测试完成 · 共 ' + state.summaries.length + ' 个场景');
+  setHudCollapsed(false); // 跑完展开面板 —— 结果表要能看
   log('全部场景跑完，可导出结果。');
   drawChart();
 }
@@ -476,7 +483,8 @@ function stop() {
   cancelAnimationFrame(state.rafId);
   setControlsEnabled(true);
   UI.btnStop.disabled = true;
-  UI.prog.textContent = '已手动停止';
+  setProg('已手动停止');
+  setHudCollapsed(false);
   log('已停止。');
 }
 
@@ -655,18 +663,50 @@ function readControls() {
   if (renderer) renderer.setPixelRatio(state.baseScale);
 }
 
+// 面板收起/展开。
+// ⚠ 为什么需要：手机上 HUD 是 min(560px,94vw) 宽、内容比屏幕还高 —— 跑测试时整块画面被它盖死，
+//   既看不到在渲染什么，也没法凭肉眼判断"画面是否正常"。收起后留下一条细条，
+//   只保留「进度 + 实时 FPS」，画面基本全露出来。
+// ⚠ 注意：面板盖住 canvas **不影响**任何指标（渲染器永远按 window.innerWidth/Height 全画布渲染，
+//   DOM 覆盖层不参与 GPU 工作）。所以这是"看得见"的可用性问题，不是数据正确性问题。
+function setHudCollapsed(v) {
+  const on = !!v;
+  state.hudCollapsed = on;
+  if (UI.hud) UI.hud.classList.toggle('collapsed', on);
+  if (UI.hudMini) UI.hudMini.classList.toggle('show', on);
+}
+
+// 手机上（窄屏或触摸设备）默认收起，桌面默认展开
+function isSmallScreen() {
+  try { if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true; } catch (e) { /* 忽略 */ }
+  return window.innerWidth <= 640;
+}
+
+// 进度文案同时写大面板与细条（细条在收起后是唯一可见的地方）
+function setProg(text) {
+  if (UI.prog) UI.prog.textContent = text;
+  if (UI.miniProg) UI.miniProg.textContent = text;
+}
+
 function bind() {
   UI.btnStart.onclick = () => { readControls(); start(); };
   UI.btnStop.onclick = stop;
   UI.btnJson.onclick = exportJSON;
   UI.btnCsv.onclick = exportCSV;
   UI.btnCopy.onclick = copySummary;
-  window.addEventListener('resize', () => {
+  if (UI.hudHide) UI.hudHide.onclick = () => setHudCollapsed(true);
+  if (UI.hudShow) UI.hudShow.onclick = () => setHudCollapsed(false);
+  const onResize = () => {
     if (!renderer || !camera) return;
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+  };
+  window.addEventListener('resize', onResize);
+  // 手机地址栏收起/展开时 window.innerHeight 会变，iOS 上 resize 不一定触发 → 用 visualViewport 兜住，
+  // 否则画布会停在旧尺寸（画面被截/留黑边），量出来的填充率也就没意义了。
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', () => setTimeout(onResize, 120));
 }
 
 function init() {
@@ -677,6 +717,8 @@ function init() {
     selDuration: id('selDuration'), selScale: id('selScale'), selTime: id('selTime'), chkColliders: id('chkColliders'),
     fps: id('statFps'), ms: id('statMs'), calls: id('statCalls'), tris: id('statTris'), progs: id('statProgs'),
     heap: id('statHeap'), prog: id('prog'), src: id('src'),
+    hud: id('hud'), hudMini: id('hudMini'), hudHide: id('btnHudHide'), hudShow: id('btnHudShow'),
+    miniProg: id('miniProg'), miniFps: id('miniFps'),
   });
   bind();
   readControls();
