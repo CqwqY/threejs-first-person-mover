@@ -255,5 +255,36 @@ console.log('\n【9】整棵子树剪枝：noCull 挂在根节点时，下面的
   resetOcclusion();
 }
 
+console.log('\n【10】天空球壳必须排除遮挡剔除（否则夜晚剔球壳→露出近黑 background = 天变暗/闪白）');
+{
+  // 源码红线：SkyBox 必须在两处都打 __noOcc —— ① 程序化兜底天空（createSky）② 四张时段球壳
+  const skySrc = src('src/world/SkyBox.js');
+  let nMark = (skySrc.match(/__noOcc\s*=\s*true/g) || []).length;
+  ok(nMark >= 2, 'SkyBox 给天空网格打了 __noOcc（程序化天空 + 时段球壳）', '标记数=' + nMark);
+
+  // ⚠ 这个 bug 的真实形态：球壳扫描期是 radius=1 的小球壳在原点，会被收进候选池，
+  //   之后每帧跟着相机走、缩放到 far*0.92 —— 候选框是陈旧的 2m@原点快照，
+  //   一旦那块落在某堵墙后面就整片被剔，露出 scene.background（夜晚 intensity≈0 = 近黑 → "天变暗"，
+  //   白天 intensity=1 = 浅蓝 → "闪白"），相机一动重投影又恢复。
+  const s = new THREE.Scene();
+  const wall = box(6, 6, 0.6, 0, 3, -12); // 一面普通墙当遮挡体
+  s.add(wall);
+  // 「扫描期的小球壳在原点」：没打标记时，它会被收进候选池（这就是隐患本身）
+  const domeBad = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), new THREE.MeshBasicMaterial());
+  domeBad.position.set(0, 0, 0);
+  s.add(domeBad);
+  const cam = mkCamera([0, 1.7, 0], [0, 1.7, -1]);
+  const nBad = scanOcclusion(s);
+  ok(nBad === 2, '未打标记的小球壳在原点会被收进候选池（隐患：扫描期球壳就是这个样子）', '候选=' + nBad);
+
+  // 补上 __noOcc（SkyBox 现在的做法）→ 无论如何都不进池、绝不被剔
+  domeBad.userData.__noOcc = true;
+  const nFixed = scanOcclusion(s);
+  ok(nFixed === 1, '__noOcc 的小球壳被排除，只剩墙进池', '候选=' + nFixed);
+  updateOcclusion(cam, true);
+  ok(!isHidden(domeBad), '__noOcc 的天空球壳永远不会被剔除（layers 没被动）');
+  resetOcclusion();
+}
+
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}`);
 process.exit(fails === 0 ? 0 : 1);
