@@ -5,7 +5,6 @@
 //
 // 默认不创建任何 DOM、不占任何帧时间 —— 只有地址栏带 ?pdbg 时才挂上，定位完即可删。
 import { debugPlayerBodies } from '../player/PlayerModel.js';
-import { occlusionStats } from '../world/OcclusionCull.js';
 
 export function installPlayerDebugOverlay(game) {
   if (typeof document === 'undefined' || !document.body) return null;
@@ -32,12 +31,7 @@ export function installPlayerDebugOverlay(game) {
     const lines = churn.map((c) =>
       ts(c.at) + ' ' + (c.kind === 'add' ? '+加入' : '-移除') + ' ' + c.id +
       (c.why ? '  (' + c.why + ')' : ''));
-    // 遮挡剔除（MC 那招）：手机没控制台，现场 A/B 只能靠这行 —— 加 ?occ=0 再对比这一行
-    const occ = occlusionStats();
-    const occLine = 'occ=' + (occ.on ? 'on' : 'off') + ' 候选=' + occ.candidates +
-      ' 剔除=' + occ.culled + '(' + occ.culledTris + '面) 遮挡体=' + occ.occluders +
-      ' ' + occ.ms.toFixed(2) + 'ms  [?occ=0 关掉做对照]';
-    el.textContent = head + '\n' + occLine + '\n' + rows.map((r) => JSON.stringify(r)).join('\n') +
+    el.textContent = head + '\n' + rows.map((r) => JSON.stringify(r)).join('\n') +
       (lines.length ? '\n--- 最近增删 ---\n' + lines.join('\n') : '');
   };
   tick();

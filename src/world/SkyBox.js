@@ -125,12 +125,6 @@ export function createSky(scene, opts = {}) {
   );
   uniforms.sunPosition.value.copy(sunDir);
 
-  // ⚠ 天空是「跟随相机、缩放随视距」的无限背景，绝不可进入遮挡剔除候选池：
-  // scanOcclusion 在加载期扫 scene，此时球壳还是个 radius=1 的小球壳在原点，会被当普通网格收进去；
-  // 之后它每帧跟着相机走、缩放到 far*0.92 —— 候选框是陈旧的 2m@原点快照，一旦那块落在某堵墙后面
-  // 就整片被剔，露出 scene.background 的浅蓝兜底（= 闪白/天忽明忽暗，动一下重投影又恢复）。
-  // 所以天空一律排除遮挡剔除。
-  sky.userData.__noOcc = true;
   scene.add(sky);
   return sky;
 }
@@ -294,10 +288,6 @@ export function createTimeSky(scene, renderer, opts = {}) {
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), mat);
     mesh.renderOrder = -1;
     mesh.visible = false;
-    // ⚠ 同上：时段天空球壳也是「跟随相机、缩放随视距」的无限背景，扫描期是 2m 小球壳在原点，
-    // 会被收进遮挡剔除候选池并因陈旧框被误剔 → 露出浅蓝兜底背景（闪白/天忽明忽暗）。
-    // 一律排除遮挡剔除（scanOcclusion 已识别 __noOcc）。
-    mesh.userData.__noOcc = true;
     scene.add(mesh);
     domes.set(key, mesh);
 
