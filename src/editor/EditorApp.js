@@ -36,7 +36,7 @@ import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset }
 import {
   createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS,
   applyWindowHoles, resetHolePatches, MAX_HOLES,
-  createRevealMesh, disposeReveal, REVEAL_DEPTH,
+  createRevealMesh, disposeReveal, REVEAL_DEPTH, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
 
 const DEG = Math.PI / 180;
@@ -665,15 +665,19 @@ export function createEditor() {
     return out;
   }
 
-  // 把场景里所有模型材质 + 阴影收集起来（挖洞补丁的施加对象）。
+  // 把「可能被挖到」的模型材质收集起来（挖洞补丁的施加对象）。
   // 每次调用都重新遍历：模型是异步加载的，晚到的模型也要能吃上补丁。
-  function collectHoleTargets() {
+  //
+  // ⚠⚠ 必须做**空间筛选**（2026-10-06 手机端"卡成啥了"的真凶）：
+  //   片元里只要有 `discard`，GPU 就得放弃 early-Z / 隐藏面消除（HSR）。手机 GPU 全是 TBDR，
+  //   HSR 一失效整屏 overdraw 翻数倍。所以「给谁打补丁」= 「让谁丢掉 early-Z」，
+  //   面必须压到最小 —— 只给包围盒确实碰到洞盒的物件打。
+  function collectHoleTargets(wins) {
     const mats = [];
     const seen = new Set();
-    // 只对**编辑器摆放的模型**开洞，不动游戏底景（地形/道路/树）—— 挖穿地面没有意义且开销白费
-    for (const rec of state.placed) {
-      if (!rec || !rec.obj || rec.kind === 'window') continue;
-      rec.obj.traverse((o) => {
+    const aabbs = wins.map((w) => holeAabbOf(w, HOLE_DEPTH));
+    const collect = (obj) => {
+      obj.traverse((o) => {
         if (!o.isMesh || !o.material) return;
         const list = Array.isArray(o.material) ? o.material : [o.material];
         for (const m of list) {
@@ -682,6 +686,18 @@ export function createEditor() {
           mats.push(m);
         }
       });
+    };
+    // 只对**编辑器摆放的模型**开洞，不动游戏底景（地形/道路/树）—— 挖穿地面没有意义且开销白费
+    for (const rec of state.placed) {
+      if (!rec || !rec.obj || rec.kind === 'window') continue;
+      if (objectTouchesAnyHole(rec.obj, aabbs, 0.5)) collect(rec.obj);
+    }
+    // 兜底：一个都没筛到但确实有洞 → 宁可全打也不能不出洞（并且留下痕迹便于排查）
+    if (!mats.length && aabbs.length) {
+      console.warn('[editor] 洞的空间筛选没有命中任何物件，回退为全量打补丁');
+      for (const rec of state.placed) {
+        if (rec && rec.obj && rec.kind !== 'window') collect(rec.obj);
+      }
     }
     return mats;
   }
@@ -690,7 +706,7 @@ export function createEditor() {
   // ⚠ 不是每帧调用（会遍历材质）。
   function syncHoles() {
     const wins = collectHoleWins();
-    const mats = collectHoleTargets();
+    const mats = collectHoleTargets(wins);
     const lights = [];
     if (sun && sun.shadow) lights.push(sun);
     try {
@@ -1781,6 +1797,8 @@ export function createEditor() {
     rec.obj.scale.set(s.x, s.y, s.z);
     rec.obj.position.set(rec.x ?? 0, rec.y ?? 0, rec.z ?? 0);
     rec.obj.rotation.y = (rec.rotY ?? 0);
+    // 位置/缩放/朝向变了 → 挖洞空间筛选用的包围盒缓存作废（下次 syncHoles 会重算）
+    invalidateHoleBox(rec.obj);
   }
 
   function bindProp(id, setter) {

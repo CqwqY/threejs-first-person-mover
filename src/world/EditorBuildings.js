@@ -17,7 +17,7 @@ import {
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
-  createRevealMesh, REVEAL_DEPTH,
+  createRevealMesh, REVEAL_DEPTH, holeAabbOf, objectTouchesAnyHole,
 } from './FakeWindow.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
@@ -60,20 +60,23 @@ export function syncFakeWindowEnvs(scene) {
 //   所以本函数只在 whenEditorLoadsSettled() 之后有意义，由 optimizeEditorScene() 调用；
 //   另外窗户数据本身是同步就好 的，洞的**位置**在场景重建后立刻可用。
 //
-// 收集范围：本函数把**所有编辑器摆放的物件**（placed）的材质都打上挖洞补丁。
-//   为什么不只挑"建筑"：本项目 placed 里既有楼也有家具/树，靠名字/url 猜不可靠；
-//   而挖洞补丁在 uHoleCount=0 时只是一次 uniform 比较（几乎免费），
-//   漏打的代价（洞在某个模型上不生效）远大于多打的代价。
+// ⚠⚠ 收集范围**必须做空间筛选**（2026-10-06 手机端"卡成啥了"的真凶）：
+//   片元里只要有 `discard`，GPU 就得放弃 early-Z / 隐藏面消除（HSR）。手机 GPU 全是 TBDR，
+//   HSR 失效 = 整屏 overdraw 翻数倍，帧率断崖（桌面独显带宽大，所以当时没发现）。
+//   而最初的实现是"把**所有**摆放物件的材质都打上补丁"，理由是"uHoleCount=0 时几乎免费"——
+//   那个判断只看到了 CPU 侧的一次 uniform 比较，忽略了**着色器里存在 discard 这件事本身**
+//   就会让整个材质丢掉 early-Z。于是 1 个洞污染了全场景的材质。
+//   现在改为：只给**包围盒真的碰到洞盒**的物件打补丁，其余一律保持原生材质。
 export function applyEditorHoles(scene) {
   if (!scene) return { count: 0, patched: 0, shadow: 0 };
   // ① 洞数据：把窗户记录里的角度（已存为弧度）喂给共享 uniform
   const wins = _holeWins;
-  // ② 目标材质：编辑器摆放物件的全部材质（窗户自己的 ShaderMaterial 不含 onBeforeCompile，
-  //    patchBuildingMaterial 会自动跳过它）
+  // ② 目标材质：只取「可能被挖到」的物件的材质（窗户自己的 ShaderMaterial 不含
+  //    onBeforeCompile，patchBuildingMaterial 会自动跳过它）
+  const aabbs = wins.map((w) => holeAabbOf(w, HOLE_DEPTH));
   const mats = [];
   const seen = new Set();
-  for (const h of _addedHolders) {
-    if (!h || !h.parent) continue;
+  const collect = (h) => {
     h.traverse((o) => {
       if (!o.isMesh || !o.material) return;
       const list = Array.isArray(o.material) ? o.material : [o.material];
@@ -83,6 +86,16 @@ export function applyEditorHoles(scene) {
         mats.push(m);
       }
     });
+  };
+  for (const h of _addedHolders) {
+    if (!h || !h.parent) continue;
+    if (objectTouchesAnyHole(h, aabbs, 0.5)) collect(h);
+  }
+  // ⚠ 兜底：一个都没筛到（包围盒不可靠 / 模型还没加载完）但确实有洞 → 宁可全打也不能不出洞。
+  //   这条分支一旦经常走到，说明包围盒有问题，会在控制台留下痕迹。
+  if (!mats.length && aabbs.length) {
+    console.warn('[EditorBuildings] 洞的空间筛选没有命中任何物件，回退为全量打补丁（可能是模型还没加载完）');
+    for (const h of _addedHolders) { if (h && h.parent) collect(h); }
   }
   // ③ 阴影：太阳方向光的阴影深度材质要单独打补丁，否则洞在阴影里"补回去"了。
   //    找场景里第一盏开了阴影的平行光（本项目的太阳）。

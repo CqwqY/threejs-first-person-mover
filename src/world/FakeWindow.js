@@ -321,11 +321,15 @@ export const holeUniforms = {
   uHoleHalf: { value: Array.from({ length: MAX_HOLES }, () => new THREE.Vector3(0, 0, 0)) },
 };
 
-// 已打补丁的材质集合。**必须**用它来防重复包装 onBeforeCompile ——
-// 一旦同一份材质被 patch 两次，onBeforeCompile 会变成两层包装，
-// 而每层都会各注入一份 #define MAX_WINDOW_HOLES → shader 里出现重复定义 → 编译直接报错。
-// （用 WeakSet 而非 Set：材质被 GC 后标记自动消失，不会永久占内存。）
-let _holeAppliedMats = new WeakSet();
+// 已打补丁的材质 → 它原本的 onBeforeCompile。**必须**记着才能防两件事：
+//   ① 重复包装 —— 同一材质被 patch 两次会让 onBeforeCompile 变两层包装，
+//      每层各注入一份 #define MAX_WINDOW_HOLES → shader 重复定义 → 编译直接报错。
+//   ② **撤不掉** —— 片元里只要存在 `discard`，GPU 就得放弃 early-Z / HSR
+//      （手机 TBDR 上这是整屏 overdraw 翻倍）。所以"洞全部消失"时必须把材质**恢复原样**，
+//      否则那栋楼会永远带着 discard 跑，白白丢掉 early-Z。
+// ⚠ 用 Map 而不是 WeakSet：要**主动遍历**它去恢复，WeakSet 遍历不了。
+//   强引用不会造成泄漏 —— 材质本来就活在场景里。
+const _holeAppliedMats = new Map();
 
 /**
  * 计算一个窗户（世界空间）对应的「世界轴对齐挖洞盒」。
@@ -368,6 +372,58 @@ export function computeHoleBox(win, depth) {
     hy: Math.abs(e0.y) + Math.abs(e1.y) + Math.abs(e2.y),
     hz: Math.abs(e0.z) + Math.abs(e1.z) + Math.abs(e2.z),
   };
+}
+
+/**
+ * 一个窗户对应的洞盒（世界轴对齐 AABB），供「哪些物件可能被挖到」的空间筛选用。
+ * @returns {{minX:number,maxX:number,minY:number,maxY:number,minZ:number,maxZ:number}}
+ */
+export function holeAabbOf(win, depth) {
+  const b = computeHoleBox(win, depth);
+  return {
+    minX: b.cx - b.hx, maxX: b.cx + b.hx,
+    minY: b.cy - b.hy, maxY: b.cy + b.hy,
+    minZ: b.cz - b.hz, maxZ: b.cz + b.hz,
+  };
+}
+
+const _holeBox3 = new THREE.Box3();
+
+/**
+ * 物件的世界包围盒是否与任一洞盒相交。
+ *
+ * ⚠⚠ 这道筛选**不是"省点事"的优化，而是必须做的正确性/性能修正**：
+ *   片元着色器里只要有 `discard`，GPU 就不能做 early-Z / 隐藏面消除（HSR）——
+ *   手机 GPU 全是 TBDR，HSR 一失效就是整屏 overdraw 翻数倍，帧率断崖。
+ *   所以「给谁打挖洞补丁」等价于「让谁丢掉 early-Z」，补丁面必须压到最小：
+ *   只给**包围盒真的碰到洞盒**的物件打，其余一律保持原生材质。
+ *
+ * 包围盒缓存在 `obj.userData.__holeBox3`；模型是异步加载的，
+ * 第一次可能是空的（还没挂网格）→ 此时**不缓存**、返回 false，等下次加载完再算。
+ */
+export function objectTouchesAnyHole(obj, aabbs, pad) {
+  if (!obj || !Array.isArray(aabbs) || !aabbs.length) return false;
+  let box = obj.userData && obj.userData.__holeBox3;
+  if (!box) {
+    _holeBox3.setFromObject(obj);
+    if (_holeBox3.isEmpty()) return false; // 还没加载完 / 空节点：不缓存，下次再试
+    box = _holeBox3.clone();
+    if (!obj.userData) obj.userData = {};
+    obj.userData.__holeBox3 = box;
+  }
+  const p = pad || 0;
+  for (let i = 0; i < aabbs.length; i++) {
+    const a = aabbs[i];
+    if (box.min.x <= a.maxX + p && box.max.x >= a.minX - p &&
+      box.min.y <= a.maxY + p && box.max.y >= a.minY - p &&
+      box.min.z <= a.maxZ + p && box.max.z >= a.minZ - p) return true;
+  }
+  return false;
+}
+
+/** 物件移动/换模型后清掉包围盒缓存（编辑器拖动、读取存档时调用）。 */
+export function invalidateHoleBox(obj) {
+  if (obj && obj.userData) delete obj.userData.__holeBox3;
 }
 
 /**
@@ -492,8 +548,30 @@ export function patchBuildingMaterial(mat) {
   };
   // ⚠ 改 shader 源码必须重编译。但**不要**在这里调 needsUpdate —— 由调用方在「洞集合真的变了」
   //   之后统一调一次，避免每次 patch 都触发一次全场重编译尖峰。
-  _holeAppliedMats.add(mat);
+  _holeAppliedMats.set(mat, prev); // 记下原回调，供 unpatchAllHoleMaterials 恢复
   return true;
+}
+
+/**
+ * 撤销**所有**挖洞补丁，把材质恢复成原生（含它自己原本的 onBeforeCompile）。
+ *
+ * 调用时机：洞的数量变成 0 时。理由见 `_holeAppliedMats` 的注释 ——
+ * 只要 shader 里还有 `discard`，这个材质就一直丢掉 early-Z，哪怕洞早没了。
+ *
+ * ⚠ 代价是这批材质重编译一次；所以只在「从有洞变成没洞」这个边沿触发，不要每帧调。
+ * @returns {number} 实际被恢复的材质数
+ */
+export function unpatchAllHoleMaterials() {
+  let n = 0;
+  for (const [mat, prev] of _holeAppliedMats) {
+    try {
+      mat.onBeforeCompile = prev;
+      mat.needsUpdate = true;
+      n++;
+    } catch (e) { /* 材质可能已被销毁：跳过 */ }
+  }
+  _holeAppliedMats.clear();
+  return n;
 }
 
 /**
@@ -536,6 +614,22 @@ export function patchShadowMaterial(light) {
  */
 export function applyWindowHoles(wins, mats, lights, opts = {}) {
   const count = setHoleList(wins, opts.depth);
+  // ⚠ 洞全部消失（取消勾选 / 删掉最后一扇挖洞窗）时，**必须把已打的补丁撤掉**：
+  //   否则那些材质的 shader 里仍留着 `discard`，GPU 会一直放弃 early-Z / HSR ——
+  //   手机上就是"没有任何洞，却还是卡"。这也是本轮手机卡顿的同一根因的另一面。
+  if (count === 0) {
+    const restored = unpatchAllHoleMaterials();
+    if (restored > 0) {
+      // 让灯光的阴影深度材质也回到原生（否则阴影那趟仍带着 discard）
+      for (const l of (Array.isArray(lights) ? lights : [])) {
+        if (l && l.shadow && l.shadow.__fpmHolePatched) {
+          l.shadow.customDepthMaterial = l.shadow.__fpmPrevDepthMat || null;
+          l.shadow.__fpmHolePatched = false;
+        }
+      }
+    }
+    return { count, patched: 0, shadow: 0, restored };
+  }
   let patched = 0;
   for (const m of (Array.isArray(mats) ? mats : [])) {
     if (patchBuildingMaterial(m)) patched++;
@@ -560,7 +654,9 @@ export function applyWindowHoles(wins, mats, lights, opts = {}) {
 // — 若换成了新实例，新实例不在集合里、会被正常打补丁。
 // 两种情况都不需要重置。保留此导出仅供「确知材质被整体换掉且想强制重打」的场景。
 export function resetHolePatches() {
-  _holeAppliedMats = new WeakSet();
+  // ⚠ 必须先**恢复**再清表：只清表的话，那些材质的 onBeforeCompile 仍是包装过的、
+  //   而原来那个回调的引用已经丢了 → 永远恢复不回去（shader 里永远留着 discard）。
+  unpatchAllHoleMaterials();
 }
 
 // ===========================================================================
