@@ -253,6 +253,9 @@ export const Config = {
   GRAPPLE_MAX_TIME: 2.4,          // 单次抓钩最长持续（秒），到时自动松手
   GRAPPLE_STOP_DIST: 1.9,         // 离锚点这么近就松手（米）
   GRAPPLE_COOLDOWN: 0,            // 松手后多久才能再抓（秒）。0 = 无冷却，松开即可立刻再抓
+  GRAPPLE_INHERIT: 0.9,           // 半路松手（含超时）时，把拽人的水平速度保留多少交给常规移动＝惯性继承
+  GRAPPLE_INHERIT_TIME: 0.9,      // 这份惯性衰减掉的时长（秒）
+  GRAPPLE_ARRIVE_DAMP: 0.1,       // **到点**松手时把速度乘这个系数收住（防冲过柱子掉岩浆）；半路松手不乘
   GRAPPLE_THROW: 26,              // 钩中人时把对方甩出去的水平速度（米/秒）
   GRAPPLE_THROW_UP: 9,            // 钩中人时附加的向上速度（米/秒）
   GRAPPLE_CATCH_ARC: 18,          // 钩人的判定张角（度，以准星为中轴）

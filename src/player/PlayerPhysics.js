@@ -19,6 +19,13 @@ const BP_REBUILD_EVERY = 300;
 // 查询外扩（米）：碰撞解析会把玩家推开、位置随之变化，而宽相位是推开**之前**算的。
 const BP_PAD = 0.6;
 
+// 惯性继承的衰减速率（1/秒）：0.9 秒左右衰减到 ~10%。
+// 松手后能顺着原方向继续冲一段（抓钩 25m/s → 约多冲 8 米），又不至于一直滑、失去操控感。
+const MOMENTUM_DECAY = 2.6;
+// 起跳冲量余量的衰减速率（1/秒）：约 0.4 秒衰减到 1/e。
+// 被 velocityHold 覆盖竖直速度时（抓钩拽人），这一份叠加在上面，跳完仍由抓钩接管。
+const JUMP_EXTRA_DECAY = 2.5;
+
 // SAT 候选轴复用缓冲（见 _resolveConvex）：
 // 长度 = 世界三轴(3) + 凸包面法线封顶(45) + 余量。**槽位复用、只挪游标，绝不每帧分配**。
 // ⚠ 模块级共享是安全的：_resolveConvex 是同步的、不重入；而 minAxis 存的是槽位里的**对象引用**，
@@ -55,6 +62,12 @@ export class PlayerPhysics {
     this.frictionMult = 1;   // 地面摩擦倍率（仅影响无输入时的减速快慢）
     this.accelMult = 1;      // 加速度倍率（仅影响有输入时提速快慢）
     this.velocityHold = null; // 持续速度覆盖 {x,y,z,t}（t 秒内每帧强制该速度）
+    // 起跳冲量的「余量」：velocityHold 覆盖竖直速度时仍把这一份叠加上去（抓钩拽人时按跳要用）。
+    // ⚠ 必须在构造函数里赋初值：`*=` 型字段没有初值会变成 NaN，NaN 参与比较恒 false → 整块静默失效。
+    this._jumpExtra = 0;
+    // 惯性继承 {x,z,t}：外部（抓钩半路松手）交还给常规移动的水平速度，逐帧衰减并叠加在输入速度之上。
+    // 没有它的话，第 2 步每帧把水平速度直接写成「输入×速度」，松手瞬间 25m/s 就地归零＝急停。
+    this.momentum = null;
     this.jetpack = false; // 喷气背包：开启后按住 Space 可悬停/上升
     this.canJump = true;  // 是否允许跳跃（骑电动车时关掉）
     this.controlLock = false; // 锁定操控：对话栏打开等 UI 占用时，移动/跳/喷气不响应
@@ -239,6 +252,19 @@ export class PlayerPhysics {
       this.velocity.z += (targetVz - this.velocity.z) * k;
     }
 
+    // ---- 2.5 惯性继承：外部甩出来的水平速度（抓钩半路松手）叠加在常规移动之上并逐帧衰减 ----
+    // 上面第 2 步是「直接写」水平速度，松手那一刻拽人的 25m/s 会被整块抹掉（表现为一松手就急停）。
+    // 这里改成叠加 + 指数衰减：松手后顺着原方向继续冲一段再收住，跳跃中松手就能顺势飞出去。
+    if (this.momentum && this.momentum.t > 0) {
+      this.velocity.x += this.momentum.x;
+      this.velocity.z += this.momentum.z;
+      this.momentum.t -= dt;
+      const mk = Math.exp(-dt * MOMENTUM_DECAY);
+      this.momentum.x *= mk;
+      this.momentum.z *= mk;
+      if (this.momentum.t <= 0) this.momentum = null;
+    }
+
     // ---- 3. 重力：竖直方向速度持续向下累加（GRAVITY 为负值）----
     this.velocity.y += Config.GRAVITY * this.gravityMult * dt;
     // 终端速度：限制下坠最快速度，避免高重力下穿地
@@ -254,9 +280,15 @@ export class PlayerPhysics {
 
     // ---- 4. 跳跃：落地后重置连跳次数；只要还有剩余次数就允许再跳 ----
     // 采用一次性探测（consumeJump），防止按住空格时连续起跳
-    if (state.onGround) this._jumpsUsed = 0;
+    if (state.onGround) {
+      this._jumpsUsed = 0;
+      this._jumpExtra = 0; // 落地：起跳冲量的余量一并清掉，别攒着
+    }
     if (this.canJump && !this.controlLock && this._jumpsUsed < this.maxJumps && input.consumeJump()) {
       this.velocity.y = Config.JUMP_VELOCITY * this.jumpMult; // 设置竖直初速度（受起跳倍率影响）
+      // 记一份起跳冲量：4.5 覆盖竖直速度时（抓钩拽人每帧都写 velocityHold）会把这次起跳整块冲掉，
+      // 表现就是「被拽着的时候按跳完全没反应」。有了它，脚在地上照样能正常起跳。
+      this._jumpExtra = this.velocity.y;
       this._jumpsUsed++;
       state.onGround = false;
     }
@@ -265,10 +297,12 @@ export class PlayerPhysics {
     if (this.velocityHold && this.velocityHold.t > 0) {
       const h = this.velocityHold;
       if (h.x !== null) this.velocity.x = h.x;
-      if (h.y !== null) this.velocity.y = h.y;
+      if (h.y !== null) this.velocity.y = h.y + this._jumpExtra; // 叠上本帧/刚才那次起跳的冲量（见第 4 步）
       if (h.z !== null) this.velocity.z = h.z;
       h.t -= dt;
       if (h.t <= 0) this.velocityHold = null;
+      // 冲量余量逐帧衰减：跳完这一下仍由 velocityHold 接管，不会一直往上飘
+      this._jumpExtra *= Math.exp(-dt * JUMP_EXTRA_DECAY);
     }
 
     // ---- 5. 积分更新位置：把位置写入 state，供相机与网络读取 ----

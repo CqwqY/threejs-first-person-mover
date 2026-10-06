@@ -2605,7 +2605,8 @@ export class Game {
     const item = this._skillMap ? this._skillMap[0] : null;
     if (item) {
       const eff = this._effectForItem(item);
-      this.skillSlots.assign(0, { label: eff.label, onActivate: eff.run });
+      // 同 _restoreSkills：0 号槽还原时也要把 noCd 带回去（否则原本免冷却的抓钩在打完 Boss 后开始卡顿）
+      this.skillSlots.assign(0, { label: eff.label, onActivate: eff.run, noCd: eff.noCd === true });
     } else {
       this.skillSlots.clearSlot(0);
     }
@@ -4775,6 +4776,10 @@ export class Game {
       case 'grapple':
         return {
           label: '抓钩',
+          // ⚠ 抓钩**不要**技能槽那 800ms 的防连点间隔（SkillSlots 的 COOLDOWN）：
+          //   那道间隔对它是凭空的 0.8 秒冷却，手感上等于"抓一次要等一下"。
+          //   抓钩自己的节奏由 GRAPPLE_COOLDOWN(=0) 与"再按一次=松手"控制。
+          noCd: true,
           run: () => this._fireGrapple(),
         };
       case 'gatling':
@@ -4847,7 +4852,7 @@ export class Game {
   // 把物品装备到指定槽位（0 起），并持久化
   _setSlot(index, item) {
     const eff = this._effectForItem(item);
-    this.skillSlots.assign(index, { label: eff.label, onActivate: eff.run });
+    this.skillSlots.assign(index, { label: eff.label, onActivate: eff.run, noCd: eff.noCd === true });
     this._skillMap[index] = item;
     this._saveSkillSlots(this._skillMap);
   }
@@ -4866,7 +4871,9 @@ export class Game {
       const item = this._skillMap[key];
       if (idx >= 0 && idx < SLOT_COUNT && item) {
         const eff = this._effectForItem(item);
-        this.skillSlots.assign(idx, { label: eff.label, onActivate: eff.run });
+        // ⚠ noCd 必须一起转发：少了它，读档恢复出来的抓钩会被技能槽那 800ms 防连点间隔卡住
+        //（表现：刚进游戏抓一次要等一下，重新装备一次又好了）。
+        this.skillSlots.assign(idx, { label: eff.label, onActivate: eff.run, noCd: eff.noCd === true });
       } else {
         delete this._skillMap[key];
       }
@@ -6316,7 +6323,7 @@ export class Game {
 
   // 再按一次 = 松手；未抓住时按 = 甩钩
   _fireGrapple() {
-    if (this._grapple) { this._endGrapple(); return; } // 已经抓着 → 松开
+    if (this._grapple) { this._endGrapple(true); return; } // 已经抓着 → 松开（半路松手：惯性继承）
     if (this._dead || this._soul) return;
     if (this.localState.ride) { this._toast('骑车时用不了抓钩'); return; }
     if (this._grappleCd > 0) return;
@@ -6461,10 +6468,25 @@ export class Game {
     return best;
   }
 
-  _endGrapple() {
+  // 结束抓钩。
+  // inherit = true 表示「还在半路就把钩松了」（再按一次 / 超时）：把拽人的那股速度交给常规移动，
+  //   松手后顺着原方向继续冲一段（惯性继承），跳起来再松手就能飞出去。
+  // inherit = false（默认）用于到点落地、死亡、切场景等：这些场合要收住速度 / 不该再获得冲劲。
+  _endGrapple(inherit = false) {
+    const phys = this.localPlayer.physics;
     // 只清掉自己写进去的那份速度覆盖（控制枪可能也在用 velocityHold）
-    if (this._grappleHold && this.localPlayer.physics.velocityHold === this._grappleHold) {
-      this.localPlayer.physics.velocityHold = null;
+    const hold = this._grappleHold;
+    // 只有「正在拽人」才有速度可继承；钩爪还在飞的时候人是没被拽动的
+    const pulling = !!(hold && this._grapple && !this._grapple.flying);
+    if (hold && phys.velocityHold === hold) {
+      phys.velocityHold = null;
+      if (inherit && pulling) {
+        // ⚠ 取的是 phys.velocity（它此刻就等于拽人的速度），不是 hold：万一这一帧被别处改过速度，
+        //   继承真实速度才不会凭空多出一段。水平交给 momentum（见 PlayerPhysics 第 2.5 步），
+        //   竖直不在这里补——velocity.y 本来就是拽人的竖直速度，重力会接着作用。
+        const keep = Config.GRAPPLE_INHERIT;
+        phys.momentum = { x: phys.velocity.x * keep, z: phys.velocity.z * keep, t: Config.GRAPPLE_INHERIT_TIME };
+      }
     }
     // 抓着一钩才广播「收回」：_endGrapple 也被切场景/超时等路径调用，没有活钩就别发。
     // 少发一条只是别人那边绳子多留一会儿（他们自己有时长兜底），多发会让绳子乱闪。
@@ -6505,18 +6527,22 @@ export class Game {
       const dist = Math.hypot(dx, dy, dz);
       const stop = g.stop || Config.GRAPPLE_STOP_DIST;
       // 光点锚点收得比抓墙更紧（g.stop），否则会在柱子斜上方就松手 → 落在柱外掉进岩浆
-      if (dist <= stop || g.t <= 0) {
-        // 到点了把速度收住：拽人时每帧速度都被覆盖成 25m/s，直接松手会带着这股冲劲
-        // 冲过柱子（锚点在半空中，没有墙挡）再掉下去。收住后靠重力自然落到柱顶。
-        this.localPlayer.physics.velocity.multiplyScalar(0.1);
-        // 光点抓钩：直接站到柱顶。超时（t<=0）时人还在半空，不能凭空瞬移过去，所以只在正常到点时生效。
-        if (g.landY != null && dist <= stop) {
-          this.localState.x = g.landX;
-          this.localState.z = g.landZ;
-          this.localState.y = g.landY;
-          this.localPlayer.physics.velocity.set(0, 0, 0);
+      const arrived = dist <= stop;
+      if (arrived || g.t <= 0) {
+        if (arrived) {
+          // 到点了把速度收住：拽人时每帧速度都被覆盖成 25m/s，直接松手会带着这股冲劲
+          // 冲过柱子（锚点在半空中，没有墙挡）再掉下去。收住后靠重力自然落到柱顶。
+          this.localPlayer.physics.velocity.multiplyScalar(Config.GRAPPLE_ARRIVE_DAMP);
+          // 光点抓钩：直接站到柱顶。超时（t<=0）时人还在半空，不能凭空瞬移过去，所以只在正常到点时生效。
+          if (g.landY != null) {
+            this.localState.x = g.landX;
+            this.localState.z = g.landZ;
+            this.localState.y = g.landY;
+            this.localPlayer.physics.velocity.set(0, 0, 0);
+          }
         }
-        this._endGrapple();
+        // 半路被超时掐断 → 惯性继承（继续冲一段）；正常到点 → 收住，别冲过柱子掉岩浆
+        this._endGrapple(!arrived);
         return;
       }
       // 用 velocityHold 每帧覆盖速度：重力与输入都被覆盖，拽得干脆且仍会被墙挡住

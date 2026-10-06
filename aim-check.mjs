@@ -63,7 +63,9 @@ ok(/noClip = !!\(this\._combat && this\._combat\.mode === 'grapple'\)/.test(game
 ok(/_endGrapple\(\)[\s\S]{0,400}?physics\.noClip = false;/.test(gameSrc) ||
    /physics\.noClip = false;[\s\S]{0,400}?this\._grapple = null;/.test(gameSrc),
   '_endGrapple 里关掉 noClip（松手/死亡/切场景都走这里）');
-ok(/if \(!this\.noClip\) \{\s*\n\s*this\._resolveWorldCollisions/.test(physicsSrc),
+// ⚠ 中间隔着注释与「宽相位」那几行，所以不能要求 `{` 的下一行就是 _resolveWorldCollisions：
+//   只要「碰撞解析」与「地面吸附」都落在同一个 noClip 分支里即可（之前写死相邻行 → 假阳性）
+ok(/if \(!this\.noClip\) \{[\s\S]{0,800}?this\._resolveWorldCollisions[\s\S]{0,600}?this\._snapToGround/.test(physicsSrc),
   '物理层在 noClip 时整段跳过碰撞与地面吸附');
 ok(/this\.noClip = false;/.test(physicsSrc), 'PlayerPhysics 默认 noClip = false');
 
@@ -137,7 +139,11 @@ ok(reachable >= GRAPPLE_SPAWN_COUNT, '每个出生点都至少勾得到一根柱
 // Game 侧确实把 landY 记进抓钩状态、并在到点时用上
 ok(/landY: beacon\.topY \+ Config\.PLAYER_HEIGHT/.test(gameSrc), '抓钩状态里记下柱顶站立点 landY');
 ok(/landX: beacon\.x/.test(gameSrc) && /landZ: beacon\.z/.test(gameSrc), 'landX/landZ 取光点（柱心）水平坐标');
-ok(/g\.landY != null && dist <= stop/.test(gameSrc), '只在正常到点时落地（超时在半空不瞬移）');
+// ⚠ 到点判定已被提成 `const arrived = dist <= stop;`，落地那段搬进了 `if (arrived) {`：
+//   语义没变（超时≠到点，不瞬移），但断言必须跟着走，否则必然假阳性。
+ok(/const arrived = dist <= stop;/.test(gameSrc)
+   && /if \(arrived\) \{[\s\S]{0,600}?if \(g\.landY != null\) \{/.test(gameSrc),
+  '只在正常到点（arrived）时落地（超时在半空不瞬移）');
 ok(/this\.localState\.y = g\.landY;/.test(gameSrc), '到点后把人放到柱顶');
 
 arena.dispose();

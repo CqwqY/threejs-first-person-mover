@@ -126,14 +126,20 @@ export function createSkillSlots(opts = {}) {
   function fire(slot) {
     if (boxHidden) return; // 整体隐藏时（对战 / 灵魂出窍）技能不可触发，而不只是看不见
     if (!slot || !slot.act) return;
+    // ⚠ COOLDOWN 的本意是**防连点**（一次点击别触发两回），不是玩法上的技能冷却。
+    //   但像抓钩这种「松手就能立刻再抓」的技能被它卡住，玩家感受到的就是凭空多出 0.8 秒冷却
+    //   ⇒ 允许技能在注册时声明免冷却（noCd），此时只跳过间隔，不做变暗反馈。
+    const cd = slot.noCd ? 0 : COOLDOWN;
     const now = performance.now();
     if (now < slot.cdUntil) return;
-    slot.cdUntil = now + COOLDOWN;
-    // 手机端槽位藏在轮盘里时，反馈要打在看得见的按钮上；网格模式下槽位自己就看得见
-    const visual = (coarse && mobileMode !== 'grid') ? box : slot.el;
-    visual.style.transition = 'opacity .12s ease';
-    visual.style.opacity = '0.55';
-    setTimeout(() => { visual.style.opacity = '1'; }, COOLDOWN);
+    slot.cdUntil = now + cd;
+    if (cd > 0) {
+      // 手机端槽位藏在轮盘里时，反馈要打在看得见的按钮上；网格模式下槽位自己就看得见
+      const visual = (coarse && mobileMode !== 'grid') ? box : slot.el;
+      visual.style.transition = 'opacity .12s ease';
+      visual.style.opacity = '0.55';
+      setTimeout(() => { visual.style.opacity = '1'; }, cd);
+    }
     slot.act();
   }
 
@@ -482,7 +488,7 @@ export function createSkillSlots(opts = {}) {
     keyEl.textContent = keyName.slice(-1);
     el.appendChild(keyEl);
 
-    const slot = { el, labelEl: label, act: null, name: '', cdUntil: 0, keyName };
+    const slot = { el, labelEl: label, act: null, name: '', cdUntil: 0, keyName, noCd: false };
 
     // 槽位自身手势：PC 与手机「网格」模式共用同一套；轮盘模式下函数内部直接放行不干活
     bindSlotGesture(slot);
@@ -628,6 +634,8 @@ export function createSkillSlots(opts = {}) {
     if (!slot) return false;
     slot.name = opts.label || '技能';
     slot.act = opts.onActivate || null;
+    // 免冷却：抓钩这类「松手即可立刻再抓」的技能不要那 800ms 防连点间隔
+    slot.noCd = opts.noCd === true;
     paint(slot);
     refreshBox();
     return true;
@@ -639,6 +647,7 @@ export function createSkillSlots(opts = {}) {
     if (!slot) return;
     slot.name = '';
     slot.act = null;
+    slot.noCd = false;
     paint(slot);
     refreshBox();
   }
