@@ -21,7 +21,10 @@ export const DEFAULT_SETTINGS = {
   viewFar: 500, // 视距（相机远裁剪面 / 绘制距离）—— 客户端本地可调
   shadowR: 42, // 阴影覆盖半宽（以 sunTarget 为中心）
   shadowSize: 2048, // 阴影贴图边长（画质档会按档位覆盖此值）
-  castShadow: true, // 阴影总开关
+  // 阴影总开关。⚠ 默认**关闭**：实测（fpm-perf）确认本项目的唯一瓶颈是填充率，
+  //   关阴影能直接省掉一整趟全场景投影 + 主 pass 里每像素的阴影采样与 IBL 之外的额外开销。
+  //   想要阴影的人在设置里打开即可（打开后即时生效，见 Game 的 castShadow 绑定）。
+  castShadow: false, // 阴影总开关
   quality: 'mid', // 画质档：high / mid / low（聚合控制阴影分辨率、dpr 封顶、阴影类型）
   renderScale: 'auto', // 渲染分辨率：auto=自适应；'85'/'70' 等 = 钉死为该百分比（弱卡兜底）
   sharpen: 0.5, // 超分锐化强度：0=关；降分辨率后靠它找回清晰度（过大反而显锯齿）
@@ -43,7 +46,20 @@ export const DEFAULT_SETTINGS = {
 const STORE_KEY = 'scene-settings-v1'; // 编辑器「光照设计」键：客户端也读取此键应用光照
 const GAME_STORE_KEY = 'scene-settings-game-v1'; // 客户端图形设置键（视距/阴影本地可调）
 
+// 「同一套默认值、两种场景」的例外表（按存储键覆盖 DEFAULT_SETTINGS）：
+//   编辑器是**光照设计工具** —— 没阴影就没得调，烘焙也烘不出东西 ⇒ 编辑器侧必须默认开。
+//   游戏端默认关（填充率是实测出来的唯一瓶颈）。两边各写各的键，互不干扰。
+const STORE_KEY_DEFAULTS = {
+  [STORE_KEY]: { castShadow: true },
+};
+
+export function defaultsFor(storeKey) {
+  const ov = STORE_KEY_DEFAULTS[storeKey];
+  return ov ? { ...DEFAULT_SETTINGS, ...ov } : DEFAULT_SETTINGS;
+}
+
 export function loadSettings(storeKey = STORE_KEY) {
+  const BASE = defaultsFor(storeKey);
   let saved = {};
   try {
     saved = JSON.parse(localStorage.getItem(storeKey) || '{}') || {};
@@ -60,7 +76,7 @@ export function loadSettings(storeKey = STORE_KEY) {
     if (typeof localStorage !== 'undefined') {
       try {
         saved.version = DEFAULT_SETTINGS.version;
-        localStorage.setItem(storeKey, JSON.stringify({ ...DEFAULT_SETTINGS, ...saved }));
+        localStorage.setItem(storeKey, JSON.stringify({ ...BASE, ...saved }));
       } catch {
         /* 忽略存储失败 */
       }
@@ -75,14 +91,31 @@ export function loadSettings(storeKey = STORE_KEY) {
         localStorage.setItem('fpm-daycycle-600', '1');
         if (Number(saved.dayCycle) === 240) {
           saved.dayCycle = DEFAULT_SETTINGS.dayCycle;
-          saveSettings({ ...DEFAULT_SETTINGS, ...saved }, GAME_STORE_KEY);
+          saveSettings({ ...BASE, ...saved }, GAME_STORE_KEY);
         }
       }
     } catch {
       /* 忽略存储失败 */
     }
   }
-  return { ...DEFAULT_SETTINGS, ...saved };
+  // 一次性迁移：阴影总开关默认值由「开」改为「关」（实测填充率是唯一瓶颈，阴影是最贵的一趟）。
+  // ⚠ 和 dayCycle 同一个坑：老用户 localStorage 里已经存着 true，`{...DEFAULT, ...saved}` 会一直
+  //   盖住新默认值 ⇒ 光改 DEFAULT_SETTINGS 是没用的，必须显式抬一次。
+  //   用标记保证只做一次 —— 之后用户自己在设置里打开，不会再被我们悄悄关回去。
+  if (storeKey === GAME_STORE_KEY && typeof localStorage !== 'undefined') {
+    try {
+      if (localStorage.getItem('fpm-shadow-off-1') !== '1') {
+        localStorage.setItem('fpm-shadow-off-1', '1');
+        if (saved.castShadow === true) {
+          saved.castShadow = false;
+          saveSettings({ ...BASE, ...saved }, GAME_STORE_KEY);
+        }
+      }
+    } catch {
+      /* 忽略存储失败 */
+    }
+  }
+  return { ...BASE, ...saved };
 }
 
 export function saveSettings(s, storeKey = STORE_KEY) {
@@ -127,7 +160,7 @@ const FIELDS = [
     options: ['512', '1024', '2048', '4096'],
     group: '视野与阴影',
   },
-  { id: 'castShadow', label: '阴影开关', kind: 'toggle', defaultValue: true, group: '视野与阴影' },
+  { id: 'castShadow', label: '阴影开关(默认关·卡就别开)', kind: 'toggle', defaultValue: false, group: '视野与阴影' },
   { id: 'nameTag', label: '显示名牌与血条', kind: 'toggle', defaultValue: true, group: '显示' },
   { id: 'showFps', label: '显示帧数(FPS)', kind: 'toggle', defaultValue: true, group: '显示', gameOnly: true },
   // 手机端技能槽的两种排布：轮盘省地方但要点两下；网格一眼看见、点一下就用（仅触屏生效）
@@ -187,13 +220,15 @@ export function createSettingsPanel(binds, opts = {}) {
     ? FIELDS.filter((f) => include.includes(f.id))
     : FIELDS.filter((f) => !f.editorOnly && (!f.gameOnly || isGame));
 
+  // 本场景的默认值（编辑器/游戏端可能不同，见 STORE_KEY_DEFAULTS）
+  const BASE = defaultsFor(storeKey);
   const loaded = loadSettings(storeKey);
   // settings = 已提交；draft = 暂存草稿（控件改的是它，点「应用设置」才合并进 settings）。
   const settings = {};
   const draft = {};
   for (const f of fields) {
     if (f.kind === 'action') continue; // 动作项没有值，别让它进设置对象（否则初始化时会误触发一次回调）
-    settings[f.id] = typeof loaded[f.id] !== 'undefined' ? loaded[f.id] : DEFAULT_SETTINGS[f.id];
+    settings[f.id] = typeof loaded[f.id] !== 'undefined' ? loaded[f.id] : BASE[f.id];
     draft[f.id] = settings[f.id];
   }
 
@@ -396,8 +431,8 @@ export function createSettingsPanel(binds, opts = {}) {
     // 恢复默认：草稿与已提交都回到默认，并立即应用 + 保存 + 同步控件
     for (const f of fields) {
       if (f.kind === 'action') continue;
-      draft[f.id] = DEFAULT_SETTINGS[f.id];
-      settings[f.id] = DEFAULT_SETTINGS[f.id];
+      draft[f.id] = BASE[f.id];
+      settings[f.id] = BASE[f.id];
       syncControl(f);
       applyOne(f.id, settings[f.id]);
     }

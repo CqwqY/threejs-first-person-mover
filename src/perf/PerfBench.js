@@ -20,7 +20,7 @@ import {
 } from '../world/EditorBuildings.js';
 import { createLights, updateShadowBudgets } from '../world/Lights.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
+import { DEFAULT_SETTINGS, loadSettings } from '../ui/SettingsPanel.js';
 import { PlayerPhysics } from '../player/PlayerPhysics.js';
 import { summarize, diffVs, samplesToCSV, summaryToCSV, download, stamp } from './metrics.js';
 
@@ -123,7 +123,10 @@ async function buildScene() {
   renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(state.baseScale);
-  renderer.shadowMap.enabled = true;
+  // ⚠ 基线必须跟**真实游戏**一致：游戏端阴影总开关默认关（见 DEFAULT_SETTINGS.castShadow），
+  //   这里若硬编码 true，测出来的是"开着阴影的游戏"，与实际帧率对不上（正是此前
+  //   「手机端测试数据比实际高/低对不上」那类偏差的来源之一）。
+  renderer.shadowMap.enabled = loadSettings('scene-settings-game-v1').castShadow !== false;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = DEFAULT_SETTINGS.exposure ?? 0.85;
@@ -249,8 +252,9 @@ function adaptResolution(fps) {
 
 function applyScenario(id) {
   // 先完整还原上一个场景的所有状态
-  renderer.shadowMap.enabled = true;
-  active.shadow = true;
+  // ⚠ 还原到**游戏默认**（不是无条件 true），否则 no-shadow 之后的基线会比真实游戏更慢
+  renderer.shadowMap.enabled = loadSettings('scene-settings-game-v1').castShadow !== false;
+  active.shadow = renderer.shadowMap.enabled;
   restoreLights();
   active.skyEnv = true; // 恢复环境反射开关（下面 sky.update 会把 environment 与强度设回去）
   if (sky) sky.update(state.timeOfDay, camera);

@@ -18,6 +18,7 @@ import {
   markBakedLayers, collectBakeableMeshes, applyBakedLightmapsToMeshes,
 } from './LightBaker.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
+import { applyBackfaceCulling } from './BackfaceCull.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
   createRevealMesh, REVEAL_DEPTH, holeAabbOf, objectTouchesAnyHole,
@@ -614,6 +615,19 @@ export async function optimizeEditorScene(scene) {
   } catch (e) {
     console.warn('[EditorBuildings] 挖洞应用失败（保持原样）:', e);
   }
+  // 背面剔除收敛：把「闭合实心体」上的 doubleSided 材质改成单面。
+  // ⚠ 必须放在 mergeSceneBatches **之前**：合并是按材质指纹分组的，先统一 side 能让
+  //   「本来只差一个 side」的材质并到一起，多合并掉一批 draw call。
+  let cull = { scanned: 0, flipped: 0 };
+  try {
+    cull = applyBackfaceCulling(scene);
+    if (cull.flipped) {
+      console.info('[EditorBuildings] 背面剔除：扫描 ' + cull.scanned + ' 三角形，' +
+        cull.flipped + ' 个双面材质收敛为单面（看不见的内壁不再着色）');
+    }
+  } catch (e) {
+    console.warn('[EditorBuildings] 背面剔除失败（保持双面）:', e);
+  }
   let st = { before: 0, after: 0, batches: 0 };
   try {
     st = mergeSceneBatches(scene);
@@ -631,7 +645,7 @@ export async function optimizeEditorScene(scene) {
       registerLodTarget(h, { noHide });
     }
   }
-  return { ...st, holes: hole.count, holePatched: hole.patched };
+  return { ...st, holes: hole.count, holePatched: hole.patched, culled: cull.flipped, cullTris: cull.scanned };
 }
 
 // buildEditorLights(scene, dataOverride)：把编辑器保存的光源渲染进场景。

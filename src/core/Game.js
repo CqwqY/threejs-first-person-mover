@@ -192,7 +192,12 @@ export class Game {
     this._sharpen = 0.5;
     this._upRT = null; this._upScene = null; this._upCam = null; this._upMat = null;
     this._upFailed = false;
-    this.renderer.shadowMap.enabled = true;
+    // 阴影总开关：**默认关**（实测填充率是唯一瓶颈，阴影是最贵的那一趟）。
+    // ⚠ 光改 DEFAULT_SETTINGS 是**没用的** —— 游戏端面板 liveApply=false，binds 只在点「应用设置」时跑，
+    //   而这里以前又硬编码 enabled=true ⇒ 启动时必须显式按存档值落一次，否则默认值永远是摆设。
+    //   存档里没有该项（新玩家）时 `!== false` 落到 DEFAULT_SETTINGS.castShadow = false。
+    this._shadowOn = loadSettings('scene-settings-game-v1').castShadow !== false;
+    this.renderer.shadowMap.enabled = this._shadowOn;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // 阴影贴图不再每帧全量重渲（GPU 大头），改为主循环里隔帧置 needsUpdate ——
     // 太阳是平行光、阴影变化极慢，30Hz 更新肉眼无差；画质档切换时的单次重渲
@@ -249,6 +254,8 @@ export class Game {
     this._sun = lights.sun;
     this._ambient = lights.ambient; // 供画面面板绑定；游戏端不透出强度调整
     this._hemi = lights.hemi;
+    // 太阳的投影开关跟随总开关：createLights 里默认开了，这里按存档/默认值纠正一次。
+    this._sun.castShadow = this._shadowOn;
 
     // 应用编辑器保存的「光照设计」：环境光/半球光/阳光强度、阳光角度，使客户端与编辑器保持一致；
     // 若编辑器从未保存过，则自动落到 DEFAULT_SETTINGS 的默认值。
@@ -434,8 +441,12 @@ export class Game {
           }
         },
         castShadow: (v) => {
+          this._shadowOn = !!v;
           this.renderer.shadowMap.enabled = !!v;
           this._sun.castShadow = !!v;
+          // 关→开：shadowMap.autoUpdate=false，不手动置位的话第一张阴影图要等主循环隔帧才画，
+          //   会有一段"开了开关但还没影子"的空窗；这里立刻补一次。
+          if (v) this.renderer.shadowMap.needsUpdate = true;
         },
         nameTag: (v) => {
           setNameTagsVisible(v);   // 玩家头顶名牌总开关
@@ -7438,8 +7449,9 @@ export class Game {
     //   那批 67ms 巨帧正是阴影重渲帧（每 2 帧一次 → 半数帧吃 +17ms）。
     //   改每 3 帧后只有 1/3 帧付这笔开销，稳态平均帧耗时下降、且仍属填充率红利范畴；
     //   阴影在 20fps 下最多滞后 2 帧（~100ms）、60fps 下 ~20Hz，均不可感知。
+    //   阴影总开关关着时压根不置位（shadowMap.enabled=false 时本就不渲染，但省掉一次状态写）。
     this._shadowTick = (this._shadowTick + 1) % 3;
-    this.renderer.shadowMap.needsUpdate = this._shadowTick === 0;
+    this.renderer.shadowMap.needsUpdate = this._shadowOn && this._shadowTick === 0;
     const _pt3 = this._perf ? performance.now() : 0;
     // 超分：分辨率被压低时，先渲进低分辨率 RT，再用锐化着色器放大到屏幕
     this._renderFrame();
