@@ -298,5 +298,20 @@ console.log('\n【11】测试键：按下实时开关遮挡剔除（现场 A/B �
   ok(/OCC_KEY:\s*'KeyO'/.test(cfg), 'Config 定义了 OCC_KEY=KeyO（与已占用的 F/Q/P/E/Y/T 不冲突）');
 }
 
+console.log('\n【12】误剔修复：参数更保守 + 静止自愈（修「能看见的也被剔」）');
+{
+  const occ = src('src/world/OcclusionCull.js');
+  // 源码红线：OCC_BIAS 调到更保守、OCC_MIN_SIZE 抬高（小装饰不当遮挡体）、OCC_HEAL_FRAMES 静止自愈
+  ok(/OCC_BIAS\s*=\s*0\.00[2-9]|OCC_BIAS\s*=\s*0\.0[1-9]/.test(occ),
+    'OCC_BIAS 调到更保守（>=0.002，宁可少剔绝不误剔）');
+  ok(/OCC_MIN_SIZE\s*=\s*[5-9]|OCC_MIN_SIZE\s*=\s*1[0-9]/.test(occ),
+    'OCC_MIN_SIZE 抬高到 >=5（花盆/栏杆/小装饰不再当遮挡体误剔旁边）');
+  ok(/OCC_HEAL_FRAMES/.test(occ), '定义了 OCC_HEAL_FRAMES（静止自愈帧数）');
+  // updateOcclusion 必须有「相机没动也按 OCC_HEAL_FRAMES 周期强制重算」的分支
+  const ub = blockAt(occ, occ.indexOf('export function updateOcclusion(camera, force) {'));
+  ok(/_occFrame\s*\+\+/.test(ub), 'updateOcclusion 每帧自增帧计数');
+  ok(/_occFrame\s*%\s*OCC_HEAL_FRAMES/.test(ub), '按 OCC_HEAL_FRAMES 取模强制重算（世界变了相机没动也自愈）');
+}
+
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}`);
 process.exit(fails === 0 ? 0 : 1);

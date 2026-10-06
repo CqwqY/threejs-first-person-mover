@@ -38,8 +38,9 @@ import * as THREE from 'three';
 export const OCC_TILE = 32;
 // 每帧最多用几个遮挡体。按"离相机最近"取前 N：近处的墙/楼才真正挡得住东西。
 export const OCC_TOP_OCCLUDERS = 24;
-// 当遮挡体的尺寸门槛（AABB 对角线，米）。太小（花盆/栏杆）挡不住什么，只会白白占格子。
-export const OCC_MIN_SIZE = 3;
+// 当遮挡体的尺寸门槛（AABB 对角线，米）。太小（花盆/栏杆/小装饰）挡不住什么，却会因 AABB 投影偏大
+// 把旁边看得见的东西误剔 → 调高到 5，只让"够厚实"的墙/楼当遮挡体（⚠ 调太高会漏掉真实挡视线的薄墙）。
+export const OCC_MIN_SIZE = 5;
 // 当遮挡体的尺寸上限（米）。⚠ 这条是**安全线**：地面/天空盒是对角线上百米的巨型 AABB，
 // 一旦当成遮挡体就会盖满整张深度图，把全场（包括它自己上方的所有东西）整片剔掉。
 export const OCC_MAX_SIZE = 60;
@@ -48,10 +49,15 @@ export const OCC_MAX_SIZE = 60;
 export const OCC_MAX_CAND = 120;
 // 离相机这么近（米，AABB 最近点）的永不剔除：贴脸的东西一闪一闪最刺眼，收益也最小。
 export const OCC_NEAR = 10;
-// NDC 深度容差：遮挡体必须比候选近这么多才认定"挡住了"（吃掉 AABB 代理与 tile 粗粒度的误差）
-export const OCC_BIAS = 0.0015;
+// NDC 深度容差：遮挡体必须比候选近这么多才认定"挡住了"。偏大 = 更保守 = 更不容易误剔看得见的东西。
+// ⚠ 这是「能看见的也被剔」的主要缓冲：宁可少剔，绝不误剔。0.004 仍远小于远处墙/楼的真实深度差。
+export const OCC_BIAS = 0.004;
 // 评估节流（毫秒）。相机不动时连节流都不触发（见 _needRun）。
 export const OCC_TICK_MS = 120;
+// ⚠ 静止自愈帧数：相机不动时，每这么多帧**强制**重算一次遮挡。否则世界变了（门开了 / 遮挡物被移走 /
+// 物体被摧毁）但相机没动，旧的「被剔」状态不会自己消失 → 玩家看到"明明能看见却被剔了"。
+// 代价极小（重算本身很轻），换来"误剔最多存活 OCC_HEAL_FRAMES 帧就自愈"。
+export const OCC_HEAL_FRAMES = 15;
 // 默认开关。`?occ=0` 整块关掉做 A/B 对照（与 BackfaceCull 的 `?cull=0` 同一套习惯）。
 const DEFAULT_ON = true;
 
@@ -95,6 +101,7 @@ let _culled = 0;
 let _culledTris = 0;
 let _occUsed = 0;
 let _lastMs = 0;
+let _occFrame = 0; // 累计帧数，用于静止自愈（OCC_HEAL_FRAMES）
 
 // ---------------------------------------------------------------------------
 // 扫描：把场景里的静态不透明网格收成候选池（同时是遮挡体池）
@@ -200,7 +207,13 @@ export function updateOcclusion(camera, force) {
     _lastMs = 0;
     return 0;
   }
-  if (!force && !_needRun(camera, t0)) { _lastMs = 0; return _culled; }
+  _occFrame++;
+  if (!force && !_needRun(camera, t0)) {
+    // ⚠ 静止自愈：相机没动时本应跳过，但世界可能变了（门开了 / 遮挡物被移走 / 物体被摧毁），
+    // 旧的「被剔」状态不会自己消失 → 玩家看到"明明能看见却没了"。每 OCC_HEAL_FRAMES 帧强算一次，
+    // 误剔最多存活这么久就自愈。相机一动则 _needRun 立即触发，无需等。
+    if (_occFrame % OCC_HEAL_FRAMES !== 0) { _lastMs = 0; return _culled; }
+  }
   _lastRun = t0;
   _lastPos.copy(camera.position);
   _lastQuat.copy(camera.quaternion);
