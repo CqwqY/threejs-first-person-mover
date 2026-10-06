@@ -3,6 +3,7 @@ import { Game } from './core/Game.js';
 import { ensureAuth } from './ui/AuthUI.js';
 import { initDebugYawPanel } from './debug/DebugYawPanel.js';
 import { debugCalibFrame } from './player/PlayerModel.js';
+import { installPlayerDebugOverlay } from './debug/PlayerDebugOverlay.js';
 import { initMobileControls } from './ui/MobileControls.js';
 import { initMobileLayout } from './ui/MobileLayout.js';
 import { initBgm } from './audio/Bgm.js';
@@ -95,6 +96,11 @@ async function main() {
 
   // 暴露到全局，方便调试（联机验证 / 控制台检查玩家状态）
   window.__game = game;
+
+  // URL 带 ?pdbg 时把「玩家模型体检」贴在屏幕左上角（排查"看得见道具看不见人"；手机没控制台时用）
+  if (/\bpdbg\b/.test(location.search)) {
+    installPlayerDebugOverlay(game);
+  }
 
   // URL 带 ?calib 时打开朝向校准面板（模型朝向 + 骨架走向两个滑块，实时生效）
   if (/\bcalib\b/.test(location.search)) {

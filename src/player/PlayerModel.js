@@ -64,6 +64,29 @@ function applyCfg(e) {
   if (arm) arm.rotation.y = cfg.skelDeg * DEG;
 }
 
+// ⚠⚠ 换身体必须「先接新的、再摘旧的」——**绝不能先 clear 再加**。
+//   只要中间任何一步抛错或异步失败，bodyHolder 就永久空掉：人物只剩头顶名牌与手持物
+//   （它们挂在 group 的独立锚点上，跟身体无关）→ 表现为「道具看得到、人看不到」；
+//   同时攻击射线在模型里找不到任何网格 → 「朝着人挥也判定不到」。
+//   这两条正是线上最难查的一类：不报错、不崩溃，就是人没了。
+// 导出是为了自检探针能直接验证「先加后摘」的顺序（tools/probe-player-body.mjs）。
+export function swapBody(entry, node) {
+  const ud = entry && entry.group && entry.group.userData;
+  const bh = ud && ud.bodyHolder;
+  if (!bh || !node) return;
+  const prev = bh.children.slice(); // 先拷一份：直接遍历 bh.children 一边删一边遍历会漏
+  bh.add(node);
+  for (const c of prev) bh.remove(c);
+}
+
+// 兜底中的兜底：bodyHolder 空了就补回占位人形，保证「人一定看得见」。
+function ensureFallbackBody(entry) {
+  const bh = entry && entry.group && entry.group.userData.bodyHolder;
+  if (!bh || bh.children.length) return;
+  swapBody(entry, _createFallbackBody());
+  entry.faceHolder = null;
+}
+
 // 构建一个模型的“身体”：加载带骨骼的 GLB，接上 AnimationMixer（待机/走/跑），
 // 失败则回退为静态等比缩放；朝向统一由 applyCfg/modelDeg 控制。
 function buildBody(entry) {
@@ -71,9 +94,6 @@ function buildBody(entry) {
     .then(({ root, animations }) => {
       entry.rig = null;
       entry.faceHolder = null;
-
-      const bodyHolder = entry.group.userData.bodyHolder;
-      bodyHolder.clear();
 
       // 归一化：按包围盒等比缩放到身高、脚底压到 y=0（bind pose 下量，骨骼与网格一起缩放）
       const box = new THREE.Box3();
@@ -94,7 +114,7 @@ function buildBody(entry) {
       const holder = new THREE.Group();
       holder.add(root);
       holder.receiveShadow = true;
-      bodyHolder.add(holder);
+      swapBody(entry, holder);
       entry.faceHolder = holder;
 
       entry.rig = createAnimRig(root, animations);
@@ -103,8 +123,9 @@ function buildBody(entry) {
       applyCfg(entry);
       return true;
     })
-    .catch(() => {
+    .catch((e) => {
       // 带骨骼的版本加载失败：退回旧的静态模型（至少人还在，不会隐形）
+      console.warn('[PlayerModel] 骨骼身体加载失败（' + entry.gender + '），退回静态模型:', e);
       return buildStaticBody(entry);
     });
 }
@@ -112,8 +133,6 @@ function buildBody(entry) {
 // 兜底：静态等比缩放的旧模型（无骨骼无动画）
 function buildStaticBody(entry) {
   return instantiate(`/assets/${entry.gender}.glb`).then((model) => {
-    const bodyHolder = entry.group.userData.bodyHolder;
-    bodyHolder.clear();
     const box = new THREE.Box3();
     model.traverse((o) => {
       if (o.isMesh) {
@@ -128,11 +147,16 @@ function buildStaticBody(entry) {
     const holder = new THREE.Group();
     holder.add(model);
     holder.receiveShadow = true;
-    bodyHolder.add(holder);
+    swapBody(entry, holder);
     entry.faceHolder = holder;
     applyCfg(entry);
     return false;
-  }).catch(() => false);
+  }).catch((e) => {
+    // 两条路都断了：把占位人形放回去，别让人凭空消失（宁可是个蓝方块，也不能没人）
+    console.error('[PlayerModel] 人物模型彻底加载失败（' + entry.gender + '），已恢复占位人形:', e);
+    ensureFallbackBody(entry);
+    return false;
+  });
 }
 
 // ---- 骨骼动画驱动 ----
@@ -220,6 +244,46 @@ export function setDebugYaw(modelDeg, skelDeg) {
 // 读取当前朝向度数，供校准面板显示
 export function getDebugYaw() {
   return { modelDeg: cfg.modelDeg, skelDeg: cfg.skelDeg };
+}
+
+// 体检：把每个玩家模型的「身体在不在 / 材质朝向 / 坐标」摊开，专治「看得见道具看不见人」。
+//   bodyChildren=0        → 身体根本没挂上（GLB 两条路都失败过，或换身体的瞬间被清空）
+//   visibleChain=false    → 某一级父节点 visible=false（本地玩家第一人称是故意的）
+//   sides 里 0=FrontSide / 1=BackSide / 2=DoubleSide；蒙皮身体本该全是 2
+//   pos 与 state 差太多    → 插值/同步把人放到了别处（不是渲染问题）
+export function debugPlayerBodies(pm) {
+  const rows = [];
+  if (!pm || !pm.players) return rows;
+  for (const [id, p] of pm.players) {
+    const m = p.model;
+    if (!m) { rows.push({ id: String(id).slice(0, 8), err: 'no model' }); continue; }
+    const bh = m.userData.bodyHolder;
+    let meshes = 0; let skinned = 0; let hidden = 0;
+    const sides = {};
+    m.traverse((o) => {
+      if (!o.isMesh) return;
+      meshes++;
+      if (o.isSkinnedMesh) skinned++;
+      if (o.visible === false) hidden++;
+      const mm = Array.isArray(o.material) ? o.material[0] : o.material;
+      if (mm) sides[mm.side] = (sides[mm.side] || 0) + 1;
+    });
+    let chain = true;
+    for (let o = m; o; o = o.parent) if (o.visible === false) { chain = false; break; }
+    const f = (v) => (Number.isFinite(v) ? +v.toFixed(1) : NaN);
+    rows.push({
+      id: String(id).slice(0, 8),
+      local: id === pm.localId,
+      vis: chain,
+      inScene: !!m.parent,
+      pos: [f(m.position.x), f(m.position.y), f(m.position.z)],
+      st: [f(p.state.x), f(p.state.y), f(p.state.z)],
+      size: p.state.size === undefined ? 1 : p.state.size,
+      body: bh ? bh.children.length : -1,
+      meshes, skinned, hidden, sides,
+    });
+  }
+  return rows;
 }
 
 // 校准调试：逐帧打印朝向数值（骨架已在烘焙阶段对齐网格，这里只需要看模型整体朝向）

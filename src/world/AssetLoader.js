@@ -92,8 +92,15 @@ function loadGLB(url) {
     }).catch(bad);
   });
 
-  cache.set(url, track(promise)); // 登记到加载计数：进游戏前的加载动画据此判断「模型都到了没」
-  return cache.get(url);
+  const tracked = track(promise); // 登记到加载计数：进游戏前的加载动画据此判断「模型都到了没」
+  // ⚠ 失败**不能**永久留在缓存里：一次瞬时失败（弱网 / 20s 超时 / 被导航打断 / 缓存里取到坏字节）
+  //   会把这条 url 毒死一整场 —— 后面每个玩家都拿不到身体，且不报错、不重试。
+  //   表现为「名牌和手持物都在、人没了」，是最难查的一类静默失效。
+  tracked.catch(() => {
+    if (cache.get(url) === tracked) cache.delete(url);
+  });
+  cache.set(url, tracked);
+  return tracked;
 }
 
 // 本次会话的缓存命中情况（调试用：控制台里看缓存到底有没有生效）

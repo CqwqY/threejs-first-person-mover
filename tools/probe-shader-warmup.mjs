@@ -93,16 +93,17 @@ const mFn = /_upSamples\(s\) \{/.exec(game);
 ok(!!mFn, '存在 _upSamples(s) 分档函数');
 const upSamples = blockAt(game, '_upSamples(s) {');
 ok(/_aaOn/.test(upSamples), '画质档没开画布 MSAA 时（手机）一律 0');
-ok(/s <= 0\.7\) return 0/.test(upSamples), '≤0.7× 关掉 MSAA（像素已经很少，带宽却照付）');
-ok(/s <= 0\.85\) return 2/.test(upSamples), '≤0.85× 用 2×');
-ok(/return 4;/.test(upSamples), '其余才 4×');
-// 边界取值必须单调不增（越大分辨率允许越多样本）
+// ⚠ 策略已改（实测后收敛成两档，别再按旧的三档写）：填充率是唯一瓶颈，
+//   MSAA 的 2~4× 填充乘数只在原生分辨率才划算；一降分辨率（主 pass 像素已砍到 1/4~1/2）
+//   就直接关掉，靠锐化升采样补锯齿。故只有「原生」给 4×，其余一律 0。
+ok(/s >= 0\.999\) return 4/.test(upSamples), '仅原生分辨率（≥0.999×）才上 4× MSAA');
+ok(/return 0;\s*\}/.test(upSamples), '降分辨率时一律 0（省掉这层填充）');
 {
-  const f = (s) => (s <= 0.7 ? 0 : s <= 0.85 ? 2 : 4);
-  ok(f(0.5) === 0 && f(0.7) === 0, '0.5× / 0.7× → 0');
-  ok(f(0.71) === 2 && f(0.85) === 2, '0.71× / 0.85× → 2');
-  ok(f(0.86) === 4 && f(1) === 4, '0.86× / 1.0× → 4');
-  ok(f(0.5) <= f(0.8) && f(0.8) <= f(1), '分档单调不增（不会出现"更低分辨率反而更多样本"）');
+  const f = (s, aaOn) => (!aaOn ? 0 : s >= 0.999 ? 4 : 0);
+  ok(f(1, true) === 4, '原生 1.0× → 4');
+  ok(f(0.86, true) === 0 && f(0.7, true) === 0 && f(0.5, true) === 0, '0.86× / 0.7× / 0.5× → 0');
+  ok(f(1, false) === 0, '画质档关掉画布 MSAA → 0（手机）');
+  ok(f(0.5, true) <= f(0.8, true) && f(0.8, true) <= f(1, true), '分档单调不增（低分辨率不会反而更多样本）');
 }
 const rt = blockAt(game, '_ensureRT() {');
 ok(rt.length > 100, '抽到 _ensureRT 函数体');
