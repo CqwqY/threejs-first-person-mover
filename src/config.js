@@ -117,6 +117,17 @@ export const Config = {
   // 纯本地调试可改回 'ws://localhost:9000'。
   RELAY_URL: 'wss://game666.lshserver.dpdns.org',
 
+  // 一键隐藏 / 显示全部游戏 UI 的键（e.code）。截图、录屏、沉浸看画面用。
+  // 见 src/util/UiVisibility.js（body 加类 + CSS 隐藏 body 直属 UI，加载屏豁免）。
+  HIDE_UI_KEY: 'KeyH',
+
+  // 数据采集（测帧率 + 加载耗时并上报服务端，供手机端性能分析）：
+  // 采集时长（秒）—— 点设置里的「数据采集」按钮后采这么久再上报。
+  // 取 20s：足够跨过自适应分辨率的收敛期（1s 节流 + 数拍调整），数据量仍很小。
+  TELEMETRY_SECONDS: 20,
+  // 上报接口路径（拼在 API_BASE 之后）。服务端见 server-remote/index.js 的 /api/telemetry。
+  TELEMETRY_PATH: '/api/telemetry',
+
   // ---- AI 商人 NPC ----
   // NPC 世界坐标（米）：出生点约 (2,144)，放在旁边的校园喷泉(-2,143)
   NPC_POS: { x: -2, z: 143 },

@@ -167,6 +167,10 @@ const BUILD_FILE = path.join(DATA_DIR, 'buildings.json');
 const AREAS_FILE = path.join(DATA_DIR, 'buildareas.json');
 const CODES_FILE = path.join(DATA_DIR, 'redeem-codes.json');
 const REDEEM_LOG_FILE = path.join(DATA_DIR, 'redeems.json');
+// 数据采集上报：按行追加的 JSONL（每行一条）。首次写入即创建。
+const TELEMETRY_FILE = path.join(DATA_DIR, 'telemetry.jsonl');
+// 上报限流表：真实 IP -> 上次上报毫秒时间戳（同 IP 30 秒 1 条）。
+const TELEMETRY_LAST = new Map();
 // 管理员密钥（改商店 / 家具 / 建造范围 / 兑换码、进编辑器都用它）。
 // 解析顺序：环境变量 SHOP_ADMIN_TOKEN > data/admin-token.txt（服务器本地文件）> 默认值并落一份该文件。
 // ⚠ 绝不写进前端：editor.html 是公网静态页，写在那里等于把后台钥匙贴在门上。
@@ -490,6 +494,63 @@ function ownerKeyOf(ws) {
   const rip = ws.__ip || (ws._socket && ws._socket.remoteAddress) || ws.remoteAddress || ws.__id;
   return 'anon:' + rip;
 }
+// 数据采集上报清洗：客户端提交的字段逐项钳制，遏制脏数据/超大对象。
+// ⚠ 客户端是公开静态页、可被伪造，所以这里**白名单 + 限长 + 数值钳制**，不信任任何字段。
+function sanitizeTelemetry(raw, ip) {
+  const n = (v, lo, hi) => {
+    const x = Number(v);
+    return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : null;
+  };
+  const str = (v, max) => String(v == null ? '' : v).slice(0, max);
+  const r = raw.render && typeof raw.render === 'object' ? raw.render : {};
+  const d = raw.device && typeof raw.device === 'object' ? raw.device : {};
+  const ph = raw.phases && typeof raw.phases === 'object' ? raw.phases : {};
+  const phases = {};
+  // 加载阶段：只放行已知键，值钳到 [0, 600000] ms
+  for (const k of ['boot', 'authDone', 'gameStart', 'waitStart', 'sceneReady', 'welcomeReady', 'assetsDone', 'assetsSkipped', 'assetsTimeout', 'enter']) {
+    if (ph[k] != null) phases[k] = n(ph[k], 0, 600000);
+  }
+  return {
+    id: 't_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
+    serverTs: Date.now(),
+    ip: str(ip, 64),                    // 真实 IP（走反代取 XFF），仅用于粗分设备来源
+    kind: str(raw.kind || 'perf', 16),
+    v: n(raw.v, 0, 99),
+    phases,
+    render: {
+      frames: n(r.frames, 0, 1e7),
+      avgFps: n(r.avgFps, 0, 1000),
+      low1Fps: n(r.low1Fps, 0, 1000),
+      p50Ms: n(r.p50Ms, 0, 60000),
+      p95Ms: n(r.p95Ms, 0, 60000),
+      maxMs: n(r.maxMs, 0, 60000),
+      jankPct: n(r.jankPct, 0, 100),
+      avgCalls: n(r.avgCalls, 0, 1e6),
+      avgTris: n(r.avgTris, 0, 1e9),
+      avgScale: n(r.avgScale, 0, 4),
+    },
+    device: {
+      ua: str(d.ua, 300),
+      platform: str(d.platform, 48),
+      lang: str(d.lang, 24),
+      cores: n(d.cores, 0, 256),
+      memGB: n(d.memGB, 0, 1024),
+      dpr: n(d.dpr, 0, 16),
+      screen: str(d.screen, 24),
+      msaa: !!d.msaa,
+    },
+    ctx: {
+      renderScale: n(raw.renderScale, 0, 4),
+      shadow: !!raw.shadow,
+      quality: str(raw.quality, 16),
+      gpu: str(raw.gpu, 160),
+      colliders: n(raw.colliders, 0, 1e6),
+      players: n(raw.players, 0, 1024),
+      msaa: !!raw.msaa,
+    },
+  };
+}
+
 // 向所有在线客户端广播（建造是全局的，不分房间）
 function broadcastAll(msg) {
   const raw = JSON.stringify(msg);
@@ -828,6 +889,52 @@ const httpServer = http.createServer(async (req, res) => {
       const r = doRedeem(ownerKeyOfReq(req), data.code);
       res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(r.ok ? { ok: true, value: r.value } : { ok: false, error: r.error }));
+    });
+    return;
+  }
+
+  // 数据采集上报（公开）：客户端测完帧率把「加载耗时 + 渲染指标 + 设备信息」POST 上来，
+  // 服务端清洗 + 限量 + 按行追加到 data/telemetry.jsonl（每行一条 JSON，便于后续 grep/分析）。
+  // 设计：
+  //   · 只收少量聚合字段，逐项钳制数值范围、字符串限长 —— 客户端是公开静态页，不可信；
+  //   · 体积硬上限（16KB）防超大包；每真实 IP 30 秒最多 1 条，防刷；
+  //   · 用真实 IP（clientIpOf，走反向代理的 X-Forwarded-For），不用 socket.remoteAddress。
+  if (req.method === 'POST' && url.pathname === '/api/telemetry') {
+    let body = '';
+    let tooBig = false;
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 16 * 1024) { tooBig = true; req.destroy(); }
+    });
+    req.on('end', () => {
+      if (tooBig) return;
+      const ip = clientIpOf(req);
+      const now = Date.now();
+      // 限流：同 IP 30 秒 1 条（内存表，够用；进程重启即清空）
+      const last = TELEMETRY_LAST.get(ip) || 0;
+      if (now - last < 30000) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '上报太频繁，请稍后再试' }));
+        return;
+      }
+      let data = null;
+      try { data = JSON.parse(body || '{}'); } catch (e) { data = null; }
+      if (!data || typeof data !== 'object') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad json' }));
+        return;
+      }
+      TELEMETRY_LAST.set(ip, now);
+      const rec = sanitizeTelemetry(data, ip);
+      try {
+        fs.appendFileSync(TELEMETRY_FILE, JSON.stringify(rec) + '\n');
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(e) }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, id: rec.id }));
     });
     return;
   }

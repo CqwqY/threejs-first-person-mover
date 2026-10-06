@@ -180,6 +180,16 @@ const FIELDS = [
     gameOnly: true,
     hint: '模型/天空贴图下载一次就存在本机，之后不再重下；换了模型或想腾空间时清一下。',
   },
+  // 数据采集：点一下会实时测帧率并把「加载耗时 + 渲染指标 + 设备信息」上报到服务器，
+  // 供我们在桌面上复盘手机（尤其 iOS）的真实性能。采集约 20 秒，期间正常游玩即可。
+  {
+    id: 'telemetry',
+    label: '数据采集（测帧率并上报）',
+    kind: 'action',
+    group: '缓存',
+    gameOnly: true,
+    hint: '点一下会持续约 20 秒测帧率、记录加载耗时与设备信息，然后上报给开发者（不含任何账号/隐私内容）。测完会有提示。',
+  },
   // —— 以下 editorOnly：编辑器的「光照设计」，客户端不显示 ——
   { id: 'ambient', label: '环境光强度', kind: 'range', min: 0, max: 1, step: 0.01, group: '光照', editorOnly: true },
   { id: 'hemi', label: '半球光(弹射)强度', kind: 'range', min: 0, max: 1, step: 0.01, group: '光照', editorOnly: true },

@@ -45,6 +45,8 @@ import { addDebugRig } from '../debug/SkeletonDebug.js';
 import { setBgmVolume } from '../audio/Bgm.js';
 import { clearAssetCache } from '../world/assetCache.js';
 import { ensureTheme } from '../ui/theme.js';
+import { installUiHotkey } from '../util/UiVisibility.js';
+import { startRenderSample, sampleFrame, waitRenderSample, report as reportTelemetry } from '../util/Telemetry.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
 // target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
@@ -377,6 +379,13 @@ export class Game {
       }
     });
 
+    // ---- 一键隐藏 / 显示全部游戏 UI（截图、录屏、沉浸看画面用）----
+    // 实现在 util/UiVisibility.js：给 body 加类 + 一条 CSS 隐藏 body 直属的 UI 层，
+    // 不做元素清单（本项目 UI 是几十处各自 append 到 body 的，逐个维护必漏）。
+    this._offUiHotkey = installUiHotkey(Config.HIDE_UI_KEY, {
+      onToggle: (hidden) => this._toast(hidden ? 'UI 已隐藏（再按 ' + Config.HIDE_UI_KEY.slice(3) + ' 显示）' : 'UI 已显示'),
+    });
+
     // ---- 窗口尺寸自适应 ----
     window.addEventListener('resize', () => this._onResize());
 
@@ -470,6 +479,8 @@ export class Game {
         quality: (v) => this._applyQuality(v), // 画质档：聚合控制阴影分辨率 / dpr 封顶 / 阴影类型
         // 模型/贴图缓存：清掉本机那份，下次进游戏重新下载（换过模型时用）
         assetCache: () => this._clearAssetCache(),
+        // 数据采集：测帧率 + 收集加载耗时/设备信息并上报（见 _runTelemetry）
+        telemetry: () => this._runTelemetry(),
       },
       {
         fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'showFps', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
@@ -7497,6 +7508,45 @@ export class Game {
     if (this._perf) {
       const now = performance.now();
       this._updatePerfHud(dt, _pt2 - _pt1, now - _pt3, now - _pt0);
+    }
+
+    // 数据采集：正在采样时每帧喂一次（未采样时 sampleFrame 内部立刻 return，零开销）
+    sampleFrame(dt, this);
+  }
+
+  // ---- 数据采集（设置面板「数据采集」按钮 / ?tel=1）----
+  // 采集约 TELEMETRY_SECONDS 秒的帧率与渲染量，连同加载各阶段耗时、设备信息上报服务端。
+  // 设计要点：① 不阻塞游玩（采样在主循环里顺手做，不进 while 死等）；
+  //   ② 失败不抛、只 toast（采集绝不能影响正常游戏）；
+  //   ③ 同一时间只跑一次（重复点直接忽略并提示）。
+  async _runTelemetry() {
+    if (this._telRunning) { this._toast('正在采集中，请稍候…'); return; }
+    this._telRunning = true;
+    const secs = Config.TELEMETRY_SECONDS || 20;
+    this._toast('开始采集：请像平时一样玩 ' + secs + ' 秒（测帧率中）…');
+    try {
+      startRenderSample(this, secs);
+      const summary = await waitRenderSample();
+      const res = await reportTelemetry({
+        msaa: !!this._aaOn,
+        renderScale: summary ? summary.avgScale : (this._dynScale || 1),
+        shadow: !!this._shadowOn,
+        quality: this._quality || null,
+        gpu: (typeof this._gpuName === 'function') ? this._gpuName() : '',
+        colliders: Array.isArray(this.colliders) ? this.colliders.length : null,
+        players: (this.playerManager && this.playerManager.players)
+          ? (this.playerManager.players.size || this.playerManager.players.length || 0) : 0,
+      });
+      if (res && res.ok) {
+        const fps = summary ? summary.avgFps : '--';
+        this._toast('采集完成，已上报（平均 ' + fps + ' FPS）。感谢反馈！');
+      } else {
+        this._toast('采集完成，但上报失败：' + ((res && res.error) || '未知错误'));
+      }
+    } catch (e) {
+      this._toast('采集出错：' + String((e && e.message) || e));
+    } finally {
+      this._telRunning = false;
     }
   }
 }
