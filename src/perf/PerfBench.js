@@ -1,8 +1,9 @@
 // 场景性能测试台：在「真实的线上场景」里跑一组对照实验，逐帧采样并导出。
 //
 // 为什么独立成一个页面而不是给游戏加埋点：游戏主循环里掺着网络同步、玩家物理、聊天 UI，
-// 噪声太大、且无法复现。这里只保留渲染相关的真实开销（地形 + 编辑器建筑 + 编辑器灯 + 天空 IBL
-// + 太阳/环境光），再配一条确定性相机航点，保证每次跑的取景一致、可对比。
+// 噪声太大、且无法复现。这里保留「渲染 + 本地玩家物理解算」两份真实开销（地形 + 编辑器建筑
+// + 编辑器灯 + 天空 IBL + 太阳/环境光 + PlayerPhysics 宽相位/SAT 碰撞/地面吸附），再配一条
+// 确定性相机航点，保证每次跑的取景一致、可对比。网络/AI/HUD 额外开销未含，故为实机帧率上限。
 //
 // ⚠ 三条项目铁律（本文件必须遵守）：
 //   1. 有阴影的灯「数量」必须恒定 —— 绝不在帧循环里改灯的 castShadow / visible，
@@ -20,6 +21,7 @@ import {
 import { createLights, updateShadowBudgets } from '../world/Lights.js';
 import { createTimeSky } from '../world/SkyBox.js';
 import { DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
+import { PlayerPhysics } from '../player/PlayerPhysics.js';
 import { summarize, diffVs, samplesToCSV, summaryToCSV, download, stamp } from './metrics.js';
 
 // ---------------- 确定性相机航点（保证多次运行取景一致）----------------
@@ -67,6 +69,7 @@ let lightsBundle = null;
 let sky = null;
 let editorLightsGroup = null;
 let path = null;
+let physPlayer = null; // 与真实游戏一致的每帧 CPU 开销载体：玩家物理解算（宽相位+SAT 碰撞+地面吸附）
 
 const state = {
   ready: false,
@@ -85,6 +88,9 @@ const state = {
   baseScale: 1,
   timeOfDay: 0.5,   // 0=00:00 0.5=12:00，固定不推进，保证可比
   buildColliders: true,
+  colliders: [],     // 世界空间碰撞体（与真实游戏同源：buildEditorBuildings 写入同一数组）
+  physDist: 0,       // 物理玩家沿航点已走过的距离（与相机固定机位解耦，独立遍历整图）
+  dynSum: 0, dynN: 0, // auto 模式收敛过程的累计系数（用于导出平均有效分辨率，避免末帧瞬时值误导）
   autoScale: false, // 分辨率模式：'auto' = 跟随游戏的自适应分辨率（弱机自动降到 0.5×）；否则固定 pixelRatio
   dynScale: 1,      // auto 模式当前收敛到的系数（最终 pixelRatio = basePR × dynScale）
   dynLast: 0,
@@ -167,6 +173,11 @@ async function buildScene() {
   buildEditorBuildings(scene, roots, data, state.buildColliders ? colliders : null);
   state.loadTimings.buildings = Math.round(performance.now() - t);
   state.loadTimings.colliders = colliders.length;
+  state.colliders = colliders;
+  // 与真实游戏一致的每帧 CPU 开销：玩家物理解算（宽相位+SAT 碰撞+地面吸附）。
+  // perftest 之前只跑纯渲染、不跑物理 → 帧率虚高、与实机相悖。这里建好物理玩家，每帧沿航点推进。
+  physPlayer = new PlayerPhysics();
+  if (colliders.length) physPlayer.markCollidersDirty();
 
   // 4) 太阳 / 环境光 / 半球光
   lightsBundle = createLights();
@@ -207,6 +218,16 @@ function basePR() { return state.autoScale ? Math.min(window.devicePixelRatio ||
 // 当前生效的 pixelRatio（导出/读数用）
 function currentPR() { return state.autoScale ? basePR() * state.dynScale : basePR(); }
 
+// 与游戏 _autoStartScale 对齐：high=1 / mid=0.85 / low=0.7（开局即接近稳态，跳过 1.0× 卡顿爬坡）
+function autoStartScaleFor(q) { return ({ high: 1, mid: 0.85, low: 0.7 })[q] || 0.85; }
+// 零输入桩：让物理玩家只受重力+碰撞（不做水平移动），逐项开销与真实游戏「站立/行走」同量级
+const PERF_INPUT = {
+  forwarded: () => 0, backwarded: () => 0, strafeRight: () => 0, strafeLeft: () => 0,
+  joyX: 0, joyY: 0, joyMagnitude: () => 0, sprinting: () => false, isDown: () => false, consumeJump: () => false,
+};
+// 物理玩家的状态载体（玩家顶部/相机高度 y=1.7；onGround 每帧由解算重写）
+const perfState = { x: 0, y: 1.7, z: 0, onGround: false };
+
 // auto 模式自适应分辨率：与游戏 _adaptResolution 同源（地板 0.5、DROP42/RAISE54 迟滞、步长 0.15/0.08、1s 节流）。
 // 目的：让测试台在弱机上的帧率**等于真实游戏**（实机就是这么跑的），否则固定 1.0× 会把弱机帧率
 // 低估 2~3 倍，与"游戏实际很流畅"的体感直接相悖。固定模式（0.4/0.6/1.0）仍钉死，用于手动对照。
@@ -223,6 +244,7 @@ function adaptResolution(fps) {
   state.dynScale = s;
   state.dynLast = now;
   renderer.setPixelRatio(basePR() * s);
+  state.dynSum += s; state.dynN++; // 累计，供导出平均有效分辨率
 }
 
 function applyScenario(id) {
@@ -330,6 +352,16 @@ function renderFrame(dtSec) {
   // 天空与环境反射（固定时刻，不推进昼夜）。关环境反射的场景要跳过 update，
   // 否则 sky.update 每帧会把 scene.environment 又设回去，开关就白关了。
   if (sky && active.skyEnv) sky.update(state.timeOfDay, camera);
+
+  // 与真实游戏一致的每帧 CPU 开销：玩家物理解算（宽相位+SAT 碰撞+地面吸附）。
+  // 沿航点推进物理玩家（与相机固定机位解耦），让碰撞解算遍历整张地图，
+  // 贴近真实游戏里玩家穿行建筑世界时的开销 —— perftest 之前缺这段，帧率才虚高。
+  if (physPlayer && state.colliders.length) {
+    state.physDist = (state.physDist || 0) + CAM_SPEED * dtSec;
+    samplePath(path, state.physDist, _camPos);
+    perfState.x = _camPos.x; perfState.y = 1.7; perfState.z = _camPos.z; perfState.onGround = false;
+    physPlayer.update(dtSec, PERF_INPUT, 0, perfState, state.colliders);
+  }
 
   renderer.render(scene, camera);
 }
@@ -443,7 +475,7 @@ function start() {
   state.yaw = 0;      // 与 nextScenario 一致：从同一朝向开跑，各场景才可比
   state.lastT = 0;
   state.compiled = false;
-  state.dynScale = 1; state.dynLast = 0; // auto 模式从原生分辨率起步重新收敛（每轮独立、可比）
+  state.dynScale = autoStartScaleFor(state.quality); state.dynLast = 0; state.dynSum = 0; state.dynN = 0; // auto 模式从与游戏一致的起点重新收敛（每轮独立、可比）
   setControlsEnabled(false);
   UI.btnStop.disabled = false;
   // 手机上跑测试时自动收起面板 —— 否则整屏被 HUD 盖住，看不到在渲染什么。
@@ -626,7 +658,11 @@ function buildExport() {
       screen: window.screen.width + 'x' + window.screen.height,
       devicePixelRatio: window.devicePixelRatio,
       renderScale: currentPR(),
+      renderScaleAvg: state.autoScale
+        ? Math.round(basePR() * (state.dynN ? state.dynSum / state.dynN : state.dynScale) * 100) / 100
+        : currentPR(),
       renderScaleAuto: state.autoScale,
+      simulatedCpu: 'physics(local)', // 测试含真实玩家物理解算；网络/AI/HUD 额外开销未含 → 是实机帧率上限
       timeOfDay: state.timeOfDay,
       warmupMs: state.warmupMs,
       durationMs: state.durationMs,
