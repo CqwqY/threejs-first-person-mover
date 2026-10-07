@@ -2,14 +2,16 @@
 //
 // 背景：挖洞只 discard 出一个通孔，墙的两层壳之间**没有侧壁** —— 看上去是个没厚度的纸片洞。
 // 洞壁就是补上的那一圈"墙的剖面"（矩形管）。它有 4 个极易静默失效的点，必须真跑真验：
-//  ① **法线必须朝管中轴**（= 只渲染内壁）。这是它能"不精确测量墙厚"的前提：
-//     管壁外面是背面 → 被剔除 → 即便管子伸出墙面，站在墙外也看不到它。
+//  ① **法线必须朝管中轴**（= 只渲染内壁）：管壁外面是背面 → 被剔除。
 //     方向写反的表现是「墙上戳出一根方管」或「洞里什么都看不见」，而且编译/运行零报错。
+//     ⚠ 但光靠"背面被剔除"**并不足以**保证不穿帮：管子一旦伸到墙背面之外，站在墙的另一侧
+//     照样看得见它。所以**方向和深度都必须由 measureWall 量出来**（见 [9]，那条是真跑）。
 //  ② **必须用独立于建筑的材质**。建筑材质打了挖洞补丁，而洞壁的世界坐标正好压在洞盒边界上，
 //     一旦被同一个补丁命中就会被自己挖掉（现象：洞壁整块消失 / 闪烁）。
 //     patchBuildingMaterial 里那道 userData.fpmReveal 守卫不能被人删掉。
 //  ③ **单向延伸**（z ∈ [−depth, 0]）：窗户贴在墙面上，往"窗户背面"才是墙内。
-//     若做成双向，一半管子会伸到墙外。
+//     若做成双向，一半管子会伸到墙外。墙在另一侧时用 setRevealSide 把整根管子翻过去，
+//     而不是做成双向。
 //  ④ 共享材质**不能被 disposeReveal 释放** —— 释放一次，后面所有洞壁都变黑/报错。
 //
 // 跑法：node tools/probe-hole-reveal.mjs
@@ -214,6 +216,48 @@ console.log('\n[8] 编辑器与游戏端的接线（静态断言：接错就是"
   // 洞盒深度与洞壁深度必须是两套：别把 REVEAL_DEPTH 当 HOLE_DEPTH 用
   ok(/HOLE_DEPTH\s*=\s*1\.2/.test(ed), '编辑器洞盒深度仍是 1.2（保证挖穿）');
   ok(!/applyWindowHoles\([^)]*REVEAL_DEPTH/.test(ed), 'REVEAL_DEPTH 没有被误当作洞盒深度传给 applyWindowHoles');
+}
+
+// ------------------------------------------------ ⑨ measureWall 真跑（方向 + 深度）
+// 「管子从墙的另一边吐出去、洞口里还是空的」那条 bug 的回归闸门：
+//   · 墙在窗户哪一侧**必须量出来**（不能假定局部 −Z 就是墙内 —— 摆反了管子就跑到墙外面）；
+//   · 深度必须取**最近**那层实体表面（取最远 → 管子横跨空腔 / 戳到墙背面之外）。
+console.log('\n[9] measureWall 真跑：方向要量、深度取最近的实体表面');
+{
+  const mkWall = (x) => {
+    const w = new THREE.Mesh(new THREE.BoxGeometry(0.3, 4, 4), new THREE.MeshStandardMaterial({ side: THREE.FrontSide }));
+    w.position.set(x, 0, 0);
+    return w;
+  };
+
+  // 墙贴在 x ∈ [−0.3, 0]（窗面在 x=0）；窗户局部 −Z 转到世界 −X（正对墙内）
+  const scene = new THREE.Scene();
+  const wall = mkWall(-0.15);
+  scene.add(wall);
+  const holder = new THREE.Group();
+  holder.rotation.y = Math.PI / 2;   // 局部 −Z → 世界 −X
+  scene.add(holder);
+
+  const m1 = FW.measureWall(holder, { root: scene, max: 0.6 });
+  eq(m1.sign, -1, '墙在局部 −Z 侧时 sign = -1');
+  near(m1.depth, 0.3, 0.06, '深度 ≈ 墙厚 0.3m');
+  ok(wall.material.side === THREE.FrontSide, '量完把材质 side 还原了（没留副作用）');
+
+  // 同一个窗**转 180°**：局部 −Z 变世界 +X（背离墙）→ 必须自己发现墙在 +Z 侧
+  holder.rotation.y = -Math.PI / 2;
+  const m2 = FW.measureWall(holder, { root: scene, max: 0.6 });
+  eq(m2.sign, 1, '窗户摆反时 sign 自动变 +1（管子不会再从墙的另一侧吐出去）');
+  near(m2.depth, 0.3, 0.06, '摆反时深度同样 ≈ 0.3m');
+
+  // 空腔陷阱：外壳 0.3m，另一层壳在 8m 外 → 取最远会量到远处（或落到上限），取最近才是 0.3
+  const scene2 = new THREE.Scene();
+  scene2.add(mkWall(-0.15), mkWall(-8.15));
+  const holder2 = new THREE.Group();
+  holder2.rotation.y = Math.PI / 2;
+  scene2.add(holder2);
+  const m3 = FW.measureWall(holder2, { root: scene2, max: 0.6 });
+  near(m3.depth, 0.3, 0.06, '有 8m 外空腔时仍取最近的 0.3m（不横跨空腔）');
+  ok(m3.depth < 0.6, '深度没被远处表面带跑（结构性保证：不会戳到墙背面之外）');
 }
 
 console.log('\n' + (fails ? `✗ ${fails} 项失败` : '✓ 全部通过'));

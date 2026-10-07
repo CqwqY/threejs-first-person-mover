@@ -204,10 +204,15 @@ has(app, 'applyWindowHoles(wins, mats, lights, { depth: HOLE_DEPTH })',
 ok(!/mats\[i\]\.uniforms/.test(app), '编辑器没有把洞参数写进单个材质自己的 uniforms');
 has(app, 'const HOLE_DEPTH = 1.2;', '编辑器定义洞厚常量（穿透厚墙）');
 
-console.log('\n[13] 洞壁深度必须「量出来」而不是写死（写死必然要么留缝、要么戳出墙）');
-ok(/measureWallDepth\(rec\.obj/.test(app), '编辑器：洞壁深度来自 measureWallDepth(rec.obj)（射线量这面墙的厚）');
-ok(/refitRevealDepths/.test(eb) && /measureWallDepth\(h,\s*\{[^}]*max:\s*maxDepth/.test(eb),
-  '游戏端：模型加载完 + 背面剔除后重算洞壁深度（refitRevealDepths）');
+console.log('\n[13] 洞壁的方向与深度都必须「量出来」（写死/假定都会露馅）');
+ok(/measureWall\(rec\.obj/.test(app), '编辑器：洞壁来自 measureWall(rec.obj)（射线量墙在哪一侧、多厚）');
+ok(/setRevealSide\(rv,\s*sign\)/.test(app),
+  '编辑器：按量出的 sign 把洞壁翻到墙所在那一侧（摆反了就是"从墙另一边吐出去"）');
+ok(/refitRevealDepths/.test(eb) && /measureWall\(h,\s*\{[^}]*max:\s*maxDepth/.test(eb),
+  '游戏端：模型加载完 + 背面剔除后重算洞壁深度/朝向（refitRevealDepths）');
+ok(/setRevealSide\(c,\s*m\.sign\)/.test(eb), '游戏端同样按量出的 sign 翻转洞壁');
+ok(/rebuildReveal\(rec\)/.test(app) && !/s\.w !== w \|\| s\.h !== h/.test(app),
+  '编辑器：窗户变换一变就重算洞壁（不再只在"尺寸变了"时才重算）');
 
 console.log('\n' + (fails === 0 ? '✅ 全部通过' : `❌ ${fails} 项失败`));
 process.exit(fails === 0 ? 0 : 1);

@@ -36,7 +36,7 @@ import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset }
 import {
   createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS,
   applyWindowHoles, resetHolePatches, MAX_HOLES,
-  createRevealMesh, disposeReveal, REVEAL_DEPTH, measureWallDepth, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
+  createRevealMesh, disposeReveal, REVEAL_DEPTH, measureWall, setRevealSide, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
 import { applyBackfaceCulling } from '../world/BackfaceCull.js';
 // 光照烘焙：把太阳直射+阴影烤进各网格 lightMap（静态建筑降填充率）。编辑器点「烘焙光照」触发。
@@ -578,15 +578,23 @@ export function createEditor() {
     if (rec.hole !== true) return;
     const w = rec.xw ?? WINDOW_DEFAULTS.w;
     const h = rec.xh ?? WINDOW_DEFAULTS.h;
-    // 洞深 = 这面墙的**实际厚度**（射线量出来），不是写死值 —— 写死必然要么在洞里留缝（"只填一半"）、
-    // 要么把管子戳到墙背面之外（"洞壁突出了"）。量不出（模型没加载完 / 墙比 HOLE_DEPTH/2 厚）时用上限兜底。
-    const depth = Number.isFinite(rec.holeDepth)
-      ? rec.holeDepth
-      : measureWallDepth(rec.obj, { root: scene, max: HOLE_DEPTH / 2 });
+    // 洞壁的**方向**和**深度**都靠射线量（见 measureWall）：
+    //  · 方向不能假定 —— 摆反了管子会从墙的另一边吐出去、洞口里反而空的；
+    //  · 深度不能写死 —— 写死要么在洞里留缝（"只填一半"）、要么戳到墙背面之外（"突出了"）。
+    let depth = REVEAL_DEPTH;
+    let sign = -1;
+    if (Number.isFinite(rec.holeDepth)) {
+      depth = rec.holeDepth;                 // 显式指定了深度就不再量
+    } else {
+      const m = measureWall(rec.obj, { root: scene, max: HOLE_DEPTH / 2 });
+      depth = m.depth;
+      sign = m.sign;
+    }
     const rv = createRevealMesh({ w, h, depth });
     rv.userData.editorReveal = true;
     // 记下当前尺寸：applyWindowTransform 靠它判断"洞口变了、该重建洞壁了"
     rv.userData.revealSize = { w, h };
+    setRevealSide(rv, sign);
     rec.obj.add(rv);
   }
 
@@ -617,13 +625,10 @@ export function createEditor() {
         mesh.geometry = new THREE.PlaneGeometry(w, h, 1, 1);
       }
       mesh.userData.windowSize = { w, h };
-      // 洞口的尺寸跟着变，洞壁也要一起重建（否则洞壁比洞口大/小，露出缝隙）。
+      // 尺寸/朝向/位置任一变了 → 洞壁都要重来：它的**深度和朝向都是射线量出来的**，
+      // 换了位置或朝向就可能已经贴着另一面墙了。rebuildReveal 对未勾「挖穿」的窗户会立刻返回。
       // ⚠ 别读 geometry.parameters —— createRevealGeometry 是裸 BufferGeometry，没有该字段。
-      const rv = revealMeshOf(rec);
-      if (rv) {
-        const s = rv.userData.revealSize;
-        if (!s || s.w !== w || s.h !== h) rebuildReveal(rec);
-      }
+      rebuildReveal(rec);
     }
   }
 
@@ -642,10 +647,8 @@ export function createEditor() {
     });
     mesh.userData.editorWindow = true;
     rec.obj.add(mesh);
-    // 先把位置/朝向落到 obj 上：洞壁要**射线量墙厚**，那时必须已有正确的世界矩阵。
-    //（applyWindowTransform 只在"洞壁尺寸变了"时才重建洞壁，首次构建时还没有洞壁 → 不会重复建。）
+    // 变换先落地：洞壁要**射线量墙**，那时必须已有正确的世界矩阵。applyWindowTransform 内部会重建洞壁。
     applyWindowTransform(rec);
-    rebuildReveal(rec);
   }
 
   // 面板改动后即时刷新窗户材质（不重建网格，避免拖动时反复 dispose）

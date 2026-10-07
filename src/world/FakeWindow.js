@@ -785,6 +785,7 @@ export function createRevealMesh(opts = {}) {
   mesh.userData.fpmReveal = true; // 识别标记：挖洞补丁 / 合并流程都要绕开它
   mesh.userData.revealSize = { w, h };   // 供 setRevealDepth() 重建几何（裸几何没有 geometry.parameters）
   mesh.userData.revealDepth = depth;     // 当前深度：setRevealDepth 靠它判「要不要重建」
+  mesh.userData.revealSign = -1;         // 默认沿局部 −Z 延伸；实测墙在另一侧时由 setRevealSide 翻转
   return mesh;
 }
 
@@ -809,89 +810,131 @@ export function setRevealDepth(mesh, depth) {
   return true;
 }
 
-// measureWallDepth 的复用临时对象（避免每次测量都新建，测量在放置/重建时高频调用）
-const _mwdOrigin = new THREE.Vector3();
-const _mwdQuat = new THREE.Quaternion();
-const _mwdDir = new THREE.Vector3();
-const _mwdStart = new THREE.Vector3();
-const _mwdRay = new THREE.Raycaster();
+/**
+ * 把洞壁摆到墙所在一侧：sign = -1 沿窗户局部 −Z（几何默认方向），sign = +1 沿 +Z。
+ * 实现是绕 X 转 180°：管截面是矩形、关于 x/y 两轴对称，翻转后与洞口仍然严丝合缝。
+ * 用途：窗户朝向无法假定时，靠 measureWall 量出墙在哪侧，再用本函数把管子翻到那一侧。
+ *
+ * @param {THREE.Mesh} mesh  createRevealMesh 的产物
+ * @param {number} sign      -1 或 +1
+ * @returns {boolean} 是否真的改了
+ */
+export function setRevealSide(mesh, sign) {
+  if (!mesh || !mesh.userData || mesh.userData.fpmReveal !== true) return false;
+  const s = sign < 0 ? -1 : 1;
+  if (mesh.userData.revealSign === s) return false;
+  mesh.userData.revealSign = s;
+  mesh.rotation.x = s > 0 ? Math.PI : 0;
+  return true;
+}
+
+// measureWall 的复用临时对象（避免每次测量都新建，测量在放置/重建时高频调用）
+const _mwOrigin = new THREE.Vector3();
+const _mwQuat = new THREE.Quaternion();
+const _mwStart = new THREE.Vector3();
+const _mwRay = new THREE.Raycaster();
+
+// 沿 dir 打一条射线，返回**最近**一个「背后实体表面」的距离（米）；打不到返回 NaN。
+// 跳过：窗户自己（含洞壁）、编辑器辅助物（幽灵环/标尺/标签这些 depthTest:false 的东西）。
+function nearestWallHit(root, holder, origin, dir, max, min) {
+  const start = _mwStart.copy(origin).addScaledVector(dir, min * 0.5);
+  _mwRay.set(start, dir);
+  _mwRay.near = 0;
+  _mwRay.far = Math.max(min, max - min * 0.5);
+  let hits;
+  try { hits = _mwRay.intersectObject(root, true); } catch (e) { return NaN; }
+  for (const hit of hits) {                 // three 已按距离升序 → 第一个有效命中就是最近的
+    if (!hit || !hit.object) continue;
+    let p = hit.object, own = false;
+    while (p) { if (p === holder) { own = true; break; } p = p.parent; }
+    if (own) continue;                      // 窗户（含洞壁）自己不算墙
+    const mm = Array.isArray(hit.object.material) ? hit.object.material[0] : hit.object.material;
+    if (mm && mm.depthTest === false) continue; // 编辑器辅助物不是墙
+    if (hit.distance > 0 && hit.distance <= _mwRay.far) return hit.distance + min * 0.5;
+  }
+  return NaN;
+}
 
 /**
- * 量「窗面 → 墙内表面」的**实际厚度**——洞壁该延伸多远，就是它。
+ * 量「窗户和它背后那面墙」的关系，返回 { sign, depth }：
+ *   sign  = 墙在窗户局部 Z 的哪一侧（-1 = −Z 侧，+1 = +Z 侧）
+ *   depth = 从窗面到墙**最近那个背面**的距离（米）= 洞壁该延伸多远
  *
- * 为什么必须量而不是写死：写死必然错。
- *   · 洞壁比墙短 → 洞里靠外那半截没有侧壁，看着像"只填了一半"；
- *   · 洞壁比墙长 → 管子伸到墙背面之外，薄墙上就是"洞壁突出了"。
- * 只有量出这面墙真实多厚，才能"贴合墙壁的空缺"。
+ * 两个「必须量、不能假定」（本函数就是为这两条而生的）：
+ *  ① **方向不能假定**。窗户局部 −Z 是不是"墙内"完全取决于摆放朝向（人怎么转的窗）。
+ *     假定反了的后果正是「管子从墙的另一边吐出去、洞口里还是空的」——
+ *     管子跑到墙**外面**去了，墙洞那侧当然什么都没有。
+ *     所以这里 +Z / −Z **两个方向都打**：哪边打得到墙就朝哪边；两边都打得到取近的那个。
+ *  ② **深度要取"最近"命中，不能取"最远"**。本项目建筑是**闭合外壳**（外面一层壳、里面是空的），
+ *     沿墙打射线会依次穿过 外表面 → 空腔 → 内表面。取最远就会量到内表面 →
+ *     管子横跨空腔、戳到墙背面之外，正是「往墙的另一边吐出去、墙里面还是空的」。
+ *     取最近 = 只覆盖最贴身的那层实体，**绝不越过它**（这是"不会戳出来"的结构性保证）。
  *
- * 做法：从窗户当前位置沿它的局部 −Z（= 墙内方向）打一条射线，
- * 取 (0, max] 内**最远**的命中距离 —— 那就是墙的内表面。
- *
- * ⚠ 为什么取**最远**：窗户贴在墙面上，射线先打中墙外表面（距离 ≈0，退化命中），
- *   再打中内表面；内表面才是墙的背面。
  * ⚠⚠ three 的 Raycaster 尊重 material.side 做背面剔除：本项目（含编辑器）都跑过背面剔除
- *   （DoubleSide→FrontSide），单面材质的**背面不参与命中** → 直接从墙里穿过去，量不到内表面。
+ *   （DoubleSide→FrontSide），单面材质的**背面不参与命中** → 射线直接从墙里穿过去，什么都量不到。
  *   所以这里把候选材质**临时**改成 DoubleSide，量完立刻还原（同步、一次性；try/finally 兜底）。
- *   只动 side 不会触发重编译（Front/Double 走同一 program cache key），且还原后状态不变。
+ *   只动 side 不会触发重编译（Front/Double 走同一 program cache key），还原后状态不变。
  *
- * @param {THREE.Object3D} holder  窗户的 holder（墙在其局部 −Z 方向）
+ * @param {THREE.Object3D} holder  窗户的 holder（墙就在它局部 ±Z 的某一侧）
  * @param {object} [opts]
- * @param {THREE.Object3D} [opts.root]  射线检测的根，默认 holder.parent（整栋楼/整个场景）
- * @param {number} [opts.max]  上限（米），默认 REVEAL_DEPTH。墙比它厚 → 直接取它（洞盒也只挖这么深）
+ * @param {THREE.Object3D} [opts.root]  射线检测的根，默认 holder.parent（整个场景）
+ * @param {number} [opts.max]  搜索上限（米），默认 REVEAL_DEPTH（洞盒也只挖这么深，再深没意义）
  * @param {number} [opts.min]  下限（米），默认 0.05
- * @returns {number} 该用的洞壁深度（米）
+ * @returns {{sign:number, depth:number}}
  */
-export function measureWallDepth(holder, opts = {}) {
+export function measureWall(holder, opts = {}) {
   const max = Number.isFinite(opts.max) ? opts.max : REVEAL_DEPTH;
   const min = Number.isFinite(opts.min) ? opts.min : 0.05;
   const root = (opts.root && opts.root.isObject3D) ? opts.root : (holder && holder.parent);
-  if (!holder || !root || !(max > 0)) return max;
+  const fallback = { sign: -1, depth: Math.max(min, max) };
+  if (!holder || !root || !(max > 0)) return fallback;
+
   try {
+    // ⚠ 必须先把整棵 root 的世界矩阵刷一遍：射线打的是**别的**物体（墙），而它们的 matrixWorld
+    //   只在渲染循环里被刷新过 —— 刚加载完/刚建好时还是旧的（甚至单位阵），照那个量会量到错位置。
+    //   root 通常就是 scene；测量只在放置/拖动结束/模型加载完时发生，代价可接受。
+    root.updateMatrixWorld(true);
     holder.updateMatrixWorld(true);
-    holder.getWorldPosition(_mwdOrigin);
-    holder.getWorldQuaternion(_mwdQuat);
-    _mwdDir.set(0, 0, -1).applyQuaternion(_mwdQuat);
-    if (!(_mwdDir.lengthSq() > 1e-10)) return max;
-    _mwdDir.normalize();
-    // 起点往墙内挪 min/2：既避开与窗户自身共面的退化命中（t=0），也把窗框的厚度算进去
-    _mwdStart.copy(_mwdOrigin).addScaledVector(_mwdDir, min * 0.5);
-    _mwdRay.set(_mwdStart, _mwdDir);
-    _mwdRay.near = 0;
-    _mwdRay.far = Math.max(min, max - min * 0.5);
+    holder.getWorldPosition(_mwOrigin);
+    holder.getWorldQuaternion(_mwQuat);
+  } catch (e) { return fallback; }
+  const back = new THREE.Vector3(0, 0, -1).applyQuaternion(_mwQuat);
+  if (!(back.lengthSq() > 1e-10)) return fallback;
+  back.normalize();
+  const front = back.clone().negate();
 
-    // 临时双面：让墙内表面（背面）也能被命中。量完还原（含数组材质）。
-    const seen = new Set();
-    const restored = [];
-    root.traverse((o) => {
-      if (!o.isMesh || !o.material) return;
-      if (o.userData && o.userData.fpmReveal) return; // 洞壁自己不参与（正好压在洞盒边界上）
-      const ms = Array.isArray(o.material) ? o.material : [o.material];
-      for (const m of ms) {
-        if (!m || m.side === THREE.DoubleSide || seen.has(m)) continue;
-        seen.add(m);
-        restored.push({ m, side: m.side });
-        m.side = THREE.DoubleSide;
-      }
-    });
-
-    let depth = max;
-    try {
-      const hits = _mwdRay.intersectObject(root, true);
-      for (const hit of hits) {
-        if (!hit || !hit.object) continue;
-        // 跳过窗户自身（含它的洞壁）：沿 holder 往上找
-        let p = hit.object, own = false;
-        while (p) { if (p === holder) { own = true; break; } p = p.parent; }
-        if (own) continue;
-        if (hit.distance > 0 && hit.distance <= _mwdRay.far) depth = hit.distance + min * 0.5;
-      }
-    } finally {
-      for (const r of restored) r.m.side = r.side;
+  // 临时双面：让墙的背面也能被命中。量完还原（含数组材质）。
+  const seen = new Set();
+  const restored = [];
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    if (o.userData && o.userData.fpmReveal) return; // 洞壁自己不参与（正好压在洞盒边界上）
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of ms) {
+      if (!m || m.side === THREE.DoubleSide || seen.has(m)) continue;
+      seen.add(m);
+      restored.push({ m, side: m.side });
+      m.side = THREE.DoubleSide;
     }
-    return Math.min(max, Math.max(min, depth));
-  } catch (e) {
-    return max; // 量不了就退回兜底值：至少覆盖整个被挖空区，不留缝
+  });
+
+  let res = fallback;
+  try {
+    const dBack = nearestWallHit(root, holder, _mwOrigin, back, max, min);
+    const dFront = nearestWallHit(root, holder, _mwOrigin, front, max, min);
+    if (Number.isFinite(dBack) && Number.isFinite(dFront)) {
+      res = (dBack <= dFront) ? { sign: -1, depth: dBack } : { sign: 1, depth: dFront };
+    } else if (Number.isFinite(dBack)) {
+      res = { sign: -1, depth: dBack };
+    } else if (Number.isFinite(dFront)) {
+      res = { sign: 1, depth: dFront };
+    }
+    // 两边都没打到（墙比 max 厚 / 悬空窗）：保持默认 −Z + 上限 —— 上限正好覆盖被挖空的那段，不留缝
+  } finally {
+    for (const r of restored) r.m.side = r.side;
   }
+  res.depth = Math.min(max, Math.max(min, res.depth));
+  return res;
 }
 
 /** 释放一块洞壁。⚠ 共享材质（getRevealMaterial 的产物）**不释放**。 */

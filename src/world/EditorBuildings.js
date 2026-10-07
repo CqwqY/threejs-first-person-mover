@@ -21,7 +21,7 @@ import { registerLodTarget, clearLodTargets } from './Lod.js';
 import { applyBackfaceCulling } from './BackfaceCull.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
-  createRevealMesh, REVEAL_DEPTH, measureWallDepth, setRevealDepth, holeAabbOf, objectTouchesAnyHole,
+  createRevealMesh, REVEAL_DEPTH, measureWall, setRevealDepth, setRevealSide, holeAabbOf, objectTouchesAnyHole,
 } from './FakeWindow.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
@@ -611,11 +611,13 @@ function refitRevealDepths() {
     if (!h || !h.parent) continue;
     for (const c of h.children) {
       if (!c || !c.userData || c.userData.fpmReveal !== true) continue;
-      const d = measureWallDepth(h, { root: h.parent, max: maxDepth });
-      if (setRevealDepth(c, d)) n++;
+      const m = measureWall(h, { root: h.parent, max: maxDepth });
+      const moved = setRevealSide(c, m.sign);    // 墙可能在窗户另一侧：把管子翻到那一侧
+      const resized = setRevealDepth(c, m.depth); // 深度改成最贴身那层实体表面的距离
+      if (moved || resized) n++;
     }
   }
-  if (n > 0) console.info('[EditorBuildings] 洞壁贴合：' + n + ' 块洞壁按实际墙厚重算了深度');
+  if (n > 0) console.info('[EditorBuildings] 洞壁贴合：' + n + ' 块洞壁按实际墙重算了深度/朝向');
   return n;
 }
 
