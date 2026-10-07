@@ -1578,10 +1578,11 @@ export class Game {
   // ---- 手电筒：沿相机视线方向（含俯仰）照射，L 键开关 ----
   _initFlashlight() {
     if (this._flash) return;
-    // 暖白光锥：半角 30°，半影 0.35，射程 100m，decay 1.2（比物理 2 软，远处也够亮）。
-    // 强度按现有光照量级调：three r170 是物理光照（SpotLight 强度单位为 candela），
-    // 衰减随距离上升，11cd 在 10~15m 处已接近 0，夜里根本看不见 → 提到 60cd 保证「有光」。
-    const fl = new THREE.SpotLight(0xfff2cc, 0, 100, Math.PI / 6, 0.35, 1.2);
+    // 暖白光锥：半角 36°（比之前 30° 略宽，覆盖更顺手），半影 0.45，射程 150m。
+    // decay 用 1.0（物理默认是 2 = 距离平方衰减，夜里 10m 外就几乎没光、探路废了）；
+    // 1.0 让光沿距离线性衰减，远处仍够亮。强度 220 candela：比场景太阳(2.5)高一个量级，
+    // 且 ACES 会把光锥内照度过载处自然压成暖白 → 看起来就是「一道手电光」，白天黑夜都看得见。
+    const fl = new THREE.SpotLight(0xfff2cc, 0, 150, Math.PI / 5, 0.45, 1.0);
     fl.castShadow = false; // 默认不投影：夜里氛围靠光锥打在墙面/地面即可，投影另开成本高
     fl.visible = false;
     // 作为场景里的独立光源（用户说的「用光源」）：直接加进 scene，每帧在 _updateFlashlight
@@ -1592,7 +1593,16 @@ export class Game {
     this._flash = fl;
     this._flashDir = new THREE.Vector3(0, 0, -1);
     this._flashOn = false;
-    this._flashMax = 100; // 开灯强度（candela，可调）
+    this._flashMax = 220; // 开灯强度（candela，已按场景亮度量级调高，确保「看得见」）
+
+    // 可见光束（体积光感）：半透明 + 加法混合的锥体，跟着相机朝向前伸。
+    // 即使白天被环境光淹没，这束暖光也给出「手电开着」的明确反馈；夜里更明显。
+    // 真光源(上面那盏 SpotLight)负责实际照亮，这锥体只负责「看得到光」。
+    this._flashBeam = this._makeFlashBeam();
+    this._flashBeam.visible = false;
+    this.scene.add(this._flashBeam);
+    this._beamPos = new THREE.Vector3();
+    this._beamQuat = new THREE.Quaternion();
     // 调试浮层：开关来自 ?flashdbg / #flashdbg / 登录前记进 sessionStorage 的标记
     // （登录跳转会吃掉 ? 查询串，故用 sessionStorage 兜底，详见 main.js）。
     if (this._flashDbgOn()) {
@@ -1604,6 +1614,30 @@ export class Game {
       this._flashDbgV = new THREE.Vector3();
       this._flashDbgT = new THREE.Vector3();
     }
+  }
+
+  // 可见光束几何：顶点在原点（灯口）、轴沿 -Z 前伸的开口锥。
+  // 每帧在 _updateFlashlight 里把 position/quaternion 对齐到相机，显得「光从眼睛射出」。
+  _makeFlashBeam() {
+    const len = 26;   // 光束长度（米）
+    const r = 4.2;    // 末端半径（米）：半角 ≈ atan(4.2/26) ≈ 9°，比光照锥窄，像聚拢的光柱
+    const geo = new THREE.ConeGeometry(r, len, 28, 1, true);
+    geo.translate(0, -len / 2, 0);   // 顶点移到原点，底面沉到 -Y(len)
+    geo.rotateX(Math.PI / 2);       // 轴从 Y 转到 -Z：底面落到 -Z(len)，顶点留在原点
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xfff2cc,
+      transparent: true,
+      opacity: 0.10,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,             // 不受 ACES 压暗，保持稳定的暖色光感
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.frustumCulled = false;
+    m.renderOrder = 2;
+    m.visible = false;
+    return m;
   }
 
   // 调试浮层开关：登录跳转会吃掉 ? 查询串，故首次见到 ?flashdbg/#flashdbg 时由 main.js
@@ -1622,6 +1656,7 @@ export class Game {
     }
     this._flashOn = !this._flashOn;
     this._flash.visible = this._flashOn;
+    if (this._flashBeam) this._flashBeam.visible = this._flashOn;
     if (this._flashOn) this._flash.intensity = this._flashMax;
     this._toast(this._flashOn ? '手电筒 已开（再按一次关）' : '手电筒 已关');
   }
@@ -1643,6 +1678,13 @@ export class Game {
           this._flash.target.updateMatrixWorld();
         }
         if (this._flash.intensity !== this._flashMax) this._flash.intensity = this._flashMax;
+        // 可见光束跟着相机走：顶点对齐到相机，朝向对齐相机朝向（光束本地 -Z = 前）
+        if (this._flashBeam && this._flashBeam.visible) {
+          cam.getWorldPosition(this._beamPos);
+          cam.getWorldQuaternion(this._beamQuat);
+          this._flashBeam.position.copy(this._beamPos);
+          this._flashBeam.quaternion.copy(this._beamQuat);
+        }
       } catch (e) {
         if (!this._flashErr) { this._flashErr = true; console.warn('[flashlight] 每帧跟随失败，已跳过:', e); }
       }
