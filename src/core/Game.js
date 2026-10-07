@@ -264,8 +264,7 @@ export class Game {
     this._sun.castShadow = this._shadowOn;
 
     // ---- 手电筒：沿相机视线方向（含俯仰）照射，用于夜里补光 / 氛围 ----
-    // 不挂成相机子节点（相机未必在场景图里，子节点 matrixWorld 不保证更新）；
-    // 改为每帧把灯位置/目标点同步到相机世界坐标，方向用 camera.getWorldDirection（含 yaw+pitch）。
+    // 实现见 _initFlashlight：SpotLight 挂成相机子节点，跟随位置/朝向由渲染管线自动处理。
     this._initFlashlight();
 
     // 应用编辑器保存的「光照设计」：环境光/半球光/阳光强度、阳光角度，使客户端与编辑器保持一致；
