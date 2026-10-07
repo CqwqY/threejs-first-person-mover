@@ -86,5 +86,19 @@ const clMax = Number((src.match(/SCALE_MIN = [\d.]+, SCALE_MAX = ([\d.]+)/) || [
 ok(svMax > 0 && clMax > 0 && clMax <= svMax, '缩放上限 ≤ 服务端 BUILD_SCALE_MAX（' + clMax + ' ≤ ' + svMax + '，否则重载被打回）');
 ok(edSrc.includes("host.scale.setScalar((Number(b.scale) || 1) * baseScaleOf(b.itemId))"), '编辑器里显示的已摆家具同样按基座放大');
 
+console.log('[7] 目录竞态：占位方块必须能升级成真模型（「刷新后变方块」的根因）');
+const shopSrc = fs.readFileSync(path.join(ROOT, 'src', 'player', 'Shop.js'), 'utf8').replace(/\r\n/g, '\n');
+const ens = blockAt('function ensureProto');
+ok(ens.includes('protoUrl') && ens.includes('protoKeyOf(it)'), '记住建原型时的模型来源（url/combo）');
+ok(ens.includes('const stale ='), '拿它跟当前商品对比，判定原型是否过期');
+ok(ens.includes('!stale'), '未过期才直接复用旧原型（过期就要重载）');
+ok(ens.includes("protoUrl.set(itemId, key)"), '无真模型 / 开始加载时也要记账（否则 loading 中被再次调用会重复发请求）');
+ok(src.includes('function refreshProtos'), '目录到位后有 refreshProtos 把旧原型升级');
+ok(blockAt('function refreshProtos').includes('rendered.values()'), '已摆出的家具也要跟着换（不只是缓存里的原型）');
+ok(src.includes('onCatalogUpdated(refreshProtos)'), '订阅目录更新（setCatalog 一到达就升级）');
+ok(shopSrc.includes('export function onCatalogUpdated'), 'Shop.js 导出订阅接口');
+ok(shopSrc.includes('catalogListeners'), 'setCatalog 里真的通知了订阅者');
+ok(blockAt('function refreshGhostProto').includes('ghost.scale.setScalar(baseScaleOf(id))'), '放置预览（幽灵）同样放大基座倍（跟摆下去一样大）');
+
 console.log(fails ? '\n' + fails + ' 条失败' : '\n全部通过');
 process.exit(fails ? 1 : 0);

@@ -229,6 +229,18 @@ export function setCatalog(items) {
   for (const it of SHOP_ITEMS) if (it && it.id) byId.set(it.id, it); // 客户端基准
   for (const it of items) if (it && it.id) byId.set(it.id, it);       // 服务端覆盖/补充
   CATALOG = [...byId.values()].filter((it) => !RETIRED_IDS.has(String(it.id))); // 剔掉已下架的
+  // 通知订阅者（建造模式靠它把「目录还没到时先建的占位方块」升级成真模型）
+  for (const fn of Array.from(catalogListeners)) {
+    try { fn(CATALOG); } catch (e) { console.warn('[shop] 目录更新回调出错:', e); }
+  }
+}
+// 订阅目录更新。用途：客户端内置的 SHOP_ITEMS 里家具 url 写的是 'placeholder'，
+// 真模型 url 要等服务端 /api/shop 下发才知道 —— 谁先到不一定，先建出来的占位原型得事后升级。
+const catalogListeners = new Set();
+export function onCatalogUpdated(fn) {
+  if (typeof fn !== 'function') return () => {};
+  catalogListeners.add(fn);
+  return () => catalogListeners.delete(fn);
 }
 export function getCatalog() {
   return CATALOG || SHOP_ITEMS;

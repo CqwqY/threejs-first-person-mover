@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { instantiate } from './AssetLoader.js';
-import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
+import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog, onCatalogUpdated } from '../player/Shop.js';
 import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
 import { baseScaleOf } from '../util/furnScale.js';
@@ -193,25 +193,39 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
 
   function getProto(itemId) { return protoCache.get(itemId) || null; }
 
+  // 已加载原型**当时**对应的模型来源（url 或组合定义）。商品目录更新后（placeholder → 真 url）
+  // 拿它对一下，不一致就说明原型过期了，要重新加载 —— 否则家具会永久定格在占位方块。
+  const protoUrl = new Map();
+  function protoKeyOf(it) {
+    if (!it) return '';
+    if (it.combo && Array.isArray(it.combo.parts)) return 'combo:' + JSON.stringify(it.combo);
+    return String(it.url || '');
+  }
+
   // 取原型：**先立刻塞一个占位方块**（保证「永远有原型可摆」），真模型/组合在后台加载完再替换。
   // 状态记在 protoState：'placeholder'（本来就没真模型）/ 'loading' / 'ready' / 'failed'（失败可重试）。
   function ensureProto(itemId, cb) {
-    const st = protoState.get(itemId);
-    if (protoCache.has(itemId) && st !== 'failed') { cb(protoCache.get(itemId)); return; } // 已有原型直接用（failed 允许重试）
     const it = findItem(itemId);
     if (!it) return;
+    const st = protoState.get(itemId);
+    const key = protoKeyOf(it);
+    // 过期判定：已有原型，但商品现在指向的模型来源和建原型时不一样（最常见：目录刚到，placeholder → 真 url）
+    const stale = protoCache.has(itemId) && protoUrl.get(itemId) !== key;
+    if (protoCache.has(itemId) && !stale && st !== 'failed') { cb(protoCache.get(itemId)); return; } // 已有原型直接用（failed 允许重试）
     if (!protoCache.has(itemId)) protoCache.set(itemId, makePlaceholderBox(it)); // 占位方块兜底
     protoState.set(itemId, 'placeholder');
     cb(protoCache.get(itemId)); // 同步回调：调用方立刻拿到「可摆」的原型，不会再卡
 
     const isCombo = !!(it.combo && Array.isArray(it.combo.parts));
     const hasUrl = !!(it.url && it.url !== 'placeholder');
-    if (!isCombo && !hasUrl) return; // 本来就是占位商品（无真模型），到此为止
+    if (!isCombo && !hasUrl) { protoUrl.set(itemId, key); return; } // 本来就是占位商品（无真模型），到此为止
 
     protoState.set(itemId, 'loading');
+    protoUrl.set(itemId, key); // 立刻记账：加载中若再被 ensureProto，判定为「未过期」→ 不会重复发请求
     const onLoaded = (g) => {
       if (!g) return;
       protoCache.set(itemId, g);
+      protoUrl.set(itemId, key);
       protoState.set(itemId, 'ready');
       if (ghostItemId === itemId) { ghostItemId = null; refreshGhostProto(); } // 幽灵换成真模型
       swapRealModel(itemId, g); // 已摆出 / 待确认的同名家具一并换成真模型
@@ -227,6 +241,15 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     else instantiate(it.url).then(onLoaded).catch(onFail);
   }
 
+  // 商品目录到位后调用：把「目录还没到时按 placeholder 建出来的原型」升级成真模型。
+  // 不这么做的话：进游戏时若 /api/build 比 /api/shop 先回来，家具会一次性定格成占位方块且永不重试
+  // —— 玩家看到的就是「放下退出刷新之后，家具变成了方块」。
+  function refreshProtos() {
+    for (const id of Array.from(protoCache.keys())) ensureProto(id, () => {});
+    for (const e of rendered.values()) if (e && e.rec && e.rec.itemId) ensureProto(e.rec.itemId, () => {});
+  }
+  onCatalogUpdated(refreshProtos);
+
   // 真模型到位后，把「已确认(rendered)」与「待确认(pending)」的同名家具都换成真模型。
   // pending 那批也要换：否则真模型若在服务端 added 回执到达之前就加载好，刚摆的那件会永远停在占位方块。
   function swapRealModel(itemId, g) {
@@ -240,8 +263,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     for (const p of state.pending) {
       if (!p || !p.mesh || p.itemId !== itemId) continue;
       const m = meshFrom(g, {
+        itemId,
         x: p.mesh.position.x, y: p.mesh.position.y, z: p.mesh.position.z,
-        rotY: p.mesh.rotation.y / DEG, scale: p.mesh.scale.x || 1,
+        rotY: p.mesh.rotation.y / DEG, scale: 1,
       });
       placedGroup.remove(p.mesh);
       placedGroup.add(m);
@@ -441,6 +465,8 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const proto = getProto(id);
     if (!proto) { ensureProto(id, () => { if (state.itemId === id) { ghostItemId = null; refreshGhostProto(); } }); return; }
     ghost = makeGhost(proto);
+    // 幽灵要和摆下去之后一样大：走 meshFrom 的那条路会乘家具基座，这里得手动补上
+    ghost.scale.setScalar(baseScaleOf(id));
     ghost.visible = false;
     ghostGroup.add(ghost);
   }
