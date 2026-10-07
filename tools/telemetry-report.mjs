@@ -3,21 +3,37 @@
 //   node tools/telemetry-report.mjs [文件路径] [--top 10] [--raw]
 //   默认路径 _telemetry.jsonl（先用 scp 从服务器拉下来：
 //   scp cai@100.127.187.92:/home/cai/fp-relay/data/telemetry.jsonl _telemetry.jsonl）
+//   路径写成 - （或干脆不给）时**读 stdin**，可以管道直接看、不落盘：
+//   ssh cai@100.127.187.92 "cat /home/cai/fp-relay/data/telemetry.jsonl" | node tools/telemetry-report.mjs
 // 说明：每行一条 JSON（服务端 sanitizeTelemetry 写入的字段见 server-remote/index.js）。
 import fs from 'node:fs';
 
 const argv = process.argv.slice(2);
-const file = argv.find((a) => !a.startsWith('--')) || '_telemetry.jsonl';
+const argPath = argv.find((a) => !a.startsWith('--'));
+const useStdin = !argPath || argPath === '-';
+const file = useStdin ? '<stdin>' : argPath;
 const topN = Number((argv.find((a) => a.startsWith('--top=')) || '--top=8').split('=')[1]) || 8;
 const wantRaw = argv.includes('--raw');
 
-if (!fs.existsSync(file)) {
-  console.error('找不到遥测文件：' + file);
-  console.error('先从服务器拉：scp cai@100.127.187.92:/home/cai/fp-relay/data/telemetry.jsonl ' + file);
+function readText() {
+  if (useStdin) {
+    try { return fs.readFileSync(0, 'utf8'); } catch (e) { return ''; }
+  }
+  if (!fs.existsSync(file)) {
+    console.error('找不到遥测文件：' + file);
+    console.error('先从服务器拉：scp cai@100.127.187.92:/home/cai/fp-relay/data/telemetry.jsonl ' + file);
+    console.error('或者直接看（不落盘）：ssh cai@100.127.187.92 "cat /home/cai/fp-relay/data/telemetry.jsonl" | node tools/telemetry-report.mjs');
+    process.exit(1);
+  }
+  return fs.readFileSync(file, 'utf8');
+}
+const text = readText();
+if (!text.trim()) {
+  console.error('没有读到遥测数据。可用：ssh cai@100.127.187.92 "cat /home/cai/fp-relay/data/telemetry.jsonl" | node tools/telemetry-report.mjs');
   process.exit(1);
 }
 
-const lines = fs.readFileSync(file, 'utf8').split('\n').filter((s) => s.trim());
+const lines = text.split('\n').filter((s) => s.trim());
 const recs = [];
 let bad = 0;
 for (const line of lines) {
