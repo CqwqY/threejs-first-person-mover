@@ -12,6 +12,7 @@ import { instantiate } from './AssetLoader.js';
 import { loadWallet, unplacedCount, consumeOwned, findItem, getCatalog } from '../player/Shop.js';
 import { keyBadge } from '../ui/KeyHints.js';
 import { isCoarsePointer } from '../util/isCoarse.js';
+import { baseScaleOf } from '../util/furnScale.js';
 import { Config } from '../config.js';
 import { registerPointLight, enableAreaShadow, AREA_LIGHT_DEFAULTS, LIGHT_SCALE } from './Lights.js';
 
@@ -174,8 +175,12 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
 
   // 占位方块：url 为 'placeholder'/空 时绘制一个木色 Box（尺寸取商品 size）
   function makePlaceholderBox(item) {
+    // ⚠ 商品 size 字段记的是「模型原尺寸 × 2」（生成目录时按当时的 ×2 建议写的），
+    //   而真模型现在的显示尺寸是「原尺寸 × 基座」，所以占位要乘 baseScale/2 才跟真模型一样大，
+    //   否则模型加载完成的瞬间会从方块尺寸跳一下。
+    const k = baseScaleOf(item && item.id) / 2;
     const size = Array.isArray(item.size) && item.size.length === 3
-      ? [Number(item.size[0]) || 1, Number(item.size[1]) || 1, Number(item.size[2]) || 1]
+      ? [(Number(item.size[0]) || 1) * k, (Number(item.size[1]) || 1) * k, (Number(item.size[2]) || 1) * k]
       : [1, 1, 1];
     const geo = new THREE.BoxGeometry(size[0], size[1], size[2]);
     const mat = new THREE.MeshStandardMaterial({ color: 0xb98a4b, roughness: 0.85, metalness: 0.05 });
@@ -310,7 +315,8 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const areas = [];
     m.traverse((o) => { if (o.isRectAreaLight) areas.push(o); });
     for (const a of areas) enableAreaShadow(a);
-    m.scale.setScalar(rec && rec.scale ? rec.scale : 1);
+    // ⚠ 缩放 = 基座 × 用户倍率：基座（家具 3）只用于渲染，绝不写进 rec.scale（否则每次编辑都会叠加一次）
+    m.scale.setScalar((rec && rec.scale ? rec.scale : 1) * baseScaleOf(rec && rec.itemId));
     m.rotation.y = ((rec && rec.rotY) ? rec.rotY : 0) * DEG;
     m.position.set(rec ? rec.x : 0, (rec && rec.y) || 0, rec ? rec.z : 0);
     return m;
@@ -482,7 +488,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const profile = getProfile();
       // 异步期间额度可能已被消耗（或这件家具已换掉）
       if (profile && unplacedCount(profile, itemId) <= 0) { refreshStrip(); return; }
-      const mesh = meshFrom(proto, { x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
+      const mesh = meshFrom(proto, { itemId, x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
       placedGroup.add(mesh);
       state.pending.push({ mesh, itemId }); // 记下 itemId：服务端回执若错标成「别人摆的」，也能据此认领
       network.sendBuildAdd({ itemId, x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
@@ -555,7 +561,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     e.rec = Object.assign({}, e.rec, rec);
     e.mesh.position.set(rec.x, rec.y || 0, rec.z);
     e.mesh.rotation.y = rec.rotY * DEG;
-    if (rec.scale) e.mesh.scale.setScalar(rec.scale);
+    if (rec.scale) e.mesh.scale.setScalar(Number(rec.scale) * baseScaleOf(e.rec.itemId));
   }
 
   // 服务端要求重载（如管理员在编辑器里清空/删除了家具）：清掉场上全部再拉一次
@@ -635,7 +641,10 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   // ---------- 编辑操作：模式（移动/缩放/旋转） × 轴向 × 滑动调节 ----------
   const SCALE_STEP = 0.05;            // 缩放每档
   const ROT_STEP = 15;                // 旋转每档（度）
-  const SCALE_MIN = 0.2, SCALE_MAX = 8;
+  // ⚠ 上下限必须对齐服务端：server-remote/index.js 的 BUILD_SCALE_MIN/MAX = 0.1/3，
+  //   build_move 会把超范围的 scale 静默夹掉 → 客户端调到 8、重载后变回 3（典型的静默失效）。
+  //   这里的 1 = 家具基座大小（见 util/furnScale.js），所以实际可调范围是基座的 0.1~3 倍。
+  const SCALE_MIN = 0.1, SCALE_MAX = 3;
   // 每种模式可选的轴。⚠ 只提供「服务端存得下」的轴：
   //   服务端 build_move 只存 x/y/z + 单个 scale + rotY，所以缩放只能等比、旋转只能绕竖轴。
   //   给存不下的轴做分轴调节 = 重载后打回原形（静默失效），宁可不给。
@@ -657,7 +666,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const cur = Number(e.rec.scale) || 1;
       const s = THREE.MathUtils.clamp(cur + dir * SCALE_STEP, SCALE_MIN, SCALE_MAX);
       e.rec.scale = s;
-      e.mesh.scale.setScalar(s);
+      e.mesh.scale.setScalar(s * baseScaleOf(e.rec.itemId));
     } else {
       state.rotY = (state.rotY + dir * ROT_STEP) % 360;
       if (state.rotY < 0) state.rotY += 360;
@@ -677,7 +686,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const v = state.editAxis === 'y' ? p.y : state.editAxis === 'z' ? p.z : p.x;
       sliderLabel.textContent = '位置 ' + String(state.editAxis).toUpperCase() + ' = ' + v.toFixed(2) + ' m';
     } else if (state.editOp === 'scale') {
-      sliderLabel.textContent = '缩放 = ' + (Number(e.rec.scale) || 1).toFixed(2) + ' ×';
+      // 显示「相对模型原始尺寸」的实际倍率（含家具基座），用户看到的数字和眼前家具的真实大小对得上
+      const shown = (Number(e.rec.scale) || 1) * baseScaleOf(e.rec.itemId);
+      sliderLabel.textContent = '缩放 = ' + shown.toFixed(2) + ' ×';
     } else {
       sliderLabel.textContent = '旋转 = ' + Math.round(state.rotY) + '°';
     }

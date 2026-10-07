@@ -54,7 +54,7 @@ ok(slider.includes('pointercancel'), 'pointercancel 收尾（手指被系统打�
 console.log('[4] 一档改动落到三种操作上');
 const step = blockAt('function editStep');
 ok(step.includes('nudge(') && step.includes("state.editOp === 'move'"), '移动：走 nudge（含范围钳制）');
-ok(step.includes('e.mesh.scale.setScalar(s)'), '缩放：改 mesh 与 rec 的 scale');
+ok(step.includes('e.mesh.scale.setScalar(s * baseScaleOf(e.rec.itemId))'), '缩放：改 mesh（乘家具基座）与 rec 的 scale');
 ok(step.includes('state.rotY = (state.rotY + dir * ROT_STEP)'), '旋转：按档改 rotY');
 ok(step.includes('refreshSlider()'), '每档刷新滑块上的数值');
 
@@ -65,6 +65,26 @@ ok(axes.includes("scale: [['all'"), '缩放：只有整体等比（服务端只�
 ok(axes.includes("rotate: [['y'"), '旋转：只有绕竖轴 Y（服务端只存 rotY）');
 const commit = blockAt('function commitEdit');
 ok(commit.includes('scale: Number(e.rec.scale) || 1'), '完成时把当前 scale 提交上去（原来写死 1）');
+
+console.log('[6] 家具放大 ×3：基座只用于渲染，绝不写进持久化数据');
+const fscale = fs.readFileSync(path.join(ROOT, 'src', 'util', 'furnScale.js'), 'utf8').replace(/\r\n/g, '\n');
+const edSrc = fs.readFileSync(path.join(ROOT, 'src', 'editor', 'EditorApp.js'), 'utf8').replace(/\r\n/g, '\n');
+const svSrc = fs.readFileSync(path.join(ROOT, 'server-remote', 'index.js'), 'utf8').replace(/\r\n/g, '\n');
+ok(/export const FURN_BASE_SCALE = 3\b/.test(fscale), '基座常量存在且为 3');
+ok(fscale.includes("/^furn_/.test(String(itemId"), '只对 furn_ 家具生效（组合家具/建筑不受影响）');
+ok(fscale.includes('改回 1'), '注释写了「若烘进 GLB 必须把这里改回 1」的防叠加警告');
+const mfrom = blockAt('function meshFrom');
+ok(mfrom.includes('baseScaleOf(rec && rec.itemId)'), 'meshFrom：缩放 = 用户倍率 × 家具基座');
+const spwn = blockAt('function spawn');
+ok(spwn.includes('meshFrom(proto, { itemId,'), 'spawn 把 itemId 传进 meshFrom（否则取不到基座）');
+const mv = blockAt('function onMove');
+ok(mv.includes('baseScaleOf(e.rec.itemId)'), 'onMove（别人移动广播回来）同样乘基座');
+ok(!blockAt('function commitEdit').includes('baseScaleOf'), '提交给服务端的 scale 不含基座（否则每次编辑都叠加一次）');
+ok(!/sendBuildAdd\(\{[^}]*baseScaleOf/.test(src), 'build_add 上报的 scale 不含基座');
+const svMax = Number((svSrc.match(/const BUILD_SCALE_MAX = ([\d.]+)/) || [])[1] || 0);
+const clMax = Number((src.match(/SCALE_MIN = [\d.]+, SCALE_MAX = ([\d.]+)/) || [])[1] || 0);
+ok(svMax > 0 && clMax > 0 && clMax <= svMax, '缩放上限 ≤ 服务端 BUILD_SCALE_MAX（' + clMax + ' ≤ ' + svMax + '，否则重载被打回）');
+ok(edSrc.includes("host.scale.setScalar((Number(b.scale) || 1) * baseScaleOf(b.itemId))"), '编辑器里显示的已摆家具同样按基座放大');
 
 console.log(fails ? '\n' + fails + ' 条失败' : '\n全部通过');
 process.exit(fails ? 1 : 0);

@@ -11,6 +11,7 @@ import { RectAreaLightHelper } from 'three/addons/helpers/RectAreaLightHelper.js
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { ConvexMeshDecomposition } from 'vhacd-js';
 import { instantiate } from '../world/AssetLoader.js';
+import { baseScaleOf } from '../util/furnScale.js';
 import { generateSimple } from '../world/collision/simpleGen.js';
 import { API_BASE, Config } from '../config.js';
 // 场地边界（空气墙）：与游戏运行时共用同一份数据/几何，见 world/Boundary.js
@@ -3780,9 +3781,11 @@ export function createEditor() {
     } catch (e) { /* 拉不到就用占位方块 */ }
   }
   function addBuildBox(host, item) {
+    // 商品 size 记的是「模型原尺寸 × 2」（与游戏端 makePlaceholderBox 同一约定），乘 baseScale/2 才等大
+    const k = baseScaleOf(item && item.id) / 2;
     const s = (item && Array.isArray(item.size) && item.size.length === 3) ? item.size : [1, 1, 1];
     const m = new THREE.Mesh(
-      new THREE.BoxGeometry(Number(s[0]) || 1, Number(s[1]) || 1, Number(s[2]) || 1),
+      new THREE.BoxGeometry((Number(s[0]) || 1) * k, (Number(s[1]) || 1) * k, (Number(s[2]) || 1) * k),
       new THREE.MeshStandardMaterial({ color: 0xb98a4b, roughness: 0.85 })
     );
     m.castShadow = true; m.receiveShadow = true;
@@ -3796,7 +3799,8 @@ export function createEditor() {
       const host = new THREE.Group();
       host.position.set(Number(b.x) || 0, Number(b.y) || 0, Number(b.z) || 0);
       host.rotation.y = (Number(b.rotY) || 0) * DEG;
-      host.scale.setScalar(Number(b.scale) || 1);
+      // 与游戏端同一套换算（util/furnScale.js）：家具按基座放大，b.scale 是「相对基座」的倍率
+      host.scale.setScalar((Number(b.scale) || 1) * baseScaleOf(b.itemId));
       buildVizGroup.add(host);
       const url = item && item.url;
       if (url && url !== 'placeholder') {
