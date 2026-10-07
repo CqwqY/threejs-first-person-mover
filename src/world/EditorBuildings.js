@@ -21,7 +21,7 @@ import { registerLodTarget, clearLodTargets } from './Lod.js';
 import { applyBackfaceCulling } from './BackfaceCull.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
-  createRevealMesh, REVEAL_DEPTH, measureWall, setRevealDepth, setRevealSide, holeAabbOf, objectTouchesAnyHole,
+  holeAabbOf, objectTouchesAnyHole,
 } from './FakeWindow.js';
 
 // 记录上一次已挂进场景的 holder（防止重复调用时旧建筑残留），再次构建前先清空
@@ -215,17 +215,11 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       });
       holder.add(mesh);
       windowMeshes.push(mesh);
-      // 勾了「挖穿墙体」的窗户：墙上真开洞（fragment discard）+ 补一圈洞壁（洞口侧壁）。
-      // ⚠ 洞壁必须挂在同一个 holder 下（跟着窗户的变换走），且用共享的独立材质 ——
-      //   若用建筑材质会被挖洞补丁自己挖掉（见 FakeWindow.js 洞壁小节）。
+      // 勾了「挖穿墙体」的窗户：墙上真开洞（fragment discard）。洞口那圈「墙剖面」(洞壁) 已按用户
+      // 要求去掉 —— 洞里空着就空着，不再补管子。
       // 洞的**位置**数据在这里登记（角度已是弧度），真正的挖洞补丁在 applyEditorHoles() 里打
       // —— 那时建筑模型才加载完、材质才存在。
       if (it.hole === true) {
-        holder.add(createRevealMesh({
-          w: it.xw ?? WINDOW_DEFAULTS.w,
-          h: it.xh ?? WINDOW_DEFAULTS.h,
-          depth: REVEAL_DEPTH,
-        }));
         _holeWins.push({
           x: it.x ?? 0, y: it.y ?? 0, z: it.z ?? 0,
           rotX: it.rotX ?? 0, rotY: it.rotY ?? 0, rotZ: it.rotZ ?? 0,
@@ -601,26 +595,6 @@ export function mergeSceneBatches(scene, holdersOverride) {
   return { before, after, batches };
 }
 
-// 把所有「挖洞窗」的洞壁深度重新量成它背后那面墙的**实际厚度**。
-// 为什么必须等模型加载完：窗户是同步建的，墙却要等建模加载；测墙厚要真的打到墙的内表面。
-// 为什么必须在 applyBackfaceCulling 之后：量的时候会把材质临时改双面（单面材质的背面不参与命中）。
-function refitRevealDepths() {
-  const maxDepth = HOLE_DEPTH / 2;
-  let n = 0;
-  for (const h of _addedHolders) {
-    if (!h || !h.parent) continue;
-    for (const c of h.children) {
-      if (!c || !c.userData || c.userData.fpmReveal !== true) continue;
-      const m = measureWall(h, { root: h.parent, max: maxDepth });
-      const moved = setRevealSide(c, m.sign);    // 墙可能在窗户另一侧：把管子翻到那一侧
-      const resized = setRevealDepth(c, m.depth); // 深度改成最贴身那层实体表面的距离
-      if (moved || resized) n++;
-    }
-  }
-  if (n > 0) console.info('[EditorBuildings] 洞壁贴合：' + n + ' 块洞壁按实际墙重算了深度/朝向');
-  return n;
-}
-
 // 场景优化统一入口：等模型加载完 → 跨物件合并 → 把结果登记进距离分级（Lod.js）。
 // 合并后的每个批次、以及没被合并的物件（complex 碰撞的、透明的、单件的）都要登记，
 // 否则它们永远是全细节渲染。
@@ -648,15 +622,6 @@ export async function optimizeEditorScene(scene) {
   } catch (e) {
     console.warn('[EditorBuildings] 背面剔除失败（保持双面）:', e);
   }
-  // 洞壁贴合：模型都加载完 → 现在能射线量出每扇挖洞窗背后那面墙的真实厚度，把洞壁长度改成墙厚
-  //（写死必然要么在洞里留缝、要么把管子戳出墙背面）。放在合并之前：洞壁是窗户 holder 的子节点，
-  // 后续合并不会动它，量好的深度一直有效。
-  let revealFit = 0;
-  try {
-    revealFit = refitRevealDepths();
-  } catch (e) {
-    console.warn('[EditorBuildings] 洞壁贴合失败（保持默认深度）:', e);
-  }
   let st = { before: 0, after: 0, batches: 0 };
   try {
     st = mergeSceneBatches(scene);
@@ -674,7 +639,7 @@ export async function optimizeEditorScene(scene) {
       registerLodTarget(h, { noHide });
     }
   }
-  return { ...st, holes: hole.count, holePatched: hole.patched, culled: cull.flipped, cullTris: cull.scanned, revealFit };
+  return { ...st, holes: hole.count, holePatched: hole.patched, culled: cull.flipped, cullTris: cull.scanned };
 }
 
 // buildEditorLights(scene, dataOverride)：把编辑器保存的光源渲染进场景。

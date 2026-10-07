@@ -63,7 +63,6 @@ export function collectBakeableMeshes(root) {
   const seen = new Set();
   root.traverse((o) => {
     if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
-    if (o.userData && o.userData.fpmReveal) return; // 洞壁不参与
     const list = Array.isArray(o.material) ? o.material : [o.material];
     let ok = true;
     for (const m of list) {

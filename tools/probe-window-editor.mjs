@@ -175,7 +175,7 @@ ok(eb.indexOf('applyEditorHoles(scene)') < eb.indexOf('mergeSceneBatches(scene)'
 console.log('\n[10] 挖洞的性能契约：零额外 draw call / 三角面 / 渲染趟数');
 // 挖洞是纯 shader discard —— 不得引入任何新的 Mesh / 渲染 pass
 // ⚠ 只扫 applyWindowHoles **自己的函数体**。用 slice 切到文件末尾是不行的 ——
-//   同文件后面新加的 createRevealMesh 就会 `new THREE.Mesh`，属于误伤。
+//   同文件后面新加的函数（比如 createWindowMesh）就会 `new THREE.Mesh`，属于误伤。
 const holeApplySrc = blockAt(fwSrc, 'export function applyWindowHoles');
 ok(holeApplySrc.length > 0, '抽到了 applyWindowHoles 的函数体（配对成功的自证）');
 ok(!/new THREE\.Mesh/.test(holeApplySrc), 'applyWindowHoles 不新建任何 Mesh（不增加 draw call）');
@@ -185,9 +185,9 @@ ok(!/PlaneGeometry/.test(holeApplySrc), 'applyWindowHoles 不建几何（不增�
 ok(!/syncHoles\(\)/.test(loopSeg), '编辑器 loop 里不逐帧同步挖洞（syncHoles 会遍历材质）');
 
 console.log('\n[11] 编辑器挖洞同步的调用时机（漏一处 = 洞不跟手）');
-// 拖拽结束：既要重算洞壁深度（窗背后可能换了另一面墙），也要同步挖洞位置
-ok(/state\.selected\.kind === 'window' && state\.selected\.hole\)[\s\S]{0,260}?rebuildReveal\(state\.selected\)[\s\S]{0,200}?syncHoles\(\)/.test(app),
-  '拖动窗户结束 → rebuildReveal + syncHoles（洞壁重贴合、洞跟手）');
+// 拖拽结束
+has(app, "state.selected.kind === 'window' && state.selected.hole) syncHoles()",
+  '拖动窗户结束 → syncHoles（洞跟着走）');
 // 面板改尺寸/朝向 → 洞形状变了
 ok(/if \(rebuildGeo\) applyWindowTransform\(rec\);[\s\S]{0,200}?if \(rec\.hole\) syncHoles\(\)/.test(app),
   '面板改尺寸/朝向 → syncHoles（洞形状跟着变）');
@@ -204,15 +204,12 @@ has(app, 'applyWindowHoles(wins, mats, lights, { depth: HOLE_DEPTH })',
 ok(!/mats\[i\]\.uniforms/.test(app), '编辑器没有把洞参数写进单个材质自己的 uniforms');
 has(app, 'const HOLE_DEPTH = 1.2;', '编辑器定义洞厚常量（穿透厚墙）');
 
-console.log('\n[13] 洞壁的方向与深度都必须「量出来」（写死/假定都会露馅）');
-ok(/measureWall\(rec\.obj/.test(app), '编辑器：洞壁来自 measureWall(rec.obj)（射线量墙在哪一侧、多厚）');
-ok(/setRevealSide\(rv,\s*sign\)/.test(app),
-  '编辑器：按量出的 sign 把洞壁翻到墙所在那一侧（摆反了就是"从墙另一边吐出去"）');
-ok(/refitRevealDepths/.test(eb) && /measureWall\(h,\s*\{[^}]*max:\s*maxDepth/.test(eb),
-  '游戏端：模型加载完 + 背面剔除后重算洞壁深度/朝向（refitRevealDepths）');
-ok(/setRevealSide\(c,\s*m\.sign\)/.test(eb), '游戏端同样按量出的 sign 翻转洞壁');
-ok(/rebuildReveal\(rec\)/.test(app) && !/s\.w !== w \|\| s\.h !== h/.test(app),
-  '编辑器：窗户变换一变就重算洞壁（不再只在"尺寸变了"时才重算）');
+console.log('\n[13] 洞壁（洞口那圈墙剖面）已按用户要求移除 —— 别再偷偷加回来');
+ok(!/createRevealMesh|fpmReveal|REVEAL_DEPTH|measureWall|rebuildReveal/.test(app), 'EditorApp 里已无洞壁残留');
+ok(!/createRevealMesh|fpmReveal|REVEAL_DEPTH|measureWall|refitRevealDepths/.test(eb), 'EditorBuildings 里已无洞壁残留');
+{ const fwSrc2 = fs.readFileSync(path.join(ROOT, 'src/world/FakeWindow.js'), 'utf8');
+  ok(!/fpmReveal|createRevealMesh|measureWall|REVEAL_DEPTH/.test(fwSrc2), 'FakeWindow 里已无洞壁残留');
+}
 
 console.log('\n' + (fails === 0 ? '✅ 全部通过' : `❌ ${fails} 项失败`));
 process.exit(fails === 0 ? 0 : 1);

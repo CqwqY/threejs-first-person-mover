@@ -156,8 +156,8 @@ export function planBackfaceCulling(root, opts = {}) {
     //   而头顶名牌 / 手持物是挂在锚点上的独立 Sprite 与网格，照样看得见。
     //   人物本来也只占很少像素，收益≈0，风险却是最大的一档 ⇒ 直接排除。
     if (o.isSkinnedMesh) return;
-    // 洞壁 / 障眼法窗户等自定义 shader：它们自己管 side，别碰
-    if (mat.userData && (mat.userData.fpmReveal === true || mat.userData.noCull === true)) return;
+    // 障眼法窗户等自定义 shader：它们自己管 side，别碰
+    if (mat.userData && mat.userData.noCull === true) return;
     if (mat.userData && mat.userData.fpmFakeWindow === true) return;
     // 半透明 / alphaTest / 线框：双面是"必须"的（薄片、玻璃、公告板），不能剔
     if (mat.transparent || mat.wireframe) return;

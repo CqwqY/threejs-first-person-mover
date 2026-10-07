@@ -101,7 +101,6 @@ console.log('【4】该跳过的必须跳过');
   eq('半透明材质 → 跳过', mk((m) => { m.transparent = true; }).r.flipped, 0);
   eq('alphaTest 材质 → 跳过', mk((m) => { m.alphaTest = 0.5; }).r.flipped, 0);
   eq('opacity<1 → 跳过', mk((m) => { m.opacity = 0.5; }).r.flipped, 0);
-  eq('洞壁材质(userData.fpmReveal) → 跳过', mk((m) => { m.userData.fpmReveal = true; }).r.flipped, 0);
   const already = new THREE.MeshStandardMaterial({ side: THREE.FrontSide });
   eq('本来就是单面 → 不用管', applyBackfaceCulling(
     new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), already)).flipped, 0);

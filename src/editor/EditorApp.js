@@ -36,7 +36,7 @@ import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset }
 import {
   createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS,
   applyWindowHoles, resetHolePatches, MAX_HOLES,
-  createRevealMesh, disposeReveal, REVEAL_DEPTH, measureWall, setRevealSide, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
+  holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
 import { applyBackfaceCulling } from '../world/BackfaceCull.js';
 // 光照烘焙：把太阳直射+阴影烤进各网格 lightMap（静态建筑降填充率）。编辑器点「烘焙光照」触发。
@@ -48,8 +48,6 @@ const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
 // 挖洞厚度（米）：窗洞盒在**墙面法线方向**的厚度。必须大于最厚的墙，否则洞打不穿、
 // 会在墙内留下一层"膜"。1.2m 覆盖本项目所有建筑外墙（含厚墙）。
-// ⚠ 注意它与 REVEAL_DEPTH 的分工：洞**盒**只负责"一定挖穿"；洞**壁**（可见的墙剖面）
-//   另有自己的深度，两者独立，别把其中一个的值套到另一个上。
 const HOLE_DEPTH = 1.2;
 // 视角飞行速度（米/秒，WASD 移动）。滚轮缩放会按远近再动态加倍，见 speedScale()
 const CAM_SPEED = 55;
@@ -220,11 +218,7 @@ export function createEditor() {
       // 挪动/旋转**窗户**结束 → 洞的位置跟着变，重新同步一次挖洞。
       // ⚠ 只在拖动结束时同步（不是 objectChange 每帧）：syncHoles 要遍历场景里的材质，
       //   每帧跑一次是纯浪费，而洞的位置差一帧用户根本看不出来。
-      if (state.selected && state.selected.kind === 'window' && state.selected.hole) {
-        // 挪动/旋转后，窗背后可能已经不是同一面墙了 → 重新量墙厚，把洞壁贴合上去
-        rebuildReveal(state.selected);
-        syncHoles();
-      }
+      if (state.selected && state.selected.kind === 'window' && state.selected.hole) syncHoles();
     }
   });
   tCtl.addEventListener('objectChange', () => {
@@ -554,60 +548,13 @@ export function createEditor() {
     for (const c of rec.obj.children) if (c.userData && c.userData.editorWindow) return c;
     return null;
   }
-  function revealMeshOf(rec) {
-    if (!rec || !rec.obj) return null;
-    for (const c of rec.obj.children) if (c.userData && c.userData.fpmReveal) return c;
-    return null;
-  }
-  // 释放 holder 下的全部子节点（窗户 + 洞壁）。⚠ 洞壁材质是共享的，disposeReveal 不碰它。
+  // 释放 holder 下的窗户子节点
   function clearWindowChildren(rec) {
     if (!rec || !rec.obj) return;
     for (const c of rec.obj.children.slice()) {
       if (c.userData && c.userData.editorWindow) disposeWindow(c);
-      else if (c.userData && c.userData.fpmReveal) disposeReveal(c);
     }
     rec.obj.clear();
-  }
-
-  // 按当前参数（重新）生成洞壁 —— 洞口那一圈"墙的剖面"，让挖穿的洞看起来有厚度。
-  // 勾选状态变化 / 宽高变化时调用；未勾挖洞则不挂。
-  function rebuildReveal(rec) {
-    if (!rec || !rec.obj) return;
-    const old = revealMeshOf(rec);
-    if (old) { rec.obj.remove(old); disposeReveal(old); }
-    if (rec.hole !== true) return;
-    const w = rec.xw ?? WINDOW_DEFAULTS.w;
-    const h = rec.xh ?? WINDOW_DEFAULTS.h;
-    // 洞壁的**方向**和**深度**都靠射线量（见 measureWall）：
-    //  · 方向不能假定 —— 摆反了管子会从墙的另一边吐出去、洞口里反而空的；
-    //  · 深度不能写死 —— 写死要么在洞里留缝（"只填一半"）、要么戳到墙背面之外（"突出了"）。
-    let depth = REVEAL_DEPTH;
-    let sign = -1;
-    if (Number.isFinite(rec.holeDepth)) {
-      depth = rec.holeDepth;                 // 显式指定了深度就不再量
-    } else {
-      const m = measureWall(rec.obj, { root: scene, max: HOLE_DEPTH / 2 });
-      depth = m.depth;
-      sign = m.sign;
-    }
-    const rv = createRevealMesh({ w, h, depth });
-    rv.userData.editorReveal = true;
-    // 记下当前尺寸：applyWindowTransform 靠它判断"洞口变了、该重建洞壁了"
-    rv.userData.revealSize = { w, h };
-    setRevealSide(rv, sign);
-    rec.obj.add(rv);
-  }
-
-  // 洞壁深度要**射线量墙厚**，而模型是异步加载的：窗摆下去时墙可能还没进来，只能先按兜底值。
-  // 所有「模型加载完」的时机都喊一嗓子，这里做一次防抖，等这一波加载完再统一把挖洞窗重量一遍。
-  let _revealFitT = 0;
-  function scheduleRevealFit() {
-    clearTimeout(_revealFitT);
-    _revealFitT = setTimeout(() => {
-      for (const rec of state.placed) {
-        if (rec && rec.kind === 'window' && rec.hole === true) rebuildReveal(rec);
-      }
-    }, 400);
   }
 
   function applyWindowTransform(rec) {
@@ -625,10 +572,6 @@ export function createEditor() {
         mesh.geometry = new THREE.PlaneGeometry(w, h, 1, 1);
       }
       mesh.userData.windowSize = { w, h };
-      // 尺寸/朝向/位置任一变了 → 洞壁都要重来：它的**深度和朝向都是射线量出来的**，
-      // 换了位置或朝向就可能已经贴着另一面墙了。rebuildReveal 对未勾「挖穿」的窗户会立刻返回。
-      // ⚠ 别读 geometry.parameters —— createRevealGeometry 是裸 BufferGeometry，没有该字段。
-      rebuildReveal(rec);
     }
   }
 
@@ -1100,7 +1043,7 @@ export function createEditor() {
     select(item);
     markDirty();
     outlinerUpdate();
-    instantiate(state.currentUrl).then((m) => { obj.add(m); optimizeLoaded(m); autoFitCollider(item); syncHoles(); scheduleRevealFit(); }).catch(() => {});
+    instantiate(state.currentUrl).then((m) => { obj.add(m); optimizeLoaded(m); autoFitCollider(item); syncHoles(); }).catch(() => {});
   }
 
   // 模型加载完成后的统一优化：
@@ -2728,7 +2671,7 @@ export function createEditor() {
       obj.name = nm;
       if (it.url) {
         instantiate(it.url).then((m) => {
-          obj.add(m); optimizeLoaded(m); syncHoles(); scheduleRevealFit();
+          obj.add(m); optimizeLoaded(m); syncHoles();
           // 默认开第 1 层（受太阳实时照）；下面若带烘焙结果，markBakedLayers 会把烘焙体关掉第 1 层。
           enableDynamicLighting(rec.obj);
           // 存档里带了烘焙结果 → 编辑器内也回放预览（静态体改走 lightMap，太阳只照动态层）
@@ -4437,7 +4380,6 @@ export function createEditor() {
       const rec = selectedWindow();
       if (!rec) return;
       rec.hole = !!StepUI.winHole.checked;
-      rebuildReveal(rec); // 勾上补洞壁、取消摘掉；只重建这一扇的几何，不动材质
       markDirty();
       const st = syncHoles();
       if (StepUI.winInfo) {
