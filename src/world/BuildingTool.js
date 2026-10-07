@@ -127,6 +127,8 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     rotY: 0,         // 放置 / 编辑时的朝向（度）
     pending: [],     // 待服务端确认的乐观摆放：[{ mesh, itemId }]（FIFO，被 rejected 时按序回滚）
     nudgeStep: 0.5,  // 编辑模式三轴微调的步长（米），可在工具条上循环切换
+    editOp: 'move',  // 编辑模式的操作：'move' 移动 | 'scale' 缩放 | 'rotate' 旋转
+    editAxis: 'x',   // 当前作用的轴：'x' | 'y' | 'z'（缩放只有 'all'、旋转只有 'y'）
     wasClamped: false, // 上一帧准星点是否越界（用于"越界提示"只弹一次）
   };
 
@@ -595,10 +597,12 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (!a.entry.mine) { onToast('只能编辑自己摆的家具'); return; }
     state.mode = 'edit';
     state.editId = a.id;
-    state.rotY = Math.round(((a.entry.rec.rotY || 0) / DEG) / 45) * 45; // 吸附到 45° 便于旋转
+    state.editOp = 'move';
+    state.editAxis = 'x';
+    state.rotY = (Number(a.entry.rec.rotY) || 0) / DEG; // rec 里存的是度，直接用原值（不吸附，滑动微调要连续）
     clearAim();
     refreshStrip();
-    onToast('编辑中：下方可微调 X/Y/Z（长按连发，可切步长）· 「移到准星」吸附 · 完成在下方');
+    onToast('编辑中：下面选「移动/缩放/旋转」→ 选轴 → 在滑块上上下滑动（↑加 ↓减）');
   }
   function exitEdit() { state.mode = 'place'; state.editId = null; refreshStrip(); }
   // 三轴位置微调：axis 0=X 左右 / 1=Y 上下 / 2=Z 前后；dir ±1；步长 = state.nudgeStep
@@ -627,6 +631,102 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     e.rec.z = e.mesh.position.z;
   }
   const NUDGE_STEPS = [0.1, 0.25, 0.5, 1, 2, 5];
+
+  // ---------- 编辑操作：模式（移动/缩放/旋转） × 轴向 × 滑动调节 ----------
+  const SCALE_STEP = 0.05;            // 缩放每档
+  const ROT_STEP = 15;                // 旋转每档（度）
+  const SCALE_MIN = 0.2, SCALE_MAX = 8;
+  // 每种模式可选的轴。⚠ 只提供「服务端存得下」的轴：
+  //   服务端 build_move 只存 x/y/z + 单个 scale + rotY，所以缩放只能等比、旋转只能绕竖轴。
+  //   给存不下的轴做分轴调节 = 重载后打回原形（静默失效），宁可不给。
+  const AXES_BY_OP = {
+    move: [['x', 'X 左右'], ['y', 'Y 上下'], ['z', 'Z 前后']],
+    scale: [['all', '整体等比']],
+    rotate: [['y', '绕竖轴 Y']],
+  };
+  function axesFor(op) { return AXES_BY_OP[op] || AXES_BY_OP.move; }
+
+  // 滑动/滚轮的一档：dir = +1（向上滑）加、-1（向下滑）减
+  function editStep(dir) {
+    if (state.mode !== 'edit') return;
+    const e = rendered.get(state.editId);
+    if (!e) return;
+    if (state.editOp === 'move') {
+      nudge({ x: 0, y: 1, z: 2 }[state.editAxis] ?? 0, dir);
+    } else if (state.editOp === 'scale') {
+      const cur = Number(e.rec.scale) || 1;
+      const s = THREE.MathUtils.clamp(cur + dir * SCALE_STEP, SCALE_MIN, SCALE_MAX);
+      e.rec.scale = s;
+      e.mesh.scale.setScalar(s);
+    } else {
+      state.rotY = (state.rotY + dir * ROT_STEP) % 360;
+      if (state.rotY < 0) state.rotY += 360;
+      e.mesh.rotation.y = state.rotY * DEG;
+    }
+    refreshSlider();
+  }
+
+  // 滑块上的当前值（滑动时实时刷新，让"加/减了多少"看得见）
+  let sliderLabel = null;
+  function refreshSlider() {
+    if (!sliderLabel) return;
+    const e = state.editId ? rendered.get(state.editId) : null;
+    if (!e) { sliderLabel.textContent = '上下滑动调节'; return; }
+    if (state.editOp === 'move') {
+      const p = e.mesh.position;
+      const v = state.editAxis === 'y' ? p.y : state.editAxis === 'z' ? p.z : p.x;
+      sliderLabel.textContent = '位置 ' + String(state.editAxis).toUpperCase() + ' = ' + v.toFixed(2) + ' m';
+    } else if (state.editOp === 'scale') {
+      sliderLabel.textContent = '缩放 = ' + (Number(e.rec.scale) || 1).toFixed(2) + ' ×';
+    } else {
+      sliderLabel.textContent = '旋转 = ' + Math.round(state.rotY) + '°';
+    }
+  }
+
+  // 上下滑动的调节条：向上滑 = 加、向下滑 = 减；每 STEP_PX 像素一档（滑得越多加得越多）。
+  // PC 上鼠标拖拽同样有效，另加滚轮（滚轮向上 = 加）。
+  function mkSlider() {
+    const STEP_PX = 14;
+    const box = document.createElement('div');
+    box.className = 'build-slider';
+    box.style.cssText =
+      'flex:1 1 100%;height:56px;border-radius:var(--kui-radius);box-sizing:border-box;' +
+      'border:2px dashed var(--kui-blue-dark);background:#eaf2fb;touch-action:none;user-select:none;' +
+      'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:ns-resize;';
+    const t = document.createElement('div');
+    t.style.cssText = 'font-size:13px;font-weight:700;color:var(--kui-ink);pointer-events:none;';
+    const hint = document.createElement('div');
+    hint.textContent = '上下滑动：↑ 加 · ↓ 减（电脑可拖拽或滚轮）';
+    hint.style.cssText = 'font-size:11px;color:var(--kui-ink-soft);pointer-events:none;';
+    box.appendChild(t);
+    box.appendChild(hint);
+    sliderLabel = t;
+    let startY = null, acc = 0;
+    const stop = (e) => {
+      startY = null; acc = 0;
+      try { if (e && e.pointerId != null) box.releasePointerCapture(e.pointerId); } catch (_) { /* 不支持捕获就算了 */ }
+    };
+    box.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation(); // 别让这一下被当成转视角
+      startY = e.clientY; acc = 0;
+      try { box.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    });
+    box.addEventListener('pointermove', (e) => {
+      if (startY == null) return;
+      const dy = startY - e.clientY; // 向上滑 → dy 为正 → 加
+      while (dy - acc >= STEP_PX) { acc += STEP_PX; editStep(1); }
+      while (acc - dy >= STEP_PX) { acc -= STEP_PX; editStep(-1); }
+    });
+    box.addEventListener('pointerup', stop);
+    box.addEventListener('pointercancel', stop);
+    box.addEventListener('wheel', (e) => { e.preventDefault(); editStep(e.deltaY < 0 ? 1 : -1); }, { passive: false });
+    return box;
+  }
+  function mkRow() {
+    const d = document.createElement('div');
+    d.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;';
+    return d;
+  }
   function cycleNudgeStep() {
     const i = NUDGE_STEPS.indexOf(state.nudgeStep);
     state.nudgeStep = NUDGE_STEPS[(i < 0 ? 2 : i + 1) % NUDGE_STEPS.length];
@@ -645,14 +745,21 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
   function rotateEdit() {
     if (state.mode !== 'edit') return;
-    state.rotY = (state.rotY + 45) % 360;
+    state.rotY = (state.rotY + ROT_STEP) % 360;
     const e = rendered.get(state.editId);
     if (e) e.mesh.rotation.y = state.rotY * DEG;
+    refreshSlider();
   }
   function deleteEdit() {
     if (state.mode !== 'edit') return;
-    network.sendBuildDel(state.editId);
-    exitEdit();
+    const id = state.editId;
+    if (!id) { exitEdit(); return; }
+    // ⚠ 必须「先本地删、再发请求」（乐观删除）：原来只发请求、等服务端广播回来才移除，
+    //   而服务端在查不到这条记录时（id 不一致 / 已被清过 / 断线时摆的）会直接 return 不广播 ——
+    //   表现就是「点了删除、方块还杵在那儿」。服务端回执到了是幂等的（rendered 里已没有该 id）。
+    onDel(id);
+    network.sendBuildDel(id);
+    onToast('已删除');
   }
   function commitEdit() {
     if (state.mode !== 'edit') return;
@@ -662,7 +769,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     network.sendBuildMove({
       id: state.editId,
       x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z,
-      rotY: state.rotY, scale: 1,
+      rotY: state.rotY, scale: Number(e.rec.scale) || 1,
     });
     onToast('已更新位置');
     exitEdit();
@@ -775,21 +882,38 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     actions.style.display = '';
     // 编辑模式下「编辑」键隐去（动作改到工具条上的 旋转/删除/完成）；「退出建造」常驻
     editBtn.style.display = (state.mode === 'place') ? '' : 'none';
+    // 编辑模式的工具条是多行的（模式 / 轴向 / 滑块 / 动作），放置模式仍是单行横滚的家具列表
+    strip.style.flexWrap = (state.mode === 'edit') ? 'wrap' : 'nowrap';
     strip.innerHTML = '';
     if (state.mode === 'edit') {
-      strip.appendChild(mkLabel('编辑：'));
-      strip.appendChild(mkChip('步长 ' + state.nudgeStep + 'm', cycleNudgeStep, 'grey'));
-      // 三轴位置微调（长按连续）：X 左右 · Y 上下 · Z 前后
-      strip.appendChild(mkChip('X−', () => nudge(0, -1), 'grey', false, true));
-      strip.appendChild(mkChip('X+', () => nudge(0, 1), 'grey', false, true));
-      strip.appendChild(mkChip('Y−', () => nudge(1, -1), 'grey', false, true));
-      strip.appendChild(mkChip('Y+', () => nudge(1, 1), 'grey', false, true));
-      strip.appendChild(mkChip('Z−', () => nudge(2, -1), 'grey', false, true));
-      strip.appendChild(mkChip('Z+', () => nudge(2, 1), 'grey', false, true));
-      strip.appendChild(mkChip('移到准星', snapToAim, 'primary'));
-      strip.appendChild(mkChip(coarse ? '旋转 45°' : '旋转 45° · R', rotateEdit, 'grey'));
-      strip.appendChild(mkChip(coarse ? '删除' : '删除 · X', deleteEdit, 'red'));
-      strip.appendChild(mkChip(coarse ? '完成' : '完成 · G', commitEdit, 'green'));
+      // ① 操作模式
+      const r1 = mkRow();
+      r1.appendChild(mkLabel('操作：'));
+      for (const [op, text] of [['move', '移动'], ['scale', '缩放'], ['rotate', '旋转']]) {
+        r1.appendChild(mkChip(text, () => {
+          state.editOp = op;
+          state.editAxis = axesFor(op)[0][0]; // 换模式后轴可能不存在，落回该模式第一个可用轴
+          refreshStrip();
+        }, 'grey', state.editOp === op));
+      }
+      // ② 轴向（+ 移动模式的步长）
+      const r2 = mkRow();
+      r2.appendChild(mkLabel('轴向：'));
+      for (const [ax, text] of axesFor(state.editOp)) {
+        r2.appendChild(mkChip(text, () => { state.editAxis = ax; refreshStrip(); }, 'grey', state.editAxis === ax));
+      }
+      if (state.editOp === 'move') r2.appendChild(mkChip('步长 ' + state.nudgeStep + 'm', cycleNudgeStep, 'grey'));
+      // ③ 滑动调节
+      strip.appendChild(r1);
+      strip.appendChild(r2);
+      strip.appendChild(mkSlider());
+      refreshSlider();
+      // ④ 其余动作
+      const r3 = mkRow();
+      r3.appendChild(mkChip('移到准星', snapToAim, 'primary'));
+      r3.appendChild(mkChip(coarse ? '删除' : '删除 · X', deleteEdit, 'red'));
+      r3.appendChild(mkChip(coarse ? '完成' : '完成 · G', commitEdit, 'green'));
+      strip.appendChild(r3);
       return;
     }
     const list = available();
