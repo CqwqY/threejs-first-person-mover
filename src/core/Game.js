@@ -4887,9 +4887,15 @@ export class Game {
   }
 
   // 根据阿花写的效果对象 {k,v,s}（或旧的字符串兼容）生成 { label, run }。力度 v、时长 s 都由阿花定。
+  // ⚠ 标准商店道具的效果由「云端目录」决定（天然跟随账号、换端不丢），优先从目录取；
+  //   只有目录里没有的「阿花自定义效果」（后端下发的）才回退到本地 effect 存储。
+  //   旧实现只查本地存储，而本地存储按 profile 分键、且不做云同步 —— 一旦断线退游客 / 清缓存 /
+  //   换设备 / profile 键漂移，读到的就是空 → 直接落到 default 分支显示「未识别」。改为目录优先后，
+  //   所有标准道具（棍子/黑洞/加特林/建造锤/手电筒…）永不再「未识别」。
   _effectForItem(item) {
     const phys = this.localPlayer.physics;
-    const raw = this._loadItemEffect(item);
+    const cat = itemByName(item);
+    const raw = (cat && cat.effect) ? cat.effect : this._loadItemEffect(item);
     const eff = raw && typeof raw === 'object' ? raw : { k: String(raw || '') };
     const k = eff.k || '';
     const v = Number.isFinite(Number(eff.v)) ? Number(eff.v) : null;
