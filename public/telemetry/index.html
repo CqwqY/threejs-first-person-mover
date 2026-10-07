@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>遥测数据可视化 · first-person-mover</title>
+<style>
+  :root {
+    --bg: #f5f7fa; --card: #ffffff; --ink: #1f2933; --ink-soft: #6b7785;
+    --line: #e3e8ee; --blue: #2f6fdb; --blue-soft: #eaf2fb;
+    --red: #d94040; --green: #2f9e5f; --amber: #c8811a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 22px 0 10px; }
+  .sub { color: var(--ink-soft); font-size: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .drop {
+    border: 2px dashed var(--blue); border-radius: 10px; background: var(--blue-soft);
+    padding: 22px; text-align: center; color: var(--ink-soft); cursor: pointer;
+  }
+  .drop.on { background: #dbeafe; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .btn {
+    background: var(--blue); color: #fff; border: 0; border-radius: 6px; padding: 7px 14px;
+    font-size: 13px; cursor: pointer;
+  }
+  .btn.ghost { background: #fff; color: var(--blue); border: 1px solid var(--blue); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  input[type=file] { display: none; }
+  textarea, input[type=text] {
+    width: 100%; font: 12px/1.5 Consolas, monospace; border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px; color: var(--ink);
+  }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat .k { font-size: 12px; color: var(--ink-soft); }
+  .stat .v { font-size: 20px; font-weight: 700; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 4px 12px;
+    font-size: 12px; cursor: pointer; color: var(--ink-soft);
+  }
+  .chip.on { background: var(--blue); border-color: var(--blue); color: #fff; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: right; white-space: nowrap; }
+  th { color: var(--ink-soft); font-weight: 600; position: sticky; top: 0; background: #fff; }
+  th:first-child, td:first-child { text-align: left; }
+  td.l, th.l { text-align: left; }
+  .scroll { max-height: 420px; overflow: auto; }
+  .detail { background: #f8fafc; }
+  .detail pre { margin: 0; padding: 10px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover { background: #f2f6fc; }
+  .empty { color: var(--ink-soft); padding: 20px; text-align: center; }
+  svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+  .legend span { cursor: pointer; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  .off { opacity: .35; }
+  .hint { font-size: 12px; color: var(--ink-soft); }
+  .warn { color: var(--amber); }
+</style>
+</head>
+<body>
+
+<h1>遥测数据可视化</h1>
+<div class="sub">
+  读取服务端 data/telemetry.jsonl（每行一条 JSON）。数据只在你自己的浏览器里解析，不会上传到任何地方。
+</div>
+
+<div class="card">
+  <div class="drop" id="drop">
+    把 telemetry.jsonl 拖到这里，或点击选择文件（也支持 .json / .txt）
+  </div>
+  <input type="file" id="file" accept=".jsonl,.json,.txt,application/json,text/plain">
+  <div class="row" style="margin-top:10px">
+    <button class="btn ghost" id="pasteBtn">粘贴文本</button>
+    <button class="btn ghost" id="urlBtn">从 URL 拉取</button>
+    <button class="btn ghost" id="demoBtn">载入示例数据</button>
+    <span class="hint" id="loadMsg"></span>
+  </div>
+  <div id="pasteBox" style="display:none;margin-top:10px">
+    <textarea id="paste" rows="5" placeholder="把 ssh 里 cat 出来的内容整段粘到这里，每行一条 JSON"></textarea>
+    <div class="row" style="margin-top:6px"><button class="btn" id="pasteOk">解析</button></div>
+  </div>
+  <div id="urlBox" style="display:none;margin-top:10px">
+    <input type="text" id="url" placeholder="https://.../telemetry.jsonl （需要该地址允许跨域读取）">
+    <div class="row" style="margin-top:6px"><button class="btn" id="urlOk">拉取</button></div>
+  </div>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="card" id="filterCard" style="display:none">
+  <div class="row" style="gap:16px">
+    <div>
+      <div class="hint" style="margin-bottom:4px">设备</div>
+      <div class="chips" id="platChips"></div>
+    </div>
+    <div>
+      <div class="hint" style="margin-bottom:4px">画质</div>
+      <div class="chips" id="qualChips"></div>
+    </div>
+    <div>
+      <div class="hint" style="margin-bottom:4px">时间</div>
+      <div class="chips" id="timeChips"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card" id="chartCard" style="display:none">
+  <h2 style="margin-top:0">帧率 / 帧耗时 随时间</h2>
+  <div class="chips" id="metricChips" style="margin-bottom:8px"></div>
+  <div id="chart"></div>
+  <div class="legend" id="legend"></div>
+</div>
+
+<div class="card" id="tableCard" style="display:none">
+  <h2 style="margin-top:0">按设备 / GPU 分组</h2>
+  <div class="scroll"><table id="groupTable"></table></div>
+</div>
+
+<div class="card" id="loadCard" style="display:none">
+  <h2 style="margin-top:0">加载耗时（平均，毫秒）</h2>
+  <div id="loadChart"></div>
+</div>
+
+<div class="card" id="detailCard" style="display:none">
+  <h2 style="margin-top:0">明细（最近 200 条，点一行看原始 JSON）</h2>
+  <div class="scroll"><table id="detailTable"></table></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var ALL = [];          // 全部已解析记录
+  var filt = { plat: 'all', qual: 'all', time: 'all', metric: 'fps' };
+  var hiddenSeries = Object.create(null);  // 图例里被关掉的分组
+  var COLORS = ['#2f6fdb', '#d94040', '#2f9e5f', '#c8811a', '#7b5bd6', '#0f9aa8', '#b3563f', '#55637a'];
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---------- 载入 ----------
+  function parseText(text) {
+    var lines = String(text || '').split(/\r?\n/);
+    var recs = [], bad = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var s = lines[i].trim();
+      if (!s) continue;
+      try {
+        var o = JSON.parse(s);
+        if (o && typeof o === 'object') recs.push(o); else bad++;
+      } catch (e) { bad++; }
+    }
+    // 也兼容「整个文件是一个数组 / {items:[]}」
+    if (!recs.length && lines.length) {
+      try {
+        var whole = JSON.parse(String(text));
+        if (Array.isArray(whole)) recs = whole.filter(function (x) { return x && typeof x === 'object'; });
+        else if (whole && Array.isArray(whole.items)) recs = whole.items.filter(function (x) { return x && typeof x === 'object'; });
+      } catch (e2) { /* 不是整包 JSON，保持空 */ }
+    }
+    return { recs: recs, bad: bad, lines: lines.length };
+  }
+
+  function ingest(text, srcName) {
+    var r = parseText(text);
+    if (!r.recs.length) {
+      $('loadMsg').innerHTML = '<span class="warn">没解析出记录（读到 ' + r.lines + ' 行，' + r.bad + ' 行坏）</span>';
+      return;
+    }
+    ALL = r.recs;
+    hiddenSeries = Object.create(null);
+    $('loadMsg').textContent = '已载入 ' + ALL.length + ' 条' + (r.bad ? '（坏行 ' + r.bad + '）' : '') + ' · 来源 ' + srcName;
+    buildFilters();
+    render();
+  }
+
+  function readFile(f) {
+    if (!f) return;
+    var fr = new FileReader();
+    fr.onload = function () { ingest(String(fr.result || ''), f.name); };
+    fr.readAsText(f);
+  }
+
+  $('drop').addEventListener('click', function () { $('file').click(); });
+  $('file').addEventListener('change', function (e) { readFile(e.target.files && e.target.files[0]); });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    $('drop').addEventListener(ev, function (e) { e.preventDefault(); $('drop').classList.add('on'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    $('drop').addEventListener(ev, function (e) { e.preventDefault(); $('drop').classList.remove('on'); });
+  });
+  $('drop').addEventListener('drop', function (e) {
+    e.preventDefault();
+    var dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length) readFile(dt.files[0]);
+  });
+
+  $('pasteBtn').addEventListener('click', function () {
+    var b = $('pasteBox');
+    b.style.display = b.style.display === 'none' ? 'block' : 'none';
+  });
+  $('pasteOk').addEventListener('click', function () { ingest($('paste').value, '粘贴文本'); });
+  $('urlBtn').addEventListener('click', function () {
+    var b = $('urlBox');
+    b.style.display = b.style.display === 'none' ? 'block' : 'none';
+  });
+  $('urlOk').addEventListener('click', function () {
+    var u = String($('url').value || '').trim();
+    if (!u) return;
+    $('loadMsg').textContent = '拉取中…';
+    fetch(u).then(function (r) { return r.text(); })
+      .then(function (t) { ingest(t, u); })
+      .catch(function (e) { $('loadMsg').innerHTML = '<span class="warn">拉取失败：' + e.message + '</span>'; });
+  });
+  $('demoBtn').addEventListener('click', function () { ingest(DEMO, '示例数据'); });
+
+  // ---------- 取值工具（字段缺失一律返回 null，绝不抛） ----------
+  function num(v) { var n = Number(v); return Number.isFinite(n) ? n : null; }
+  function get(r, path) {
+    var cur = r;
+    for (var i = 0; i < path.length; i++) {
+      if (cur == null) return null;
+      cur = cur[path[i]];
+    }
+    return cur == null ? null : cur;
+  }
+  function r1(v) { return v == null ? '-' : (Math.round(v * 10) / 10).toFixed(1); }
+  function r0(v) { return v == null ? '-' : String(Math.round(v)); }
+  function ts(v) {
+    if (!v) return '-';
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? '-' : d.toLocaleString('zh-CN', { hour12: false });
+  }
+  function tsShort(v) {
+    if (!v) return '-';
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? '-' : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  function median(a) {
+    var s = a.filter(function (x) { return x != null; }).sort(function (x, y) { return x - y; });
+    if (!s.length) return null;
+    var m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+  function avg(a) {
+    var s = a.filter(function (x) { return x != null; });
+    return s.length ? s.reduce(function (p, c) { return p + c; }, 0) / s.length : null;
+  }
+  function pct(a, p) {
+    var s = a.filter(function (x) { return x != null; }).sort(function (x, y) { return x - y; });
+    if (!s.length) return null;
+    return s[Math.min(s.length - 1, Math.floor(s.length * p))];
+  }
+
+  // 分组键：优先 GPU 名（最能代表设备档），退回 platform + screen
+  function groupKey(r) {
+    var gpu = String(get(r, ['ctx', 'gpu']) || get(r, ['device', 'gpu']) || '').trim();
+    if (gpu) return gpu.slice(0, 40);
+    var d = r.device || {};
+    return [d.platform || '?', d.screen || '?', 'cores=' + (d.cores == null ? '?' : d.cores)].join(' ');
+  }
+  function platformOf(r) {
+    var d = r.device || {};
+    var p = String(d.platform || '');
+    var ua = String(d.ua || '');
+    if (/iphone|ipad|ipod/i.test(p) || /iphone|ipad|ipod/i.test(ua)) return 'iOS';
+    if (/android/i.test(p) || /android/i.test(ua)) return 'Android';
+    if (/win|mac|linux|x11/i.test(p) || /windows|macintosh|linux/i.test(ua)) return '桌面';
+    if (p) return '其它';
+    return '未知';
+  }
+  function qualOf(r) { return String(get(r, ['ctx', 'quality']) || '-'); }
+
+  // ---------- 筛选 ----------
+  function buildFilters() {
+    var plats = {}, quals = {};
+    ALL.forEach(function (r) { plats[platformOf(r)] = 1; quals[qualOf(r)] = 1; });
+    chips('platChips', ['all'].concat(Object.keys(plats)), function (k) { return k === 'all' ? '全部' : k; }, 'plat');
+    chips('qualChips', ['all'].concat(Object.keys(quals)), function (k) { return k === 'all' ? '全部' : k; }, 'qual');
+    chips('timeChips', ['all', '24h', '7d', '30d'], function (k) { return { all: '全部', '24h': '近 24 小时', '7d': '近 7 天', '30d': '近 30 天' }[k]; }, 'time');
+    $('filterCard').style.display = 'block';
+  }
+  function chips(id, keys, label, field) {
+    var host = $(id);
+    host.innerHTML = '';
+    keys.forEach(function (k) {
+      var b = document.createElement('button');
+      b.className = 'chip' + (filt[field] === k ? ' on' : '');
+      b.textContent = label(k);
+      b.dataset.k = k;
+      b.addEventListener('click', function () {
+        filt[field] = k;
+        Array.prototype.forEach.call(host.children, function (c) { c.classList.toggle('on', c.dataset.k === k); });
+        render();
+      });
+      host.appendChild(b);
+    });
+  }
+  function filtered() {
+    var now = Date.now();
+    var span = { '24h': 864e5, '7d': 7 * 864e5, '30d': 30 * 864e5 }[filt.time] || 0;
+    return ALL.filter(function (r) {
+      if (filt.plat !== 'all' && platformOf(r) !== filt.plat) return false;
+      if (filt.qual !== 'all' && qualOf(r) !== filt.qual) return false;
+      if (span) {
+        var t = num(r.serverTs);
+        if (t == null || now - t > span) return false;
+      }
+      return true;
+    });
+  }
+
+  // ---------- 渲染 ----------
+  function render() {
+    var recs = filtered();
+    renderStats(recs);
+    renderMetricChips();
+    renderChart(recs);
+    renderGroupTable(recs);
+    renderLoadChart(recs);
+    renderDetail(recs);
+  }
+
+  function renderStats(recs) {
+    var tss = recs.map(function (r) { return num(r.serverTs); }).filter(function (x) { return x != null; });
+    var groups = {};
+    recs.forEach(function (r) { groups[groupKey(r)] = 1; });
+    var items = [
+      ['记录条数', recs.length],
+      ['设备分组', Object.keys(groups).length],
+      ['fps 中位', r1(median(recs.map(function (r) { return num(get(r, ['render', 'avgFps'])); })))],
+      ['p95 帧耗时', r1(median(recs.map(function (r) { return num(get(r, ['render', 'p95Ms'])); }))) + ' ms'],
+      ['卡顿占比', r1(median(recs.map(function (r) { return num(get(r, ['render', 'jankPct'])); }))) + ' %'],
+      ['渲染倍率', r1(median(recs.map(function (r) { return num(get(r, ['ctx', 'renderScale'])); })))],
+      ['时间范围', tss.length ? tsShort(Math.min.apply(null, tss)) + ' ~ ' + tsShort(Math.max.apply(null, tss)) : '-'],
+    ];
+    $('stats').innerHTML = items.map(function (it) {
+      return '<div class="stat"><div class="k">' + it[0] + '</div><div class="v">' + it[1] + '</div></div>';
+    }).join('');
+  }
+
+  function METRICS() {
+    return [
+      { k: 'fps', label: '平均 fps', path: ['render', 'avgFps'] },
+      { k: 'low1', label: '最低 1% fps', path: ['render', 'low1Fps'] },
+      { k: 'p95', label: 'p95 帧耗时 ms', path: ['render', 'p95Ms'] },
+      { k: 'jank', label: '卡顿占比 %', path: ['render', 'jankPct'] },
+      { k: 'calls', label: 'draw call', path: ['render', 'avgCalls'] },
+      { k: 'tris', label: '三角数（千）', path: ['render', 'avgTris'] },
+      { k: 'scale', label: '渲染倍率', path: ['ctx', 'renderScale'] },
+    ];
+  }
+  function renderMetricChips() {
+    var host = $('metricChips');
+    host.innerHTML = '';
+    METRICS().forEach(function (m) {
+      var b = document.createElement('button');
+      b.className = 'chip' + (filt.metric === m.k ? ' on' : '');
+      b.textContent = m.label;
+      b.addEventListener('click', function () { filt.metric = m.k; renderMetricChips(); renderChart(filtered()); });
+      host.appendChild(b);
+    });
+  }
+
+  // 折线图：X = 时间，Y = 指标；按分组一条线
+  function renderChart(recs) {
+    var host = $('chart');
+    var metric = METRICS().filter(function (m) { return m.k === filt.metric; })[0] || METRICS()[0];
+    var byGroup = {};
+    recs.forEach(function (r) {
+      var g = groupKey(r);
+      var v = num(get(r, metric.path));
+      if (metric.k === 'tris' && v != null) v = v / 1000;
+      if (v == null) return;
+      var t = num(r.serverTs);
+      if (t == null) return;
+      (byGroup[g] = byGroup[g] || []).push({ t: t, v: v });
+    });
+    var names = Object.keys(byGroup).filter(function (g) { return !hiddenSeries[g]; });
+    for (var g2 in byGroup) byGroup[g2].sort(function (a, b) { return a.t - b.t; });
+
+    if (!recs.length || !names.length) {
+      host.innerHTML = '<div class="empty">没有可绘制的数据（换筛选条件，或先载入文件）</div>';
+      $('legend').innerHTML = '';
+      $('chartCard').style.display = 'block';
+      return;
+    }
+    var W = 920, H = 300, PL = 52, PR = 16, PT = 14, PB = 34;
+    var all = [];
+    names.forEach(function (g) { byGroup[g].forEach(function (p) { all.push(p); }); });
+    var tMin = Math.min.apply(null, all.map(function (p) { return p.t; }));
+    var tMax = Math.max.apply(null, all.map(function (p) { return p.t; }));
+    var vMin = Math.min.apply(null, all.map(function (p) { return p.v; }));
+    var vMax = Math.max.apply(null, all.map(function (p) { return p.v; }));
+    if (tMax === tMin) tMax = tMin + 1000;
+    if (vMax === vMin) { vMax = vMin + Math.max(1, Math.abs(vMin) * 0.1); }
+    var pad = (vMax - vMin) * 0.08;
+    vMin -= pad; vMax += pad;
+    if (vMin < 0 && metric.k !== 'scale') vMin = 0;
+
+    var x = function (t) { return PL + (t - tMin) / (tMax - tMin) * (W - PL - PR); };
+    var y = function (v) { return H - PB - (v - vMin) / (vMax - vMin) * (H - PT - PB); };
+
+    var svg = ['<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">'];
+    // 网格 + Y 轴刻度
+    for (var i = 0; i <= 4; i++) {
+      var vv = vMin + (vMax - vMin) * i / 4;
+      var yy = y(vv);
+      svg.push('<line x1="' + PL + '" y1="' + yy.toFixed(1) + '" x2="' + (W - PR) + '" y2="' + yy.toFixed(1) + '" stroke="#e3e8ee"/>');
+      svg.push('<text x="' + (PL - 6) + '" y="' + (yy + 4).toFixed(1) + '" text-anchor="end" font-size="11" fill="#6b7785">' + r1(vv) + '</text>');
+    }
+    // X 轴时间刻度
+    for (var j = 0; j <= 4; j++) {
+      var tt = tMin + (tMax - tMin) * j / 4;
+      svg.push('<text x="' + x(tt).toFixed(1) + '" y="' + (H - PB + 16) + '" text-anchor="middle" font-size="11" fill="#6b7785">' + tsShort(tt) + '</text>');
+    }
+    svg.push('<line x1="' + PL + '" y1="' + PT + '" x2="' + PL + '" y2="' + (H - PB) + '" stroke="#cbd2d9"/>');
+    svg.push('<line x1="' + PL + '" y1="' + (H - PB) + '" x2="' + (W - PR) + '" y2="' + (H - PB) + '" stroke="#cbd2d9"/>');
+    // 折线（颜色按「全部分组」的序号取，关掉某条线不会让其余颜色跳动）
+    var allKeys = Object.keys(byGroup);
+    names.forEach(function (g) {
+      var color = COLORS[allKeys.indexOf(g) % COLORS.length];
+      var pts = byGroup[g];
+      var step = Math.max(1, Math.ceil(pts.length / 400)); // 点太多时抽稀，避免 SVG 过大
+      var d = '';
+      for (var k = 0; k < pts.length; k += step) {
+        d += (d ? ' L ' : 'M ') + x(pts[k].t).toFixed(1) + ' ' + y(pts[k].v).toFixed(1);
+      }
+      svg.push('<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.6"/>');
+      for (var k2 = 0; k2 < pts.length; k2 += step) {
+        svg.push('<circle cx="' + x(pts[k2].t).toFixed(1) + '" cy="' + y(pts[k2].v).toFixed(1) + '" r="2.2" fill="' + color + '"/>');
+      }
+    });
+    svg.push('</svg>');
+    host.innerHTML = svg.join('');
+
+    $('legend').innerHTML = Object.keys(byGroup).map(function (g, gi) {
+      var off = hiddenSeries[g] ? ' off' : '';
+      return '<span class="' + off.trim() + '" data-g="' + g + '"><i style="background:' + COLORS[gi % COLORS.length] + '"></i>' + g + '</span>';
+    }).join('');
+    Array.prototype.forEach.call($('legend').children, function (el) {
+      el.addEventListener('click', function () {
+        var g = el.dataset.g;
+        hiddenSeries[g] = !hiddenSeries[g];
+        renderChart(filtered());
+      });
+    });
+    $('chartCard').style.display = 'block';
+  }
+
+  // 分组聚合表（列与 tools/telemetry-report.mjs 保持一致）
+  function renderGroupTable(recs) {
+    var groups = {};
+    recs.forEach(function (r) { var k = groupKey(r); (groups[k] = groups[k] || []).push(r); });
+    var rows = Object.keys(groups).map(function (k) {
+      var list = groups[k];
+      var last = list[list.length - 1];
+      var d = last.device || {}, c = last.ctx || {};
+      return {
+        key: k, n: list.length,
+        fps: median(list.map(function (r) { return num(get(r, ['render', 'avgFps'])); })),
+        low1: median(list.map(function (r) { return num(get(r, ['render', 'low1Fps'])); })),
+        p95: median(list.map(function (r) { return num(get(r, ['render', 'p95Ms'])); })),
+        jank: median(list.map(function (r) { return num(get(r, ['render', 'jankPct'])); })),
+        calls: median(list.map(function (r) { return num(get(r, ['render', 'avgCalls'])); })),
+        tris: avg(list.map(function (r) { return num(get(r, ['render', 'avgTris'])); })),
+        scale: median(list.map(function (r) { return num(get(r, ['ctx', 'renderScale'])); })),
+        qual: String(c.quality || '-'),
+        shadow: c.shadow ? 'Y' : 'N',
+        msaa: (c.msaa || d.msaa) ? 'Y' : 'N',
+        dpr: r0(num(d.dpr)), cores: r0(num(d.cores)), mem: r0(num(d.memGB)),
+        screen: String(d.screen || '-'),
+        boot: avg(list.map(function (r) { return num(get(r, ['phases', 'boot'])); })),
+        enter: avg(list.map(function (r) { return num(get(r, ['phases', 'enter'])); })),
+        assets: avg(list.map(function (r) { return num(get(r, ['phases', 'assetsDone'])); })),
+      };
+    }).sort(function (a, b) { return b.n - a.n; });
+
+    if (!rows.length) {
+      $('groupTable').innerHTML = '';
+      $('tableCard').style.display = 'none';
+      return;
+    }
+    var head = ['设备 / GPU', '条', 'fps', 'low1', 'p95ms', 'jank%', 'calls', 'tris', '倍率', '画质', '影', 'MSAA', 'dpr', '核', 'GB', '屏', '启动ms', '进场ms', '资源ms'];
+    var html = '<thead><tr>' + head.map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead><tbody>';
+    rows.forEach(function (x) {
+      html += '<tr>' + [
+        x.key, x.n, r1(x.fps), r1(x.low1), r1(x.p95), r1(x.jank), r0(x.calls),
+        (x.tris == null ? '-' : r0(x.tris / 1000) + 'k'), r1(x.scale), x.qual, x.shadow, x.msaa,
+        x.dpr, x.cores, x.mem, x.screen, r0(x.boot), r0(x.enter), r0(x.assets),
+      ].map(function (v) { return '<td>' + v + '</td>'; }).join('') + '</tr>';
+    });
+    $('groupTable').innerHTML = html + '</tbody>';
+    $('tableCard').style.display = 'block';
+  }
+
+  // 加载耗时柱状图：每个分组三根（启动 / 进场 / 资源）
+  function renderLoadChart(recs) {
+    var groups = {};
+    recs.forEach(function (r) { var k = groupKey(r); (groups[k] = groups[k] || []).push(r); });
+    var keys = Object.keys(groups);
+    var vals = [];
+    keys.forEach(function (k) {
+      var list = groups[k];
+      var b = avg(list.map(function (r) { return num(get(r, ['phases', 'boot'])); })) || 0;
+      var e = avg(list.map(function (r) { return num(get(r, ['phases', 'enter'])); })) || 0;
+      var a = avg(list.map(function (r) { return num(get(r, ['phases', 'assetsDone'])); })) || 0;
+      vals.push([k, b, e, a]);
+    });
+    if (!vals.length) { $('loadChart').innerHTML = '<div class="empty">没有加载耗时数据</div>'; $('loadCard').style.display = 'none'; return; }
+    var max = Math.max.apply(null, vals.map(function (v) { return Math.max(v[1], v[2], v[3]); })) || 1;
+    var W = 920, rowH = 44, H = vals.length * rowH + 30, PL = 200, PR = 60;
+    var svg = ['<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">'];
+    var names = ['启动', '进场', '资源'], cs = ['#2f6fdb', '#2f9e5f', '#c8811a'];
+    vals.forEach(function (v, i) {
+      var y0 = i * rowH + 8;
+      svg.push('<text x="' + (PL - 8) + '" y="' + (y0 + 20) + '" text-anchor="end" font-size="12" fill="#1f2933">' + v[0].slice(0, 30) + '</text>');
+      for (var j = 0; j < 3; j++) {
+        var w = (v[j + 1] / max) * (W - PL - PR);
+        var yy = y0 + j * 11;
+        svg.push('<rect x="' + PL + '" y="' + yy + '" width="' + Math.max(0, w).toFixed(1) + '" height="8" fill="' + cs[j] + '"/>');
+        svg.push('<text x="' + (PL + Math.max(0, w) + 6) + '" y="' + (yy + 8) + '" font-size="10" fill="#6b7785">' + Math.round(v[j + 1]) + '</text>');
+      }
+    });
+    svg.push('<text x="' + PL + '" y="' + (H - 6) + '" font-size="11" fill="#6b7785">毫秒（' + names.map(function (n, i) { return n + '=' + cs[i]; }).join(' ') + '，颜色见条）</text>');
+    svg.push('</svg>');
+    $('loadChart').innerHTML = svg.join('');
+    $('loadCard').style.display = 'block';
+  }
+
+  function renderDetail(recs) {
+    var list = recs.slice().sort(function (a, b) { return (num(b.serverTs) || 0) - (num(a.serverTs) || 0); }).slice(0, 200);
+    if (!list.length) { $('detailTable').innerHTML = ''; $('detailCard').style.display = 'none'; return; }
+    var head = ['时间', '平台', '设备 / GPU', 'fps', 'low1', 'p95ms', 'jank%', '倍率', '画质', '屏'];
+    var html = '<thead><tr>' + head.map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead><tbody>';
+    list.forEach(function (r, i) {
+      var d = r.device || {};
+      html += '<tr class="clickable" data-i="' + i + '">' + [
+        tsShort(num(r.serverTs)), platformOf(r), groupKey(r),
+        r1(num(get(r, ['render', 'avgFps']))), r1(num(get(r, ['render', 'low1Fps']))),
+        r1(num(get(r, ['render', 'p95Ms']))), r1(num(get(r, ['render', 'jankPct']))),
+        r1(num(get(r, ['ctx', 'renderScale']))), qualOf(r), String(d.screen || '-'),
+      ].map(function (v) { return '<td>' + v + '</td>'; }).join('') + '</tr>';
+      html += '<tr class="detail" id="d' + i + '" style="display:none"><td colspan="' + head.length + '"><pre>' + JSON.stringify(r, null, 2) + '</pre></td></tr>';
+    });
+    $('detailTable').innerHTML = html + '</tbody>';
+    Array.prototype.forEach.call($('detailTable').querySelectorAll('tr.clickable'), function (tr) {
+      tr.addEventListener('click', function () {
+        var d = $('d' + tr.dataset.i);
+        d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
+      });
+    });
+    $('detailCard').style.display = 'block';
+  }
+
+  // 示例数据：没有真数据时先看看页面长什么样（含 iOS / Android / 桌面三种设备）
+  var DEMO = [
+    { id: 'd1', serverTs: Date.now() - 3600e3, kind: 'perf', v: 1, phases: { boot: 1200, enter: 3400, assetsDone: 900 }, render: { frames: 600, avgFps: 59.6, low1Fps: 24.4, p50Ms: 16, p95Ms: 21.1, jankPct: 0.4, avgCalls: 98, avgTris: 104265, avgScale: 0.99 }, device: { ua: 'Mozilla/5.0 (Linux; Android 14)', platform: 'Android', cores: 8, memGB: 6, dpr: 3, screen: '412x915', msaa: false }, ctx: { renderScale: 0.99, shadow: false, quality: 'low', gpu: 'Adreno 730' } },
+    { id: 'd2', serverTs: Date.now() - 1800e3, kind: 'perf', v: 1, phases: { boot: 900, enter: 2800, assetsDone: 700 }, render: { frames: 600, avgFps: 47.8, low1Fps: 31.2, p50Ms: 18, p95Ms: 33.5, jankPct: 4.2, avgCalls: 45, avgTris: 67000, avgScale: 0.72 }, device: { ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)', platform: 'iPhone', cores: 6, memGB: 4, dpr: 3, screen: '390x844', msaa: false }, ctx: { renderScale: 0.72, shadow: false, quality: 'low', gpu: 'Apple A15 GPU' } },
+    { id: 'd3', serverTs: Date.now() - 600e3, kind: 'perf', v: 1, phases: { boot: 1500, enter: 4200, assetsDone: 1400 }, render: { frames: 600, avgFps: 23.2, low1Fps: 12.1, p50Ms: 40, p95Ms: 72.1, jankPct: 18.5, avgCalls: 52, avgTris: 71000, avgScale: 0.5 }, device: { ua: 'Mozilla/5.0 (Windows NT 10.0)', platform: 'Win32', cores: 4, memGB: 8, dpr: 1, screen: '1920x1080', msaa: true }, ctx: { renderScale: 0.5, shadow: false, quality: 'low', gpu: 'Intel UHD 620' } },
+    { id: 'd4', serverTs: Date.now() - 300e3, kind: 'perf', v: 1, phases: { boot: 800, enter: 2100, assetsDone: 500 }, render: { frames: 600, avgFps: 55.1, low1Fps: 30.0, p50Ms: 17, p95Ms: 25.0, jankPct: 1.1, avgCalls: 60, avgTris: 80000, avgScale: 0.9 }, device: { ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)', platform: 'iPhone', cores: 6, memGB: 4, dpr: 3, screen: '390x844', msaa: false }, ctx: { renderScale: 0.9, shadow: false, quality: 'medium', gpu: 'Apple A15 GPU' } },
+  ].map(function (o) { return JSON.stringify(o); }).join('\n');
+})();
+</script>
+</body>
+</html>
