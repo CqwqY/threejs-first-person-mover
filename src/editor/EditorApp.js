@@ -590,6 +590,18 @@ export function createEditor() {
     rec.obj.add(rv);
   }
 
+  // 洞壁深度要**射线量墙厚**，而模型是异步加载的：窗摆下去时墙可能还没进来，只能先按兜底值。
+  // 所有「模型加载完」的时机都喊一嗓子，这里做一次防抖，等这一波加载完再统一把挖洞窗重量一遍。
+  let _revealFitT = 0;
+  function scheduleRevealFit() {
+    clearTimeout(_revealFitT);
+    _revealFitT = setTimeout(() => {
+      for (const rec of state.placed) {
+        if (rec && rec.kind === 'window' && rec.hole === true) rebuildReveal(rec);
+      }
+    }, 400);
+  }
+
   function applyWindowTransform(rec) {
     if (!rec || !rec.obj) return;
     rec.obj.position.set(rec.x ?? 0, rec.y ?? 0, rec.z ?? 0);
@@ -1085,7 +1097,7 @@ export function createEditor() {
     select(item);
     markDirty();
     outlinerUpdate();
-    instantiate(state.currentUrl).then((m) => { obj.add(m); optimizeLoaded(m); autoFitCollider(item); syncHoles(); }).catch(() => {});
+    instantiate(state.currentUrl).then((m) => { obj.add(m); optimizeLoaded(m); autoFitCollider(item); syncHoles(); scheduleRevealFit(); }).catch(() => {});
   }
 
   // 模型加载完成后的统一优化：
@@ -2713,7 +2725,7 @@ export function createEditor() {
       obj.name = nm;
       if (it.url) {
         instantiate(it.url).then((m) => {
-          obj.add(m); optimizeLoaded(m); syncHoles();
+          obj.add(m); optimizeLoaded(m); syncHoles(); scheduleRevealFit();
           // 默认开第 1 层（受太阳实时照）；下面若带烘焙结果，markBakedLayers 会把烘焙体关掉第 1 层。
           enableDynamicLighting(rec.obj);
           // 存档里带了烘焙结果 → 编辑器内也回放预览（静态体改走 lightMap，太阳只照动态层）
