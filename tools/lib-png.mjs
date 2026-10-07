@@ -42,16 +42,19 @@ export function encodePNG(rgba, w, h) {
 export function decodePNG(buf) {
   let p = 8, w = 0, h = 0, ctype = 0;
   const idat = [];
+  let plte = null, trns = null; // ctype 3（调色板）：PLTE 是 RGB 三元组表，tRNS 是每索引的 alpha 表
   while (p < buf.length) {
     const len = buf.readUInt32BE(p);
     const type = buf.toString('ascii', p + 4, p + 8);
     const data = buf.subarray(p + 8, p + 8 + len);
     if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); ctype = data[9]; }
+    else if (type === 'PLTE') plte = data;
+    else if (type === 'tRNS') trns = data;
     else if (type === 'IDAT') idat.push(data);
     else if (type === 'IEND') break;
     p += 12 + len;
   }
-  const bpp = ctype === 6 ? 4 : 3;
+  const bpp = ctype === 6 ? 4 : ctype === 3 ? 1 : 3;
   const raw = inflateSync(Buffer.concat(idat));
   const stride = w * bpp;
   const out = Buffer.alloc(w * h * bpp);
@@ -75,5 +78,5 @@ export function decodePNG(buf) {
       out[y * stride + x] = v & 0xff;
     }
   }
-  return { w, h, px: out, bpp };
+  return { w, h, px: out, bpp, plte, trns };
 }
