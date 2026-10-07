@@ -433,7 +433,9 @@ const RETIRED_IDS = new Set(['flashlight']); // 手电筒：2026-10-07 按用户
     // 只动超标的那条 —— 编辑器里手工改过的正常价格不该被每次启动冲掉。
     if (Number(cur.price) > 100) { cur.price = f.price; changed = true; }
     // 还是老「占位家具」文案的，顺手刷成真家具的名称/描述/尺寸。
-    if (String(cur.desc || '').includes('占位')) {
+    // 「建议缩放」也算陈旧：家具已改成统一基座 ×3 渲染（客户端 FURN_BASE_SCALE），
+    //   描述里再写「摆放时建议缩放 ×2」会误导玩家去编辑里再调一次（变 6 倍），故一并刷新。
+    if (String(cur.desc || '').includes('占位') || String(cur.desc || '').includes('建议缩放')) {
       cur.name = f.name; cur.desc = f.desc; cur.size = f.size; changed = true;
     }
     if (changed) fixed++;
