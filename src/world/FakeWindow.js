@@ -680,7 +680,7 @@ export function resetHolePatches() {
 // 视觉洞深（米）：即"假定墙有多厚"。单向延伸这么长。
 // ⚠ 洞**盒**的深度是另一回事（computeHoleBox 用的是调用方传的 depth，本项目 1.2m）——
 //   洞盒负责"一定要挖穿"，洞壁负责"看起来有厚度"，两者独立。
-export const REVEAL_DEPTH = 0.7; // 加深到 ~HOLE_DEPTH/2：挖洞 discard 盒以窗面为心、沿墙法线各侵 HOLE_DEPTH/2≈0.6m，
+export const REVEAL_DEPTH = 0.6; // 加深到 ~HOLE_DEPTH/2：挖洞 discard 盒以窗面为心、沿墙法线各侵 HOLE_DEPTH/2≈0.6m，
 // 洞壁颜色（中性灰，接近水泥/石膏的剖面）。太暗在洞里会糊成一片黑，太亮又不像墙。
 export const REVEAL_COLOR = '#94918a';
 
@@ -775,14 +775,123 @@ export function createRevealGeometry(w, h, depth) {
 export function createRevealMesh(opts = {}) {
   const w = opts.w != null ? opts.w : WINDOW_DEFAULTS.w;
   const h = opts.h != null ? opts.h : WINDOW_DEFAULTS.h;
-  const depth = opts.depth != null ? opts.depth : REVEAL_DEPTH;
+  const raw = opts.depth != null ? Number(opts.depth) : REVEAL_DEPTH;
+  const depth = Math.max(0.02, Number.isFinite(raw) ? raw : REVEAL_DEPTH);
   const mesh = new THREE.Mesh(createRevealGeometry(w, h, depth), getRevealMaterial());
   mesh.name = 'hole-reveal';
   mesh.castShadow = false;   // 洞壁本身不投影（洞口很小，投了也看不出，白花一趟阴影）
   mesh.receiveShadow = true; // 但要能吃到墙的阴影：洞里暗、洞口亮，厚度感靠它
   mesh.frustumCulled = true;
   mesh.userData.fpmReveal = true; // 识别标记：挖洞补丁 / 合并流程都要绕开它
+  mesh.userData.revealSize = { w, h };   // 供 setRevealDepth() 重建几何（裸几何没有 geometry.parameters）
+  mesh.userData.revealDepth = depth;     // 当前深度：setRevealDepth 靠它判「要不要重建」
   return mesh;
+}
+
+/**
+ * 把一块洞壁的「向墙内延伸长度」改成 depth（几何随之重建；共享材质不动）。
+ * 用于「射线量出墙厚后，把洞壁贴合到那面墙上」。与当前深度相同则直接返回 false（不白重建）。
+ *
+ * @param {THREE.Mesh} mesh  createRevealMesh 的产物
+ * @param {number} depth     新的洞深（米）
+ * @returns {boolean} 是否真的重建了
+ */
+export function setRevealDepth(mesh, depth) {
+  if (!mesh || !mesh.userData || mesh.userData.fpmReveal !== true || !mesh.geometry) return false;
+  const size = mesh.userData.revealSize || { w: WINDOW_DEFAULTS.w, h: WINDOW_DEFAULTS.h };
+  const raw = Number(depth);
+  const d = Math.max(0.02, Number.isFinite(raw) ? raw : REVEAL_DEPTH);
+  if (mesh.userData.revealDepth === d) return false;
+  const old = mesh.geometry;
+  mesh.geometry = createRevealGeometry(size.w, size.h, d);
+  mesh.userData.revealDepth = d;
+  try { old.dispose(); } catch (e) { /* 已被释放：忽略 */ }
+  return true;
+}
+
+// measureWallDepth 的复用临时对象（避免每次测量都新建，测量在放置/重建时高频调用）
+const _mwdOrigin = new THREE.Vector3();
+const _mwdQuat = new THREE.Quaternion();
+const _mwdDir = new THREE.Vector3();
+const _mwdStart = new THREE.Vector3();
+const _mwdRay = new THREE.Raycaster();
+
+/**
+ * 量「窗面 → 墙内表面」的**实际厚度**——洞壁该延伸多远，就是它。
+ *
+ * 为什么必须量而不是写死：写死必然错。
+ *   · 洞壁比墙短 → 洞里靠外那半截没有侧壁，看着像"只填了一半"；
+ *   · 洞壁比墙长 → 管子伸到墙背面之外，薄墙上就是"洞壁突出了"。
+ * 只有量出这面墙真实多厚，才能"贴合墙壁的空缺"。
+ *
+ * 做法：从窗户当前位置沿它的局部 −Z（= 墙内方向）打一条射线，
+ * 取 (0, max] 内**最远**的命中距离 —— 那就是墙的内表面。
+ *
+ * ⚠ 为什么取**最远**：窗户贴在墙面上，射线先打中墙外表面（距离 ≈0，退化命中），
+ *   再打中内表面；内表面才是墙的背面。
+ * ⚠⚠ three 的 Raycaster 尊重 material.side 做背面剔除：本项目（含编辑器）都跑过背面剔除
+ *   （DoubleSide→FrontSide），单面材质的**背面不参与命中** → 直接从墙里穿过去，量不到内表面。
+ *   所以这里把候选材质**临时**改成 DoubleSide，量完立刻还原（同步、一次性；try/finally 兜底）。
+ *   只动 side 不会触发重编译（Front/Double 走同一 program cache key），且还原后状态不变。
+ *
+ * @param {THREE.Object3D} holder  窗户的 holder（墙在其局部 −Z 方向）
+ * @param {object} [opts]
+ * @param {THREE.Object3D} [opts.root]  射线检测的根，默认 holder.parent（整栋楼/整个场景）
+ * @param {number} [opts.max]  上限（米），默认 REVEAL_DEPTH。墙比它厚 → 直接取它（洞盒也只挖这么深）
+ * @param {number} [opts.min]  下限（米），默认 0.05
+ * @returns {number} 该用的洞壁深度（米）
+ */
+export function measureWallDepth(holder, opts = {}) {
+  const max = Number.isFinite(opts.max) ? opts.max : REVEAL_DEPTH;
+  const min = Number.isFinite(opts.min) ? opts.min : 0.05;
+  const root = (opts.root && opts.root.isObject3D) ? opts.root : (holder && holder.parent);
+  if (!holder || !root || !(max > 0)) return max;
+  try {
+    holder.updateMatrixWorld(true);
+    holder.getWorldPosition(_mwdOrigin);
+    holder.getWorldQuaternion(_mwdQuat);
+    _mwdDir.set(0, 0, -1).applyQuaternion(_mwdQuat);
+    if (!(_mwdDir.lengthSq() > 1e-10)) return max;
+    _mwdDir.normalize();
+    // 起点往墙内挪 min/2：既避开与窗户自身共面的退化命中（t=0），也把窗框的厚度算进去
+    _mwdStart.copy(_mwdOrigin).addScaledVector(_mwdDir, min * 0.5);
+    _mwdRay.set(_mwdStart, _mwdDir);
+    _mwdRay.near = 0;
+    _mwdRay.far = Math.max(min, max - min * 0.5);
+
+    // 临时双面：让墙内表面（背面）也能被命中。量完还原（含数组材质）。
+    const seen = new Set();
+    const restored = [];
+    root.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      if (o.userData && o.userData.fpmReveal) return; // 洞壁自己不参与（正好压在洞盒边界上）
+      const ms = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of ms) {
+        if (!m || m.side === THREE.DoubleSide || seen.has(m)) continue;
+        seen.add(m);
+        restored.push({ m, side: m.side });
+        m.side = THREE.DoubleSide;
+      }
+    });
+
+    let depth = max;
+    try {
+      const hits = _mwdRay.intersectObject(root, true);
+      for (const hit of hits) {
+        if (!hit || !hit.object) continue;
+        // 跳过窗户自身（含它的洞壁）：沿 holder 往上找
+        let p = hit.object, own = false;
+        while (p) { if (p === holder) { own = true; break; } p = p.parent; }
+        if (own) continue;
+        if (hit.distance > 0 && hit.distance <= _mwdRay.far) depth = hit.distance + min * 0.5;
+      }
+    } finally {
+      for (const r of restored) r.m.side = r.side;
+    }
+    return Math.min(max, Math.max(min, depth));
+  } catch (e) {
+    return max; // 量不了就退回兜底值：至少覆盖整个被挖空区，不留缝
+  }
 }
 
 /** 释放一块洞壁。⚠ 共享材质（getRevealMaterial 的产物）**不释放**。 */

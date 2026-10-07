@@ -36,7 +36,7 @@ import { createSettingsPanel, loadSettings, DEFAULT_SETTINGS, computeSunOffset }
 import {
   createWindowMesh, createWindowMaterial, setWindowEnv, readWindowParams, disposeWindow, WINDOW_DEFAULTS,
   applyWindowHoles, resetHolePatches, MAX_HOLES,
-  createRevealMesh, disposeReveal, REVEAL_DEPTH, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
+  createRevealMesh, disposeReveal, REVEAL_DEPTH, measureWallDepth, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
 import { applyBackfaceCulling } from '../world/BackfaceCull.js';
 // 光照烘焙：把太阳直射+阴影烤进各网格 lightMap（静态建筑降填充率）。编辑器点「烘焙光照」触发。
@@ -76,6 +76,16 @@ const UPLOAD_URL = API_ROOT + '/api/upload';
 const SAME_ORIGIN_UPLOAD = '/api/upload';
 // 后端与 vite 代理的单次上传上限都是 64MB。这里先拦一道，给一句人话，而不是让连接被服务端 reset。
 const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
+
+// 编辑器**写接口**要带的管理员密钥：进门密码门通过后写进这两个键（sessionStorage 短期 + localStorage 复用）。
+// 服务端会拿它校验所有写接口（/api/scene 存场景、/api/upload 传模型、/api/build 等）——
+// 所以「删掉 #gate 遮罩」是没用的：遮罩只是 UI，写不进去才是真的进不来。
+const ADMIN_TOKEN_KEY = 'fpm-shop-token'; // 与 SHOP_TOKEN_KEY 及各处密钥框共用的同一个键
+const GATE_PASS_KEY = 'fpm-editor-pass';  // 与进门密码门写入 sessionStorage 的键一致
+function editorAdminToken() {
+  try { return localStorage.getItem(ADMIN_TOKEN_KEY) || sessionStorage.getItem(GATE_PASS_KEY) || ''; }
+  catch (e) { return ''; }
+}
 
 // 上传用的 ASCII 文件名。为什么必须转：
 // HTTP 头的值只能是 ISO-8859-1 字节，文件名里只要有一个中文（任何码位 >255 的字符），
@@ -117,8 +127,12 @@ export function createEditor() {
   // 真实阴影贴图默认关闭：填充率是本项目瓶颈，编辑器全城实时阴影会拖垮帧率（"都快爆了"）。
   // 需要时由「画面」面板阴影开关即时开启（开关会同时置 renderer.shadowMap.enabled 与 sun.castShadow）。
   const EDITOR_CAST_SHADOW = false;
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
+  // 编辑器默认**最低画质**渲染：它常年开着，场景又比游戏端重（全城建筑 + 实时灯光/烘焙编辑），
+  // 高分辨率 + 抗锯齿是最先把帧率吃光的两项。0.5 = 与游戏端画质档「50%」同一档。
+  // 看清细节时改这个常量即可（编辑器不暴露画质面板，免得和游戏端设置互相打架）。
+  const EDITOR_RENDER_SCALE = 0.5;
+  const renderer = new THREE.WebGLRenderer({ antialias: false });
+  renderer.setPixelRatio(EDITOR_RENDER_SCALE);
   // ACES 色调映射：多重光累加柔和压回 [0,1]，高光不爆白；曝光随编辑器设计值（太亮就调低）。
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = (design && Number(design.exposure)) || DEFAULT_SETTINGS.exposure;
@@ -206,7 +220,11 @@ export function createEditor() {
       // 挪动/旋转**窗户**结束 → 洞的位置跟着变，重新同步一次挖洞。
       // ⚠ 只在拖动结束时同步（不是 objectChange 每帧）：syncHoles 要遍历场景里的材质，
       //   每帧跑一次是纯浪费，而洞的位置差一帧用户根本看不出来。
-      if (state.selected && state.selected.kind === 'window' && state.selected.hole) syncHoles();
+      if (state.selected && state.selected.kind === 'window' && state.selected.hole) {
+        // 挪动/旋转后，窗背后可能已经不是同一面墙了 → 重新量墙厚，把洞壁贴合上去
+        rebuildReveal(state.selected);
+        syncHoles();
+      }
     }
   });
   tCtl.addEventListener('objectChange', () => {
@@ -558,14 +576,17 @@ export function createEditor() {
     const old = revealMeshOf(rec);
     if (old) { rec.obj.remove(old); disposeReveal(old); }
     if (rec.hole !== true) return;
-    const rv = createRevealMesh({
-      w: rec.xw ?? WINDOW_DEFAULTS.w,
-      h: rec.xh ?? WINDOW_DEFAULTS.h,
-      depth: Number.isFinite(rec.holeDepth) ? rec.holeDepth : REVEAL_DEPTH,
-    });
+    const w = rec.xw ?? WINDOW_DEFAULTS.w;
+    const h = rec.xh ?? WINDOW_DEFAULTS.h;
+    // 洞深 = 这面墙的**实际厚度**（射线量出来），不是写死值 —— 写死必然要么在洞里留缝（"只填一半"）、
+    // 要么把管子戳到墙背面之外（"洞壁突出了"）。量不出（模型没加载完 / 墙比 HOLE_DEPTH/2 厚）时用上限兜底。
+    const depth = Number.isFinite(rec.holeDepth)
+      ? rec.holeDepth
+      : measureWallDepth(rec.obj, { root: scene, max: HOLE_DEPTH / 2 });
+    const rv = createRevealMesh({ w, h, depth });
     rv.userData.editorReveal = true;
     // 记下当前尺寸：applyWindowTransform 靠它判断"洞口变了、该重建洞壁了"
-    rv.userData.revealSize = { w: rec.xw ?? WINDOW_DEFAULTS.w, h: rec.xh ?? WINDOW_DEFAULTS.h };
+    rv.userData.revealSize = { w, h };
     rec.obj.add(rv);
   }
 
@@ -609,8 +630,10 @@ export function createEditor() {
     });
     mesh.userData.editorWindow = true;
     rec.obj.add(mesh);
-    rebuildReveal(rec);
+    // 先把位置/朝向落到 obj 上：洞壁要**射线量墙厚**，那时必须已有正确的世界矩阵。
+    //（applyWindowTransform 只在"洞壁尺寸变了"时才重建洞壁，首次构建时还没有洞壁 → 不会重复建。）
     applyWindowTransform(rec);
+    rebuildReveal(rec);
   }
 
   // 面板改动后即时刷新窗户材质（不重建网格，避免拖动时反复 dispose）
@@ -2762,13 +2785,17 @@ export function createEditor() {
     try {
       const r = await fetch(SAVE_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // 写场景必须带管理员密钥：服务端会校验，所以「删掉进门遮罩」也照样写不进去。
+        headers: { 'Content-Type': 'application/json', 'x-shop-token': editorAdminToken() },
         body: JSON.stringify(serialize()),
       });
       const res = await r.json().catch(() => null);
       if (r.ok && res && res.ok) {
         StepUI.status.textContent = '已保存编辑器场景';
         StepUI.status.className = 'save-status saved';
+      } else if (r.status === 403) {
+        StepUI.status.textContent = '保存失败：管理员密钥不对（先在进门密码框输入正确密码）';
+        StepUI.status.className = 'save-status err';
       } else {
         StepUI.status.textContent = '保存失败' + (res && res.error ? '：' + res.error : '');
         StepUI.status.className = 'save-status err';
@@ -2985,7 +3012,8 @@ export function createEditor() {
     try {
       r = await fetch(url, {
         method: 'POST',
-        headers: { 'x-filename': asciiFileName(file.name) },
+        // 上传也是写接口：带管理员密钥（服务端校验），避免任何人往 assets 里塞文件
+        headers: { 'x-filename': asciiFileName(file.name), 'x-shop-token': editorAdminToken() },
         body: buf,
       });
     } catch (e) {
@@ -3541,7 +3569,7 @@ export function createEditor() {
   // ---------- 商店管理（在线改价格 / 导入模型） ----------
   // 与后端 /api/shop 对接：GET 公开读、POST 带管理员密钥改（add/update/del）。
   // 价格改动即时全服生效（玩家进游戏会重新拉 /api/shop 覆盖本地目录）。
-  const SHOP_TOKEN_KEY = 'fpm-shop-token';
+  const SHOP_TOKEN_KEY = ADMIN_TOKEN_KEY; // 与进门密码 / editorAdminToken() 用同一个键，别再各写一份字面量
   let editingShopId = null;        // 正在编辑的商品 id；null 表示新增
   let lastShopItems = [];          // 最近一次拉取的商品列表（保存/删除后就地更新）
   if (StepUI.shopToken) {

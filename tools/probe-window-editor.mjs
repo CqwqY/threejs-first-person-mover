@@ -185,9 +185,9 @@ ok(!/PlaneGeometry/.test(holeApplySrc), 'applyWindowHoles 不建几何（不增�
 ok(!/syncHoles\(\)/.test(loopSeg), '编辑器 loop 里不逐帧同步挖洞（syncHoles 会遍历材质）');
 
 console.log('\n[11] 编辑器挖洞同步的调用时机（漏一处 = 洞不跟手）');
-// 拖拽结束
-has(app, "state.selected.kind === 'window' && state.selected.hole) syncHoles()",
-  '拖动窗户结束 → syncHoles（洞跟着走）');
+// 拖拽结束：既要重算洞壁深度（窗背后可能换了另一面墙），也要同步挖洞位置
+ok(/state\.selected\.kind === 'window' && state\.selected\.hole\)[\s\S]{0,260}?rebuildReveal\(state\.selected\)[\s\S]{0,200}?syncHoles\(\)/.test(app),
+  '拖动窗户结束 → rebuildReveal + syncHoles（洞壁重贴合、洞跟手）');
 // 面板改尺寸/朝向 → 洞形状变了
 ok(/if \(rebuildGeo\) applyWindowTransform\(rec\);[\s\S]{0,200}?if \(rec\.hole\) syncHoles\(\)/.test(app),
   '面板改尺寸/朝向 → syncHoles（洞形状跟着变）');
@@ -203,6 +203,11 @@ has(app, 'applyWindowHoles(wins, mats, lights, { depth: HOLE_DEPTH })',
   '编辑器走统一入口 applyWindowHoles（洞参数写入共享 uniform）');
 ok(!/mats\[i\]\.uniforms/.test(app), '编辑器没有把洞参数写进单个材质自己的 uniforms');
 has(app, 'const HOLE_DEPTH = 1.2;', '编辑器定义洞厚常量（穿透厚墙）');
+
+console.log('\n[13] 洞壁深度必须「量出来」而不是写死（写死必然要么留缝、要么戳出墙）');
+ok(/measureWallDepth\(rec\.obj/.test(app), '编辑器：洞壁深度来自 measureWallDepth(rec.obj)（射线量这面墙的厚）');
+ok(/refitRevealDepths/.test(eb) && /measureWallDepth\(h,\s*\{[^}]*max:\s*maxDepth/.test(eb),
+  '游戏端：模型加载完 + 背面剔除后重算洞壁深度（refitRevealDepths）');
 
 console.log('\n' + (fails === 0 ? '✅ 全部通过' : `❌ ${fails} 项失败`));
 process.exit(fails === 0 ? 0 : 1);

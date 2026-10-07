@@ -662,6 +662,14 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && (url.pathname === '/api/map' || url.pathname === '/api/scene')) {
+    // 鉴权：**写**场景/地图必须带管理员密钥（读 /api/scene 仍公开 —— 游戏客户端要拉场景）。
+    // 之前这里是裸的：进门密码门只是个 UI 遮罩，删掉遮罩就能直接 POST 覆盖整个场景（"删了就露馅"）。
+    if (String(req.headers['x-shop-token'] || '') !== SHOP_ADMIN_TOKEN) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '管理员密钥错误' }));
+      req.resume(); // 排空请求体，否则连接可能被 reset，客户端就读不到 403 了
+      return;
+    }
     let body = '';
     req.on('data', (chunk) => { if ((body += chunk).length > 8e6) req.destroy(); });
     req.on('end', () => {
@@ -685,6 +693,13 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && url.pathname === '/api/upload') {
+    // 上传也是写接口：同样要管理员密钥，否则任何人都能往 assets 里塞文件。
+    if (String(req.headers['x-shop-token'] || '') !== SHOP_ADMIN_TOKEN) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '管理员密钥错误' }));
+      req.resume();
+      return;
+    }
     const name = sanitizeName(req.headers['x-filename']);
     const saved = 'import-' + Date.now() + '-' + name;
     const chunks = [];
