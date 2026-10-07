@@ -1584,23 +1584,18 @@ export class Game {
     const fl = new THREE.SpotLight(0xfff2cc, 0, 100, Math.PI / 6, 0.35, 1.2);
     fl.castShadow = false; // 默认不投影：夜里氛围靠光锥打在墙面/地面即可，投影另开成本高
     fl.visible = false;
-    // 挂在相机上：光照方向 = 相机视线，自动跟随位置与朝向（含俯仰），
-    // 由 three 渲染管线同步 worldMatrix，无需每帧手动填世界坐标。
-    // 旧实现每帧 cam.getWorldPosition + getWorldDirection 手填，相机矩阵未刷新时会退化成
-    // 零向量/重合点 → 光锥方向退化 → 整灯不亮（表现为「按了没光」）。挂相机子节点彻底规避。
-    this.camera.add(fl);
-    fl.position.set(0, 0, 0.15); // 略前移，避免与眼睛精确重合
-    this.camera.add(fl.target);
-    fl.target.position.set(0, 0, -1); // 相机本地坐标：正前方 1m
-    fl.target.updateMatrixWorld();
-    // 相机加入场景图：确保其 worldMatrix（及子光源）在渲染前被 scene.updateMatrixWorld 更新
-    if (this.camera.parent !== this.scene) this.scene.add(this.camera);
+    // 作为场景里的独立光源（用户说的「用光源」）：直接加进 scene，每帧在 _updateFlashlight
+    // 把 position / target 同步到相机世界坐标（含俯仰）。比「挂相机子节点」更稳——独立光源
+    // 一定在渲染管线的灯光收集链里，不受相机是否进场景图、子节点矩阵何时刷新等坑影响。
+    this.scene.add(fl);
+    this.scene.add(fl.target);
     this._flash = fl;
     this._flashDir = new THREE.Vector3(0, 0, -1);
     this._flashOn = false;
-    this._flashMax = 60; // 开灯强度（candela，可调）
-    // 调试浮层（仅 ?flashdbg 时）：实时打印 owned/可见/强度/世界坐标，定位「没光」到底是没开还是渲染问题
-    if (location.search.indexOf('flashdbg') >= 0) {
+    this._flashMax = 100; // 开灯强度（candela，可调）
+    // 调试浮层：开关来自 ?flashdbg / #flashdbg / 登录前记进 sessionStorage 的标记
+    // （登录跳转会吃掉 ? 查询串，故用 sessionStorage 兜底，详见 main.js）。
+    if (this._flashDbgOn()) {
       const d = document.createElement('div');
       d.id = 'flashdbg';
       d.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;background:rgba(0,0,0,.72);color:#3f6;font:12px/1.5 monospace;padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none';
@@ -1609,6 +1604,13 @@ export class Game {
       this._flashDbgV = new THREE.Vector3();
       this._flashDbgT = new THREE.Vector3();
     }
+  }
+
+  // 调试浮层开关：登录跳转会吃掉 ? 查询串，故首次见到 ?flashdbg/#flashdbg 时由 main.js
+  // 记进 sessionStorage.__flashdbg，这里三种来源都认，保证登录后浮层仍出得来。
+  _flashDbgOn() {
+    try { if (sessionStorage.getItem('__flashdbg') === '1') return true; } catch (e) { /* 忽略 */ }
+    return location.search.indexOf('flashdbg') >= 0 || location.hash.indexOf('flashdbg') >= 0;
   }
 
   _toggleFlashlight() {
@@ -1625,14 +1627,27 @@ export class Game {
   }
 
   _updateFlashlight() {
-    // 手电筒已作为相机子节点，跟随位置/朝向由 three 渲染管线自动处理，无需手动同步世界坐标
-    // （旧逻辑每帧 cam.getWorldPosition + getWorldDirection 手填，相机矩阵未刷新时会退化成零向量
-    //  → 光锥方向退化 → 整灯不亮；且与「挂相机子节点」的局部坐标冲突，必须弃用）。
-    // 这里仅做强度兜底：开启后若强度被别处重置，重新拉回 _flashMax。
-    if (this._flash && this._flash.visible && this._flash.intensity !== this._flashMax) {
-      this._flash.intensity = this._flashMax;
+    if (!this._flash) return;
+    // 手电筒是场景里的独立光源：开启时每帧把 position/target 同步到相机世界坐标（含俯仰）。
+    // cam.getWorldPosition / getWorldDirection 内部会强制刷新相机矩阵，故不会退化成零向量
+    // （之前「零向量」是误判——独立光源 + 每帧同步是 three 里做跟随视角手电筒的标准做法）。
+    // 整段包 try/catch：一旦抛异常也绝不让主循环卡住（否则表现成「按了手电筒就动不了」）。
+    if (this._flash.visible) {
+      const cam = this.camera;
+      try {
+        cam.getWorldPosition(this._flash.position);
+        cam.getWorldDirection(this._flashDir);
+        if (Number.isFinite(this._flashDir.x) && Number.isFinite(this._flashDir.y) && Number.isFinite(this._flashDir.z)
+            && (this._flashDir.x !== 0 || this._flashDir.y !== 0 || this._flashDir.z !== 0)) {
+          this._flash.target.position.copy(this._flash.position).add(this._flashDir);
+          this._flash.target.updateMatrixWorld();
+        }
+        if (this._flash.intensity !== this._flashMax) this._flash.intensity = this._flashMax;
+      } catch (e) {
+        if (!this._flashErr) { this._flashErr = true; console.warn('[flashlight] 每帧跟随失败，已跳过:', e); }
+      }
     }
-    // 调试浮层（?flashdbg）：手电筒状态 + 技能槽/道具诊断，定位「没光」「未识别」
+    // 调试浮层（?flashdbg / #flashdbg / sessionStorage 兜底）：手电筒状态 + 技能槽/道具诊断
     if (this._flashDbg) {
       this._flash.getWorldPosition(this._flashDbgV);
       this._flash.target.getWorldPosition(this._flashDbgT);

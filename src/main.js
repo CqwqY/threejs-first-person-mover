@@ -12,6 +12,12 @@ import { initSaveSync } from './player/CloudSave.js';
 import { stats, whenIdle, quietFor } from './world/loadTracker.js';
 import { markLoadPhase } from './util/Telemetry.js';
 
+// 调试开关记忆：登录跳转会吃掉 ? 查询串，故首次见到 ?flashdbg / #flashdbg 就记进 sessionStorage，
+// 让 Game 构造时（登录后）仍能读到，调试浮层才出得来。详见 Game._flashDbgOn()。
+if (/flashdbg/.test(location.search) || /flashdbg/.test(location.hash)) {
+  try { sessionStorage.setItem('__flashdbg', '1'); } catch (e) { /* 忽略 */ }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms)]);
 
