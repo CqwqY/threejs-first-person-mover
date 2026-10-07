@@ -15,6 +15,7 @@
 import * as THREE from 'three';
 import { instantiate, instantiateRigged } from '../world/AssetLoader.js';
 import { Config } from '../config.js';
+import { attachFakeShadow } from '../world/FakeShadow.js';
 
 const MODEL_HEIGHT = 1.8;      // 人物目标高度（米），与相机高度 PLAYER_HEIGHT 大致对齐
 const NAME_TAG_Y = 2.05;       // 名牌锚点高度（在头顶上方）
@@ -114,6 +115,7 @@ function buildBody(entry) {
       const holder = new THREE.Group();
       holder.add(root);
       holder.receiveShadow = true;
+      attachFakeShadow(holder, { radius: 0.5 }); // 假阴影：关掉真实阴影后给角色落地实感
       swapBody(entry, holder);
       entry.faceHolder = holder;
 
@@ -144,9 +146,10 @@ function buildStaticBody(entry) {
     const scale = sizeY > 1e-4 ? MODEL_HEIGHT / sizeY : MODEL_HEIGHT;
     model.scale.setScalar(scale);
     model.position.y = -box.min.y * scale;
-    const holder = new THREE.Group();
-    holder.add(model);
-    holder.receiveShadow = true;
+      const holder = new THREE.Group();
+      holder.add(model);
+      holder.receiveShadow = true;
+      attachFakeShadow(holder, { radius: 0.5 }); // 假阴影：关掉真实阴影后给角色落地实感
     swapBody(entry, holder);
     entry.faceHolder = holder;
     applyCfg(entry);

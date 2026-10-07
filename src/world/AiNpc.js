@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
+import { attachFakeShadow } from '../world/FakeShadow.js';
 
 
 
@@ -28,6 +29,7 @@ function buildMerchant() {
       model.position.y = -box.min.y * s; // 底边压到 y=0
       model.traverse((o) => { if (o.isMesh) o.castShadow = true; });
       g.add(model);
+      attachFakeShadow(g, { radius: 0.5 }); // 假阴影
     })
     .catch(() => { /* boy GLB 加载失败：模型留白即可 */ });
 

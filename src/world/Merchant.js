@@ -5,6 +5,8 @@ import * as THREE from 'three';
 import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
 
+import { attachFakeShadow } from '../world/FakeShadow.js';
+
 export function createMerchant() {
   const pos = Config.MERCHANT_POS;
   const group = new THREE.Group();
@@ -27,6 +29,7 @@ export function createMerchant() {
       model.position.y = -box.min.y * s;
       model.traverse((o) => { if (o.isMesh) o.castShadow = true; });
       group.add(model);
+      attachFakeShadow(group, { radius: 0.5 }); // 假阴影
     })
     .catch((e) => {
       console.warn('[merchant] 商人模型加载失败:', e);

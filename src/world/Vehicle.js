@@ -6,6 +6,8 @@ import { Config } from '../config.js';
 import { instantiate } from './AssetLoader.js';
 import { enableDynamicLighting } from './Lights.js';
 
+import { attachFakeShadow } from '../world/FakeShadow.js';
+
 export function createVehicle(scene) {
   const group = new THREE.Group();
   // 载具是动态体：不参与背面剔除收敛（材质在实例间共享，且动态体的收益远不如静态建筑值得冒险）
@@ -41,6 +43,7 @@ export function createVehicle(scene) {
       holder.rotation.y = Config.VEHICLE_YAW_OFFSET;
       holder.add(model);
       group.add(holder);
+      attachFakeShadow(group, { radius: 1.5 }); // 假阴影
       // 载具是动态物体：开第 1 层让太阳实时照它（group 已在 createVehicle 同步开了，
       // 这里给异步加载进来的子模型补一层，确保车体网格也受太阳照）。
       enableDynamicLighting(group);

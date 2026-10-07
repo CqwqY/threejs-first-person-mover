@@ -680,7 +680,7 @@ export function resetHolePatches() {
 // 视觉洞深（米）：即"假定墙有多厚"。单向延伸这么长。
 // ⚠ 洞**盒**的深度是另一回事（computeHoleBox 用的是调用方传的 depth，本项目 1.2m）——
 //   洞盒负责"一定要挖穿"，洞壁负责"看起来有厚度"，两者独立。
-export const REVEAL_DEPTH = 0.35;
+export const REVEAL_DEPTH = 0.7; // 加深到 ~HOLE_DEPTH/2：挖洞 discard 盒以窗面为心、沿墙法线各侵 HOLE_DEPTH/2≈0.6m，
 // 洞壁颜色（中性灰，接近水泥/石膏的剖面）。太暗在洞里会糊成一片黑，太亮又不像墙。
 export const REVEAL_COLOR = '#94918a';
 

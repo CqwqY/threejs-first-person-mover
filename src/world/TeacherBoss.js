@@ -10,6 +10,7 @@
 //       非 owner 的老师只按收到的位姿与角度插值。伤害结算全部「各人判自己」：
 //       每个客户端只检测自己有没有被弹幕/激光扫到、有没有被碰到，因此不需要服务器判定。
 import * as THREE from 'three';
+import { attachFakeShadow } from '../world/FakeShadow.js';
 import { Config } from '../config.js';
 import { instantiate, createFallback } from './AssetLoader.js';
 import { projectileHitsWorld } from './collision/projectileHit.js';
@@ -92,6 +93,7 @@ export function createTeacherBoss(scene) {
       model.position.y = -box.min.y * s; // 底边压到 y=0
       model.traverse((o) => { if (o.isMesh) o.castShadow = true; });
       bossGroup.add(model);
+      attachFakeShadow(bossGroup, { radius: 0.9 }); // 假阴影
     })
     .catch((e) => {
       // 模型加载失败：用方块兜底，保证 Boss 依然能打

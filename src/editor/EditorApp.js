@@ -38,6 +38,7 @@ import {
   applyWindowHoles, resetHolePatches, MAX_HOLES,
   createRevealMesh, disposeReveal, REVEAL_DEPTH, holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
+import { applyBackfaceCulling } from '../world/BackfaceCull.js';
 // 光照烘焙：把太阳直射+阴影烤进各网格 lightMap（静态建筑降填充率）。编辑器点「烘焙光照」触发。
 import {
   bakeMeshLightmaps, collectBakeableMeshes, applyBakedLightmapsToMeshes, markBakedLayers,
@@ -113,12 +114,15 @@ export function createEditor() {
   }
   // ---------- 渲染 / 场景 / 相机 ----------
   const design = loadSettings('scene-settings-v1'); // 编辑器保存的光照设计（环境光/半球/阳光/曝光），初始化即应用
+  // 真实阴影贴图默认关闭：填充率是本项目瓶颈，编辑器全城实时阴影会拖垮帧率（"都快爆了"）。
+  // 需要时由「画面」面板阴影开关即时开启（开关会同时置 renderer.shadowMap.enabled 与 sun.castShadow）。
+  const EDITOR_CAST_SHADOW = false;
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   // ACES 色调映射：多重光累加柔和压回 [0,1]，高光不爆白；曝光随编辑器设计值（太亮就调低）。
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = (design && Number(design.exposure)) || DEFAULT_SETTINGS.exposure;
-  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.enabled = EDITOR_CAST_SHADOW;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   const vp = document.getElementById('viewport');
   vp.insertBefore(renderer.domElement, vp.firstChild);
@@ -145,7 +149,7 @@ export function createEditor() {
   scene.add(sunTarget);
   const sunOffset = new THREE.Vector3(30, 40, 20); // 阳光相对 target 的固定偏移（保持整体光向不变）
   const sun = new THREE.DirectionalLight(0xffffff, (design && Number(design.sun)) || DEFAULT_SETTINGS.sun);
-  sun.castShadow = true;
+  sun.castShadow = EDITOR_CAST_SHADOW;
   sun.shadow.mapSize.set(DEFAULT_SETTINGS.shadowSize, DEFAULT_SETTINGS.shadowSize);
   // 阴影痤疮修复：bias 轻微下压深度，normalBias 沿法线推开采样点，消除平面上的「一条一条」条纹
   sun.shadow.bias = -0.0004;
@@ -252,6 +256,7 @@ export function createEditor() {
     // 组合家具：进入「空白场景」拼装（主场景临时隐藏、placed/lights/scenery 换成空草稿），存成商店商品
     comboMode: false,
     comboBackup: null,  // { placed, lights, scenery } 主场景的备份
+    showColliders: false, // 碰撞体可视化默认关闭（编辑器不需要实时渲染碰撞线框，按需打开）
   };
   // 物体 id：全局唯一的纯数字 id，随场景一起保存/还原。
   // 编号顺序：景物先按 buildScenery 顺序占 1..N（key 固定 → id 固定），摆放物体接续往后排。
@@ -314,6 +319,7 @@ export function createEditor() {
     cHz: document.getElementById('cHz'),
     cOy: document.getElementById('cOy'),
     colliderPanel: document.getElementById('colliderPanel'),
+    showColliders: document.getElementById('showColliders'),
     btnBound: document.getElementById('tBound'),
     boundaryPanel: document.getElementById('boundaryPanel'),
     bInfo: document.getElementById('bInfo'),
@@ -503,7 +509,7 @@ export function createEditor() {
     // 空碰撞体放置：幽灵只显示圆环，不加载模型
     if (state.currentUrl && !state.placingEmpty) {
       instantiate(state.currentUrl)
-        .then((m) => { if (state.ghost) { state.ghost.clear(); state.ghost.add(makeRing()); state.ghost.add(m); enableShadows(m); } })
+        .then((m) => { if (state.ghost) { state.ghost.clear(); state.ghost.add(makeRing()); state.ghost.add(m); optimizeLoaded(m); } })
         .catch(() => {});
     }
   }
@@ -1056,11 +1062,16 @@ export function createEditor() {
     select(item);
     markDirty();
     outlinerUpdate();
-    instantiate(state.currentUrl).then((m) => { obj.add(m); enableShadows(m); autoFitCollider(item); syncHoles(); }).catch(() => {});
+    instantiate(state.currentUrl).then((m) => { obj.add(m); optimizeLoaded(m); autoFitCollider(item); syncHoles(); }).catch(() => {});
   }
 
-  function enableShadows(m) {
+  // 模型加载完成后的统一优化：
+  // · 保留逐网格 castShadow/receiveShadow 标记 —— 仅当用户手动打开「画面→阴影」开关时才生效（平时无害）；
+  // · 套用游戏端背面剔除（把导出器默认的 DoubleSide 收敛成 FrontSide，砍掉看不见的背面三角面，省填充率）。
+  function optimizeLoaded(m) {
+    if (!m) return;
     m.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    applyBackfaceCulling(m);
   }
 
   // 是否位于碰撞体可视化节点（collider-vis*）内部：这些橙色的体积盒/凸包是「可视化产物」，
@@ -1085,6 +1096,9 @@ export function createEditor() {
       if (typeof ch.name === 'string' && ch.name.startsWith('collider-vis')) stale.push(ch);
     });
     stale.forEach((ch) => holder.remove(ch));
+    // 编辑器默认不渲染碰撞体可视化（state.showColliders=false）：关掉时清掉现有线框即返回。
+    // 空碰撞体(kind:'empty') 是「游戏中不可见的墙」在编辑器里唯一的可见/可拾取形态，始终显示以便编辑。
+    if (!state.showColliders && rec.kind !== 'empty') return;
     // 盒的可视化统一走这里：支持逐盒 ox/oy/oz 偏移与可选四元数（P1 新增字段），
     // 没有 ox/oz/q 时退化为旧的「只有 oy 的轴对齐盒」行为。
     const applyBoxXform = (obj, c) => {
@@ -2021,6 +2035,15 @@ export function createEditor() {
     markDirty();
   }
   StepUI.cEn.onchange = applyColliderEdit;
+
+  // 「显示碰撞体」总开关：默认关（编辑器不渲染碰撞线框）。勾选后重建全部可视化，取消则全部清掉。
+  if (StepUI.showColliders) {
+    StepUI.showColliders.checked = !!state.showColliders;
+    StepUI.showColliders.onchange = () => {
+      state.showColliders = StepUI.showColliders.checked;
+      [...state.placed, ...state.scenery].forEach((rec) => buildColliderVis(rec));
+    };
+  }
   ['cHx', 'cHy', 'cHz', 'cOy'].forEach((id) => {
     document.getElementById(id).addEventListener('input', applyColliderEdit);
   });
@@ -2667,7 +2690,7 @@ export function createEditor() {
       obj.name = nm;
       if (it.url) {
         instantiate(it.url).then((m) => {
-          obj.add(m); enableShadows(m); syncHoles();
+          obj.add(m); optimizeLoaded(m); syncHoles();
           // 默认开第 1 层（受太阳实时照）；下面若带烘焙结果，markBakedLayers 会把烘焙体关掉第 1 层。
           enableDynamicLighting(rec.obj);
           // 存档里带了烘焙结果 → 编辑器内也回放预览（静态体改走 lightMap，太阳只照动态层）
@@ -2678,7 +2701,7 @@ export function createEditor() {
         }).catch(() => {});
       } else if (it.data) {
         const g = new GLTFLoader();
-        g.load(it.data, (gltf) => { obj.add(gltf.scene); enableShadows(gltf.scene); }, undefined, () => {});
+        g.load(it.data, (gltf) => { obj.add(gltf.scene); optimizeLoaded(gltf.scene); }, undefined, () => {});
       }
       applyPlTransform(rec);
       scene.add(obj);
@@ -2933,7 +2956,7 @@ export function createEditor() {
           raf = requestAnimationFrame(tick);
           instantiate(url).then((m) => {
             host.add(m);
-            enableShadows(m);
+            optimizeLoaded(m);
             focus();
           }).catch(() => { /* 预览失败静默 */ });
         }, 140);
@@ -3791,7 +3814,7 @@ export function createEditor() {
       buildVizGroup.add(host);
       const url = item && item.url;
       if (url && url !== 'placeholder') {
-        instantiate(url).then((m) => { host.add(m); enableShadows(m); }).catch(() => addBuildBox(host, item));
+        instantiate(url).then((m) => { host.add(m); optimizeLoaded(m); }).catch(() => addBuildBox(host, item));
       } else {
         addBuildBox(host, item);
       }
@@ -4521,6 +4544,7 @@ let _lastWindowEnv = null; // 上次同步给障眼法窗户的环境贴图引�
   }
 
   adoptGameScenery();
+  applyBackfaceCulling(scene); // 游戏端优化：把地面等景物里导出器默认的 DoubleSide 材质收敛成单面（看不见的背面不再进片元着色器）
   restore();
   // 读档完成 → 把存档里标记了挖洞的窗户同步一次（模型本体是异步加载的，
   // 各自在 then() 里还会补一次，这里负责「一扇洞都没有」的常见情况快速归零）。
