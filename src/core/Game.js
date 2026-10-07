@@ -1633,17 +1633,29 @@ export class Game {
     if (this._flash && this._flash.visible && this._flash.intensity !== this._flashMax) {
       this._flash.intensity = this._flashMax;
     }
-    // 调试浮层
+    // 调试浮层（?flashdbg）：手电筒状态 + 技能槽/道具诊断，定位「没光」「未识别」
     if (this._flashDbg) {
       this._flash.getWorldPosition(this._flashDbgV);
       this._flash.target.getWorldPosition(this._flashDbgT);
       const prof = this._profile ? (this._profile.username || this._profile.nickname || '?') : 'NULL';
+      let slotLines = '';
+      const map = this._skillMap || {};
+      const keys = Object.keys(map);
+      for (const k of keys) {
+        const it = map[k];
+        const cat = itemByName(it);
+        let lbl = '?';
+        try { lbl = this._effectForItem(it).label; } catch (e) { lbl = 'ERR'; }
+        slotLines += '  ' + k + ': ' + JSON.stringify(it) + ' cat=' + (cat ? 'Y' : 'N') + ' label=' + lbl + '\n';
+      }
+      if (!keys.length) slotLines = '  (空)\n';
       this._flashDbg.textContent =
         'FLASH dbg (vis=' + this._flash.visible + ' I=' + this._flash.intensity + ')\n' +
         'owned=' + isOwned(this._profile, 'flashlight') + '  prof=' + prof + '\n' +
         'pos=' + this._flashDbgV.x.toFixed(1) + ',' + this._flashDbgV.y.toFixed(1) + ',' + this._flashDbgV.z.toFixed(1) + '\n' +
         'tgt=' + this._flashDbgT.x.toFixed(1) + ',' + this._flashDbgT.y.toFixed(1) + ',' + this._flashDbgT.z.toFixed(1) + '\n' +
-        'lightInScene=' + (this.scene.getObjectById(this._flash.id) != null);
+        'lightInScene=' + (this.scene.getObjectById(this._flash.id) != null) + '\n' +
+        '--- skill slots (' + keys.length + ') ---\n' + slotLines;
     }
   }
 
