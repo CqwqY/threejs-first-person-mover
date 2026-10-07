@@ -263,10 +263,6 @@ export class Game {
     // 太阳的投影开关跟随总开关：createLights 里默认开了，这里按存档/默认值纠正一次。
     this._sun.castShadow = this._shadowOn;
 
-    // ---- 手电筒：沿相机视线方向（含俯仰）照射，用于夜里补光 / 氛围 ----
-    // 实现见 _initFlashlight：SpotLight 挂成相机子节点，跟随位置/朝向由渲染管线自动处理。
-    this._initFlashlight();
-
     // 应用编辑器保存的「光照设计」：环境光/半球光/阳光强度、阳光角度，使客户端与编辑器保持一致；
     // 若编辑器从未保存过，则自动落到 DEFAULT_SETTINGS 的默认值。
     const design = loadSettings('scene-settings-v1');
@@ -387,18 +383,6 @@ export class Game {
       if (e.key === 'F5') {
         e.preventDefault(); // 阻止浏览器默认刷新
         this.toggleThirdPerson();
-      }
-    });
-
-    // ---- 手电筒开关（L）：沿视线方向照，夜里补光/氛围 ----
-    // 必须拥有（在小满的杂货铺买过）才能用；没买按 L 提示去哪买
-    window.addEventListener('keydown', (e) => {
-      if (e.code === 'KeyL' && !e.repeat) {
-        if (!isOwned(this._profile, 'flashlight')) {
-          this._toast('手电筒要先去小满的杂货铺买（喷泉边找小满）');
-          return;
-        }
-        this._toggleFlashlight();
       }
     });
 
@@ -759,6 +743,9 @@ export class Game {
     this._hideHintDeg = null;   // 最近一次收到的方向（世界方位角）
     this._hideReportTimer = Config.HIDE_REPORT_INTERVAL;
     this._hidePanel = this._createHidePanel();
+    this._invitePanel = this._createInvitePanel(); // 邀请传送：挑一个在线玩家发邀请
+    this._tpConfirm = this._createTpConfirm();     // 邀请传送：收到邀请时的确认框
+    this._tpCdUntil = 0;                           // 邀请传送：自己加的冷却（技能槽只有 800ms 防连点）
     this._hideArrow = this._createHideArrow();
     this._hideTxtCache = '';
 
@@ -1575,146 +1562,6 @@ export class Game {
     this._applyEditorLightDayState(t);
   }
 
-  // ---- 手电筒：沿相机视线方向（含俯仰）照射，L 键开关 ----
-  _initFlashlight() {
-    if (this._flash) return;
-    // 暖白光锥：半角 36°（比之前 30° 略宽，覆盖更顺手），半影 0.45，射程 150m。
-    // decay 用 1.0（物理默认是 2 = 距离平方衰减，夜里 10m 外就几乎没光、探路废了）；
-    // 1.0 让光沿距离线性衰减，远处仍够亮。强度 220 candela：比场景太阳(2.5)高一个量级，
-    // 且 ACES 会把光锥内照度过载处自然压成暖白 → 看起来就是「一道手电光」，白天黑夜都看得见。
-    const fl = new THREE.SpotLight(0xfff2cc, 0, 150, Math.PI / 5, 0.45, 1.0);
-    fl.castShadow = false; // 默认不投影：夜里氛围靠光锥打在墙面/地面即可，投影另开成本高
-    fl.visible = false;
-    // 作为场景里的独立光源（用户说的「用光源」）：直接加进 scene，每帧在 _updateFlashlight
-    // 把 position / target 同步到相机世界坐标（含俯仰）。比「挂相机子节点」更稳——独立光源
-    // 一定在渲染管线的灯光收集链里，不受相机是否进场景图、子节点矩阵何时刷新等坑影响。
-    this.scene.add(fl);
-    this.scene.add(fl.target);
-    this._flash = fl;
-    this._flashDir = new THREE.Vector3(0, 0, -1);
-    this._flashOn = false;
-    this._flashMax = 220; // 开灯强度（candela，已按场景亮度量级调高，确保「看得见」）
-
-    // 可见光束（体积光感）：半透明 + 加法混合的锥体，跟着相机朝向前伸。
-    // 即使白天被环境光淹没，这束暖光也给出「手电开着」的明确反馈；夜里更明显。
-    // 真光源(上面那盏 SpotLight)负责实际照亮，这锥体只负责「看得到光」。
-    this._flashBeam = this._makeFlashBeam();
-    this._flashBeam.visible = false;
-    this.scene.add(this._flashBeam);
-    this._beamPos = new THREE.Vector3();
-    this._beamQuat = new THREE.Quaternion();
-    // 调试浮层：开关来自 ?flashdbg / #flashdbg / 登录前记进 sessionStorage 的标记
-    // （登录跳转会吃掉 ? 查询串，故用 sessionStorage 兜底，详见 main.js）。
-    if (this._flashDbgOn()) {
-      const d = document.createElement('div');
-      d.id = 'flashdbg';
-      d.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;background:rgba(0,0,0,.72);color:#3f6;font:12px/1.5 monospace;padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none';
-      document.body.appendChild(d);
-      this._flashDbg = d;
-      this._flashDbgV = new THREE.Vector3();
-      this._flashDbgT = new THREE.Vector3();
-    }
-  }
-
-  // 可见光束几何：顶点在原点（灯口）、轴沿 -Z 前伸的开口锥。
-  // 每帧在 _updateFlashlight 里把 position/quaternion 对齐到相机，显得「光从眼睛射出」。
-  _makeFlashBeam() {
-    const len = 26;   // 光束长度（米）
-    const r = 4.2;    // 末端半径（米）：半角 ≈ atan(4.2/26) ≈ 9°，比光照锥窄，像聚拢的光柱
-    const geo = new THREE.ConeGeometry(r, len, 28, 1, true);
-    geo.translate(0, -len / 2, 0);   // 顶点移到原点，底面沉到 -Y(len)
-    geo.rotateX(Math.PI / 2);       // 轴从 Y 转到 -Z：底面落到 -Z(len)，顶点留在原点
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xfff2cc,
-      transparent: true,
-      opacity: 0.10,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      toneMapped: false,             // 不受 ACES 压暗，保持稳定的暖色光感
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.frustumCulled = false;
-    m.renderOrder = 2;
-    m.visible = false;
-    return m;
-  }
-
-  // 调试浮层开关：登录跳转会吃掉 ? 查询串，故首次见到 ?flashdbg/#flashdbg 时由 main.js
-  // 记进 sessionStorage.__flashdbg，这里三种来源都认，保证登录后浮层仍出得来。
-  _flashDbgOn() {
-    try { if (sessionStorage.getItem('__flashdbg') === '1') return true; } catch (e) { /* 忽略 */ }
-    return location.search.indexOf('flashdbg') >= 0 || location.hash.indexOf('flashdbg') >= 0;
-  }
-
-  _toggleFlashlight() {
-    if (!this._flash) return;
-    // 防御：任何路径触发前都确认拥有（在小满的杂货铺买过），避免被免费调起
-    if (!isOwned(this._profile, 'flashlight')) {
-      this._toast('手电筒要先去小满的杂货铺买（喷泉边找小满）');
-      return;
-    }
-    this._flashOn = !this._flashOn;
-    this._flash.visible = this._flashOn;
-    if (this._flashBeam) this._flashBeam.visible = this._flashOn;
-    if (this._flashOn) this._flash.intensity = this._flashMax;
-    this._toast(this._flashOn ? '手电筒 已开（再按一次关）' : '手电筒 已关');
-  }
-
-  _updateFlashlight() {
-    if (!this._flash) return;
-    // 手电筒是场景里的独立光源：开启时每帧把 position/target 同步到相机世界坐标（含俯仰）。
-    // cam.getWorldPosition / getWorldDirection 内部会强制刷新相机矩阵，故不会退化成零向量
-    // （之前「零向量」是误判——独立光源 + 每帧同步是 three 里做跟随视角手电筒的标准做法）。
-    // 整段包 try/catch：一旦抛异常也绝不让主循环卡住（否则表现成「按了手电筒就动不了」）。
-    if (this._flash.visible) {
-      const cam = this.camera;
-      try {
-        cam.getWorldPosition(this._flash.position);
-        cam.getWorldDirection(this._flashDir);
-        if (Number.isFinite(this._flashDir.x) && Number.isFinite(this._flashDir.y) && Number.isFinite(this._flashDir.z)
-            && (this._flashDir.x !== 0 || this._flashDir.y !== 0 || this._flashDir.z !== 0)) {
-          this._flash.target.position.copy(this._flash.position).add(this._flashDir);
-          this._flash.target.updateMatrixWorld();
-        }
-        if (this._flash.intensity !== this._flashMax) this._flash.intensity = this._flashMax;
-        // 可见光束跟着相机走：顶点对齐到相机，朝向对齐相机朝向（光束本地 -Z = 前）
-        if (this._flashBeam && this._flashBeam.visible) {
-          cam.getWorldPosition(this._beamPos);
-          cam.getWorldQuaternion(this._beamQuat);
-          this._flashBeam.position.copy(this._beamPos);
-          this._flashBeam.quaternion.copy(this._beamQuat);
-        }
-      } catch (e) {
-        if (!this._flashErr) { this._flashErr = true; console.warn('[flashlight] 每帧跟随失败，已跳过:', e); }
-      }
-    }
-    // 调试浮层（?flashdbg / #flashdbg / sessionStorage 兜底）：手电筒状态 + 技能槽/道具诊断
-    if (this._flashDbg) {
-      this._flash.getWorldPosition(this._flashDbgV);
-      this._flash.target.getWorldPosition(this._flashDbgT);
-      const prof = this._profile ? (this._profile.username || this._profile.nickname || '?') : 'NULL';
-      let slotLines = '';
-      const map = this._skillMap || {};
-      const keys = Object.keys(map);
-      for (const k of keys) {
-        const it = map[k];
-        const cat = itemByName(it);
-        let lbl = '?';
-        try { lbl = this._effectForItem(it).label; } catch (e) { lbl = 'ERR'; }
-        slotLines += '  ' + k + ': ' + JSON.stringify(it) + ' cat=' + (cat ? 'Y' : 'N') + ' label=' + lbl + '\n';
-      }
-      if (!keys.length) slotLines = '  (空)\n';
-      this._flashDbg.textContent =
-        'FLASH dbg (vis=' + this._flash.visible + ' I=' + this._flash.intensity + ')\n' +
-        'owned=' + isOwned(this._profile, 'flashlight') + '  prof=' + prof + '\n' +
-        'pos=' + this._flashDbgV.x.toFixed(1) + ',' + this._flashDbgV.y.toFixed(1) + ',' + this._flashDbgV.z.toFixed(1) + '\n' +
-        'tgt=' + this._flashDbgT.x.toFixed(1) + ',' + this._flashDbgT.y.toFixed(1) + ',' + this._flashDbgT.z.toFixed(1) + '\n' +
-        'lightInScene=' + (this.scene.getObjectById(this._flash.id) != null) + '\n' +
-        '--- skill slots (' + keys.length + ') ---\n' + slotLines;
-    }
-  }
-
   // 按当前时刻开关编辑器摆放的光源。tf 为一天的比例（0=00:00，0.5=12:00）；
   // 传 null 表示「无时刻概念」（昼夜循环关闭）→ 全部按常亮处理。
   // 每盏灯的开关窗口由 EditorBuildings.buildEditorLights 存在 userData.__onWindow 上。
@@ -1926,6 +1773,16 @@ export class Game {
       case 'ctrl': {
         // 控制枪：别人抓住我 / 松开我
         this._applyCtrlMsg(msg);
+        break;
+      }
+      case 'tp_invite': {
+        // 邀请传送：有人请我传送到他身边 → 弹确认框，同意才动
+        this._onTpInvite(msg);
+        break;
+      }
+      case 'tp_reply': {
+        // 邀请传送：我请的那个人回话了（同意 / 拒绝）
+        this._onTpReply(msg);
         break;
       }
       case 'bh': {
@@ -3508,6 +3365,170 @@ export class Game {
     };
   }
 
+  // ---- 邀请传送 ----
+  // 玩法：用道具 → 弹在线玩家列表 → 选中发出邀请（带上我此刻的坐标）→
+  //       对方屏幕上弹确认框 → 他同意后**传送到我这里**。位置由各客户端自己拥有，
+  //       服务端只当中继（tp_invite / tp_reply）。
+
+  // 邀请传送要用的冷却（技能槽自带的 800ms 只防连点，对「拉人」太短了）
+  get TP_COOLDOWN_MS() { return 8000; }
+
+  _createInvitePanel() {
+    const ov = document.createElement('div');
+    ov.style.cssText =
+      'position:fixed;inset:0;z-index:9750;display:none;background:rgba(15,20,30,.45);' +
+      'align-items:center;justify-content:center;font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;';
+    const card = document.createElement('div');
+    card.className = 'kui-panel';
+    card.style.cssText = 'width:min(380px,88vw);box-sizing:border-box;';
+    card.innerHTML =
+      '<div class="kui-panel__body">' +
+      '<h3 class="kui-title" style="margin:0 0 14px;font-size:16px;">邀请传送</h3>' +
+      '<label style="display:block;margin-bottom:12px;">邀请谁过来' +
+      '<select class="tp-target kui-input" style="margin-left:8px;max-width:190px;width:auto;display:inline-block;"></select></label>' +
+      '<div style="color:#9aa4b1;font-size:12px;margin-bottom:14px;">对方会收到确认框；他同意后会传送到你此刻的位置。</div>' +
+      '<div style="display:flex;gap:10px;justify-content:flex-end;">' +
+      '<button class="tp-cancel kui-btn kui-btn--ghost" type="button">取消</button>' +
+      '<button class="tp-go kui-btn kui-btn--primary" type="button">发出邀请</button></div>' +
+      '</div>';
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+    const sel = card.querySelector('.tp-target');
+    card.querySelector('.tp-cancel').addEventListener('click', () => { ov.style.display = 'none'; });
+    card.querySelector('.tp-go').addEventListener('click', () => { this._sendTpInvite(sel.value); });
+    return {
+      ov,
+      // 打开前刷新在线玩家列表；没有别人在线就返回 false（与捉迷藏面板同一套做法）
+      open: () => {
+        const me = this.localState.id;
+        const opts = [];
+        for (const [id] of this.playerManager.players) { if (id !== me) opts.push(id); }
+        if (!opts.length) return false;
+        sel.innerHTML = '';
+        for (const id of opts) {
+          const o = document.createElement('option');
+          o.value = id;
+          const rp = this.playerManager.players.get(id);
+          o.textContent = (rp && rp.name) || ('玩家 ' + id.slice(-4)); // 用名牌名，别暴露网络 id
+          sel.appendChild(o);
+        }
+        ov.style.display = 'flex';
+        return true;
+      },
+      close: () => { ov.style.display = 'none'; },
+      isOpen: () => ov.style.display !== 'none',
+    };
+  }
+
+  // 收到别人邀请时的确认框。20 秒不理会当作拒绝 —— 否则发起方一直等不到回话。
+  _createTpConfirm() {
+    const ov = document.createElement('div');
+    ov.style.cssText =
+      'position:fixed;inset:0;z-index:9760;display:none;background:rgba(15,20,30,.45);' +
+      'align-items:center;justify-content:center;font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;';
+    const card = document.createElement('div');
+    card.className = 'kui-panel';
+    card.style.cssText = 'width:min(360px,88vw);box-sizing:border-box;';
+    card.innerHTML =
+      '<div class="kui-panel__body">' +
+      '<h3 class="kui-title" style="margin:0 0 10px;font-size:16px;">收到传送邀请</h3>' +
+      '<div class="tp-text" style="margin-bottom:14px;"></div>' +
+      '<div style="display:flex;gap:10px;justify-content:flex-end;">' +
+      '<button class="tp-no kui-btn kui-btn--ghost" type="button">拒绝</button>' +
+      '<button class="tp-yes kui-btn kui-btn--primary" type="button">同意并传送</button></div>' +
+      '</div>';
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+    const text = card.querySelector('.tp-text');
+    let onYes = null, onNo = null, timer = 0;
+    const finish = (ok) => {
+      if (!onYes && !onNo) return; // 已经被处理过（超时/重复点）
+      const yes = onYes, no = onNo;
+      onYes = null; onNo = null;
+      clearTimeout(timer); timer = 0;
+      ov.style.display = 'none';
+      if (ok) { if (yes) yes(); } else if (no) no();
+    };
+    card.querySelector('.tp-yes').addEventListener('click', () => finish(true));
+    card.querySelector('.tp-no').addEventListener('click', () => finish(false));
+    return {
+      ov,
+      show: (who, yes, no) => {
+        text.textContent = '「' + who + '」邀请你传送过去（传送到他此刻的位置），是否同意？';
+        onYes = yes; onNo = no;
+        ov.style.display = 'flex';
+        clearTimeout(timer);
+        timer = setTimeout(() => finish(false), 20000);
+      },
+      isOpen: () => ov.style.display !== 'none',
+      hide: () => finish(false),
+    };
+  }
+
+  // 用道具：开面板挑人（冷却由这里控）
+  _useInviteTp() {
+    const now = performance.now();
+    if (now < (this._tpCdUntil || 0)) {
+      this._toast('邀请传送冷却中（还有 ' + Math.ceil((this._tpCdUntil - now) / 1000) + ' 秒）');
+      return;
+    }
+    if (this._tpConfirm.isOpen()) this._tpConfirm.hide(); // 别让确认框和选人框叠着
+    if (!this._invitePanel.open()) this._toast('没有其他玩家在线，邀请传送要有人可邀');
+  }
+
+  // 面板里点了「发出邀请」
+  _sendTpInvite(targetId) {
+    const me = this.localState.id;
+    if (!me || !targetId) { this._toast('先选一个要邀请的人'); return; }
+    this._invitePanel.close();
+    const st = this.localState;
+    this.network.sendTpInvite(String(targetId), st.x, st.y, st.z);
+    this._tpCdUntil = performance.now() + this.TP_COOLDOWN_MS;
+    const rp = this.playerManager.players.get(String(targetId));
+    this._toast('已邀请「' + ((rp && rp.name) || '玩家') + '」传送过来，等他同意');
+  }
+
+  // 收到邀请：弹确认；同意 → 回报 + 立刻传送到他的坐标
+  _onTpInvite(msg) {
+    if (!msg || !msg.from) return;
+    const from = String(msg.from);
+    const x = Number(msg.x), y = Number(msg.y), z = Number(msg.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return; // 坐标非法：别把人传到 NaN
+    const rp = this.playerManager.players.get(from);
+    const who = (rp && rp.name) || '有玩家';
+    this._tpConfirm.show(who, () => {
+      this.network.sendTpReply(from, true);
+      this._teleportLocal(x, y, z);
+      this._toast('已传送到「' + who + '」身边');
+    }, () => {
+      this.network.sendTpReply(from, false);
+    });
+  }
+
+  // 邀请的结果回来了
+  _onTpReply(msg) {
+    if (!msg) return;
+    const rp = this.playerManager.players.get(String(msg.from));
+    const who = (rp && rp.name) || '对方';
+    this._toast(msg.ok
+      ? ('「' + who + '」同意了，正在传送到你身边')
+      : ('「' + who + '」拒绝了你的邀请'));
+  }
+
+  // 把自己瞬移到 (x,y,z)：先下车 → 钳制到地面范围 → 站到地面高度 → 清速度。
+  // ⚠ 本地位置以 localState 为唯一真源（物理读它），所以只写 localState，别去挪模型。
+  // 「邀请传送」与 AI 的 teleport_player / set_player_position 共用这一份。
+  _teleportLocal(x, y, z) {
+    const st = this.localState;
+    const phys = this.localPlayer.physics;
+    if (st.ride) this._dismountVehicle();
+    const nx = Number(x), nz = Number(z), ny = Number(y);
+    if (Number.isFinite(nx)) st.x = THREE.MathUtils.clamp(nx, -Config.GROUND_WIDTH / 2, Config.GROUND_WIDTH / 2);
+    if (Number.isFinite(nz)) st.z = THREE.MathUtils.clamp(nz, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
+    st.y = Number.isFinite(ny) ? ny : Config.PLAYER_HEIGHT * phys.sizeScale;
+    if (phys.velocity) phys.velocity.set(0, 0, 0);
+  }
+
   // 抓的人屏幕顶部的方向指示：一个指向目标方位的箭头
   _createHideArrow() {
     const el = document.createElement('div');
@@ -4545,12 +4566,8 @@ export class Game {
       }
       case 'teleport_player':
       case 'set_player_position': {
-        const x = a.x;
-        const z = a.z;
-        if (Number.isFinite(x)) state.x = THREE.MathUtils.clamp(x, -Config.GROUND_WIDTH / 2, Config.GROUND_WIDTH / 2);
-        if (Number.isFinite(z)) state.z = THREE.MathUtils.clamp(z, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
-        if (Number.isFinite(a.y)) state.y = a.y;
-        else state.y = Config.PLAYER_HEIGHT * phys.sizeScale;
+        // 与「邀请传送」共用同一套瞬移（钳制到地面范围 + 站到地面高度 + 清速度 + 先下车）
+        this._teleportLocal(a.x, a.y, a.z);
         this._toast('已移动');
         break;
       }
@@ -5051,11 +5068,18 @@ export class Game {
           run: () => { if (this._buildTool) this._buildTool.toggle(); },
         };
       case 'flashlight':
+        // 手电筒已下架（用户要求移除，2026-10-07）。老存档/老背包里仍可能留着这个物品 →
+        // 给一句明确提示，别让它落到 default 分支显示成「未识别」。
         return {
-          label: '手电筒',
-          // 开关型工具：不要技能槽的防连点间隔，否则刚关掉要等一下才能再开
+          label: '手电筒(已下架)',
+          run: () => this._toast('手电筒已下架，可以在背包里把它换成别的道具'),
+        };
+      case 'invitetp':
+        return {
+          label: '邀请传送',
+          // 会弹面板挑人，所以别让技能槽那 800ms 防连点挡着（真正的冷却在 _useInviteTp 里自己控）
           noCd: true,
-          run: () => this._toggleFlashlight(),
+          run: () => this._useInviteTp(),
         };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
@@ -7603,7 +7627,6 @@ export class Game {
 
     // 昼夜循环：先更新太阳角度与光照，后面阴影定位要用到最新的 _sunOffset
     this._updateDayNight(dt);
-    this._updateFlashlight(); // 手电筒每帧跟随相机视线（含俯仰）
 
     // 控制枪：抢在玩家更新之前处理，这样挣脱输入能先消费掉空格、
     // 且被控侧的 velocityHold 能在本次物理里生效

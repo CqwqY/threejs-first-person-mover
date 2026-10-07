@@ -207,7 +207,7 @@ function seedShop() {
     { id: 'ctrlgun', name: '控制枪', price: 180, desc: '激光抓住别人，移动视角拖着走；对方按空格挣脱。', kind: 'item', effect: { k: 'control' } },
     { id: 'grapple', name: '抓钩', price: 160, desc: '朝准星方向甩出钩爪，勾到墙/箱/柱子就把自己拽过去。', kind: 'item', effect: { k: 'grapple' } },
     { id: 'hammer', name: '建造锤', price: 300, desc: '装备到技能槽，按对应数字键（手机点技能键）进入建造模式：攻击键变放置，血条变家具条。', kind: 'item', effect: { k: 'hammer' } },
-    { id: 'flashlight', name: '手电筒', price: 120, desc: '照亮你正对的方向（含抬头/低头）。夜里探路、找人、搞氛围都好用。装备到技能槽，按对应键开关；电脑也可直接按 L。', kind: 'item', effect: { k: 'flashlight' } },
+    { id: 'invitetp', name: '邀请传送', price: 200, desc: '选一名在线玩家发出邀请；对方同意后会传送到你身边。适合把朋友叫过来一起玩。', kind: 'item', effect: { k: 'invitetp' } },
     { id: 'furn_chair', name: '木椅', url: 'placeholder', price: 80, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [0.5, 0.9, 0.5] },
     { id: 'furn_table', name: '木桌', url: 'placeholder', price: 120, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.2, 0.8, 0.8] },
     { id: 'furn_sofa', name: '布艺沙发', url: 'placeholder', price: 200, desc: '占位家具（先用方块）。可在编辑器导入真实模型替换。买 1 件得 1 个摆放额度。', kind: 'building', size: [1.8, 0.8, 0.9] },
@@ -268,11 +268,20 @@ let SHOP = (() => {
   const h = seedShop().find((x) => x.id === 'hammer');
   if (h) { SHOP.push(h); saveShop(SHOP); }
 })();
-// 确保「手电筒」在售（老 shop.json 已存在时不会自动带上新种子）
-(function ensureFlashlight() {
-  if (SHOP.some((x) => x.id === 'flashlight')) return;
-  const f = seedShop().find((x) => x.id === 'flashlight');
-  if (f) { SHOP.push(f); saveShop(SHOP); }
+// 已下架商品 id：老 shop.json 里仍留着它们（文件不会自己删条目），启动时剔掉并落盘。
+// ⚠ 客户端 Shop.js 里有一份**同样**的 RETIRED_IDS 过滤 —— 两边都要有：服务端这份等 scp 才生效，
+//   在那之前靠客户端那份先把已下架商品从店里藏掉。
+const RETIRED_IDS = new Set(['flashlight']); // 手电筒：2026-10-07 按用户要求下架
+(function retireShopItems() {
+  const before = SHOP.length;
+  SHOP = SHOP.filter((x) => x && !RETIRED_IDS.has(String(x.id)));
+  if (SHOP.length !== before) saveShop(SHOP);
+})();
+// 确保「邀请传送」在售（老 shop.json 已存在时不会自动带上新种子）
+(function ensureInviteTp() {
+  if (SHOP.some((x) => x.id === 'invitetp')) return;
+  const it = seedShop().find((x) => x.id === 'invitetp');
+  if (it) { SHOP.push(it); saveShop(SHOP); }
 })();
 // 组合家具的部件 / 灯光消毒：只放行已知字段并逐项钳制（防脏数据 / 超大对象）
 // ⚠⚠ 单位：客户端的 rotY/rotX 一律是**度**（不是弧度）—— 早先这里按弧度写了钳制范围
@@ -1258,6 +1267,37 @@ wss.on('connection', (ws, req) => {
         z: num(msg.z, 0, -1000, 1000),
       };
       const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client.__id === target && client.readyState === WebSocket.OPEN) { client.send(raw); break; }
+      }
+      return;
+    }
+
+    // 邀请传送：把邀请转发给**目标玩家**（带上邀请者的坐标，钳制后转发）。
+    // 与 ctrl 同一套目标定向转发：服务端只做白名单中继，不校验玩法规则；
+    // 真正「传送到哪」由接受方的客户端自己执行（位置由各客户端自己拥有）。
+    if (msg.t === 'tp_invite') {
+      const target = String(msg.target || '');
+      if (!target || target === id) return;
+      const num = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const out = {
+        t: 'tp_invite', from: id,
+        x: num(msg.x, 0, -1000, 1000),
+        y: num(msg.y, 0, -100, 500),
+        z: num(msg.z, 0, -1000, 1000),
+      };
+      const raw = JSON.stringify(out);
+      for (const client of wss.clients) {
+        if (client.__id === target && client.readyState === WebSocket.OPEN) { client.send(raw); break; }
+      }
+      return;
+    }
+
+    // 邀请传送的回复（接受/拒绝）：转发回发起邀请的那个人，让他知道对方点没点同意
+    if (msg.t === 'tp_reply') {
+      const target = String(msg.target || '');
+      if (!target || target === id) return;
+      const raw = JSON.stringify({ t: 'tp_reply', from: id, ok: msg.ok ? 1 : 0 });
       for (const client of wss.clients) {
         if (client.__id === target && client.readyState === WebSocket.OPEN) { client.send(raw); break; }
       }

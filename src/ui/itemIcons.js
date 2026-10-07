@@ -39,6 +39,11 @@ export const ITEM_ICONS = {
     <path fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" d="M3 -22 L3 2 Q3 16 -11 16 Q-22 16 -22 6"/>
     <circle cx="3" cy="-23" r="5" fill="none" stroke="currentColor" stroke-width="4"/>
   ` },
+  // 邀请传送：一上一下两个箭头（“换位/传送”）
+  teleport: { viewBox: '-28 -28 56 56', body: `
+    <path fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" d="M-9 8 L-9 -14 M-17 -6 L-9 -14 L-1 -6"/>
+    <path fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" d="M9 -8 L9 14 M1 6 L9 14 L17 6"/>
+  ` },
   // 椅子
   chair: { viewBox: '-28 -28 56 56', body: `
     <rect x="-15" y="-24" width="30" height="6" rx="2" fill="currentColor"/>
@@ -108,7 +113,7 @@ export function itemIconKeyFor(item) {
   const k = item.effect ? item.effect.k : '';
   const byKind = {
     club: 'club', blackhole: 'blackhole', hide: 'hide', gatling: 'gatling',
-    control: 'joystick', grapple: 'hook', hammer: 'hammer',
+    control: 'joystick', grapple: 'hook', hammer: 'hammer', invitetp: 'teleport',
   };
   return byKind[k] || 'box';
 }

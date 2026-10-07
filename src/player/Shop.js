@@ -61,25 +61,30 @@ export const SHOP_ITEMS = [
     effect: { k: 'hammer' },
   },
   {
-    id: 'flashlight',
-    name: '手电筒',
-    price: 120,
-    desc: '照亮你正对的方向（含抬头/低头）。夜里探路、找人、搞氛围都好用。装备到技能槽，按对应键开关；电脑也可直接按 L。',
-    effect: { k: 'flashlight' },
+    id: 'invitetp',
+    name: '邀请传送',
+    price: 200,
+    desc: '装备到技能槽后按对应键，会弹出在线玩家列表；选一个人发出邀请，他同意后就会传送到你身边。',
+    effect: { k: 'invitetp' },
   },
 ];
+
+// 已下架商品 id：老 shop.json 里还留着它们，服务端那份过滤要 scp 才生效 ——
+// 这里再来一份，让「下架」在前端**立刻**生效，不至于店里还挂着一个买了没用的道具。
+// ⚠ 与 server-remote/index.js 的 RETIRED_IDS 必须一致（两边都是「下架名单」这一个来源的两份副本）。
+const RETIRED_IDS = new Set(['flashlight']); // 手电筒：2026-10-07 按用户要求下架
 
 // 目录可被服务端覆盖：GET /api/shop 拉到的最新商品表。为 null 时回退到上面写死的 SHOP_ITEMS。
 let CATALOG = null;
 // 合并而非整体替换：以服务端列表覆盖同名商品（价格/描述），但保留客户端写死、
-// 而服务端漏发的商品（如手电筒）。否则服务端旧版本没部署时会把 flashlight 整条冲掉，
-// 导致小满店里买不到、isOwned 恒 false、按 L 只剩一句「去小满买」的提示，灯永远开不了。
+// 而服务端漏发的商品（例如刚加的新道具还没 scp 到服务器时）。否则服务端比前端旧的那段时间里，
+// 新道具会整条被冲掉 —— 店里买不到、isOwned 恒 false，看起来就像「道具没做」。
 export function setCatalog(items) {
   if (!Array.isArray(items)) return;
   const byId = new Map();
   for (const it of SHOP_ITEMS) if (it && it.id) byId.set(it.id, it); // 客户端基准
   for (const it of items) if (it && it.id) byId.set(it.id, it);       // 服务端覆盖/补充
-  CATALOG = [...byId.values()];
+  CATALOG = [...byId.values()].filter((it) => !RETIRED_IDS.has(String(it.id))); // 剔掉已下架的
 }
 export function getCatalog() {
   return CATALOG || SHOP_ITEMS;

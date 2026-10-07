@@ -186,6 +186,20 @@ export class Network {
     this.send({ t: 'ctrl', target, on: on ? 1 : 0, x, y, z });
   }
 
+  // 邀请传送：请 target 传送到我这里。带上**我此刻的坐标**（他要落在这儿），
+  // 服务器只做转发与钳制 —— 真正瞬移由对方客户端执行。
+  sendTpInvite(target, x, y, z) {
+    if (!target) return;
+    this.send({ t: 'tp_invite', target, x, y, z });
+  }
+
+  // 回复别人的传送邀请：ok=true 同意（我这就传送过去）/ false 拒绝。
+  // target 指向**发起邀请的人**（与 ctrl 的「挣脱时 target 指回控制器」同一套约定）。
+  sendTpReply(target, ok) {
+    if (!target) return;
+    this.send({ t: 'tp_reply', target, ok: ok ? 1 : 0 });
+  }
+
   // 匹配：请求进入对战房间（mode 指定玩法：'meteor' 躲避陨石混战 / 'grapple' 疯狂抓钩）
   sendMatch(mode) {
     this.send({ t: 'match', mode: mode || 'meteor' });

@@ -6,7 +6,10 @@ import { dirname, resolve } from 'path';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dir, '..');
-const read = (p) => readFileSync(resolve(root, p), 'utf8');
+// ⚠ 必须把 CRLF 归一成 LF 再断言：下面有**多行字面量**断言（`import {\n  ...\n} from ...`），
+//   而 Windows 上 git 检出默认是 CRLF（core.autocrlf）→ 不归一化时这些断言必然失败，
+//   且看起来像"代码改错了"，其实只是行尾不同。
+const read = (p) => readFileSync(resolve(root, p), 'utf8').replace(/\r\n/g, '\n');
 
 const files = {
   baker: read('src/world/LightBaker.js'),
