@@ -22,13 +22,24 @@ function normalizeUrl(url) {
   return url;
 }
 
+// 运行时探明的「站点上没有、只有服务端有」的 url：第一次按同源加载会 404，
+// 记下来后直接走 API_BASE，避免同一件模型反复 404。
+const remoteOnly = new Set();
+function canTryRemote(rawUrl) {
+  return typeof rawUrl === 'string' && /^\/(assets|models)\//.test(rawUrl) && !remoteOnly.has(rawUrl);
+}
+
 // 统一模型地址解析：决定每个 url 该从哪台主机加载。
-// - 已上传/导入到后端的模型（/assets/import-*.glb）→ 拼上 API_BASE 走远程后端；
+// - **服务端上传目录**的模型（/assets/import-*.glb 编辑器上传、/assets/furn_*.glb 商店家具）→
+//   拼上 API_BASE 走远程后端。这两类文件只存在于服务器的 data/assets，**站点上根本没有**。
+//   ⚠ 漏了 furn_ 就是「全都模型失败」：浏览器会拿 /assets/furn_xxx.glb 去问 GitHub Pages，
+//   而 Pages 的 public/assets 里只有内建模型 → 404 → 家具全部回退占位方块。
 // - 其余（内建 /assets/*、旧导入 /models/*）→ 相对当前页面解析（GitHub Pages 上随站点一起托管）。
 function resolveUrl(url) {
   if (typeof url !== 'string') return url;
   if (/^https?:/i.test(url) || url.startsWith('//')) return url; // 已是绝对地址直接用
-  if (url.startsWith('/assets/import-')) return API_BASE + url; // 后端托管的上传模型
+  if (remoteOnly.has(url)) return API_BASE + url;                // 已探明「只有服务端有」
+  if (/^\/assets\/(import-|furn_)/.test(url)) return API_BASE + url; // 服务端托管：上传模型 / 家具
   return normalizeUrl(url);
 }
 
@@ -68,8 +79,8 @@ export function optimizeLoadedModel(gltf, url) {
 //
 // 字节统一走 assetCache：第二次打开页面时模型从本地缓存直接取，不再重复下载
 // （boy/girl 的人物模型各 1~1.6MB、四张天空全景图 4MB 多，每次重下太浪费）。
-function loadGLB(url) {
-  url = resolveUrl(url);
+function loadGLB(rawUrl) {
+  const url = resolveUrl(rawUrl);
   if (cache.has(url)) return cache.get(url);
 
   if (!_loader) _loader = new GLTFLoader();
@@ -92,7 +103,16 @@ function loadGLB(url) {
     }).catch(bad);
   });
 
-  const tracked = track(promise); // 登记到加载计数：进游戏前的加载动画据此判断「模型都到了没」
+  let tracked = track(promise); // 登记到加载计数：进游戏前的加载动画据此判断「模型都到了没」
+  // 兜底：站点同源上确实没有这个文件（上传/家具类模型只在服务端），再试一次远程。
+  // 命中后记进 remoteOnly，之后同一 url 直接走 API_BASE，不再多一次 404。
+  if (canTryRemote(rawUrl)) {
+    tracked = track(tracked.catch(() => {
+      remoteOnly.add(rawUrl);
+      cache.delete(url);
+      return loadGLB(rawUrl);
+    }));
+  }
   // ⚠ 失败**不能**永久留在缓存里：一次瞬时失败（弱网 / 20s 超时 / 被导航打断 / 缓存里取到坏字节）
   //   会把这条 url 毒死一整场 —— 后面每个玩家都拿不到身体，且不报错、不重试。
   //   表现为「名牌和手持物都在、人没了」，是最难查的一类静默失效。

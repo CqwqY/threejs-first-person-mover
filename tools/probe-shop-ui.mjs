@@ -64,5 +64,17 @@ const missing = ids.filter((id) => !files.has(id + '.png'));
 ok(files.size >= ids.length, 'public/furn-previews 共 ' + files.size + ' 张，不少于在售家具 ' + ids.length + ' 件');
 ok(missing.length === 0, '每件在售家具都有预览图' + (missing.length ? '（缺: ' + missing.join(', ') + '）' : ''));
 
+console.log('[6] 家具模型的地址解析（不能把服务端模型当站点同源文件取）');
+const loader = read('src/world/AssetLoader.js');
+const resBlock = blockAt(loader, 'function resolveUrl');
+ok(/remoteOnly\.has\(url\)\)\s*return API_BASE \+ url/.test(resBlock), '探明只有服务端有的 url 走 API_BASE');
+ok(resBlock.includes("/^\\/assets\\/(import-|furn_)/.test(url)"), 'import- 与 furn_ 前缀直接走 API_BASE（服务端 data/assets）');
+const tryBlock = blockAt(loader, 'function canTryRemote');
+ok(tryBlock.includes('!remoteOnly.has(rawUrl)'), '远程回退只试一次（防无限递归）');
+const loadBlock = blockAt(loader, 'function loadGLB');
+ok(loadBlock.includes('canTryRemote(rawUrl)'), 'loadGLB 挂了远程兜底分支');
+ok(loadBlock.includes('remoteOnly.add(rawUrl)') && loadBlock.includes('return loadGLB(rawUrl)'), '同源 404 后改走 API_BASE 重试');
+ok(loadBlock.includes('cache.delete(url)'), '回退前清掉失败缓存（失败 Promise 不能毒死后续）');
+
 console.log(fails ? '\n' + fails + ' 条失败' : '\n全部通过');
 process.exit(fails ? 1 : 0);
