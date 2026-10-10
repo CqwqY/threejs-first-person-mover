@@ -1,5 +1,6 @@
-// 职责：AI 商人 NPC 的对话面板，原神式「单条对话 + 打字机」。
-// 消息由调用方通过 onSend 回调走后端 /api/ai；NPC 的回复逐字显示(打字机，非流式)。
+// 职责：NPC 对话面板（学生用），原神式「单条对话 + 打字机」。
+// 消息由调用方通过 onSend 回调发到服务端（服务端带人设/记忆调 GLM）；回复逐字显示（打字机，非流式）。
+// setTitle 换掉顶栏的名字；addThink 显示对方的「心理活动」（灰色斜体，和嘴上说的话区分开）。
 import { ensureTheme } from './theme.js';
 
 // 创建对话面板。返回 { root, open, close, toggle, isOpen, addMsg, setOnSend, focusInput }
@@ -19,12 +20,12 @@ export function createNpcChat() {
       <div class="kui-panel__body">
         <div class="npc-chat-head" style="display:flex;align-items:center;gap:8px;padding:4px 2px 8px;border-bottom:2px solid var(--kui-blue-dark);">
           <span class="dot" style="flex:none;width:8px;height:8px;border-radius:50%;background:var(--kui-ok);"></span>
-          <span class="kui-title">阿花 · 物品商人</span>
+          <span class="kui-title npc-chat-title">同学</span>
           <span class="close kui-iconbtn" style="margin-left:auto;">×</span>
         </div>
         <div class="npc-chat-body" style="height:150px;max-height:150px;overflow-y:auto;padding:8px;margin:8px 0;background:var(--kui-blue-soft);border-radius:var(--kui-radius);"></div>
         <div class="npc-chat-foot" style="display:flex;gap:6px;padding:2px;">
-          <input class="kui-input" style="flex:1;" placeholder="想要什么宝贝？直接跟阿花开口…" />
+          <input class="kui-input" style="flex:1;" placeholder="想聊点什么？直接说…" />
           <button type="button" class="kui-btn kui-btn--primary">发送</button>
         </div>
       </div>
@@ -35,10 +36,32 @@ export function createNpcChat() {
   const input = root.querySelector('.npc-chat-foot input');
   const sendBtn = root.querySelector('.npc-chat-foot button');
   const closeBtn = root.querySelector('.npc-chat-head .close');
+  const titleEl = root.querySelector('.npc-chat-title');
 
   let onSend = null; // (text) => Promise | void
   let _stopType = null; // 正在进行的打字机停止句柄
   let _busyEl = null;   // 当前显示的「正在想…」元素
+
+  // 换对话对象：顶栏名字 + 清掉上一个人的聊天记录（聊天记录不跨人保留）
+  function setTitle(text) {
+    if (titleEl) titleEl.textContent = String(text || '同学');
+    body.innerHTML = '';
+    _stopType = null;
+    _busyEl = null;
+  }
+  // 心理活动：灰色斜体小字，紧跟在对方那句话下面
+  function addThink(text) {
+    if (!text) return null;
+    const el = document.createElement('div');
+    el.className = 'npc-msg think';
+    el.style.cssText = 'margin:-2px 0 8px;max-width:88%;padding:4px 10px;border-radius:10px;' +
+      'background:transparent;color:var(--kui-ink-soft);font-style:italic;font-size:12px;' +
+      'white-space:pre-wrap;word-break:break-word;opacity:.85;';
+    el.textContent = '（' + String(text) + '）';
+    body.appendChild(el);
+    body.scrollTop = body.scrollHeight;
+    return el;
+  }
 
   // 消息气泡外观（只做视觉）：换成 Kenney 主题变量，排版尺寸沿用原值
   function styleMsg(el, role) {
@@ -139,7 +162,7 @@ export function createNpcChat() {
     root.style.display = 'flex';
     input.focus();
     if (!body.querySelector('.npc-msg')) {
-      addMsg('npc', '来啦来啦～我是物品商人阿花。想要什么宝贝，直接跟我说，东西放进你背包里。');
+      addMsg('npc', '嗯？找我有什么事吗。');
     }
     if (onOpen) onOpen();
   }
@@ -166,6 +189,8 @@ export function createNpcChat() {
     toggle,
     isOpen: () => !root.classList.contains('hidden'),
     addMsg,
+    addThink,
+    setTitle,
     focusInput,
     setOnSend(fn) { onSend = fn; },
     setOnOpen(fn) { onOpen = fn; },

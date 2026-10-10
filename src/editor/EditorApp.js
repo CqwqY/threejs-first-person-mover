@@ -393,6 +393,17 @@ export function createEditor() {
     codeCancel: document.getElementById('codeCancel'),
     codeReset: document.getElementById('codeReset'),
     codesFormHint: document.getElementById('codesFormHint'),
+    // ---- 功能区标注（学生 NPC 的目的地）----
+    btnZones: document.getElementById('tZones'),
+    zonesPanel: document.getElementById('zonesPanel'),
+    zonesToken: document.getElementById('zonesToken'),
+    zonesRefresh: document.getElementById('zonesRefresh'),
+    zonesList: document.getElementById('zonesList'),
+    zonesAdd: document.getElementById('zonesAdd'),
+    zonesFromSel: document.getElementById('zonesFromSel'),
+    zonesSave: document.getElementById('zonesSave'),
+    zonesFit: document.getElementById('zonesFit'),
+    zonesMsg: document.getElementById('zonesMsg'),
     // ---- 障眼法窗户 ----
     btnWindow: document.getElementById('tWindow'),
     windowPanel: document.getElementById('windowPanel'),
@@ -3072,6 +3083,12 @@ export function createEditor() {
   areaVizGroup.visible = false;
   scene.add(areaVizGroup);
 
+  // 功能区标注的可视化：按类型上色的地面框（只在「区域」模式显示）
+  const zoneVizGroup = new THREE.Group();
+  zoneVizGroup.name = 'editor-zones';
+  zoneVizGroup.visible = false;
+  scene.add(zoneVizGroup);
+
   const TK_COLOR = 0xffc14d;        // 普通门（琥珀）
   const TK_START_COLOR = 0x5ddc7a;  // 起终点 = 0 号门（绿）
   const TK_SEL_COLOR = 0x4ea1ff;    // 选中（蓝）
@@ -3409,13 +3426,13 @@ export function createEditor() {
 
   function setMode(m) {
     // 切到「边界 / 赛道 / 道具 / 家具 / 兑换码」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
-    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn' || m === 'codes')) exitComboMode();
+    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn' || m === 'codes' || m === 'zones')) exitComboMode();
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes', 'window'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes', 'window', 'zones'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes, window: StepUI.btnWindow };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes, window: StepUI.btnWindow, zones: StepUI.btnZones };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
@@ -3432,6 +3449,8 @@ export function createEditor() {
       StepUI.hint.textContent = '兑换码管理：码表存在服务端，改完即时生效（玩家进游戏输入即可兑换）';
     } else if (m === 'window') {
       StepUI.hint.textContent = '点「添加窗户」放一扇 · 用选择/移动/旋转轴贴到墙上 · 右侧面板可调尺寸/朝向/玻璃色';
+    } else if (m === 'zones') {
+      StepUI.hint.textContent = '功能区标注：给地块标上「饭堂/教室/操场…」，学生 NPC 会自己走过去 · 选中建筑后点「用选中建筑生成」最快';
     } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('已摆家具') || StepUI.hint.textContent.includes('兑换码管理') || StepUI.hint.textContent.includes('添加窗户')) {
       StepUI.hint.textContent = '';
     }
@@ -3443,6 +3462,7 @@ export function createEditor() {
     const isFurn = m === 'furn';
     const isCodes = m === 'codes';
     const isWindow = m === 'window';
+    const isZones = m === 'zones';
     boundaryGroup.visible = isBound;
     trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
@@ -3451,11 +3471,14 @@ export function createEditor() {
     if (StepUI.furnPanel) StepUI.furnPanel.style.display = isFurn ? 'block' : 'none';
     if (StepUI.codesPanel) StepUI.codesPanel.style.display = isCodes ? 'block' : 'none';
     if (StepUI.windowPanel) StepUI.windowPanel.style.display = isWindow ? 'block' : 'none';
+    if (StepUI.zonesPanel) StepUI.zonesPanel.style.display = isZones ? 'block' : 'none';
     buildVizGroup.visible = isFurn;
     areaVizGroup.visible = isFurn;
+    zoneVizGroup.visible = isZones;
     if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具 + 建造范围
     if (isCodes) fetchCodes();  // 进入即拉一次服务端码表
     if (isWindow) syncWindowPanel(); // 进入即把选中窗户的参数回填到面板
+    if (isZones) fetchZones(); // 进入即拉一次服务端的功能区标注
     if (isBound) {
       state.boundaryDrag = null;
       applyBoundaryFocus(StepUI.bFocus ? StepUI.bFocus.checked : true);
@@ -3524,6 +3547,7 @@ export function createEditor() {
   if (StepUI.btnTrack) StepUI.btnTrack.onclick = () => setMode('track'); // 赛道编辑模式（校园狂飙）
   // ⚠ 编辑器工具按钮**不是遍历自动绑**的，必须手写这一行，漏了就是「点都点不了」
   if (StepUI.btnWindow) StepUI.btnWindow.onclick = () => setMode('window'); // 障眼法窗户
+  if (StepUI.btnZones) StepUI.btnZones.onclick = () => setMode('zones'); // 功能区标注（学生 NPC 目的地）
 
   // ---------- 商店管理（在线改价格 / 导入模型） ----------
   // 与后端 /api/shop 对接：GET 公开读、POST 带管理员密钥改（add/update/del）。
@@ -3981,6 +4005,164 @@ export function createEditor() {
     const a = buildAreas[0];
     if (!a) return;
     const cx = (a.minX + a.maxX) / 2, cz = (a.minZ + a.maxZ) / 2;
+    controls.target.set(cx, 0, cz);
+    camera.position.set(cx, 130, cz + 100);
+    controls.update();
+  };
+
+  // ---------- 功能区标注（学生 NPC 的目的地）----------
+  // 数据存在服务端 data/zones.json；学生按「课程表时段 + 需求」挑一个区域走过去，
+  // 所以这里的类型标注就是他们行为的全部依据 —— 标错了人就跑错地方。
+  let zoneList = [];
+  const ZONE_TYPES = [
+    { id: 'classroom', label: '教室', color: 0x4aa3ff },
+    { id: 'canteen', label: '饭堂', color: 0xffb347 },
+    { id: 'playground', label: '操场', color: 0x5ed46a },
+    { id: 'library', label: '图书馆', color: 0xa58bff },
+    { id: 'shop', label: '小卖部', color: 0xff7f9e },
+    { id: 'dorm', label: '宿舍', color: 0x8fd3ff },
+    { id: 'toilet', label: '厕所', color: 0xbfc9d4 },
+    { id: 'gate', label: '校门', color: 0xf2f2f2 },
+    { id: 'fountain', label: '喷泉', color: 0x59d6e8 },
+    { id: 'other', label: '其它', color: 0x9aa4b1 },
+  ];
+  function zoneColor(type) {
+    const t = ZONE_TYPES.find((x) => x.id === type);
+    return t ? t.color : 0x9aa4b1;
+  }
+  function setZoneMsg(text, cls) {
+    if (!StepUI.zonesMsg) return;
+    StepUI.zonesMsg.textContent = text || '';
+    StepUI.zonesMsg.style.color = cls === 'err' ? '#ff8888' : '#9fe0a8';
+  }
+  // 地面彩色框 + 边框线：和建造范围同一套画法，只是按类型上色
+  function drawZoneViz() {
+    for (let i = zoneVizGroup.children.length - 1; i >= 0; i--) zoneVizGroup.remove(zoneVizGroup.children[i]);
+    for (const z of zoneList) {
+      const w = Math.max(0.1, z.maxX - z.minX), d = Math.max(0.1, z.maxZ - z.minZ);
+      const cx = (z.minX + z.maxX) / 2, cz = (z.minZ + z.maxZ) / 2;
+      const color = zoneColor(z.type);
+      const fill = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, d),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false })
+      );
+      fill.rotation.x = -Math.PI / 2;
+      fill.position.set(cx, 0.07, cz);
+      zoneVizGroup.add(fill);
+      const pts = [
+        new THREE.Vector3(z.minX, 0.09, z.minZ), new THREE.Vector3(z.maxX, 0.09, z.minZ),
+        new THREE.Vector3(z.maxX, 0.09, z.maxZ), new THREE.Vector3(z.minX, 0.09, z.maxZ),
+        new THREE.Vector3(z.minX, 0.09, z.minZ),
+      ];
+      zoneVizGroup.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color })
+      ));
+    }
+  }
+  function renderZoneList() {
+    if (!StepUI.zonesList) return;
+    StepUI.zonesList.innerHTML = '';
+    zoneList.forEach((z, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:3px;align-items:center;margin:3px 0;flex-wrap:wrap';
+      const name = document.createElement('input');
+      name.type = 'text'; name.value = z.name || ''; name.placeholder = '名称';
+      name.style.cssText = 'width:70px';
+      name.oninput = () => { zoneList[i].name = name.value; };
+      row.appendChild(name);
+      const type = document.createElement('select');
+      type.style.cssText = 'width:74px';
+      for (const t of ZONE_TYPES) {
+        const op = document.createElement('option');
+        op.value = t.id; op.textContent = t.label;
+        if (z.type === t.id) op.selected = true;
+        type.appendChild(op);
+      }
+      type.onchange = () => { zoneList[i].type = type.value; drawZoneViz(); };
+      row.appendChild(type);
+      const mk = (key, title) => {
+        const inp = document.createElement('input');
+        inp.type = 'number'; inp.step = '1'; inp.title = title; inp.value = String(z[key]);
+        inp.style.cssText = 'width:52px';
+        inp.oninput = () => { const v = Number(inp.value); if (Number.isFinite(v)) { zoneList[i][key] = v; drawZoneViz(); } };
+        return inp;
+      };
+      row.appendChild(mk('minX', 'X 最小'));
+      row.appendChild(mk('maxX', 'X 最大'));
+      row.appendChild(mk('minZ', 'Z 最小'));
+      row.appendChild(mk('maxZ', 'Z 最大'));
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'import-btn'; del.textContent = '✕';
+      del.style.cssText = 'flex:0 0 auto;padding:2px 6px';
+      del.onclick = () => { zoneList.splice(i, 1); renderZoneList(); drawZoneViz(); };
+      row.appendChild(del);
+      StepUI.zonesList.appendChild(row);
+    });
+    if (!zoneList.length) StepUI.zonesList.innerHTML = '<div style="color:#7d8894">（还没标任何区域 —— 点「加一个区域」或「用选中建筑生成」）</div>';
+  }
+  async function fetchZones() {
+    try {
+      const r = await fetch(API_ROOT + '/api/zones');
+      const body = await r.json().catch(() => null);
+      if (body && body.ok && Array.isArray(body.zones)) {
+        zoneList = body.zones.map((z) => ({ ...z }));
+        renderZoneList(); drawZoneViz();
+        setZoneMsg('已载入 ' + zoneList.length + ' 个区域');
+      }
+    } catch (e) {
+      /* 拿不到就保持现状 */
+    }
+  }
+  async function saveZones() {
+    const tok = StepUI.zonesToken ? StepUI.zonesToken.value : '';
+    if (!tok) { setZoneMsg('请先填管理员密钥', 'err'); return; }
+    setZoneMsg('保存中…', '');
+    try {
+      const r = await fetch(API_ROOT + '/api/zones', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tok, zones: zoneList }),
+      });
+      const b = await r.json().catch(() => null);
+      if (r.ok && b && b.ok) {
+        zoneList = b.zones.map((z) => ({ ...z }));
+        renderZoneList(); drawZoneViz();
+        setZoneMsg('已保存 ' + zoneList.length + ' 个区域（学生立刻按新标注行动）', '');
+      } else {
+        setZoneMsg('保存失败：HTTP ' + r.status + (b && b.error ? ' · ' + b.error : ''), 'err');
+      }
+    } catch (e) {
+      setZoneMsg('保存失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+  if (StepUI.zonesRefresh) StepUI.zonesRefresh.onclick = () => fetchZones();
+  if (StepUI.zonesSave) StepUI.zonesSave.onclick = () => saveZones();
+  if (StepUI.zonesAdd) StepUI.zonesAdd.onclick = () => {
+    zoneList.push({ id: 'z' + (Date.now() % 100000), name: '新区域', type: 'other', minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
+    renderZoneList(); drawZoneViz();
+  };
+  // 用选中建筑的外接框生成：选中教学楼点一下就出矩形，不用手输坐标
+  if (StepUI.zonesFromSel) StepUI.zonesFromSel.onclick = () => {
+    const sel = state.selected;
+    if (!sel || !sel.obj) { setZoneMsg('先在场景里左键选中一栋楼，再点这个', 'err'); return; }
+    const box = new THREE.Box3().setFromObject(sel.obj);
+    if (box.isEmpty()) { setZoneMsg('取不到包围盒（该对象没有网格）', 'err'); return; }
+    const r1 = (v) => Math.round(v * 10) / 10;
+    zoneList.push({
+      id: 'z' + (Date.now() % 100000),
+      name: String(sel.name || '建筑').slice(0, 16),
+      type: 'classroom',
+      minX: r1(box.min.x), maxX: r1(box.max.x),
+      minZ: r1(box.min.z), maxZ: r1(box.max.z),
+    });
+    renderZoneList(); drawZoneViz();
+    setZoneMsg('已按「' + (sel.name || '选中物件') + '」生成区域 —— 选好类型再点「保存区域」', '');
+  };
+  if (StepUI.zonesFit) StepUI.zonesFit.onclick = () => {
+    const z = zoneList[0];
+    if (!z) return;
+    const cx = (z.minX + z.maxX) / 2, cz = (z.minZ + z.maxZ) / 2;
     controls.target.set(cx, 0, cz);
     camera.position.set(cx, 130, cz + 100);
     controls.update();

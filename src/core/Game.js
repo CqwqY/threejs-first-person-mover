@@ -11,7 +11,7 @@ import { fullscreenSupported, isFullscreen, toggleFullscreen, onFullscreenChange
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createChatBox } from '../ui/ChatBox.js';
-import { createAiNpc } from '../world/AiNpc.js';
+import { createStudents } from '../world/Students.js';
 import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
@@ -507,10 +507,11 @@ export class Game {
     // 顶部校卡两侧：左侧「背包」、右侧「设置」
     this._createTopButtons();
 
-    // ---- AI 商人 NPC：出生点旁喷泉处的阿花，靠近按 F 或点右侧选项卡打开对话栏 ----
+    // ---- 学生 NPC：校园里的 8 名同学，位置由服务端权威跑，靠近按 F 或点选项卡打开对话栏 ----
+    // 对话面板沿用原来的 NPC 聊天框（原商人 NPC 已下架，给物品的能力并入商店）。
     this.aiChat = createNpcChat();
-    this.aiChat.setOnSend((text) => this._npcSend(text));
-    // NPC 对话（跟阿花说话）也要打字：同样把手机控件整组藏掉，免得边聊边走
+    this.aiChat.setOnSend((text) => this._studentSend(text));
+    // 和学生说话也要打字：同样把手机控件整组藏掉，免得边聊边走
     this.aiChat.setOnOpen(() => {
       this._setChatLock(true);
       if (this.mobileControls) this.mobileControls.setHidden(true);
@@ -518,13 +519,15 @@ export class Game {
     this.aiChat.setOnClose(() => {
       this._setChatLock(false);
       if (this.mobileControls) this.mobileControls.setHidden(false);
+      this._talkId = ''; // 关掉面板就结束这次对话，下次靠近重新开始
     });
-    this.aiNpc = createAiNpc();
-    this.aiNpc.setInteract(() => this._openChat());
-    this.scene.add(this.aiNpc.group);
-    // 屏幕中心右侧的「与阿花对话」选项卡：仅在靠近阿花时显示，点击开/关对话栏
+    this.students = createStudents({
+      scene: this.scene,
+      onSpeak: (info) => this._onStudentSpeak(info),
+    });
+    // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关对话栏
     this._createChatTab();
-    this.aiNpc.onRange((r) => { this._chatTab.style.display = r ? '' : 'none'; });
+    this._bindStudentTalk();
 
     // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
     this.vehicle = createVehicle(this.scene);
@@ -562,7 +565,7 @@ export class Game {
       this.chat.open();
     });
 
-    // 技能槽：阿花给的物品在此变为可点/可按数字键触发的技能；恢复上次指定的槽位
+    // 技能槽：商店买的道具在此变为可点/可按数字键触发的技能；恢复上次指定的槽位
     this.skillSlots = createSkillSlots({
       dropModifier: Config.DROP_MODIFIER_KEY,
       gestureMs: Config.DROP_GESTURE_MS,
@@ -1714,6 +1717,30 @@ export class Game {
       case 'build': {
         // 玩家建造（教学楼）：服务端回执/广播的增删
         if (this._buildTool) this._buildTool.handleBuild(msg);
+        break;
+      }
+      case 'npc_roster': {
+        // 学生名单：连上就发一份（姓名/班级/性别/当前位置）
+        if (this.students) this.students.setRoster(msg.list);
+        break;
+      }
+      case 'npc': {
+        // 学生位置广播（5Hz）：只更新目标点，实际位移在 students.update 里缓动
+        if (this.students) this.students.applyList(msg.list);
+        break;
+      }
+      case 'npc_say': {
+        // 学生说话/心理活动（所有人都能看到气泡）
+        if (this.students) this.students.onSay(msg);
+        break;
+      }
+      case 'npc_reply': {
+        // 只回给发起对话的那个玩家：填进对话栏
+        this._onStudentReply(msg);
+        break;
+      }
+      case 'npc_zones': {
+        // 编辑器改了功能区：本地不直接用（位置以服务端为准），只提示一下
         break;
       }
       case 'chat': {
@@ -4159,17 +4186,32 @@ export class Game {
     }
   }
 
-  // 屏幕中心右侧的「按 F 与她对话」选项卡：仅靠近阿花显示，点击开/关底部对话栏；位置略往中间收
+  // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关底部对话栏；位置略往中间收
   _createChatTab() {
     const el = document.createElement('div');
     el.className = 'chat-tab kui-btn kui-btn--primary'; // 保留 chat-tab 供手机端「按键布局调整」定位与检查
-    el.textContent = '按 F 与她对话';
+    el.textContent = '按 F 对话';
     el.style.cssText =
       'position:fixed;right:26%;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
       'padding:9px 12px;user-select:none;text-align:center;';
-    el.addEventListener('click', () => { this.aiChat.toggle(); });
+    el.addEventListener('click', () => {
+      // 已开着就关；没开就找最近的人开（直接 toggle 会在没对话对象时开出空面板）
+      if (this.aiChat && this.aiChat.isOpen()) this.aiChat.close();
+      else this._talkToNearest();
+    });
     document.body.appendChild(el);
     this._chatTab = el;
+  }
+
+  // 每帧刷新搭话选项卡：靠近谁就写谁的名字，离开就藏起来
+  _updateTalkTab() {
+    if (!this._chatTab || !this.students || !this.localState) return;
+    if (this.aiChat && this.aiChat.isOpen()) { this._chatTab.style.display = 'none'; return; }
+    const s = this.students.nearest(this.localState.x, this.localState.z);
+    if (!s) { this._chatTab.style.display = 'none'; return; }
+    const text = '按 F 与' + s.name + '对话';
+    if (this._chatTab.textContent !== text) this._chatTab.textContent = text;
+    this._chatTab.style.display = '';
   }
 
   // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
@@ -4417,7 +4459,7 @@ export class Game {
     grid.innerHTML = '';
     if (!entries.length) {
       grid.style.cssText = 'text-align:center;color:var(--kui-paper);padding:40px 0;';
-      grid.textContent = isFurn ? '还没有家具，去小满杂货铺的「家具」页买。' : '背包空空如也，去喷泉边找阿花要宝贝吧。';
+      grid.textContent = isFurn ? '还没有家具，去小满杂货铺的「家具」页买。' : '背包空空如也，去小满杂货铺逛逛吧。';
       return;
     }
     grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;padding-top:6px;';
@@ -4509,169 +4551,64 @@ export class Game {
     }
   }
 
-  // 把玩家一句话发给后端 GLM 代理，拿到 {reply, action} 后：展示回复并执行工具动作。
-  async _npcSend(text) {
-    const aichat = this.aiChat;
-    aichat.addMsg('busy', '阿花正在想…');
-    const msgs = this._npcHistory || [];
-    msgs.push({ role: 'user', content: text });
-    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
-    try {
-      const res = await fetch(API_BASE + '/api/ai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: msgs }),
-        signal: ctrl ? ctrl.signal : undefined,
-      });
-      if (timer) clearTimeout(timer);
-      const data = await res.json();
-      if (!data || !data.ok) throw new Error((data && data.error) || ('http ' + res.status));
-      const reply = data.reply || '…';
-      // 诊断：pv 是后端提示词版本号，raw 是 action 为空时模型的原始输出
-      console.log('[阿花] pv=' + (data.pv || '未知(旧后端)'), 'action=' + JSON.stringify(data.action), 'raw=' + (data.raw || ''));
-      msgs.push({ role: 'assistant', content: reply });
-      // 只保留最近若干条，避免历史无限膨胀
-      this._npcHistory = msgs.slice(-12);
-      aichat.addMsg('npc', reply);
-      if (data.action) this._executeNpcAction(data.action);
-    } catch (e) {
-      aichat.addMsg('npc', '阿花好像卡住了，请稍后再试。');
+  // ---------- 学生 NPC：靠近搭话 / 服务端带记忆回话 ----------
+  // F 键：找最近的学生开聊。位置是服务端权威的，这里只判断"谁离我最近"。
+  _bindStudentTalk() {
+    this._talkId = '';        // 当前正在对话的学生 id（空 = 没在聊）
+    this._talkName = '';
+    this._sayTimer = null;    // 回复超时兜底的定时器
+    this._pendingSayAt = 0;   // 发出这句话的时间戳（超时判定用，必须初始化，否则 NaN）
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.NPC_KEY) return;
+      // 有输入框在打字或已开面板时不重复触发，交给面板自身管理
+      const el = document.activeElement;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
+      if (this.aiChat && this.aiChat.isOpen()) return;
+      this._talkToNearest();
+    });
+  }
+
+  // 靠近谁就跟谁聊：周围没人时明确提示（不要静默什么都不发生）
+  _talkToNearest() {
+    if (!this.students || !this.localState) return;
+    const s = this.students.nearest(this.localState.x, this.localState.z);
+    if (!s) { this._toast('走近一点才能搭话'); return; }
+    this._talkId = s.id;
+    this._talkName = s.name;
+    this.aiChat.setTitle(s.name + ' · ' + s.cls);
+    this._openChat();
+  }
+
+  // 把玩家的话发给服务端（服务端带人设/记忆调 GLM），回复走 npc_reply
+  _studentSend(text) {
+    if (!this._talkId) { this.aiChat.addMsg('busy', '（没有对话对象）'); return; }
+    if (!this.network) return;
+    this.aiChat.addMsg('busy', (this._talkName || '同学') + '正在想…');
+    this._pendingSayAt = Date.now();
+    this.network.sendStudentTalk(this._talkId, text);
+    // 兜底：20 秒还没回就出声，别让「正在想…」一直挂着（AI 失败/限流时会走到这条）
+    if (this._sayTimer) clearTimeout(this._sayTimer);
+    this._sayTimer = setTimeout(() => {
+      if (this.aiChat && this.aiChat.isOpen()) this.aiChat.addMsg('npc', '（他好像没听见，等会儿再说吧）');
+    }, 20500);
+  }
+
+  // 服务端回的对话内容：say 是嘴上说的话、think 是心理活动
+  _onStudentReply(msg) {
+    if (!this.aiChat || !msg) return;
+    if (this._sayTimer) { clearTimeout(this._sayTimer); this._sayTimer = null; }
+    if (this.aiChat.isOpen() && msg.id === this._talkId) {
+      if (msg.say) this.aiChat.addMsg('npc', String(msg.say));
+      if (msg.think) this.aiChat.addThink(String(msg.think));
     }
   }
 
-  // 执行 GLM 点名的工具动作。所有参数已经过后端清洗（越界值被钳制或整条丢弃），这里只做贴上玩家。
-  _executeNpcAction(action) {
-    if (!action || !action.name) return;
-    const state = this.localState;
-    const phys = this.localPlayer.physics;
-    const a = action.args || {};
-    // 带 seconds 的动作：到点自动恢复默认值（只在该值没被后续动作覆盖时还原）
-    const after = (secs, fn) => { if (secs && secs > 0) setTimeout(fn, secs * 1000); };
-    switch (action.name) {
-      case 'set_player_speed': {
-        const m = a.multiplier;
-        phys.speedMult = m;
-        if (a.mode) phys.speedMode = a.mode;
-        this._toast('速度 ×' + m + (a.mode && a.mode !== 'walk' ? '（' + a.mode + '）' : ''));
-        after(a.seconds, () => { if (phys.speedMult === m) { phys.speedMult = 1; phys.speedMode = 'walk'; } });
-        break;
-      }
-      case 'set_player_size': {
-        const s = a.scale;
-        phys.sizeTarget = s;
-        this._toast('体型已变为 ' + s + ' 倍');
-        after(a.seconds, () => { if (phys.sizeTarget === s) phys.sizeTarget = 1; });
-        break;
-      }
-      case 'teleport_player':
-      case 'set_player_position': {
-        // 与「邀请传送」共用同一套瞬移（钳制到地面范围 + 站到地面高度 + 清速度 + 先下车）
-        this._teleportLocal(a.x, a.y, a.z);
-        this._toast('已移动');
-        break;
-      }
-      case 'set_player_jump': {
-        const m = a.multiplier;
-        phys.jumpMult = m;
-        if (a.max_jumps) phys.maxJumps = a.max_jumps;
-        this._toast('起跳力度 ×' + m + (a.max_jumps ? '，最多连跳 ' + a.max_jumps + ' 次' : ''));
-        after(a.seconds, () => {
-          if (phys.jumpMult === m) phys.jumpMult = 1;
-          if (a.max_jumps) phys.maxJumps = 1;
-        });
-        break;
-      }
-      case 'set_player_gravity': {
-        const m = a.multiplier;
-        phys.gravityMult = m;
-        if (a.terminal_velocity) phys.terminalVelocity = a.terminal_velocity;
-        this._toast('重力 ×' + m + (a.terminal_velocity ? '，终端速度 ' + a.terminal_velocity : ''));
-        after(a.seconds, () => {
-          if (phys.gravityMult === m) phys.gravityMult = 1;
-          if (a.terminal_velocity) phys.terminalVelocity = null;
-        });
-        break;
-      }
-      case 'set_player_velocity': {
-        // 有 seconds：这段时间内每帧强制该速度；无 seconds：只给一次瞬时冲量
-        if (a.seconds && a.seconds > 0) {
-          phys.velocityHold = { x: a.x, y: a.y, z: a.z, t: a.seconds };
-        } else {
-          if (Number.isFinite(a.x)) phys.velocity.x = a.x;
-          if (Number.isFinite(a.y)) phys.velocity.y = a.y;
-          if (Number.isFinite(a.z)) phys.velocity.z = a.z;
-        }
-        this._toast('已施加速度' + (a.seconds ? '（持续 ' + a.seconds + ' 秒）' : ''));
-        break;
-      }
-      case 'set_player_friction': {
-        const m = a.multiplier;
-        phys.frictionMult = m;
-        this._toast('地面摩擦 ×' + m);
-        after(a.seconds, () => { if (phys.frictionMult === m) phys.frictionMult = 1; });
-        break;
-      }
-      case 'set_player_acceleration': {
-        const m = a.multiplier;
-        phys.accelMult = m;
-        this._toast('加速度 ×' + m);
-        after(a.seconds, () => { if (phys.accelMult === m) phys.accelMult = 1; });
-        break;
-      }
-      case 'grant_jetpack': {
-        phys.jetpack = !!a.on;
-        this._toast(phys.jetpack ? '喷气背包已开启，空中按住空格上升' : '喷气背包已关闭');
-        after(a.seconds, () => { phys.jetpack = false; });
-        break;
-      }
-      case 'set_player_health': {
-        if (Number.isFinite(a.value)) {
-          const target = Math.max(0, Math.min(Config.HEALTH_MAX, a.value));
-          this.localState.health = target;
-          this._updateHealthBar();
-          if (target <= 0 && !this._dead) this._die();
-        } else if (Number.isFinite(a.delta)) {
-          this._changeHealth(a.delta);
-        }
-        this._toast('血量：' + Math.round(this.localState.health) + ' / ' + Config.HEALTH_MAX);
-        break;
-      }
-      case 'hold_item': {
-        // 手持物：默认就是手上举着一段文字（第三人称与他人可见）
-        const text = a.text || '';
-        this.localState.hold = text;
-        this._toast(text ? '手持：' + text : '已放下手持物');
-        break;
-      }
-      case 'spawn_projectile': {
-        // 直接投掷：伤害/范围/范围效果由阿花指定，后端已钳制
-        const dmg = Number(a.damage) || 0;
-        const onHit = (a.onHit && typeof a.onHit === 'object') ? a.onHit : null;
-        this._throwProjectile({
-          damage: dmg,
-          radius: Number(a.radius) || 2,
-          speed: Number(a.speed) || Config.PROJECTILE_SPEED,
-          color: dmg > 0 ? 0xff6a3c : 0x4cd97b,
-          onHit,
-        });
-        this._toast((dmg > 0 ? '投掷物已出手（伤害 ' + dmg + '）' : '投掷物已出手')
-          + (onHit ? '，并给予 ' + this._describeEffect(onHit) : ''));
-        break;
-      }
-      case 'spawn_item': {
-        // 阿花把物品放进玩家背包，并记住她给的效果（{k,v,s} 或 null）
-        const item = a.item || '神秘物品';
-        const effKey = a.effect || null;
-        const key = getBagKey(this._profile);
-        const n = addToBag(key, item, 1);
-        this._storeItemEffect(item, effKey);
-        this._toast('阿花把「' + item + '」放进背包 · 效果：' + this._describeEffect(effKey));
-        this._equipItemSkill(item);
-        break;
-      }
-      default:
-        break;
+  // 别人跟同一个学生说话时，自己这边也能在对话栏里看到（气泡由 Students 自己显示）
+  _onStudentSpeak(info) {
+    if (!info) return;
+    if (this.aiChat && this.aiChat.isOpen() && info.id === this._talkId) {
+      if (info.say) this.aiChat.addMsg('npc', String(info.say));
+      if (info.think) this.aiChat.addThink(String(info.think));
     }
   }
 
@@ -4914,6 +4851,12 @@ export class Game {
         setTimeout(() => { if (phys.sizeTarget === s) phys.sizeTarget = 1; }, secs * 1000);
         break;
       }
+      case 'gravity': {
+        const m = (v > 0) ? v : 0.5;
+        phys.gravityMult = m;
+        setTimeout(() => { if (phys.gravityMult === m) phys.gravityMult = 1; }, secs * 1000);
+        break;
+      }
       case 'heal': {
         const amount = (v > 0) ? v : 100;
         this._changeHealth(amount);
@@ -4954,7 +4897,7 @@ export class Game {
     return 'fp_item_effect__' + (id || 'guest');
   }
 
-  // 记住阿花给某件物品的效果（speed/jump/jetpack/size；null 视为装饰品）
+  // 记住某件物品的效果（speed/jump/jetpack/size；null 视为装饰品）
   _storeItemEffect(item, effect) {
     if (!effect) return;
     try {
@@ -4971,9 +4914,9 @@ export class Game {
     } catch (e) { return null; }
   }
 
-  // 根据阿花写的效果对象 {k,v,s}（或旧的字符串兼容）生成 { label, run }。力度 v、时长 s 都由阿花定。
+  // 根据效果对象 {k,v,s}（或旧的字符串兼容）生成 { label, run }。力度 v、时长 s 都由效果本身定。
   // ⚠ 标准商店道具的效果由「云端目录」决定（天然跟随账号、换端不丢），优先从目录取；
-  //   只有目录里没有的「阿花自定义效果」（后端下发的）才回退到本地 effect 存储。
+  //   只有目录里没有的「自定义效果」（后端下发的）才回退到本地 effect 存储。
   //   旧实现只查本地存储，而本地存储按 profile 分键、且不做云同步 —— 一旦断线退游客 / 清缓存 /
   //   换设备 / profile 键漂移，读到的就是空 → 直接落到 default 分支显示「未识别」。改为目录优先后，
   //   所有标准道具（棍子/黑洞/加特林/建造锤/手电筒…）永不再「未识别」。
@@ -5025,6 +4968,27 @@ export class Game {
             phys.sizeTarget = s; // 平滑过渡到目标体型
             this._toast('体型变化：变为 ' + s + ' 倍，持续 ' + secs + ' 秒');
             setTimeout(() => { if (phys.sizeTarget === s) phys.sizeTarget = 1; }, secs * 1000);
+          },
+        };
+      }
+      case 'gravity': {
+        const m = (v && v > 0) ? v : 0.5;
+        return {
+          label: '轻身',
+          run: () => {
+            phys.gravityMult = m;
+            this._toast('轻身：重力降至 ' + m + ' 倍，持续 ' + secs + ' 秒');
+            setTimeout(() => { if (phys.gravityMult === m) phys.gravityMult = 1; }, secs * 1000);
+          },
+        };
+      }
+      case 'heal': {
+        const amount = (v && v > 0) ? v : 100;
+        return {
+          label: '治疗',
+          run: () => {
+            this._changeHealth(amount);
+            this._toast('治疗：回复 ' + amount + ' 点血量');
           },
         };
       }
@@ -5082,7 +5046,7 @@ export class Game {
           run: () => this._useInviteTp(),
         };
       case 'throw': {
-        // 投掷物：v = 伤害，r = 爆炸半径（都由阿花指定，后端已钳制）；可选 onHit = 范围效果
+        // 投掷物：v = 伤害，r = 爆炸半径（后端已钳制）；可选 onHit = 范围效果
         const dmg = (v && v > 0) ? v : 40;
         const rad = Number.isFinite(Number(eff.r)) && Number(eff.r) > 0 ? Number(eff.r) : 3;
         const onHit = (eff.onHit && typeof eff.onHit === 'object') ? eff.onHit : null;
@@ -5110,7 +5074,7 @@ export class Game {
     }
   }
 
-  // 把阿花写的效果对象翻译成中文短语，用于提示/排查（后端会把非法效果整块删掉 → null）
+  // 把效果对象翻译成中文短语，用于提示/排查（后端会把非法效果整块删掉 → null）
   _describeEffect(e) {
     if (e == null) return '无（装饰品 / 或后端未放行该效果）';
     if (typeof e !== 'object') return '格式错误（' + String(e) + '，应为对象）';
@@ -5118,12 +5082,12 @@ export class Game {
     if (k === 'throw') return '投掷 伤害' + (e.v == null ? '?' : e.v) + ' 半径' + (e.r == null ? '?' : e.r);
     if (k === 'jetpack') return '飞行 ' + (e.s == null ? '?' : e.s) + ' 秒';
     if (k === 'heal') return '治疗 ' + (e.v == null ? '?' : e.v);
-    const names = { speed: '加速', jump: '跳高', size: '体型' };
+    const names = { speed: '加速', jump: '跳高', size: '体型', gravity: '轻身', jetpack: '喷气' };
     if (names[k]) return names[k] + ' ×' + (e.v == null ? '?' : e.v) + ' 持续 ' + (e.s == null ? '?' : e.s) + ' 秒';
     return '未知类型(' + k + ')';
   }
 
-  // 把阿花给的物品挂到技能槽：用阿花选定的效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
+  // 把买来的物品挂到技能槽：用物品自带的效果。触发方式：点击槽位（手机）或按对应数字键（PC）。
   _equipItemSkill(item) {
     // 已装备则刷新该槽；否则找第一个空槽
     let idx = Object.keys(this._skillMap).find((k) => this._skillMap[k] === item);
@@ -5224,7 +5188,7 @@ export class Game {
     this._pickups.push(p);
     mesh.userData.pickup = p;
 
-    this._toast('阿花送了你一个：' + name + '，走过去碰到它就有小惊喜');
+    this._toast('收到一个：' + name + '，走过去碰到它就有小惊喜');
   }
 
   // ============ 网络连接状态 UI ============
@@ -6055,7 +6019,7 @@ export class Game {
     // 隐藏主世界景物与城市 NPC；碰撞体先快照再原地替换为竞技场
     if (this._cityRoots) for (const r of this._cityRoots) r.visible = false;
     setEditorSceneVisible(false); // 编辑器建筑不在 roots 里，单独整组隐藏
-    if (this.aiNpc) this.aiNpc.group.visible = false;
+    if (this.students) this.students.setVisible(false);
     if (this.merchant) this.merchant.group.visible = false;
     if (this.vehicle) this.vehicle.group.visible = false;
     // 狂飙的池子车也一起藏（竞技场里不该出现它们；退出对战后由 _updateVehicle 按需重新露出来）
@@ -6126,7 +6090,7 @@ export class Game {
     // 还原城市景物与 NPC
     if (this._cityRoots) for (const r of this._cityRoots) r.visible = true;
     setEditorSceneVisible(true);
-    if (this.aiNpc) this.aiNpc.group.visible = true;
+    if (this.students) this.students.setVisible(true);
     if (this.merchant) this.merchant.group.visible = true;
     if (this.vehicle) this.vehicle.group.visible = true;
     if (this.boss && this.boss.group) this.boss.group.visible = true;
@@ -7648,8 +7612,11 @@ export class Game {
       // 电动车：摆放车体、钉住后座、刷新上下车提示（必须在玩家更新之后）
       this._updateVehicle(dt);
       this._updateRace(); // 校园狂飙：按顺序过门计圈（不在对战中才跑）
-      // AI 商人 NPC：靠近提示 + 可拾取道具的推进
-      this.aiNpc.update(dt, this.localState.x, this.localState.z);
+      // 学生 NPC：位置缓动 + 走停动画 + 选项卡「按 F 与 XX 对话」的显隐
+      if (this.students) {
+        this.students.update(dt);
+        this._updateTalkTab();
+      }
       this._updatePickups(dt);
       // 商人小满：靠近显隐「找小满买东西」按钮
       this._updateMerchant(dt);

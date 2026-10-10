@@ -227,6 +227,7 @@
         <button class="tool" id="tFurn"><span class="ico">⌂</span><span class="lbl">家具</span></button>
         <button class="tool" id="tCodes"><span class="ico">🎟</span><span class="lbl">兑换码</span></button>
   <button class="tool" id="tWindow"><span class="ico">▢</span><span class="lbl">窗户</span></button>
+        <button class="tool" id="tZones" title="功能区：给校园地块标上「饭堂/教室/操场…」，学生 NPC 靠它决定去哪"><span class="ico">▤</span><span class="lbl">区域</span></button>
         <hr />
         <button class="tool" id="tRuler"><span class="ico">↔</span><span class="lbl">测距</span></button>
         <button class="tool" id="tDel"><span class="ico">✕</span><span class="lbl">删除</span></button>
@@ -346,6 +347,26 @@
             <button id="areaFit" class="import-btn" type="button">定位到范围</button>
           </div>
           <div id="areaMsg" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
+        </div>
+        <div id="zonesPanel" style="display:none">
+          <div class="panel-title">功能区标注（学生 NPC 的目的地）</div>
+          <div id="zonesHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
+            给学生标出「这是饭堂、那是教室」，他们就会按时段和需求自己走过去：饿了去饭堂、上课点进教室、困了回宿舍。<br />
+            没标任何区域时，学生原地待命（不会乱走穿墙）。
+          </div>
+          <div class="field">
+            <label>密钥</label>
+            <input id="zonesToken" type="password" placeholder="管理员密钥" style="flex:1" />
+            <button id="zonesRefresh" class="import-btn" type="button" style="flex:0 0 auto">刷新</button>
+          </div>
+          <div id="zonesList" style="max-height:260px;overflow:auto;margin:6px 0;font-size:12px;color:#cfe0f5"></div>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <button id="zonesAdd" class="import-btn" type="button">加一个区域</button>
+            <button id="zonesFromSel" class="import-btn" type="button">用选中建筑生成</button>
+            <button id="zonesSave" class="import-btn" type="button" style="background:#2b6f5f">保存区域</button>
+            <button id="zonesFit" class="import-btn" type="button">定位到区域</button>
+          </div>
+          <div id="zonesMsg" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
         </div>
         <div id="codesPanel" style="display:none">
           <div class="panel-title">兑换码（全服生效）</div>

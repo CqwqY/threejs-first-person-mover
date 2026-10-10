@@ -351,6 +351,12 @@ export class Network {
     this.send({ t: 'build_del', id: String(id).slice(0, 48) });
   }
 
+  // 跟学生 NPC 说话：服务端带人设/记忆调 GLM，回话走 npc_reply（旁人也能听见 npc_say 广播）
+  sendStudentTalk(id, text) {
+    if (!id || !text) return;
+    this.send({ t: 'npc_talk', id: String(id).slice(0, 24), text: String(text).slice(0, 200) });
+  }
+
   // sendBuildMove 发 {id, x,y,z,rotY,scale}：仅能移动自己摆的家具（服务端校验 owner）
   sendBuildMove(info) {
     if (!info || !info.id) return;

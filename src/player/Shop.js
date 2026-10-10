@@ -67,6 +67,56 @@ export const SHOP_ITEMS = [
     desc: '装备到技能槽后按对应键，会弹出在线玩家列表；选一个人发出邀请，他同意后就会传送到你身边。',
     effect: { k: 'invitetp' },
   },
+  // ---- 能力道具：原来只能跟喷泉边的 NPC 要，现在直接在商店买 ----
+  {
+    id: 'boots_speed',
+    name: '疾风靴',
+    price: 90,
+    desc: '穿上跑得像风一样：6 秒内移动速度 ×2.2。装备到技能槽后按对应键触发。',
+    effect: { k: 'speed', v: 2.2, s: 6 },
+  },
+  {
+    id: 'boots_jump',
+    name: '弹簧鞋',
+    price: 80,
+    desc: '跳得更高：8 秒内跳跃高度 ×1.8，还能连跳。',
+    effect: { k: 'jump', v: 1.8, s: 8 },
+  },
+  {
+    id: 'pill_size',
+    name: '变大丸',
+    price: 70,
+    desc: '吃完体型变成 1.8 倍，6 秒后恢复；挤过窄缝前记得先别吃。',
+    effect: { k: 'size', v: 1.8, s: 6 },
+  },
+  {
+    id: 'pill_shrink',
+    name: '变小丸',
+    price: 70,
+    desc: '吃完体型缩到 0.5 倍，6 秒后恢复；钻洞躲猫猫很好用。',
+    effect: { k: 'size', v: 0.5, s: 6 },
+  },
+  {
+    id: 'jetpack',
+    name: '竹蜻蜓',
+    price: 120,
+    desc: '戴上一飞冲天：8 秒内可以自由飞行。',
+    effect: { k: 'jetpack', s: 8 },
+  },
+  {
+    id: 'medkit',
+    name: '急救包',
+    price: 60,
+    desc: '回满血。被打残的时候按一下就活过来。',
+    effect: { k: 'heal', v: 500 },
+  },
+  {
+    id: 'feather',
+    name: '羽毛',
+    price: 65,
+    desc: '重力变轻：6 秒内下落变得很慢，从高处跳下来也不怕摔。',
+    effect: { k: 'gravity', v: 0.4, s: 6 },
+  },
   // ---- 家具（可摆放）· Kenney Furniture Kit 2.0（CC0）----
   // url 先留 placeholder（占位方块）；服务端启动时会自动把 url 对位到已上传的同名资源
   // （按「以 <id>.glb 结尾」在 assets 目录里找），所以上传完重启一次即可显示真模型。

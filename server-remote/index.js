@@ -9,9 +9,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { initAuth } from './auth.js';
-import { handleAIRoute } from './ai.js';
+import { createNpcWorld } from './npcworld.js';
+import { askStudent } from './ai-student.js';
 
 const PORT = 9000; // 服务监听端口
+// 学生 NPC 世界（服务端权威：位置/需求/记忆都在这里跑，客户端只负责插值显示）。
+// 在文件末尾初始化（要用到 dayTime 等后面才声明的量），这里先声明占位。
+let npcWorld = null;
 const SNAPSHOT_INTERVAL = 50; // 快照广播间隔（毫秒），对应 20Hz
 const HEARTBEAT_INTERVAL = 30000; // 心跳间隔（毫秒），防止连接被中间层断开
 const SPAWN_RADIUS = 4; // 出生点离原点距离（米）
@@ -808,10 +812,32 @@ const httpServer = http.createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  // AI 商人 NPC：对话 + 工具调用（改速度/体积/传送/喷气背包/生成物品）
-  if (req.method === 'POST' && url.pathname === '/api/ai') {
-    await handleAIRoute(req, res, url);
-    return;
+  // 学生 NPC 的功能区标注：读公开（客户端要知道去哪找人），写需要管理员密钥
+  if (url.pathname === '/api/zones') {
+    if (req.method === 'GET') {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, zones: npcWorld ? npcWorld.getZones() : [] }));
+      return;
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk) => { if ((body += chunk).length > 1e5) req.destroy(); });
+      req.on('end', () => {
+        const deny = (m, code = 400) => {
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: m }));
+        };
+        let data;
+        try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
+        // 写接口一律要密钥：和 /api/scene、/api/buildareas 同一套路
+        if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return deny('管理员密钥错误', 403);
+        const zones = npcWorld ? npcWorld.setZones(data.zones) : [];
+        broadcastAll({ t: 'npc_zones', zones }); // 在线客户端即时换目标
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, zones }));
+      });
+      return;
+    }
   }
 
   // 账号相关接口（注册/登录/资料/登出）：已处理则返回
@@ -1335,6 +1361,8 @@ wss.on('connection', (ws, req) => {
   // welcome：告知新客户端自己的 id/序号/出生点，以及当前已有玩家（只列同房间/大厅的人）
   const existing = worldPlayers().filter((p) => p.id !== id && !p.room);
   ws.send(JSON.stringify({ t: 'welcome', id, num, spawn, players: existing }));
+  // 学生 NPC 名单：名字/班级/当前位置。位置之后由 5Hz 的 npc 广播持续更新。
+  if (npcWorld) ws.send(JSON.stringify({ t: 'npc_roster', list: npcWorld.roster() }));
   // 建造归属键：客户端据此判断「这条家具是不是我摆的」（跨设备/清缓存也准，比本地记录可靠）
   ws.send(JSON.stringify({ t: 'build', ev: 'owner', key: ownerKeyOf(ws) }));
   // 有人刚进来 → 丢掉快照 delta 缓存，让下一帧对所有人发一次全量。
@@ -1367,6 +1395,23 @@ wss.on('connection', (ws, req) => {
         states.set(id, { ...cur, nick: pub.nickname || pub.username || ('玩家' + cur.num), color: pub.nicknameColor || '#ffffff' });
         roomBroadcast(ws.__room, { t: 'join', id, state: states.get(id) }, ws); // 只通知同房间的人
       }
+      return;
+    }
+
+    // 和学生说话：服务端带人设/记忆调 GLM，回话同时广播给所有人（旁边的人也能听见）
+    if (msg.t === 'npc_talk') {
+      if (!npcWorld) return;
+      const sid = String(msg.id || '');
+      const text = String(msg.text || '').slice(0, 200);
+      if (!sid || !text) return;
+      const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username)) || (states.get(id) && states.get(id).nick) || '同学';
+      // 同一个学生同时只处理一句（AI 有冷却，并发多了会撞免费档限流）
+      npcWorld.talk(sid, text, String(nick).slice(0, 16))
+        .then((out) => {
+          if (!out || !out.say) return;
+          ws.send(JSON.stringify({ t: 'npc_reply', id: sid, say: out.say, think: out.think || '' }));
+        })
+        .catch(() => { /* AI 失败就静默：玩家看到的是"他没理我"，比报错友好 */ });
       return;
     }
 
@@ -1956,5 +2001,15 @@ setInterval(() => {
 
 // 匹配轮询：单人苦等超时也放单人也开（练习场），避免永远卡在队列里
 setInterval(tryMatch, 1000);
+
+// ---- 学生 NPC 世界：在这里初始化（上面的 dayTime 已声明，getDayTime 才能安全取值）----
+// 没标注功能区时学生原地待命（不会乱走穿墙），编辑器「区域」页签标好即自动开跑。
+npcWorld = createNpcWorld({
+  dataDir: DATA_DIR,
+  broadcast: broadcastAll,
+  getDayTime: () => (typeof dayTime === 'number' ? dayTime : 0.35), // 课程表跟世界时刻走
+  askStudent,
+});
+console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个');
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);
