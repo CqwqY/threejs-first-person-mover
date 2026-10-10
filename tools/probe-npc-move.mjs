@@ -201,7 +201,7 @@ console.log('[4] 知道自己在哪：place 按**当前坐标**判定，不是�
     broadcast: () => {},
     getDayTime: () => 0.35,
     askStudent: async (input) => {
-      seen.push(String(input.student && input.student.place || ''));
+      if (String(input.kind || '') === 'talk') seen.push(String(input.student && input.student.place || ''));
       return { say: '嗯。', think: '', mem: '' };
     },
   });
@@ -287,7 +287,7 @@ console.log('[7] 只给"被搭话那一个"的记忆，而且不是整串');
     broadcast: () => {},
     getDayTime: () => 0.35,
     askStudent: async (input) => {
-      seen.push((input.memory || []).map((m) => String(m.text || '')));
+      if (String(input.kind || '') === 'talk') seen.push((input.memory || []).map((m) => String(m.text || '')));
       return { say: '记得一点。', think: '', mem: '' };
     },
   });

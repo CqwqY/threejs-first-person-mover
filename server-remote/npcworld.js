@@ -71,6 +71,15 @@ const LEN_MEM = 120;
 // 同一个学生两次 AI 之间的最小间隔（秒）：防刷爆免费档
 const AI_COOLDOWN = 45;
 
+// ---------- System2（LLM「灵魂」）规划层 ----------
+// 低频定意图 + 计划，错峰轮询，避免 8 个 NPC 同时打 GLM 被限流/烧钱。
+// 角色分工：LLM 决定"接下来去哪、干什么、干多久"（意图），本地代码（System1）每帧高频执行
+// 走位/绕障/碰撞/动画 —— 即"决策一次、干一会活"。
+const PLAN_INTERVAL_MS = 120000; // 每个 NPC 两次规划之间至少 2 分钟
+const PLAN_STAGGER_MS = 15000;   // 8 个 NPC 依次错开 15s（总跨度 120s ≈ 一轮），不会同时打 GLM
+const PLAN_DUR_MIN = 30;         // 单次活动最短时长（秒）
+const PLAN_DUR_MAX = 300;        // 单次活动最长时长（秒）
+
 // 课程表（世界时刻的小时 → 该时段最该去的区域类型；null = 自由活动看需求）
 const SCHEDULE = [
   { from: 0, to: 6.5, type: 'dorm', label: '睡觉' },
@@ -111,6 +120,19 @@ function num(v, d, lo, hi) {
 function clamp01(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
 function rand(a, b) { return a + Math.random() * (b - a); }
 function pickOne(arr) { return arr.length ? arr[Math.floor(Math.random() * arr.length)] : null; }
+function clampInt(v, lo, hi, d) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return d;
+  return Math.max(lo, Math.min(hi, n));
+}
+// 把 LLM 给的 goalType 归一化到已知区域类型 / wander / rest；认不出就当 wander（随便走走），绝不静默卡死
+function resolveGoalType(g) {
+  const x = String(g || '').trim().toLowerCase();
+  if (ZONE_TYPE_IDS.has(x)) return x;
+  if (['wander', 'walk', 'roam', 'stroll', '游荡', '散步', '溜达', '随便走走'].includes(x)) return 'wander';
+  if (['rest', 'stay', 'idle', 'sit', '休息', '待着', '歇着', '发呆'].includes(x)) return 'rest';
+  return 'wander';
+}
 
 export function createNpcWorld(opts) {
   const dataDir = opts.dataDir;
@@ -187,7 +209,10 @@ export function createNpcWorld(opts) {
         x: cx, z: cz,
         hw: w / 2, hd: d / 2,                 // 半宽 / 半深
         c: Math.cos(rotRad), s: Math.sin(rotRad), // 旋转到建筑自有坐标用的三角值
-        rr: Math.hypot(w, d) / 2 + NPC_PAD,   // 外接圆半径：只用来快速排除，不用来判定
+        // ⚠ 外接圆半径：只用来快速排除，**必须包住"加了 NPC_PAD 之后"的矩形**，否则四角会漏判。
+        //   旧写法 hypot(w,d)/2+PAD = 5.7 < 矩形角 hypot(w/2+PAD, d/2+PAD) = 5.98
+        //   ⇒ 矩形的四个角落在剔除圆之外 ⇒ blockedBy 判"没挡"，学生会走进建筑的**贴边角**（探针 [2] 抓到过）。
+        rr: Math.hypot(w / 2 + NPC_PAD, d / 2 + NPC_PAD),
       });
     };
     try {
@@ -287,6 +312,8 @@ export function createNpcWorld(opts) {
           zoneId: '',
           stayUntil: 0,
           decideAt: 0,
+          planAt: Date.now() + i * PLAN_STAGGER_MS, // 错峰：第 i 个学生延后 i*15s 才首次规划（避免 8 个同时打 GLM）
+          intent: null,  // System2 规划出的意图：{goalType,goalText,activity,plan,since}
           aiAt: 0,
           needs: (old && old.needs) || { hunger: rand(0, 0.5), fun: rand(0, 0.5), study: rand(0, 0.5), fatigue: rand(0, 0.3), social: rand(0, 0.5), bladder: rand(0, 0.3) },
           mem: Array.isArray(old && old.mem) ? old.mem : [],
@@ -303,6 +330,8 @@ export function createNpcWorld(opts) {
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.decideAt))) { s.decideAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.planAt))) { s.planAt = 0; dirty = true; }
+      if (s.intent !== null && typeof s.intent !== 'object') { s.intent = null; dirty = true; }
       if (!Number.isFinite(Number(s.aiAt))) { s.aiAt = 0; dirty = true; }
       // 后加的字段：老存档没有 ⇒ 不补就是 undefined 参与运算 → NaN → 人不动/消失（静默失效）
       if (!Number.isFinite(Number(s.hx))) { s.hx = Number(s.x) || 0; dirty = true; }
@@ -485,6 +514,74 @@ export function createNpcWorld(opts) {
     wander(s, now);
   }
 
+  // ---------- System2：LLM 低频规划（"灵魂"） ----------
+  // 每个 NPC 每隔 PLAN_INTERVAL_MS 让 GLM 想一次"接下来去哪、干什么、干多久"，落地成 s.intent；
+  // 本地代码（System1）每帧按 intent 走位/绕障/碰撞/动画（决策一次、干一会活）。
+  // 失败 / 超时 / 没配 GLM → 回退 decide()（规则大脑 / 策略网络），零行为回归风险。
+  function planNext(s, now) {
+    if (s._planning) return;
+    s._planning = true;
+    s.planAt = now + PLAN_INTERVAL_MS; // 先占住下一个 slot，避免 await 期间被主循环重复触发
+    (async () => {
+      try {
+        const h = hourNow();
+        const seg = scheduleType(h);
+        const out = await askStudent({
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs },
+          memory: pickMemory(s, null),
+          kind: 'plan',
+          hour: h,
+          schedule: seg ? seg.label : '自由活动',
+        });
+        if (!out || !out.goalType) {
+          // GLM 没给有效意图 → 回退规则大脑（保留走位能力，不静默卡死）
+          s.intent = null;
+          s.decideAt = now;
+          decide(s, now);
+          return;
+        }
+        const goalType = resolveGoalType(out.goalType);
+        const durMs = clampInt(out.durationSec, PLAN_DUR_MIN, PLAN_DUR_MAX, 60) * 1000;
+        s.intent = {
+          goalType,
+          goalText: clampText(out.goal || '', 80),
+          activity: clampText(out.activity || '', 120),
+          plan: clampText(out.plan || '', 200),
+          since: now,
+        };
+        // plan 自带的内心考量入库（驱动记忆与后续举止）
+        const thought = clampText(out.thought, LEN_THINK);
+        if (thought) {
+          s.think.push({ t: now, text: thought });
+          if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
+          saveStudents(students);
+        }
+        if (goalType === 'rest') {
+          s.st = 'act';
+          s.stayUntil = Math.max(now + durMs, now + PLAN_INTERVAL_MS);
+          s.planAt = now + PLAN_INTERVAL_MS;
+          s.decideAt = s.planAt;
+          return;
+        }
+        if (goalType === 'wander') { wander(s, now); s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt; return; }
+        const target = pickOne(zonesOfType(goalType));
+        if (!target) { wander(s, now); s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt; return; } // 没这种区域：自由漫步兜底
+        goZone(s, now, target);          // 落地走位目标
+        s._stayMs = durMs;               // 到达后按 plan 的时长停留（决策一次、干一会活）
+        s.planAt = now + PLAN_INTERVAL_MS;
+        s.decideAt = s.planAt;            // 首轮之后不再走规则大脑分支，直到下一个规划点
+        console.info('[npc] ' + s.name + ' 规划→ ' + goalType + '：' + (s.intent.goalText || '') + '（停留 ' + Math.round(durMs / 1000) + 's）');
+      } catch (e) {
+        // 任何异常都降级，绝不静默卡死
+        s.intent = null;
+        s.decideAt = now;
+        try { decide(s, now); } catch { s.st = 'idle'; s.planAt = now + PLAN_INTERVAL_MS; }
+      } finally {
+        s._planning = false;
+      }
+    })();
+  }
+
   // 朝目标走一步：被建筑挡住就左右试探绕行（最多 5 个方向，全挡住就原地等下一拍）
   function stepMove(s, dt) {
     const dx = Number(s.tx) - Number(s.x);
@@ -505,8 +602,13 @@ export function createNpcWorld(opts) {
       if (!(el > 1e-3)) { ex = ux; ez = uz; el = 1; } // 正好压在楼中心：退化成朝目标挪
       ex /= el;
       ez /= el;
-      s.x = Number(s.x) + ex * stepLen;
-      s.z = Number(s.z) + ez * stepLen;
+      // ⚠ 向外挪一步**还站在楼里**（贴边/贴角时径向出楼要走好几步）就继续挪到出楼为止（带上限防死循环）。
+      //   以前这里只无条件挪一步：贴着角落往外挪时，会在障碍内留下一两帧"违规帧"（probe-npc-move [2] 抓到过）。
+      let nx = Number(s.x) + ex * stepLen;
+      let nz = Number(s.z) + ez * stepLen;
+      for (let i = 0; i < 24 && blocked(nx, nz); i++) { nx += ex * stepLen; nz += ez * stepLen; }
+      s.x = nx;
+      s.z = nz;
       s.rot = (Math.atan2(-ex, -ez) * 180) / Math.PI;
       return dist < ARRIVE_DIST;
     }
@@ -676,14 +778,17 @@ export function createNpcWorld(opts) {
     for (const s of students) {
       updateNeeds(s, dt, now);
       if (s.st === 'act') {
-        if (now >= Number(s.stayUntil || 0)) { s.st = 'idle'; s.decideAt = now; }
+        if (now >= Number(s.stayUntil || 0)) { s.st = 'idle'; }
       } else if (s.st === 'walk') {
         const bx = Number(s.x);
         const bz = Number(s.z);
         const arrived = stepMove(s, dt);
         if (arrived) {
           s.st = 'act';
-          s.stayUntil = now + rand(STAY_MIN, STAY_MAX) * 1000;
+          // 按 plan 的时长停留（决策一次、干一会活）；至少覆盖到下一次规划点，活动短也不至于杵着发呆
+          const stayMs = Number.isFinite(Number(s._stayMs)) ? Number(s._stayMs) : rand(STAY_MIN, STAY_MAX) * 1000;
+          s.stayUntil = Math.max(now + stayMs, Number(s.planAt || 0));
+          s._stayMs = undefined;
           s.stuck = 0;
           // 到达目的地：触发一次内心独白（内部有冷却，绝大多数会被节流掉）
           triggerAI(s, 'arrive');
@@ -694,11 +799,15 @@ export function createNpcWorld(opts) {
           s.stuck = moved > 0.02 ? 0 : Number(s.stuck || 0) + 1;
           if (s.stuck >= STUCK_TICKS || now >= Number(s.walkUntil || 0)) {
             s.st = 'idle';
-            s.decideAt = now;
+            s.decideAt = now;           // 立即走规则大脑兜底
+            s.planAt = now + 8000;      // 8s 后让 LLM 重新规划（短退避，避免一卡死就狂刷 GLM）
             s.stuck = 0;
           }
         }
+      } else if (now >= Number(s.planAt || 0) && !s._planning) {
+        planNext(s, now); // System2：低频 LLM 规划（失败自动回退规则大脑）
       } else if (now >= Number(s.decideAt || 0)) {
+        // 仅在首次 LLM 规划之前用规则大脑 / 漫步保活，避免开局集体杵着不动
         if (hasZones) decide(s, now); else wander(s, now);
       }
     }
@@ -708,7 +817,7 @@ export function createNpcWorld(opts) {
       // ⚠ 客户端自己驱动走位：下发「目标点」tx/tz（客户端用 tx/tz 走位）；同时保留 x/z（服务端 ghost
       //   坐标，供 probe-npc-move 等守卫探针观测实际移动/绕障）与 rot（服务端自转朝向，仅做兼容/调试）。
       //   客户端只消费 tx/tz/st，x/z/rot 客户端忽略（缺 tx/tz 时才回退用 x/z）。
-      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), rot: round1(s.rot), st: s.st })) });
+      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), rot: round1(s.rot), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '' })) });
     }
   }, TICK_MS);
   if (timer.unref) timer.unref();
@@ -734,7 +843,7 @@ export function createNpcWorld(opts) {
     return students.map((s) => ({
       id: s.id, name: s.name, cls: s.cls, sex: s.sex,
       // ⚠ 初始坐标 x/z 给客户端落地 pstate；目标点 tx/tz 给客户端定初始走向（客户端驱动走位）
-      x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), st: s.st,
+      x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '',
     }));
   }
 
@@ -743,7 +852,7 @@ export function createNpcWorld(opts) {
     saveZones(zones);
     // 换了区域：所有学生立刻重新决策，免得还朝着已经删掉的旧目标走
     const now = Date.now();
-    for (const s of students) { s.decideAt = now; s.st = 'idle'; }
+    for (const s of students) { s.decideAt = now; s.planAt = now; s.intent = null; s.st = 'idle'; }
     return zones;
   }
   function getZones() { return zones; }
