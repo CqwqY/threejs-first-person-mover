@@ -261,6 +261,7 @@ export function createNpcWorld(opts) {
       /* 没有玩家建造数据：不纳入障碍即可 */
     }
     obstacles = list;
+    buildNavGrid(); // 障碍变了：重建导航网格（A* 用）
     if (!list.length) console.warn('[npc] 障碍表为空：学生会穿墙（检查 editor-scene.json 是否存在且已保存）');
     else if (!measured) console.info('[npc] 障碍 ' + list.length + ' 个（尺寸为估算，请在编辑器重新保存一次场景以写入真实占地 fw/fd）');
     else console.info('[npc] 障碍 ' + list.length + ' 个，其中 ' + measured + ' 个带真实占地');
@@ -280,6 +281,132 @@ export function createNpcWorld(opts) {
     return null;
   }
   function blocked(x, z) { return !!blockedBy(x, z); }
+
+  // ---------- 寻路（导航网格 A*）----------
+  // 为什么要它：局部转向（5 方向扇区）撞到建筑**正面**时转不出 90° 去贴墙滑行 ⇒ 卡死（局部最小）。
+  // 做法：由障碍表生成规则网格（判据与 blockedBy 同源），A* 出折线并拉直；服务端沿折线推进，
+  // 把**当前路点**作为 wx/wz 下发（客户端照它走位），最终目标仍是 tx/tz（到达判定不变）。
+  const NAV_CELL = 2.0;     // 格边长（米）：太细则 A* 慢，太粗则贴不进楼间通道
+  const NAV_MARGIN = 12;    // 包围盒外扩（米）
+  const NAV_MAX_COLS = 512; // 单边格子上限：超过就不建（防内存爆炸）
+  let nav = null;           // { minX, minZ, cols, rows, blocked: Uint8Array }
+  function buildNavGrid() {
+    let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+    const acc = (x, z, r) => { if (!Number.isFinite(x) || !Number.isFinite(z)) return; minX = Math.min(minX, x - r); minZ = Math.min(minZ, z - r); maxX = Math.max(maxX, x + r); maxZ = Math.max(maxZ, z + r); };
+    for (const o of obstacles) acc(o.x, o.z, Math.max(o.hw, o.hd) + 1);
+    for (const z of zones) { acc(z.minX, z.minZ, 0); acc(z.maxX, z.maxZ, 0); }
+    for (const s of students) acc(Number(s.x), Number(s.z), 0);
+    if (!Number.isFinite(minX)) { nav = null; return; }
+    minX -= NAV_MARGIN; minZ -= NAV_MARGIN; maxX += NAV_MARGIN; maxZ += NAV_MARGIN;
+    const cols = Math.min(NAV_MAX_COLS, Math.ceil((maxX - minX) / NAV_CELL) + 1);
+    const rows = Math.min(NAV_MAX_COLS, Math.ceil((maxZ - minZ) / NAV_CELL) + 1);
+    const blockedGrid = new Uint8Array(cols * rows);
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) blockedGrid[j * cols + i] = blockedBy(minX + (i + 0.5) * NAV_CELL, minZ + (j + 0.5) * NAV_CELL) ? 1 : 0;
+    }
+    nav = { minX, minZ, cols, rows, blocked: blockedGrid };
+  }
+  function cellI(x) { return Math.floor((x - nav.minX) / NAV_CELL); }
+  function cellJ(z) { return Math.floor((z - nav.minZ) / NAV_CELL); }
+  function cellCX(i) { return nav.minX + (i + 0.5) * NAV_CELL; }
+  function cellCZ(j) { return nav.minZ + (j + 0.5) * NAV_CELL; }
+  function navBlocked(i, j) { return (i < 0 || j < 0 || i >= nav.cols || j >= nav.rows) ? true : nav.blocked[j * nav.cols + i] === 1; }
+  // 起点/终点落在障碍里时，找最近的可通行格
+  function nearestFreeCell(i, j) {
+    if (!navBlocked(i, j)) return [i, j];
+    for (let r = 1; r <= 8; r++) {
+      for (let dj = -r; dj <= r; dj++) {
+        for (let di = -r; di <= r; di++) {
+          if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
+          if (!navBlocked(i + di, j + dj)) return [i + di, j + dj];
+        }
+      }
+    }
+    return null;
+  }
+  // 两点连线是否不穿障碍（用于把折线拉直）
+  function lineFree(x0, z0, x1, z1) {
+    const d = Math.hypot(x1 - x0, z1 - z0);
+    const n = Math.max(1, Math.ceil(d / (NAV_CELL * 0.5)));
+    for (let k = 1; k < n; k++) { const t = k / n; if (blockedBy(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t)) return false; }
+    return true;
+  }
+  const NAV_DIRS = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1], [1, 1, 1.4142], [1, -1, 1.4142], [-1, 1, 1.4142], [-1, -1, 1.4142]];
+  // A*：返回世界坐标折线（含终点、不含起点格），失败返回 null
+  function findPath(sx, sz, tx, tz) {
+    if (!nav) return null;
+    const a = nearestFreeCell(cellI(sx), cellJ(sz));
+    const b = nearestFreeCell(cellI(tx), cellJ(tz));
+    if (!a || !b) return null;
+    const ai = a[0], aj = a[1], bi = b[0], bj = b[1];
+    if (ai === bi && aj === bj) return null; // 同一格：直走即可
+    const cols = nav.cols, N = cols * nav.rows;
+    const start = aj * cols + ai, goal = bj * cols + bi;
+    const g = new Float64Array(N).fill(Infinity);
+    const came = new Int32Array(N).fill(-1);
+    const closed = new Uint8Array(N);
+    const hf = (i, j) => { const dx = Math.abs(i - bi), dz = Math.abs(j - bj); return (dx + dz) + (1.4142 - 2) * Math.min(dx, dz); };
+    // 简易二叉最小堆
+    const heap = []; const hkey = [];
+    const push = (k, f) => {
+      heap.push(k); hkey.push(f); let c = heap.length - 1;
+      while (c > 0) { const p = (c - 1) >> 1; if (hkey[p] <= hkey[c]) break; const tk = heap[p], tf = hkey[p]; heap[p] = heap[c]; hkey[p] = hkey[c]; heap[c] = tk; hkey[c] = tf; c = p; }
+    };
+    const pop = () => {
+      const top = heap[0]; const lk = heap.pop(), lf = hkey.pop();
+      if (heap.length) {
+        heap[0] = lk; hkey[0] = lf; let p = 0;
+        for (;;) { const l = p * 2 + 1, r = l + 1; let m = p; if (l < heap.length && hkey[l] < hkey[m]) m = l; if (r < heap.length && hkey[r] < hkey[m]) m = r; if (m === p) break; const tk = heap[p], tf = hkey[p]; heap[p] = heap[m]; hkey[p] = hkey[m]; heap[m] = tk; hkey[m] = tf; p = m; }
+      }
+      return top;
+    };
+    g[start] = 0; push(start, hf(ai, aj));
+    while (heap.length) {
+      const cur = pop();
+      if (cur === goal) break;
+      if (closed[cur]) continue;
+      closed[cur] = 1;
+      const ci = cur % cols, cj = (cur - ci) / cols;
+      for (const dir of NAV_DIRS) {
+        const ni = ci + dir[0], nj = cj + dir[1];
+        if (navBlocked(ni, nj)) continue;
+        if (dir[0] !== 0 && dir[1] !== 0 && (navBlocked(ci + dir[0], cj) || navBlocked(ci, cj + dir[1]))) continue; // 不切角
+        const nk = nj * cols + ni;
+        if (closed[nk]) continue;
+        const ng = g[cur] + dir[2];
+        if (ng < g[nk]) { g[nk] = ng; came[nk] = cur; push(nk, ng + hf(ni, nj)); }
+      }
+    }
+    if (came[goal] === -1) return null; // 不连通
+    const cells = [];
+    let k = goal;
+    while (k !== start && k !== -1) { const i = k % cols; cells.push(cellCX(i), cellCZ((k - i) / cols)); k = came[k]; }
+    if (k === -1) return null;
+    cells.push(cellCX(ai), cellCZ(aj));
+    cells.reverse(); // [x0,z0, x1,z1, ...] 起点在前
+    // 拉直：从当前位置贪心跳过中间点（直线可达就跳），并把最终目标接上
+    const pts = [];
+    let cx = sx, cz = sz, idx = 2; // 跳过起点格
+    while (idx < cells.length) {
+      let best = idx;
+      for (let m = cells.length - 2; m >= idx; m -= 2) { if (lineFree(cx, cz, cells[m], cells[m + 1])) { best = m; break; } }
+      pts.push({ x: cells[best], z: cells[best + 1] });
+      cx = cells[best]; cz = cells[best + 1];
+      if (best + 2 <= idx) break; // 防死循环
+      idx = best + 2;
+    }
+    if (!pts.length) return null;
+    if (lineFree(cx, cz, tx, tz)) pts.push({ x: tx, z: tz });
+    return pts;
+  }
+  // 设目标 + 立刻算一条路径；wx/wz = 当前路点（没路径就直奔目标）
+  function setTarget(s, x, z) {
+    s.tx = x; s.tz = z; s.pathTries = 0;
+    s.path = nav ? findPath(Number(s.x), Number(s.z), x, z) : null;
+    s.pathIdx = 0;
+    if (s.path && s.path.length) { s.wx = s.path[0].x; s.wz = s.path[0].z; }
+    else { s.wx = x; s.wz = z; }
+  }
 
   // ---------- 角色档案 ----------
   function loadStudents() {
@@ -314,6 +441,11 @@ export function createNpcWorld(opts) {
           hz: pz,
           tx: px,   // 当前目标点（必须初始化：undefined 参与运算会变 NaN）
           tz: pz,
+          wx: px,   // 当前路点（A* 绕行点；没路径时 = 目标点）；客户端照它走位
+          wz: pz,
+          path: null,    // A* 折线 [{x,z},...]；null = 直走
+          pathIdx: 0,
+          pathTries: 0,  // 卡住后重算路径的次数（累加型字段，必须有初值）
           walkUntil: 0, // 本次行走的放弃时刻（毫秒）
           stuck: 0,     // 连续没位移的拍数（累加型字段，必须有初值）
           rot: 0,
@@ -347,6 +479,11 @@ export function createNpcWorld(opts) {
       if (!Number.isFinite(Number(s.hz))) { s.hz = Number(s.z) || 0; dirty = true; }
       if (!Number.isFinite(Number(s.tx))) { s.tx = Number(s.x) || 0; dirty = true; }
       if (!Number.isFinite(Number(s.tz))) { s.tz = Number(s.z) || 0; dirty = true; }
+      if (!Number.isFinite(Number(s.wx))) { s.wx = Number(s.tx) || 0; dirty = true; }
+      if (!Number.isFinite(Number(s.wz))) { s.wz = Number(s.tz) || 0; dirty = true; }
+      if (s.path !== null && !Array.isArray(s.path)) { s.path = null; dirty = true; }
+      if (!Number.isFinite(Number(s.pathIdx))) { s.pathIdx = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.pathTries))) { s.pathTries = 0; dirty = true; }
       if (!Number.isFinite(Number(s.walkUntil))) { s.walkUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stuck))) { s.stuck = 0; dirty = true; }
     }
@@ -383,8 +520,7 @@ export function createNpcWorld(opts) {
       const x = hx + Math.cos(a) * r;
       const z = hz + Math.sin(a) * r;
       if (blocked(x, z)) continue;
-      s.tx = x;
-      s.tz = z;
+      setTarget(s, x, z);
       s.st = 'walk';
       s.walkUntil = now + WALK_TIMEOUT * 1000;
       s.stuck = 0;
@@ -494,8 +630,7 @@ export function createNpcWorld(opts) {
     const p = pickPointIn(target);
     if (!p) { wander(s, now); return; }
     s.zoneId = target.id;
-    s.tx = p.x;
-    s.tz = p.z;
+    setTarget(s, p.x, p.z); // 设目标 + A* 算路（wx/wz = 首路点）
     s.st = 'walk';
     s.walkUntil = now + WALK_TIMEOUT * 1000;
     s.stuck = 0;
@@ -514,7 +649,7 @@ export function createNpcWorld(opts) {
     if (a === 'follow_player' || a === 'help_player') {
       const p = nearestPlayer(s);
       if (p) {
-        s.zoneId = ''; s.tx = Number(p.x); s.tz = Number(p.z);
+        s.zoneId = ''; setTarget(s, Number(p.x), Number(p.z));
         s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
         s.decideAt = now + rand(DECIDE_MIN, DECIDE_MAX) * 1000; return;
       }
@@ -639,35 +774,50 @@ export function createNpcWorld(opts) {
     })();
   }
 
-  // 朝目标走一步：被建筑挡住就左右试探绕行（最多 5 个方向，全挡住就原地等下一拍）
+  // 朝当前**路点**走一步（路点由 A* 给出，绕开建筑）；到达**最终目标**(tx/tz)才算到。
+  // 被建筑挡住就左右试探绕行（最多 5 个方向，全挡住就原地等下一拍/重算路径）。
   function stepMove(s, dt) {
-    const dx = Number(s.tx) - Number(s.x);
-    const dz = Number(s.tz) - Number(s.z);
-    const dist = Math.hypot(dx, dz);
-    if (!Number.isFinite(dist) || dist < ARRIVE_DIST) return true; // 到了
+    const fdx = Number(s.tx) - Number(s.x);
+    const fdz = Number(s.tz) - Number(s.z);
+    const fdist = Math.hypot(fdx, fdz);
+    if (!Number.isFinite(fdist) || fdist < ARRIVE_DIST) return true; // 到了最终目标
     const stepLen = WALK_SPEED * dt;
+    // 取当前路点；到路点就推进（并用视线拉直，跳过直线可达的更远点）
+    let wx = Number(s.wx), wz = Number(s.wz);
+    if (!Number.isFinite(wx) || !Number.isFinite(wz)) { wx = Number(s.tx); wz = Number(s.tz); }
+    if (Math.hypot(wx - Number(s.x), wz - Number(s.z)) < Math.max(0.6, stepLen * 1.5)) {
+      if (Array.isArray(s.path) && Number(s.pathIdx) < s.path.length - 1) {
+        let k = Number(s.pathIdx) + 1;
+        while (k + 1 < s.path.length && lineFree(Number(s.x), Number(s.z), s.path[k + 1].x, s.path[k + 1].z)) k++;
+        s.pathIdx = k; s.wx = s.path[k].x; s.wz = s.path[k].z;
+      } else {
+        s.path = null; s.pathIdx = 0; s.wx = Number(s.tx); s.wz = Number(s.tz);
+      }
+      wx = Number(s.wx); wz = Number(s.wz);
+    }
+    let dx = wx - Number(s.x), dz = wz - Number(s.z);
+    let dist = Math.hypot(dx, dz);
+    if (!Number.isFinite(dist) || dist < 1e-6) { dx = fdx; dz = fdz; dist = fdist; } // 退化：直奔最终目标
     const ux = dx / dist;
     const uz = dz / dist;
-    // 脱困：如果自己正站在障碍里（初始坐标是随机的，可能正好落进楼里；或场景改动后被压住），
-    // 下面五个绕行方向**全都会被判挡住** ⇒ 永远出不来。
-    // ⚠ 方向必须朝"背离这栋楼"走，不能朝目标走 —— 朝目标走等于被允许横穿整栋楼（真·穿墙）。
+    // 脱困：正站在障碍里（出生点落楼里 / 场景改动被压住）→ 朝"背离这栋楼"的方向挪到出楼为止。
+    // ⚠ 方向必须背离楼心，不能朝目标走（朝目标走 = 允许横穿整栋楼，真·穿墙）。
     const hit = blockedBy(Number(s.x), Number(s.z));
     if (hit) {
       let ex = Number(s.x) - hit.x;
       let ez = Number(s.z) - hit.z;
       let el = Math.hypot(ex, ez);
-      if (!(el > 1e-3)) { ex = ux; ez = uz; el = 1; } // 正好压在楼中心：退化成朝目标挪
+      if (!(el > 1e-3)) { ex = ux; ez = uz; el = 1; } // 正好压在楼中心：退化成朝路点挪
       ex /= el;
       ez /= el;
-      // ⚠ 向外挪一步**还站在楼里**（贴边/贴角时径向出楼要走好几步）就继续挪到出楼为止（带上限防死循环）。
-      //   以前这里只无条件挪一步：贴着角落往外挪时，会在障碍内留下一两帧"违规帧"（probe-npc-move [2] 抓到过）。
+      // 向外挪一步**还站在楼里**（贴边/贴角时径向出楼要走好几步）就继续挪到出楼为止（带上限防死循环）。
       let nx = Number(s.x) + ex * stepLen;
       let nz = Number(s.z) + ez * stepLen;
       for (let i = 0; i < 24 && blocked(nx, nz); i++) { nx += ex * stepLen; nz += ez * stepLen; }
       s.x = nx;
       s.z = nz;
       s.rot = (Math.atan2(-ex, -ez) * 180) / Math.PI;
-      return dist < ARRIVE_DIST;
+      return false;
     }
     const angles = [0, 0.6, -0.6, 1.2, -1.2];
     for (const a of angles) {
@@ -686,7 +836,7 @@ export function createNpcWorld(opts) {
         return false;
       }
     }
-    return false; // 全被挡：这一拍不动（下一拍继续试，不会卡死）
+    return false; // 全被挡：这一拍不动（下一拍重算路径再试）
   }
 
   // 需求随真实时间推进；在对应类型的区域里"被满足"而回落
@@ -823,10 +973,17 @@ export function createNpcWorld(opts) {
     }
     // 每拍算"同区有没有同学 / 附近有没有玩家"——策略网络的 nearFriend / playerNear 特征
     const zoneOf = new Map();
-    for (const s of students) zoneOf.set(s, zoneAt(Number(s.x), Number(s.z)));
+    const typeCount = new Map(); // 每区域类型有几个人：一次 O(n) 统计，别用 some 扫成 O(n²)
     for (const s of students) {
-      const myType = zoneOf.get(s) ? zoneOf.get(s).type : null;
-      s._nearFriend = myType && students.some((o) => o !== s && zoneOf.get(o) && zoneOf.get(o).type === myType) ? 1 : 0;
+      const zn = zoneAt(Number(s.x), Number(s.z));
+      zoneOf.set(s, zn);
+      const t = zn ? zn.type : '\u0000none';
+      typeCount.set(t, (typeCount.get(t) || 0) + 1);
+    }
+    for (const s of students) {
+      const zn = zoneOf.get(s);
+      const myType = zn ? zn.type : '\u0000none';
+      s._nearFriend = (myType !== '\u0000none' && typeCount.get(myType) > 1) ? 1 : 0;
       s._playerNear = playerPositions.some((p) => {
         const dx = Number(p.x) - Number(s.x), dz = Number(p.z) - Number(s.z);
         return dx * dx + dz * dz < 64; // 8m 内算"玩家在附近"
@@ -855,10 +1012,18 @@ export function createNpcWorld(opts) {
           const moved = Math.hypot(Number(s.x) - bx, Number(s.z) - bz);
           s.stuck = moved > 0.02 ? 0 : Number(s.stuck || 0) + 1;
           if (s.stuck >= STUCK_TICKS || now >= Number(s.walkUntil || 0)) {
-            s.st = 'idle';
-            s.decideAt = now;           // 立即走规则大脑兜底
-            s.planAt = now + 8000;      // 8s 后让 LLM 重新规划（短退避，避免一卡死就狂刷 GLM）
-            s.stuck = 0;
+            // 先重算路径（局部最小 / 障碍刚变）；试过还是卡才放弃，且**绝不重置 planAt**
+            // ⚠ 曾经这里设 planAt = now + 8000：一卡就每 8s 重调一次 GLM，8 个 NPC 频繁卡会把
+            //   调用量刷到设计值（4 次/分）的十几倍 ⇒ 服务端/额度开销飙升。规则大脑兜底足够，且不花 LLM。
+            if (Number(s.pathTries || 0) < 2 && nav) {
+              s.pathTries = Number(s.pathTries || 0) + 1;
+              setTarget(s, Number(s.tx), Number(s.tz));
+              s.stuck = 0;
+            } else {
+              s.st = 'idle';
+              s.decideAt = now; // 只走规则大脑兜底；planAt 保持原 2 分钟节奏（不额外调 LLM）
+              s.stuck = 0;
+            }
           }
         }
       } else if (now >= Number(s.planAt || 0) && !s._planning) {
@@ -871,10 +1036,10 @@ export function createNpcWorld(opts) {
     // ⚠ 无论有没有区域都要广播：以前没区域时直接 return，客户端连一次更新都收不到（表现为"人都定住了"）
     if (now - lastBroadcast >= BROADCAST_MS) {
       lastBroadcast = now;
-      // ⚠ 客户端自己驱动走位：下发「目标点」tx/tz（客户端用 tx/tz 走位）；同时保留 x/z（服务端 ghost
-      //   坐标，供 probe-npc-move 等守卫探针观测实际移动/绕障）与 rot（服务端自转朝向，仅做兼容/调试）。
-      //   客户端只消费 tx/tz/st，x/z/rot 客户端忽略（缺 tx/tz 时才回退用 x/z）。
-      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), rot: round1(s.rot), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '' })) });
+      // ⚠ 客户端自己驱动走位：下发 wx/wz（**当前路点**，A* 给的绕行点）让客户端照它走；tx/tz 仍是
+      //   **最终目标**（到达判定/probes 观测用）。x/z/rot 是服务端 ghost（供 probe 观测，客户端忽略）。
+      //   老客户端不认 wx/wz 就退回用 tx/tz（= 直走，行为不回归）。
+      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), wx: round2(s.wx), wz: round2(s.wz), rot: round1(s.rot), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '' })) });
     }
   }, TICK_MS);
   if (timer.unref) timer.unref();
@@ -900,7 +1065,7 @@ export function createNpcWorld(opts) {
     return students.map((s) => ({
       id: s.id, name: s.name, cls: s.cls, sex: s.sex,
       // ⚠ 初始坐标 x/z 给客户端落地 pstate；目标点 tx/tz 给客户端定初始走向（客户端驱动走位）
-      x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '',
+      x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), wx: round2(s.wx), wz: round2(s.wz), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '',
     }));
   }
 

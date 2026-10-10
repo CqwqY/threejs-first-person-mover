@@ -9,8 +9,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { initAuth } from './auth.js';
-import { createNpcWorld } from './npcworld.js';
-import { askStudent } from './ai-student.js';
+// ⚠ NPC 世界（npcworld.js → policy.js）与对话（ai-student.js → ai.key.js）**故意用动态 import**（见文件末尾）：
+//   静态 import 一旦其中一个文件缺失/报错，ESM 解析失败会**拖垮整个 relay**（玩家联机/建造/商店全挂）。
+//   动态 import + try/catch ⇒ NPC 侧任何问题都只降级为「没有学生」，其余功能照常。
 
 const PORT = 9000; // 服务监听端口
 // 学生 NPC 世界（服务端权威：位置/需求/记忆都在这里跑，客户端只负责插值显示）。
@@ -2068,12 +2069,22 @@ setInterval(tryMatch, 1000);
 
 // ---- 学生 NPC 世界：在这里初始化（上面的 dayTime 已声明，getDayTime 才能安全取值）----
 // 没标注功能区时学生原地待命（不会乱走穿墙），编辑器「区域」页签标好即自动开跑。
-npcWorld = createNpcWorld({
-  dataDir: DATA_DIR,
-  broadcast: broadcastAll,
-  getDayTime: () => (typeof dayTime === 'number' ? dayTime : 0.35), // 课程表跟世界时刻走
-  askStudent,
-});
-console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个');
+// ⚠ 两个模块**各自** import + try/catch：谁缺了（如漏传 policy.js / ai.key.js）只降级谁，
+//   绝不因一个文件缺失让整个 relay 起不来（静态 import 会 —— 这正是踩过的坑）。
+let createNpcWorld = null;
+let askStudent = null;
+try { ({ createNpcWorld } = await import('./npcworld.js')); }
+catch (e) { console.error('[relay] 学生 NPC 世界加载失败，已跳过（玩家联机/建造/商店不受影响）：' + ((e && e.stack) || e)); }
+try { ({ askStudent } = await import('./ai-student.js')); }
+catch (e) { console.error('[relay] 学生对话(AI)加载失败，学生将无对话（其余不受影响）：' + ((e && e.stack) || e)); }
+if (createNpcWorld) {
+  npcWorld = createNpcWorld({
+    dataDir: DATA_DIR,
+    broadcast: broadcastAll,
+    getDayTime: () => (typeof dayTime === 'number' ? dayTime : 0.35), // 课程表跟世界时刻走
+    askStudent: askStudent || undefined, // 没加载到就交给 npcworld 的空实现（学生照走，不对话）
+  });
+  console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个；对话 ' + (askStudent ? '开' : '关'));
+}
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);

@@ -157,8 +157,10 @@ export function createStudents(opts) {
       tag: null,
       bubble: null,
       bubbleUntil: 0,
-      // 服务端坐标（目标）与本地显示坐标：分开存，才能做缓动
+      // 服务端坐标（目标 tx/tz = 最终目标；wx/wz = A* 当前路点）与本地显示坐标：分开存，才能做缓动
       tx: 0, tz: 0, trot: 0,
+      gx: 0, gz: 0, // 转向目标 = 当前路点（没有路点时 = 最终目标）
+
       x: 0, z: 0, rot: 0, yaw: 0, // yaw：客户端按真实速度算的朝向（弧度），不依赖服务端 rot
       st: 'idle',
       speed: 0,
@@ -248,6 +250,9 @@ export function createStudents(opts) {
       const gz = Number.isFinite(Number(it.tz)) ? Number(it.tz) : Number(it.z);
       s.tx = Number.isFinite(gx) ? gx : 0;
       s.tz = Number.isFinite(gz) ? gz : 0;
+      // 路点（服务端 A* 下的绕行点）：优先拿它当转向目标；老协议没 wx/wz 就退回目标点（= 直走）
+      s.gx = Number.isFinite(Number(it.wx)) ? Number(it.wx) : s.tx;
+      s.gz = Number.isFinite(Number(it.wz)) ? Number(it.wz) : s.tz;
       s.trot = Number(it.rot) || 0;
       if (!s.model) {
         // 初始位置用服务端当前坐标(x/z)落地 pstate（目标已在上面临时设好）
@@ -281,6 +286,9 @@ export function createStudents(opts) {
       if (!Number.isFinite(nx) || !Number.isFinite(nz)) continue;
       s.tx = nx;
       s.tz = nz;
+      // A* 当前路点（服务端下发）：客户端朝它走位；缺字段退回最终目标（老协议/没路径）
+      s.gx = Number.isFinite(Number(it.wx)) ? Number(it.wx) : nx;
+      s.gz = Number.isFinite(Number(it.wz)) ? Number(it.wz) : nz;
       s.st = String(it.st || 'idle');
     }
   }
@@ -317,31 +325,43 @@ export function createStudents(opts) {
   }
 
   // ⚠ 学生走位改由客户端 PlayerPhysics 驱动（吃和玩家同一份 colliders，含 trimesh 复杂碰撞）。
-  // 服务端只下发「目标点」(tx/tz) 与状态 st；实际位移/碰撞/朝向都在这里算。
+  // 服务端下发的 tx/tz 是**最终目标**，wx/wz 是**当前路点**（服务端 A* 绕行点）：客户端朝路点走位，
+  // 到路点由服务端推进到下一个 ⇒ 能绕过建筑（局部转向撞正面会卡死）。
   function update(dt) {
     const now = performance.now() / 1000;
     const cs = colliders; // 同一份世界碰撞体（含 trimesh），与玩家共用
     for (const s of byId.values()) {
-      const dx = s.tx - s.pstate.x;
-      const dz = s.tz - s.pstate.z;
+      // 转向目标优先用当前路点 gx/gz；缺字段退回最终目标 tx/tz
+      const gx = Number.isFinite(s.gx) ? s.gx : s.tx;
+      const gz = Number.isFinite(s.gz) ? s.gz : s.tz;
+      const dx = gx - s.pstate.x;
+      const dz = gz - s.pstate.z;
       const dist = Math.hypot(dx, dz);
+      const fdx = s.tx - s.pstate.x;
+      const fdz = s.tz - s.pstate.z;
+      const fdist = Math.hypot(fdx, fdz);
       const shouldWalk = s.st === 'walk';
-      const moving = shouldWalk && dist > 0.4;
+      // 到路点**不算**到终点：是否继续走看最终目标距离
+      const moving = shouldWalk && (fdist > 0.4 || dist > 0.4);
 
       if (cs) {
         if (moving) {
-          // 朝目标的单位方向，再用 STEER_FAN 选一条不被墙挡的路（trimesh/盒都认）
-          const ux = dx / dist, uz = dz / dist;
+          // 朝路点走（路点≈0 时退回最终目标方向），再用 STEER_FAN 选一条不被墙挡的路（trimesh/盒都认）
+          let ux = 0, uz = 0;
+          if (dist > 1e-3) { ux = dx / dist; uz = dz / dist; }
+          else if (fdist > 1e-3) { ux = fdx / fdist; uz = fdz / fdist; }
           let nx = ux, nz = uz;
           const probeY = s.pstate.y - STUDENT_HEIGHT * 0.5;
-          for (const a of STEER_FAN) {
-            const ca = Math.cos(a), sa = Math.sin(a);
-            const cx = ux * ca - uz * sa;
-            const cz = ux * sa + uz * ca;
-            const px = s.pstate.x + cx * WALK_PROBE;
-            const pz = s.pstate.z + cz * WALK_PROBE;
-            // sphereWorldMTV 复用缓冲：只判 null，不存引用
-            if (!sphereWorldMTV(cs, px, probeY, pz, STUDENT_RADIUS)) { nx = cx; nz = cz; break; }
+          if (ux || uz) {
+            for (const a of STEER_FAN) {
+              const ca = Math.cos(a), sa = Math.sin(a);
+              const cx = ux * ca - uz * sa;
+              const cz = ux * sa + uz * ca;
+              const px = s.pstate.x + cx * WALK_PROBE;
+              const pz = s.pstate.z + cz * WALK_PROBE;
+              // sphereWorldMTV 复用缓冲：只判 null，不存引用
+              if (!sphereWorldMTV(cs, px, probeY, pz, STUDENT_RADIUS)) { nx = cx; nz = cz; break; }
+            }
           }
           // cameraYaw 让玩家模型朝 (-sin yaw, -cos yaw)；要朝 (nx,nz) 走 ⇒ yaw = atan2(-nx,-nz)
           const yaw = Math.atan2(-nx, -nz);
@@ -355,8 +375,10 @@ export function createStudents(opts) {
       } else {
         // ⚠ 兜底（colliders 没注入时）：退回坐标缓动，免得人定住（无碰撞，会穿墙——只应急）
         const k = 1 - Math.exp(-6 * dt);
-        s.pstate.x += dx * k;
-        s.pstate.z += dz * k;
+        const mx = dist > 1e-3 ? dx : fdx;
+        const mz = dist > 1e-3 ? dz : fdz;
+        s.pstate.x += mx * k;
+        s.pstate.z += mz * k;
         s.pstate.y = STUDENT_HEIGHT;
       }
 
@@ -369,7 +391,8 @@ export function createStudents(opts) {
       const sp = Math.hypot(vx, vz);
       let faceYaw = s.yaw;
       if (sp > 0.05) faceYaw = Math.atan2(-vx, -vz);
-      else if (!cs && moving) faceYaw = Math.atan2(-(dx / dist), -(dz / dist));
+      else if (!cs && moving && dist > 1e-3) faceYaw = Math.atan2(-(dx / dist), -(dz / dist));
+      else if (!cs && moving && fdist > 1e-3) faceYaw = Math.atan2(-(fdx / fdist), -(fdz / fdist));
       let dYaw = ((faceYaw - s.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
       s.yaw += dYaw * Math.min(1, dt * ROT_LAMBDA);
       s.holder.rotation.y = s.yaw;

@@ -153,6 +153,53 @@ console.log('[2b] 出生点恰好压在楼里：要能走出来（脱困）');
   ok(escaped >= 6, '至少 6/8 人走出了楼体（没有困死在里面）', '实际 ' + escaped + '/8');
 }
 
+console.log('[2c] 寻路：目标在墙背面，要绕过墙（不能卡在墙正面）');
+{
+  const dir = freshDir('path');
+  // 一道横墙（x∈[-2.5,2.5]，z∈[-1,1]）：从北侧去南侧必须绕两端
+  fs.writeFileSync(path.join(dir, 'editor-scene.json'), JSON.stringify({
+    scenery: [],
+    placed: [{ id: 'w1', kind: 'building', name: '长墙', x: 0, y: 0, z: 0, rotY: 0, scale: { x: 1, y: 1, z: 1 }, fw: 5, fd: 2 }],
+  }));
+  // 出生在墙北侧；study 拉满 ⇒ 必然想去 library 区（南侧），且路径被墙挡住
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1), sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: i * 0.4, z: 3.5 + i * 0.4, hx: 0, hz: 3.5, tx: 0, tz: 3.5,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 0, planAt: 0, intent: null, aiAt: 0, walkUntil: 0, stuck: 0,
+      needs: { hunger: 0, fatigue: 0, fun: 0, study: 0.99, social: 0, bladder: 0 },
+      mem: [], think: [],
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  fs.writeFileSync(path.join(dir, 'zones.json'), JSON.stringify([
+    { id: 'zs', name: '南院图书馆', type: 'library', minX: -1.5, maxX: 1.5, minZ: -4, maxZ: -2 },
+  ]));
+  const inWall = (x, z) => Math.abs(x) < 5 / 2 + 0.7 && Math.abs(z) < 2 / 2 + 0.7;
+  const minDist = new Map();
+  let insideHits = 0;
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => {
+      if (m.t !== 'npc') return;
+      for (const s of m.list) {
+        if (inWall(s.x, s.z)) insideHits++;
+        const d = Math.hypot(Number(s.tx) - s.x, Number(s.tz) - s.z);
+        if (Number.isFinite(d)) { const prev = minDist.get(s.id); if (prev == null || d < prev) minDist.set(s.id, d); }
+      }
+    },
+    getDayTime: () => 0.35,
+  });
+  await sleep(13000);
+  w.dispose();
+  let reached = 0;
+  for (const d of minDist.values()) if (d < 3.0) reached++;
+  ok(minDist.size === 8, '拿到 8 个人的轨迹', '人数=' + minDist.size);
+  ok(reached >= 5, '至少 5/8 人绕过长墙接近了南侧目标（不再卡在墙正面）', '实际 ' + reached + '/8');
+  ok(insideHits === 0, '绕行路上没有穿墙', '违规帧=' + insideHits);
+}
+
 console.log('[3] 朝向：rot 必须与移动方向一致（不是背朝前）');
 {
   const dir = freshDir('yaw');
