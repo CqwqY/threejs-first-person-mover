@@ -89,6 +89,22 @@ console.log('[1] planNext 真的提交意图：目标点落在对应 zone 内且
     ok(moved > 0.3, 's1 朝着饭堂移动了', '位移=' + moved.toFixed(2) + 'm');
     ok(!anyNaN(frames.map((f) => f.find((s) => s.id === 's1'))), '全程坐标无 NaN');
   }
+
+  // 慢环（"用 LLM 训练神经"）：LLM 的决策必须回写成可训练标签，否则闭环没闭上
+  const sftPath = path.join(dir, 'feed', 'llm_plan.csv');
+  const sft = fs.existsSync(sftPath) ? fs.readFileSync(sftPath, 'utf8').trim().split('\n') : [];
+  ok(sft.length >= 2, '写了 llm_plan.csv（表头 + ≥1 样本行）', '行数=' + sft.length);
+  const header = (sft[0] || '').split(',');
+  ok(header.length === 23 && header[21] === 'action' && header[22] === 'weight',
+    'CSV 表头 = 21 状态 + action + weight', header.join('|'));
+  const row0 = (sft[1] || '').split(',');
+  ok(row0[22 - 1] === 'canteen', '首个样本动作 = canteen（LLM 的选择被写成标签）', 'row=' + (sft[1] || ''));
+  ok(Number(row0[6]) > 1 && Number(row0[6]) <= 24, 'hour 列是原始小时 0~24（不是归一化值）', 'hour=' + row0[6]);
+  const prefPath = path.join(dir, 'feed', 'llm_pref.csv');
+  const pref = fs.existsSync(prefPath) ? fs.readFileSync(prefPath, 'utf8').trim().split('\n') : [];
+  ok(pref.length >= 2, '写了 llm_pref.csv（chosen/rejected 偏好对，供 DPO）', '行数=' + pref.length);
+  const ph = (pref[0] || '').split(',');
+  ok(ph[21] === 'chosen' && ph[22] === 'rejected', '偏好表头含 chosen/rejected', ph.slice(-2).join('|'));
 }
 
 console.log('[2] GLM 返回 null（宕机/没配 key）→ 回退规则大脑，照常移动、无 NaN');

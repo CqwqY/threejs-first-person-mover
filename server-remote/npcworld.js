@@ -155,6 +155,15 @@ export function createNpcWorld(opts) {
   const STUDENTS_FILE = path.join(dataDir, 'students.json');
   const SCENE_FILE = path.join(dataDir, 'editor-scene.json');
   const BUILD_FILE = path.join(dataDir, 'buildings.json');
+  // LLM → 训练数据（慢环）：列格式与 tools/npc-policy 的 gen_synthetic.py / template.csv 逐字一致，
+  // train.py 直接 `--data data/feed` 就能把 LLM 的决策蒸馏进策略网络。
+  const FEED_DIR = path.join(dataDir, 'feed');
+  const FEED_SFT = path.join(FEED_DIR, 'llm_plan.csv');   // LLM 示范行（状态 → 动作）
+  const FEED_PREF = path.join(FEED_DIR, 'llm_pref.csv');  // 偏好行（chosen=LLM 选择 > rejected=规则大脑备选）
+  const FEED_MAX_BYTES = 4 * 1024 * 1024;                 // 单文件上限，防无限膨胀
+  let feedSftRows = 0;   // 本进程已写入行数（累加型字段，必须有初值，否则 NaN 静默）
+  let feedPrefRows = 0;
+  let feedLogged = false;
 
   // ---------- 功能区 ----------
   function loadZones() {
@@ -514,6 +523,53 @@ export function createNpcWorld(opts) {
     wander(s, now);
   }
 
+  // ---------- LLM → 训练数据（"用 LLM 训练神经网络"的闭环 / 慢环） ----------
+  // 每次 LLM 规划成功，就把「状态向量 → 它选的动作」追加进 data/feed/：
+  //   SFT 行（llm_plan.csv）：教策略网络（System1）模仿 LLM 的选择（蒸馏 / 行为克隆）；
+  //   偏好行（llm_pref.csv）：chosen=LLM 的选择、rejected=规则大脑的备选 → 给 train.py 的 DPO 阶段。
+  // 于是 System1 越训越像 LLM ⇒ LLM 可以调得越稀疏（System2 只在关键时刻出场）。
+  function feedFull(file) { try { return fs.statSync(file).size > FEED_MAX_BYTES; } catch { return false; } }
+  function ensureHeader(file, header) { try { if (!fs.existsSync(file)) fs.writeFileSync(file, header + '\n'); } catch { /* 写不了就算了 */ } }
+  // 状态 → CSV 单元格（STATE_KEYS 顺序）。用 buildState()（与推理端同一段逻辑），只把 hour 还原成原始小时。
+  function stateCells(s) {
+    const v = buildState(s);
+    const cells = [];
+    for (let i = 0; i < STATE_KEYS.length; i++) {
+      // ⚠ hour 列必须是**原始小时**（0~24）：train.py 的 build_x 会再 /24；若写归一化值会被二次除。
+      const val = STATE_KEYS[i] === 'hour' ? hourNow() : v[i];
+      cells.push(Math.round(Number(val) * 10000) / 10000);
+    }
+    return cells;
+  }
+  function actionOfGoal(g) { return (g === 'wander' || g === 'rest') ? g : (ACTIONS.includes(g) ? g : 'other'); }
+  // 规则大脑会选的备选动作（作为 DPO 的 rejected）：课程表时段优先，否则按最迫切需求
+  function ruleAltAction(s) { const seg = scheduleType(hourNow()); return seg ? seg.type : needType(s); }
+  function recordPlanFeed(s, goalType) {
+    try {
+      const action = actionOfGoal(goalType);
+      if (!ACTIONS.includes(action)) return;
+      fs.mkdirSync(FEED_DIR, { recursive: true });
+      const cells = stateCells(s);
+      if (!feedFull(FEED_SFT)) {
+        ensureHeader(FEED_SFT, STATE_KEYS.join(',') + ',action,weight');
+        fs.appendFileSync(FEED_SFT, cells.join(',') + ',' + action + ',1\n');
+        feedSftRows++;
+      }
+      const alt = ruleAltAction(s);
+      if (alt && alt !== action && ACTIONS.includes(alt) && !feedFull(FEED_PREF)) {
+        ensureHeader(FEED_PREF, STATE_KEYS.join(',') + ',chosen,rejected');
+        fs.appendFileSync(FEED_PREF, cells.join(',') + ',' + action + ',' + alt + '\n');
+        feedPrefRows++;
+      }
+      if (!feedLogged) {
+        feedLogged = true;
+        console.info('[npc] LLM 决策开始回写训练集 ' + FEED_DIR + '/llm_plan.csv（train.py --data data/feed 即可蒸馏）');
+      }
+    } catch (e) {
+      /* 采集失败绝不影响行为（静默降级） */
+    }
+  }
+
   // ---------- System2：LLM 低频规划（"灵魂"） ----------
   // 每个 NPC 每隔 PLAN_INTERVAL_MS 让 GLM 想一次"接下来去哪、干什么、干多久"，落地成 s.intent；
   // 本地代码（System1）每帧按 intent 走位/绕障/碰撞/动画（决策一次、干一会活）。
@@ -549,6 +605,7 @@ export function createNpcWorld(opts) {
           plan: clampText(out.plan || '', 200),
           since: now,
         };
+        recordPlanFeed(s, goalType); // 慢环：把这次 LLM 决策写成训练标签（SFT + DPO 偏好对）
         // plan 自带的内心考量入库（驱动记忆与后续举止）
         const thought = clampText(out.thought, LEN_THINK);
         if (thought) {
@@ -859,5 +916,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }
