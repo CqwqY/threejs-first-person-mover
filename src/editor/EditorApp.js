@@ -2499,6 +2499,24 @@ export function createEditor() {
   }
 
   // ---------- 持久化（编辑器自有场景文件，游戏读取） ----------
+  // 量一个对象的**世界占地**（宽 x / 深 z，已含 scale）。
+  // 用途：随场景存档写进 fw/fd，服务端（没有 three、读不到模型）才能知道这栋楼到底多大，
+  // 给学生 NPC 做绕障。老存档没有这两个字段时服务端按 scale × 4 估算（会不准）。
+  const _fpBox = new THREE.Box3();
+  const _fpSize = new THREE.Vector3();
+  function footprintOf(obj) {
+    try {
+      if (!obj || !obj.isObject3D) return null;
+      _fpBox.setFromObject(obj);
+      if (_fpBox.isEmpty()) return null;
+      _fpBox.getSize(_fpSize);
+      if (!Number.isFinite(_fpSize.x) || !Number.isFinite(_fpSize.z)) return null;
+      return { w: Math.round(_fpSize.x * 100) / 100, d: Math.round(_fpSize.z * 100) / 100 };
+    } catch {
+      return null;
+    }
+  }
+
   function serialize() {
     return {
       // 场地边界（空气墙）：游戏运行时读这份数据决定玩家能走到哪；
@@ -2510,7 +2528,7 @@ export function createEditor() {
       // 游戏景物：保存每个可编辑景物（地形/道路/墙体/树/建筑…）的变换，key 为统一下标
       scenery: state.scenery.map((rec) => {
         const s = normScale(rec.scale ?? rec.obj.scale);
-        return {
+        const out = {
           id: rec.id,
           key: rec.key,
           x: rec.x ?? rec.obj.position.x,
@@ -2519,6 +2537,9 @@ export function createEditor() {
           rotY: rec.rotY ?? 0,
           scale: { x: s.x, y: s.y, z: s.z },
         };
+        const fp = footprintOf(rec.obj);
+        if (fp) { out.fw = fp.w; out.fd = fp.d; }
+        return out;
       }),
       // 用户新建摆放的对象
       placed: state.placed.map((rec) => {
@@ -2564,6 +2585,9 @@ export function createEditor() {
             ? { vertices: rec.convex.vertices.slice(), faces: rec.convex.faces.slice() } : null,
           convexParts: (Array.isArray(rec.convexParts) && rec.convexParts.length)
             ? rec.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
+          // 占地（世界尺寸，已含 scale）：服务端靠它给学生 NPC 绕障；缺了服务端只能按 scale×4 猜 ⇒ 穿墙。
+          fw: (footprintOf(rec.obj) || {}).w ?? null,
+          fd: (footprintOf(rec.obj) || {}).d ?? null,
           // 烘焙光照结果：随场景存档进游戏运行时，按 key(meshName) 套回材质。无烘焙则为 undefined（旧行为）。
           lightmaps: (Array.isArray(rec.lightmaps) && rec.lightmaps.length) ? rec.lightmaps.map((l) => ({ ...l })) : undefined,
         };

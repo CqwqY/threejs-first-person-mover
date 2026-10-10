@@ -10,7 +10,12 @@ import * as THREE from 'three';
 import { instantiateRigged } from './AssetLoader.js';
 import { attachFakeShadow } from './FakeShadow.js';
 
-const MODEL = { m: '/assets/boy.glb', f: '/assets/girl.glb' };
+// ⚠ 必须用带骨骼的 -rig 版本（tools/auto-rig.mjs 生成）：原版 boy/girl.glb 没有骨骼也没有动画，
+//   加载出来是个立牌 —— 表现就是"只会平移、没有走路动作"。
+const MODEL = { m: '/assets/boy-rig.glb', f: '/assets/girl-rig.glb' };
+// ⚠ 模型正面偏 90°，与 PlayerModel 的 cfg.modelDeg 必须一致（那边真机校准过的值）。
+//   少了它，学生会侧着身子走。
+const MODEL_DEG = 90;
 const FOLLOW_LAMBDA = 6;      // 位置缓动系数：越大越贴服务端（太大会抖，太小会拖影）
 const ROT_LAMBDA = 8;         // 朝向缓动
 const TALK_RANGE = 3.2;       // 多近才能搭话（米）
@@ -146,7 +151,11 @@ export function createStudents(opts) {
         model.scale.setScalar(k);
         model.position.y = -box.min.y * k;
         model.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-        s.holder.add(model);
+        // 朝向修正单独一层：外层 holder 只管"往哪走"，这一层负责把模型正面掰正（跟玩家同款处理）
+        const face = new THREE.Group();
+        face.rotation.y = (MODEL_DEG * Math.PI) / 180;
+        face.add(model);
+        s.holder.add(face);
         s.model = model;
         attachFakeShadow(s.holder, { radius: 0.5 });
         if (animations && animations.length) {
@@ -171,7 +180,11 @@ export function createStudents(opts) {
           new THREE.MeshStandardMaterial({ color: 0x9c7b5a })
         );
         m.position.y = 0.85;
-        s.holder.add(m);
+        // 兜底方块也走同一层朝向修正，免得"真人正确、兜底侧着走"
+        const face = new THREE.Group();
+        face.rotation.y = (MODEL_DEG * Math.PI) / 180;
+        face.add(m);
+        s.holder.add(face);
         s.model = m;
       });
     // 名牌/气泡不等模型：先挂上，模型到了再一起显示
@@ -233,14 +246,16 @@ export function createStudents(opts) {
     s.bubbleUntil = now + BUBBLE_SEC;
   }
 
-  // 说话/心理活动：所有客户端都能看见（服务端广播的）
+  // 说话：所有客户端都能看见（服务端广播的）
   function onSay(msg) {
     const s = byId.get(String(msg.id));
     if (!s) return;
     const now = performance.now() / 1000;
-    if (msg.say) showBubble(s, String(msg.say), false, now);
-    else if (msg.think) showBubble(s, String(msg.think), true, now);
-    onSpeak({ id: s.id, name: s.name, say: String(msg.say || ''), think: String(msg.think || '') });
+    const say = String(msg.say || '');
+    // ⚠ 心理活动（think）是**内部**的：服务端根本不再下发，这里也绝不显示 ——
+    //   它只留在角色档案里，用来驱动记忆和接下来的举止。
+    if (say) showBubble(s, say, false, now);
+    onSpeak({ id: s.id, name: s.name, say });
   }
 
   // 离玩家最近、且在搭话范围内的学生

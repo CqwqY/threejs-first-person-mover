@@ -48,7 +48,7 @@ console.log('[2] 学生档案与记忆（长度与条数硬约束）');
 ok(/const SEEDS = \[/.test(SRC.world) && (SRC.world.match(/name: '/g) || []).length >= 8, '至少 8 名学生种子档案');
 ok(/const MEM_MAX = 20/.test(SRC.world), '记忆条数上限');
 ok(/const LEN_SAY = 60/.test(SRC.world), 'say 长度上限');
-ok(/const LEN_THINK = 80/.test(SRC.world), 'think 长度上限');
+ok(/const LEN_THINK = 120/.test(SRC.world), 'think 长度上限（内部独白，写宽一点才有内容）');
 ok(/const LEN_MEM = 120/.test(SRC.world), 'mem 长度上限');
 ok(/function clampText/.test(SRC.world) && /clampText\(out\.say/.test(SRC.world), '入库前一律截断（超了直接砍）');
 const trim = blockAt(SRC.world, 'async function trimMemory');
@@ -61,7 +61,8 @@ ok(/function needType/.test(SRC.world) && /function decide/.test(SRC.world), '�
 ok(/Math\.random\(\) < 0\.7/.test(SRC.world), '课程表优先级 70%，其余按需求（有随机但不乱走）');
 ok(/function updateNeeds/.test(SRC.world), '需求随时间推进、在对应区域回落');
 ok(/function blocked/.test(SRC.world) && /function stepMove/.test(SRC.world), '行走带建筑绕障（不是直线穿墙）');
-ok(/if \(!zones\.length\)/.test(SRC.world), '没标注功能区时原地待命（不乱走穿墙）');
+ok(/function wander/.test(SRC.world) && /if \(hasZones\) decide\(s, now\); else wander\(s, now\)/.test(SRC.world),
+  '没标注功能区时自由漫步（不再原地杵着，也不再连广播都不发）');
 
 console.log('[4] 服务端权威 + 广播协议');
 ok(/const BROADCAST_MS = 200/.test(SRC.world), '5Hz 广播位置');
@@ -104,6 +105,44 @@ for (const id of ['boots_speed', 'boots_jump', 'pill_size', 'jetpack', 'medkit',
   ok(SRC.shop.includes("id: '" + id + "'"), '商店有 ' + id);
 }
 ok(/case 'gravity'/.test(SRC.game) && /case 'heal'/.test(SRC.game), '重力/治疗效果已受支持（否则买了没反应 = 静默失效）');
+
+console.log('[9] 走路/朝向/地点的契约（这几条错了都是"零报错但看着不对"）');
+{
+  const obstacleBlock = blockAt(SRC.world, 'function reloadObstacles()');
+  ok(/scene\.placed/.test(obstacleBlock) && /scene\.scenery/.test(obstacleBlock),
+    '障碍表读 placed/scenery（不是根本不存在的 scene.items / it.rec）');
+  ok(/rec\.fw/.test(obstacleBlock) && /rec\.fd/.test(obstacleBlock), '优先用真实占地 fw/fd');
+  ok(!/scene\.items/.test(obstacleBlock), '不再遍历根本不存在的 scene.items（老 bug：障碍表恒空→穿墙）');
+  ok(/it && it\.rec \? it\.rec : it/.test(obstacleBlock), 'buildings.json 的 .rec 包装仍正确处理（与 editor-scene 结构不同）');
+  ok(/SCENE_MAX_SIDE/.test(obstacleBlock), '超大项（地形/道路）被排除，不会把整片地面堵死');
+  const step = blockAt(SRC.world, 'function stepMove(');
+  ok(/atan2\(-nx, -nz\)/.test(step),
+    'rot 用 atan2(-dx,-dz)，与玩家 yaw 约定一致（少负号 = 背朝前走）');
+  ok(/blockedBy/.test(step) && /s\.x\) - hit\.x/.test(step),
+    '压在楼里时朝"背离障碍中心"脱困（朝目标走 = 被允许横穿整栋楼）');
+  ok(/WALK_TIMEOUT/.test(SRC.world) && /STUCK_TICKS/.test(SRC.world),
+    'walk 有超时 + 卡住计数（否则目标不可达会永久卡死、人再也不动）');
+  ok(/function zoneAt/.test(SRC.world) && /placeOf\(s\)/.test(SRC.world),
+    '"我在哪"按当前坐标判定（不是按打算去哪 ⇒ 不会再在教室说自己在图书馆）');
+  ok(!/zones\.slice\(0, 1\)/.test(SRC.world),
+    '区域匹配不到时不再 fallback 成第一个区域（那是"认错地方"的根源）');
+}
+
+console.log('[10] 心理活动不外泄 + 对话不重复');
+ok(/t: 'npc_say', id: s\.id, say: out\.say \}/.test(SRC.world), '广播的 npc_say 只有 say、不带 think');
+ok(!/think: out\.think/.test(SRC.world), 'talk 不再把 think 广播出去');
+ok(/, ws\)/.test(SRC.index) || /talk\(sid, text, String\(nick\)\.slice\(0, 16\), ws\)/.test(SRC.index),
+  '搭话时把发起者传进去，广播跳过他（否则同一句话出现两遍）');
+ok(/if \(c === except\) continue/.test(SRC.index), 'broadcastAll 支持排除一个连接');
+ok(!/addThink/.test(SRC.game), '对话栏不再显示心理活动');
+ok(/_awaitReplyId/.test(SRC.game), '客户端还有一层去重（等回复期间跳过广播那一份）');
+ok(/fw: \(footprintOf\(rec\.obj\)/.test(SRC.editor), '编辑器存档写入真实占地 fw/fd（服务端才有得算）');
+
+console.log('[11] 学生模型：带骨骼 + 朝向修正');
+ok(/boy-rig\.glb/.test(SRC.students) && /girl-rig\.glb/.test(SRC.students),
+  '用带骨骼的 -rig 模型（原版没有动画，会变成"平移的立牌"）');
+ok(/const MODEL_DEG = 90/.test(SRC.students), '模型朝向修正 90°（与 PlayerModel 的 modelDeg 一致）');
+ok(/face\.rotation\.y/.test(SRC.students), '朝向修正挂在独立一层，不污染外层位移');
 
 console.log(fails ? '\n' + fails + ' 条失败' : '\n全部通过');
 process.exit(fails ? 1 : 0);

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "description": "学生 NPC 行为策略网络的状态/动作契约。train.py（训练端）与 policy.js（推理端）都以此为唯一真源；改动本文件后必须同步 tools/npc-policy/train.py 的 STATE_KEYS / ACTIONS，并用 tools/probe-policy.mjs 验证两端一致。",
+  "state": [
+    {"key": "hunger",   "range": [0, 1],  "note": "饿（越高越想去饭堂）"},
+    {"key": "fatigue",  "range": [0, 1],  "note": "累（越高越想回宿舍）"},
+    {"key": "fun",      "range": [0, 1],  "note": "想玩（越高越想去操场/喷泉）"},
+    {"key": "study",    "range": [0, 1],  "note": "想学（越高越想去教室/图书馆）"},
+    {"key": "social",   "range": [0, 1],  "note": "想社交（越高越想去喷泉/找人聊）"},
+    {"key": "bladder",  "range": [0, 1],  "note": "想上厕所（越高越想去厕所）"},
+    {"key": "hour",     "range": [0, 24], "norm": "div24", "note": "世界时刻（小时），训练/推理都先 /24 归一化到 [0,1]"},
+    {"key": "isWeekend","range": [0, 1],  "note": "是否周末（当前游戏无周末概念，恒 0；以后投周末数据再改 npcworld.buildState）"},
+    {"key": "cur_classroom", "range": [0,1], "note": "当前所在区域类型 one-hot（以下 10 项）"},
+    {"key": "cur_canteen",   "range": [0,1], "note": ""},
+    {"key": "cur_playground","range": [0,1], "note": ""},
+    {"key": "cur_library",   "range": [0,1], "note": ""},
+    {"key": "cur_shop",      "range": [0,1], "note": ""},
+    {"key": "cur_dorm",      "range": [0,1], "note": ""},
+    {"key": "cur_toilet",    "range": [0,1], "note": ""},
+    {"key": "cur_gate",      "range": [0,1], "note": ""},
+    {"key": "cur_fountain",  "range": [0,1], "note": ""},
+    {"key": "cur_other",     "range": [0,1], "note": ""},
+    {"key": "hasClass", "range": [0,1], "note": "此刻是否上课时段（课程表 type==classroom）"},
+    {"key": "nearFriend","range": [0,1], "note": "同区域是否有别的学生（服务端每拍算）"},
+    {"key": "playerNear","range": [0,1], "note": "8m 内是否有玩家（服务端每拍算，需玩家上报坐标）"}
+  ],
+  "actions": [
+    "classroom", "canteen", "playground", "library", "shop", "dorm", "toilet", "gate", "fountain", "other",
+    "wander", "rest", "chat_with", "follow_player", "help_player"
+  ],
+  "action_note": {
+    "前 10 项": "去该类型的功能区（服务端再挑具体区域→落点）",
+    "wander": "原地附近自由漫步（没有对应区域时的兜底）",
+    "rest": "原地休息（不换地方）",
+    "chat_with": "原地/附近找人聊天（nearFriend 或 playerNear 时更合理）",
+    "follow_player": "朝最近玩家走（没玩家则 wander）",
+    "help_player": "朝最近玩家走并示好（没玩家则 wander）"
+  }
+}

@@ -775,9 +775,14 @@ function sanitizeTelemetry(raw, ip) {
 }
 
 // 向所有在线客户端广播（建造是全局的，不分房间）
-function broadcastAll(msg) {
+// except：要跳过的一个连接（同一个学生的话，发起者自己已经收到 npc_reply 了，
+// 再广播一次 npc_say 会让他看到**两遍**同样的内容）。
+function broadcastAll(msg, except) {
   const raw = JSON.stringify(msg);
-  for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(raw);
+  for (const c of wss.clients) {
+    if (c === except) continue;
+    if (c.readyState === WebSocket.OPEN) c.send(raw);
+  }
 }
 
 const MAX_UPLOAD = 64 * 1024 * 1024; // 单次上传上限 64MB（导入的 GLB 模型可能较大）
@@ -838,6 +843,50 @@ const httpServer = http.createServer(async (req, res) => {
       });
       return;
     }
+  }
+
+  // ---- 学生策略网络：投喂接口（阶段2~5 的人投喂数据 + 训练好的模型上传）----
+  // 投喂数据：把 CSV/JSON 落到 data/feed/（训练在本地跑 train.py，不需要服务器有 Python）。
+  if (req.method === 'POST' && url.pathname === '/api/npc/feed') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 2e6) req.destroy(); });
+    req.on('end', () => {
+      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
+      let data;
+      try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
+      if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return deny('管理员密钥错误', 403);
+      const name = String(data.name || 'feed.csv').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40);
+      const text = String(data.text || '');
+      if (!text) return deny('empty');
+      try {
+        fs.mkdirSync(path.join(DATA_DIR, 'feed'), { recursive: true });
+        fs.writeFileSync(path.join(DATA_DIR, 'feed', name), text);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, saved: name }));
+      } catch (e) { deny(String(e && e.message || e), 500); }
+    });
+    return;
+  }
+  // 上传训练好的模型（本地 train.py 产出的 campus_policy.json）；也可直接 scp 到 data/。
+  if (req.method === 'POST' && url.pathname === '/api/npc/policy') {
+    let body = '';
+    req.on('data', (chunk) => { if ((body += chunk).length > 5e6) req.destroy(); });
+    req.on('end', () => {
+      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
+      try {
+        const json = JSON.parse(body || '{}');
+        if (!json || !Array.isArray(json.weights) || !Array.isArray(json.actions)) return deny('bad model');
+        fs.writeFileSync(path.join(DATA_DIR, 'campus_policy.json'), JSON.stringify(json));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, meta: json.meta || {} }));
+      } catch (e) { deny(String(e && e.message || e), 500); }
+    });
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/npc/policy') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, status: npcWorld ? npcWorld.loadPolicyStatus() : { ready: false } }));
+    return;
   }
 
   // 账号相关接口（注册/登录/资料/登出）：已处理则返回
@@ -916,6 +965,8 @@ const httpServer = http.createServer(async (req, res) => {
         // 统一写入 data/ 下 JSON（本后端为跨端共用的场景/地图数据源）
         const target = url.pathname === '/api/scene' ? SCENE_FILE : MAP_FILE;
         fs.writeFileSync(target, JSON.stringify(data, null, 2));
+        // 场景刚落盘：立刻重读障碍表，学生的绕障不用等下一轮定时（也不用重启）
+        if (npcWorld && target === SCENE_FILE) npcWorld.refreshObstacles();
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -1406,12 +1457,16 @@ wss.on('connection', (ws, req) => {
       if (!sid || !text) return;
       const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username)) || (states.get(id) && states.get(id).nick) || '同学';
       // 同一个学生同时只处理一句（AI 有冷却，并发多了会撞免费档限流）
-      npcWorld.talk(sid, text, String(nick).slice(0, 16))
+      npcWorld.talk(sid, text, String(nick).slice(0, 16), ws)
         .then((out) => {
+          // ⚠ 只回发起者（其他人由 npcWorld 里的 npc_say 广播拿到），否则发起者会看到两遍
           if (!out || !out.say) return;
-          ws.send(JSON.stringify({ t: 'npc_reply', id: sid, say: out.say, think: out.think || '' }));
+          ws.send(JSON.stringify({ t: 'npc_reply', id: sid, say: out.say }));
         })
-        .catch(() => { /* AI 失败就静默：玩家看到的是"他没理我"，比报错友好 */ });
+        .catch((e) => {
+          // 绝不静默吞掉（记忆第 1 条）：AI 挂了要能在日志里看见，否则只表现为"他没理我"
+          console.warn('[npc] 搭话失败 ' + sid + '：' + (e && e.message ? e.message : e));
+        });
       return;
     }
 
@@ -1874,6 +1929,15 @@ wss.on('connection', (ws, req) => {
       nick: pub ? (pub.nickname || pub.username || ('玩家' + num)) : ('玩家' + num),
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });
+
+    // 把当前所有玩家的坐标喂给 NPC 世界（playerNear 特征用；没有 NPC 世界时跳过）
+    if (npcWorld && npcWorld.setPlayerPositions) {
+      const arr = [];
+      for (const s of states.values()) {
+        if (Number.isFinite(Number(s.x)) && Number.isFinite(Number(s.z))) arr.push({ x: Number(s.x), z: Number(s.z) });
+      }
+      npcWorld.setPlayerPositions(arr);
+    }
 
     if (isFresh) {
       // 新玩家首次上报：把 join（含序号与状态）广播给同房间其他人

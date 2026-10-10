@@ -4558,6 +4558,7 @@ export class Game {
     this._talkName = '';
     this._sayTimer = null;    // 回复超时兜底的定时器
     this._pendingSayAt = 0;   // 发出这句话的时间戳（超时判定用，必须初始化，否则 NaN）
+    this._awaitReplyId = '';  // 正在等哪位学生的回复（用于跳过自己发起的那次广播，避免同一句显示两遍）
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.NPC_KEY) return;
       // 有输入框在打字或已开面板时不重复触发，交给面板自身管理
@@ -4585,30 +4586,35 @@ export class Game {
     if (!this.network) return;
     this.aiChat.addMsg('busy', (this._talkName || '同学') + '正在想…');
     this._pendingSayAt = Date.now();
+    this._awaitReplyId = this._talkId; // 接下来会同时收到一次广播，靠它跳过重复的那份
     this.network.sendStudentTalk(this._talkId, text);
     // 兜底：20 秒还没回就出声，别让「正在想…」一直挂着（AI 失败/限流时会走到这条）
     if (this._sayTimer) clearTimeout(this._sayTimer);
     this._sayTimer = setTimeout(() => {
+      if (this._awaitReplyId) this._awaitReplyId = ''; // 超时了就别再拦广播（否则漏看别人的话）
       if (this.aiChat && this.aiChat.isOpen()) this.aiChat.addMsg('npc', '（他好像没听见，等会儿再说吧）');
     }, 20500);
   }
 
-  // 服务端回的对话内容：say 是嘴上说的话、think 是心理活动
+  // 服务端回的对话内容：只有 say（嘴上说的话）。
+  // ⚠ think（心理活动）是内部数据，服务端不再下发、这里也绝不显示。
   _onStudentReply(msg) {
     if (!this.aiChat || !msg) return;
     if (this._sayTimer) { clearTimeout(this._sayTimer); this._sayTimer = null; }
     if (this.aiChat.isOpen() && msg.id === this._talkId) {
       if (msg.say) this.aiChat.addMsg('npc', String(msg.say));
-      if (msg.think) this.aiChat.addThink(String(msg.think));
     }
+    if (this._awaitReplyId === String(msg.id || '')) this._awaitReplyId = '';
   }
 
   // 别人跟同一个学生说话时，自己这边也能在对话栏里看到（气泡由 Students 自己显示）
   _onStudentSpeak(info) {
     if (!info) return;
+    // ⚠ 自己发起的那次服务端会单独回 npc_reply，这里必须跳过广播的那一份 —— 否则同一句话出现两遍。
+    //   用"正在等谁回复"判定，才不会误伤别人跟同一个学生说的话。
+    if (info.id === this._awaitReplyId) return;
     if (this.aiChat && this.aiChat.isOpen() && info.id === this._talkId) {
       if (info.say) this.aiChat.addMsg('npc', String(info.say));
-      if (info.think) this.aiChat.addThink(String(info.think));
     }
   }
 
