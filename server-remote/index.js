@@ -461,6 +461,23 @@ const RETIRED_IDS = new Set(['flashlight']); // 手电筒：2026-10-07 按用户
   } catch (e) { /* assets 目录还不存在：一件都没上传过，保持 placeholder */ }
   if (fixed) { saveShop(SHOP); console.info('[relay] 家具 url 对位：' + fixed + ' 件指向已上传模型'); }
 })();
+// 老数据的 rotY 修一次：build_add/build_move 曾把「度」按 ±4π（≈±12.566）的**弧度**范围钳制，
+// 所以任何大于 12.566 度的角度都被夹成正好 4π —— 客户端读回去除以 DEG 就是「720°」。
+// 这里只认「恰好等于 ±4π」这个钳制边界值（正常玩家几乎不可能转出这么整的数），归零即可。
+(function repairBuildRot() {
+  let fixed = 0;
+  try {
+    const list = loadBuildings();
+    for (const b of list) {
+      if (!b) continue;
+      const n = Number(b.rotY);
+      if (!Number.isFinite(n)) continue;
+      if (Math.abs(Math.abs(n) - Math.PI * 4) < 1e-6) { b.rotY = 0; fixed++; }
+      else if (n < 0 || n >= 360) { b.rotY = ((n % 360) + 360) % 360; fixed++; }
+    }
+    if (fixed) { saveBuildings(list); console.info('[relay] 摆放角度修复：' + fixed + ' 条（旧的 ±4π 弧度钳制残留）'); }
+  } catch (e) { /* 没数据文件就算了 */ }
+})();
 // 组合家具的部件 / 灯光消毒：只放行已知字段并逐项钳制（防脏数据 / 超大对象）
 // ⚠⚠ 单位：客户端的 rotY/rotX 一律是**度**（不是弧度）—— 早先这里按弧度写了钳制范围
 //   （±2π ≈ ±6.28），结果编辑器存进去的 rotX = -90（朝下照）被夹成 **-6.28 度**，
@@ -468,6 +485,14 @@ const RETIRED_IDS = new Set(['flashlight']); // 手电筒：2026-10-07 按用户
 //   现在统一按度钳制到 ±360（允许多圈，负数合法）。
 const DEG_LO = -360;
 const DEG_HI = 360;
+// 摆放物件的 rotY：**度**，归一化到 [0,360) 后落盘。
+// ⚠ 这里原来写成按弧度钳到 ±4π（≈±12.57），于是玩家转个 90° 存进去被夹成 12.57°，
+//   客户端一读就是「角度跳到 720°」（12.566 / (π/180) = 720），且再也转不动。
+function normDeg(v, d) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return d;
+  return ((n % 360) + 360) % 360;
+}
 const AREA_ROTX_DEFAULT = -90; // 与前端 Lights.AREA_LIGHT_DEFAULTS.rotX 保持一致
 const AREA_DISTANCE_DEFAULT = 14; // 与前端 AREA_SHADOW_DISTANCE 保持一致
 function sanitizeCombo(c) {
@@ -1736,7 +1761,7 @@ wss.on('connection', (ws, req) => {
         x: xz.x,
         y: num(msg.y, 0, -2, 10),
         z: xz.z,
-        rotY: num(msg.rotY, 0, -Math.PI * 4, Math.PI * 4),
+        rotY: normDeg(msg.rotY, 0),
         scale: num(msg.scale, 1, BUILD_SCALE_MIN, BUILD_SCALE_MAX),
         ts: now,
       };
@@ -1777,7 +1802,7 @@ wss.on('connection', (ws, req) => {
       rec.x = mXZ.x;
       rec.y = num(msg.y, rec.y, -2, 10);
       rec.z = mXZ.z;
-      rec.rotY = num(msg.rotY, rec.rotY, -Math.PI * 4, Math.PI * 4);
+      rec.rotY = normDeg(msg.rotY, rec.rotY);
       rec.scale = num(msg.scale, rec.scale, BUILD_SCALE_MIN, BUILD_SCALE_MAX);
       saveBuildings(list);
       const out = { t: 'build', ev: 'move', id: rec.id, x: rec.x, y: rec.y, z: rec.z, rotY: rec.rotY, scale: rec.scale };

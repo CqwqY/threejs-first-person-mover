@@ -34,13 +34,21 @@ ok(del.includes('onDel(id)'), '先调 onDel 本地移除（含退出编辑态）
 ok(del.indexOf('onDel(id)') < del.indexOf('sendBuildDel(id)'), '顺序：本地删除在发请求之前');
 ok(del.includes("onToast('已删除')"), '删除给出反馈（不能静默）');
 
-console.log('[2] 三段式编辑：模式 → 轴向 → 滑动');
+console.log('[2] 三段式编辑：模式 → 轴向 → 滑动（模式/轴向在右侧竖排面板，底部只留滑动条）');
 const strip = blockAt('function refreshStrip');
-ok(/\['move', '移动'\], \['scale', '缩放'\], \['rotate', '旋转'\]/.test(strip), '底部有三种操作模式：移动/缩放/旋转');
-ok(strip.includes('state.editOp = op'), '点模式切换 state.editOp');
-ok(strip.includes('state.editAxis = ax'), '点轴向切换 state.editAxis');
-ok(strip.includes('axesFor(op)[0][0]'), '换模式后轴向落回该模式第一个可用轴（避免轴向不存在）');
-ok(strip.includes('mkSlider()'), '第三行是滑动调节条');
+const panel = blockAt('function buildEditPanel');
+ok(panel.includes("['move', '移动'], ['scale', '缩放'], ['rotate', '旋转']"), '右侧面板有三种操作模式：移动/缩放/旋转');
+ok(panel.includes('state.editOp = op'), '点模式切换 state.editOp');
+ok(panel.includes('state.editAxis = ax'), '点轴向切换 state.editAxis');
+ok(panel.includes('axesFor(op)[0][0]'), '换模式后轴向落回该模式第一个可用轴（避免轴向不存在）');
+ok(panel.includes('mkGroup('), '面板按「分组」组织（信息层级清晰）');
+ok(panel.includes("mkGroup('操作')") && panel.includes("mkGroup('轴向')"), '至少「操作」「轴向」两个带标题的分组');
+ok(strip.includes('mkSlider()'), '底部条挂滑动调节条');
+ok(/appendChild\(mkSlider\(\)\);[\s\S]{0,160}buildEditPanel\(\);/.test(strip), '编辑模式：底部 = 滑动条，右侧 = 操作面板（各司其职）');
+const eb = strip.indexOf("if (state.mode === 'edit') {");
+const editBranch = eb < 0 ? '' : strip.slice(eb, strip.indexOf('buildEditPanel();', eb));
+ok(eb >= 0 && !/strip\.appendChild\(mkChip\(/.test(editBranch), '编辑模式底部不再堆按钮（高度才压得下来）');
+ok(/strip\.appendChild\(mkSlider\(\)\)/.test(editBranch), '编辑模式底部只剩一个滑动条');
 
 console.log('[3] 滑动条：向上加、向下减');
 const slider = blockAt('function mkSlider');
@@ -55,7 +63,7 @@ console.log('[4] 一档改动落到三种操作上');
 const step = blockAt('function editStep');
 ok(step.includes('nudge(') && step.includes("state.editOp === 'move'"), '移动：走 nudge（含范围钳制）');
 ok(step.includes('e.mesh.scale.setScalar(s * baseScaleOf(e.rec.itemId))'), '缩放：改 mesh（乘家具基座）与 rec 的 scale');
-ok(step.includes('state.rotY = (state.rotY + dir * ROT_STEP)'), '旋转：按档改 rotY');
+ok(step.includes('state.rotY = normalizeDeg(state.rotY + dir * ROT_STEP)'), '旋转：按档改 rotY 并归一化到 [0,360)');
 ok(step.includes('refreshSlider()'), '每档刷新滑块上的数值');
 
 console.log('[5] 只提供服务端存得下的轴（防重载打回原形）');
@@ -99,6 +107,43 @@ ok(src.includes('onCatalogUpdated(refreshProtos)'), '订阅目录更新（setCat
 ok(shopSrc.includes('export function onCatalogUpdated'), 'Shop.js 导出订阅接口');
 ok(shopSrc.includes('catalogListeners'), 'setCatalog 里真的通知了订阅者');
 ok(blockAt('function refreshGhostProto').includes('ghost.scale.setScalar(baseScaleOf(id))'), '放置预览（幽灵）同样放大基座倍（跟摆下去一样大）');
+
+console.log('[8] 旋转角度：单位统一为「度」且始终归一化到 [0,360)（「一进编辑就跳到 720°」的根因）');
+ok(!/\/ DEG;?\s*$/m.test(src.replace(/\/\/.*$/gm, '')), '客户端不再有「度再除一次 DEG」的写法（会把 15° 放大成 859°）');
+ok(src.includes('function normalizeDeg'), '存在 normalizeDeg 归一化函数');
+const ndeg = blockAt('function normalizeDeg');
+ok(ndeg.includes('((n % 360) + 360) % 360'), '归一化结果落在 [0,360)，负角度也能正确回绕');
+ok(ndeg.includes('Number.isFinite(n)'), '非有限数（NaN/undefined）兜底为 0');
+const stEdit = blockAt('function startEdit');
+ok(stEdit.includes('state.rotY = normalizeDeg(a.entry.rec.rotY)'), '进编辑：直接取 rec.rotY 的度值（不换算、不放大）');
+ok(!/state\.rotY = .*rec\.rotY.*\/ DEG/.test(stEdit), '进编辑：绝不再除 DEG');
+ok(stEdit.includes('e0.mesh.rotation.y = state.rotY * DEG'), '进编辑：把「度」同步回 mesh，UI 与内部数据一致');
+const rotE = blockAt('function rotateEdit');
+ok(rotE.includes('normalizeDeg(state.rotY + ROT_STEP)'), 'R 键旋转同样归一化（不会转出 360 以上）');
+ok(blockAt('function commitEdit').includes('rotY: normalizeDeg(state.rotY)'), '提交给服务端的 rotY 已归一化');
+ok(blockAt('function spawn').includes('rotY: normalizeDeg(rotY)'), 'build_add 上报的 rotY 已归一化');
+ok(blockAt('function meshFrom').includes('normalizeDeg(rec && rec.rotY) * DEG'), '渲染时按归一化后的度值转弧度');
+ok(blockAt('function onMove').includes('normalizeDeg(rec.rotY) * DEG'), '别人的移动广播回来同样归一化');
+// 服务端：rotY 是度，不能按弧度范围 ±4π 钳制（12.566 度 → 客户端读成 720°）
+ok(svSrc.includes('function normDeg'), '服务端有 normDeg（度归一化）');
+ok(!/num\(msg\.rotY,.*Math\.PI \* 4/.test(svSrc), '服务端不再把 rotY 按 ±4π 弧度范围钳制');
+ok(/rotY: normDeg\(msg\.rotY, 0\)/.test(svSrc), 'build_add 的 rotY 走 normDeg');
+ok(/rec\.rotY = normDeg\(msg\.rotY, rec\.rotY\)/.test(svSrc), 'build_move 的 rotY 走 normDeg');
+ok(svSrc.includes('repairBuildRot'), '启动时修复老数据里被 ±4π 钳坏的 rotY');
+
+console.log('[9] 界面布局：控件搬到右侧竖排面板，底部条压到一行');
+const theme = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'theme.js'), 'utf8').replace(/\r\n/g, '\n');
+ok(src.includes("side.className = 'build-side'"), '右侧面板容器存在（class .build-side）');
+ok(src.includes('side.appendChild(actions)') && src.includes('side.appendChild(editPanel)'), '常驻键与编辑面板都挂进右侧面板');
+ok(!/actions\.style\.cssText = 'position:fixed/.test(src), '「编辑/退出建造」不再各自 fixed 定位（改由面板统一排）');
+ok(theme.includes('.build-side {'), 'theme.js 定义了 .build-side 样式');
+ok(/flex-direction: column/.test(theme.slice(theme.indexOf('.build-side {'))), '面板是竖排（flex column）');
+ok(theme.includes('max-height: calc(100dvh - 24px)'), '限高 + 可滚动（矮屏不会顶出屏幕）');
+ok(theme.includes('overflow-y: auto'), '内容超高时滚动，不裁掉按钮');
+ok(theme.includes('pointer-events: none;') && theme.includes('.build-side > * { pointer-events: auto; }'), '面板空隙仍可转视角（只有按钮响应点击）');
+ok(/@media \(max-height: 700px\)/.test(theme), '矮屏（手机横屏/小窗口）有紧凑档，适配不同分辨率');
+ok(theme.includes('width: min(150px, 34vw)'), '宽度随视口自适应（窄屏不会挤满）');
+ok(src.includes("editPanel.style.display = (state.mode === 'edit') ? 'flex' : 'none'"), '编辑面板只在编辑模式出现（放置模式右侧只剩常驻键）');
 
 console.log(fails ? '\n' + fails + ' 条失败' : '\n全部通过');
 process.exit(fails ? 1 : 0);

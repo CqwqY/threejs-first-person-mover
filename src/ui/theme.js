@@ -398,6 +398,53 @@ export function ensureTheme() {
       padding: 0 4px;
     }
 
+    /* ---- 建造模式「右侧竖排面板」----
+       编辑模式的 操作/轴向/动作 都搬到这里，底部条只留一条滑动调节条，可视区域不再被压掉一半。
+       尺寸全部写在 CSS（不写 inline），这样下面 @media 的紧凑档才能真正生效。 */
+    .build-side {
+      position: fixed;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 64;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      width: min(150px, 34vw);
+      max-height: calc(100vh - 24px);
+      max-height: calc(100dvh - 24px);
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      pointer-events: none;
+      scrollbar-width: thin;
+    }
+    .build-side > * { pointer-events: auto; }
+    .build-side__group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 6px;
+      border-radius: var(--kui-r-md);
+      background: rgba(11, 21, 34, .72);
+      border: 1px solid rgba(255, 255, 255, .12);
+    }
+    .build-side__title {
+      color: var(--kui-paper);
+      font: 600 11px/1.2 var(--kui-font);
+      opacity: .75;
+      padding: 0 2px;
+      white-space: nowrap;
+    }
+    /* 竖排面板里的按钮一律撑满整行（.kui-btn 自带 min-width:72px，这里放开由容器定宽） */
+    .build-side .kui-btn { width: 100%; min-width: 0; }
+    /* 矮屏（手机横屏 / 小窗口）：收紧间距、隐去分组标题，保证一屏放得下 */
+    @media (max-height: 700px) {
+      .build-side { width: min(124px, 30vw); gap: 6px; }
+      .build-side__group { gap: 4px; padding: 4px; }
+      .build-side__title { display: none; }
+    }
+
     /* ---- 键位提示（Kenney Input Prompts Pixel）----
        图块是 16px 像素画，**不要平滑缩放**，否则糊成一团；用 image-rendering: pixelated。
        尺寸用 em，跟着所在文字一起缩放。 */

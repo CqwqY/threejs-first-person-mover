@@ -18,6 +18,18 @@ import { registerPointLight, enableAreaShadow, AREA_LIGHT_DEFAULTS, LIGHT_SCALE 
 
 const DEG = Math.PI / 180;
 
+// 角度归一化到 [0,360)：全项目 rotY 的单位一律是**度**（见 meshFrom：rotation.y = rotY * DEG）。
+// ⚠ 这里必须挡住两类脏值，否则角度会「跳」：
+//   ① 客户端曾把「度」当成「弧度」再除一次 DEG（×57.3）→ 15° 变成 859°；
+//   ② 服务端早期把 rotY 按弧度范围钳到 ±4π（≈±12.57），度值一进去就被夹成 12.57；
+//      两者叠加的终点就是「一进编辑角度直接跳到 720°」（12.566 / DEG = 720.0，且永久定格）。
+//   所有读写 rotY 的地方都必须过这道归一化，保证 UI 显示与内部数据一致、且旋转连续可预期。
+function normalizeDeg(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return ((n % 360) + 360) % 360;
+}
+
 // 面光源（RectAreaLight）使用前必须初始化一次 LTC 查找表 —— 全局只需要一次
 let _rectAreaReady = false;
 function ensureRectAreaLib() {
@@ -341,7 +353,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     for (const a of areas) enableAreaShadow(a);
     // ⚠ 缩放 = 基座 × 用户倍率：基座（家具 3）只用于渲染，绝不写进 rec.scale（否则每次编辑都会叠加一次）
     m.scale.setScalar((rec && rec.scale ? rec.scale : 1) * baseScaleOf(rec && rec.itemId));
-    m.rotation.y = ((rec && rec.rotY) ? rec.rotY : 0) * DEG;
+    m.rotation.y = normalizeDeg(rec && rec.rotY) * DEG;
     m.position.set(rec ? rec.x : 0, (rec && rec.y) || 0, rec ? rec.z : 0);
     return m;
   }
@@ -517,7 +529,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const mesh = meshFrom(proto, { itemId, x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
       placedGroup.add(mesh);
       state.pending.push({ mesh, itemId }); // 记下 itemId：服务端回执若错标成「别人摆的」，也能据此认领
-      network.sendBuildAdd({ itemId, x: pt.x, y: pt.y || 0, z: pt.z, rotY, scale: 1 });
+      network.sendBuildAdd({ itemId, x: pt.x, y: pt.y || 0, z: pt.z, rotY: normalizeDeg(rotY), scale: 1 });
     });
   }
   function place() {
@@ -586,7 +598,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     if (!e) return;
     e.rec = Object.assign({}, e.rec, rec);
     e.mesh.position.set(rec.x, rec.y || 0, rec.z);
-    e.mesh.rotation.y = rec.rotY * DEG;
+    e.mesh.rotation.y = normalizeDeg(rec.rotY) * DEG;
     if (rec.scale) e.mesh.scale.setScalar(Number(rec.scale) * baseScaleOf(e.rec.itemId));
   }
 
@@ -631,10 +643,14 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     state.editId = a.id;
     state.editOp = 'move';
     state.editAxis = 'x';
-    state.rotY = (Number(a.entry.rec.rotY) || 0) / DEG; // rec 里存的是度，直接用原值（不吸附，滑动微调要连续）
+    // ⚠ rec.rotY 的单位是**度**，直接取用即可 —— 早先这里写成 `rec.rotY / DEG`（把度当弧度再转一次，
+    //   等于 ×57.3），配合服务端把 rotY 钳在 ±4π，最终表现为「一进编辑角度跳到 720°」。
+    state.rotY = normalizeDeg(a.entry.rec.rotY);
+    const e0 = rendered.get(state.editId);
+    if (e0) e0.mesh.rotation.y = state.rotY * DEG; // 以「度」为准统一一次，避免与残留的脏 rec 不一致
     clearAim();
     refreshStrip();
-    onToast('编辑中：下面选「移动/缩放/旋转」→ 选轴 → 在滑块上上下滑动（↑加 ↓减）');
+    onToast('编辑中：右侧选「移动/缩放/旋转」→ 选轴 → 底部滑动条上下滑（↑加 ↓减）');
   }
   function exitEdit() { state.mode = 'place'; state.editId = null; refreshStrip(); }
   // 三轴位置微调：axis 0=X 左右 / 1=Y 上下 / 2=Z 前后；dir ±1；步长 = state.nudgeStep
@@ -694,8 +710,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       e.rec.scale = s;
       e.mesh.scale.setScalar(s * baseScaleOf(e.rec.itemId));
     } else {
-      state.rotY = (state.rotY + dir * ROT_STEP) % 360;
-      if (state.rotY < 0) state.rotY += 360;
+      state.rotY = normalizeDeg(state.rotY + dir * ROT_STEP);
       e.mesh.rotation.y = state.rotY * DEG;
     }
     refreshSlider();
@@ -726,8 +741,9 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     const STEP_PX = 14;
     const box = document.createElement('div');
     box.className = 'build-slider';
+    // 底部条现在是单行：这条撑满整行即可（编辑模式底部只留它一个元素）
     box.style.cssText =
-      'flex:1 1 100%;height:56px;border-radius:var(--kui-radius);box-sizing:border-box;' +
+      'flex:1 1 auto;width:100%;height:52px;border-radius:var(--kui-radius);box-sizing:border-box;' +
       'border:2px dashed var(--kui-blue-dark);background:#eaf2fb;touch-action:none;user-select:none;' +
       'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:ns-resize;';
     const t = document.createElement('div');
@@ -759,11 +775,6 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     box.addEventListener('wheel', (e) => { e.preventDefault(); editStep(e.deltaY < 0 ? 1 : -1); }, { passive: false });
     return box;
   }
-  function mkRow() {
-    const d = document.createElement('div');
-    d.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;';
-    return d;
-  }
   function cycleNudgeStep() {
     const i = NUDGE_STEPS.indexOf(state.nudgeStep);
     state.nudgeStep = NUDGE_STEPS[(i < 0 ? 2 : i + 1) % NUDGE_STEPS.length];
@@ -782,7 +793,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
   }
   function rotateEdit() {
     if (state.mode !== 'edit') return;
-    state.rotY = (state.rotY + ROT_STEP) % 360;
+    state.rotY = normalizeDeg(state.rotY + ROT_STEP);
     const e = rendered.get(state.editId);
     if (e) e.mesh.rotation.y = state.rotY * DEG;
     refreshSlider();
@@ -806,7 +817,7 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     network.sendBuildMove({
       id: state.editId,
       x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z,
-      rotY: state.rotY, scale: Number(e.rec.scale) || 1,
+      rotY: normalizeDeg(state.rotY), scale: Number(e.rec.scale) || 1,
     });
     onToast('已更新位置');
     exitEdit();
@@ -851,11 +862,22 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     : 'position:fixed;left:18px;bottom:22px;z-index:64;display:none;width:min(440px,50vw);';
   document.body.appendChild(strip);
 
+  // 右侧竖排面板：装「编辑 / 退出建造」两个常驻键 + 编辑模式的操作/轴向/动作分组。
+  // 编辑模式的控件原来全堆在底部条（四行、吃掉小半个屏幕），现在搬到这里，底部只留一条滑动调节条。
+  // 容器本身 pointer-events:none（空隙仍可转视角），子元素由 CSS 各自放开。
+  const side = document.createElement('div');
+  side.className = 'build-side';
+  document.body.appendChild(side);
+
   // 右侧悬浮键：编辑（放置模式） + 退出建造（常驻） —— 都走 Kenney 按钮
   const actions = document.createElement('div');
   actions.className = 'build-actions';
-  actions.style.cssText = 'position:fixed;right:16px;bottom:44%;z-index:64;display:none;';
-  document.body.appendChild(actions);
+  side.appendChild(actions);
+
+  const editPanel = document.createElement('div');
+  editPanel.className = 'build-side__panel';
+  editPanel.style.cssText = 'display:none;flex-direction:column;gap:8px;';
+  side.appendChild(editPanel);
 
   const editBtn = document.createElement('button');
   editBtn.type = 'button';
@@ -898,12 +920,15 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     el.addEventListener('pointerleave', () => { if (repeat) { moved = true; stopRepeat(); } });
     return el;
   }
-  function mkChip(text, onClick, variant, active, repeat) {
+  function mkChip(text, onClick, variant, active, repeat, block) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'kui-btn ' + (active ? 'kui-btn--primary' : ('kui-btn--' + (variant || 'grey')));
     b.textContent = text;
-    b.style.cssText = 'flex:0 0 auto;white-space:nowrap;touch-action:manipulation;';
+    // block：竖排面板里的按钮撑满整行（宽度由 CSS 的 .build-side 定，矮屏会自动收窄）
+    b.style.cssText = block
+      ? 'flex:1 1 auto;width:100%;white-space:nowrap;touch-action:manipulation;'
+      : 'flex:0 0 auto;white-space:nowrap;touch-action:manipulation;';
     return bindPress(b, onClick, repeat);
   }
   function mkLabel(text) {
@@ -912,45 +937,35 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
     d.textContent = text;
     return d;
   }
+  // 右侧竖排面板里的分组：小标题 + 该组的按钮（竖排）
+  function mkGroup(title) {
+    const g = document.createElement('div');
+    g.className = 'build-side__group';
+    if (title) {
+      const t = document.createElement('div');
+      t.className = 'build-side__title';
+      t.textContent = title;
+      g.appendChild(t);
+    }
+    return g;
+  }
 
   function refreshStrip() {
-    if (!state.active) { strip.style.display = 'none'; actions.style.display = 'none'; return; }
+    if (!state.active) { strip.style.display = 'none'; side.style.display = 'none'; return; }
     strip.style.display = '';
-    actions.style.display = '';
-    // 编辑模式下「编辑」键隐去（动作改到工具条上的 旋转/删除/完成）；「退出建造」常驻
+    side.style.display = 'flex';
+    // 编辑模式下「编辑」键隐去（动作改到右侧面板）；「退出建造」常驻
     editBtn.style.display = (state.mode === 'place') ? '' : 'none';
-    // 编辑模式的工具条是多行的（模式 / 轴向 / 滑块 / 动作），放置模式仍是单行横滚的家具列表
-    strip.style.flexWrap = (state.mode === 'edit') ? 'wrap' : 'nowrap';
+    editPanel.style.display = (state.mode === 'edit') ? 'flex' : 'none';
+    strip.style.flexWrap = 'nowrap';
     strip.innerHTML = '';
+    editPanel.innerHTML = '';
     if (state.mode === 'edit') {
-      // ① 操作模式
-      const r1 = mkRow();
-      r1.appendChild(mkLabel('操作：'));
-      for (const [op, text] of [['move', '移动'], ['scale', '缩放'], ['rotate', '旋转']]) {
-        r1.appendChild(mkChip(text, () => {
-          state.editOp = op;
-          state.editAxis = axesFor(op)[0][0]; // 换模式后轴可能不存在，落回该模式第一个可用轴
-          refreshStrip();
-        }, 'grey', state.editOp === op));
-      }
-      // ② 轴向（+ 移动模式的步长）
-      const r2 = mkRow();
-      r2.appendChild(mkLabel('轴向：'));
-      for (const [ax, text] of axesFor(state.editOp)) {
-        r2.appendChild(mkChip(text, () => { state.editAxis = ax; refreshStrip(); }, 'grey', state.editAxis === ax));
-      }
-      if (state.editOp === 'move') r2.appendChild(mkChip('步长 ' + state.nudgeStep + 'm', cycleNudgeStep, 'grey'));
-      // ③ 滑动调节
-      strip.appendChild(r1);
-      strip.appendChild(r2);
+      // 底部条只留「滑动调节条」一行（原来四行，压掉太多可视区域）；
+      // 操作/轴向/动作 全部搬到右侧竖排面板 —— 见 buildEditPanel()。
       strip.appendChild(mkSlider());
       refreshSlider();
-      // ④ 其余动作
-      const r3 = mkRow();
-      r3.appendChild(mkChip('移到准星', snapToAim, 'primary'));
-      r3.appendChild(mkChip(coarse ? '删除' : '删除 · X', deleteEdit, 'red'));
-      r3.appendChild(mkChip(coarse ? '完成' : '完成 · G', commitEdit, 'green'));
-      strip.appendChild(r3);
+      buildEditPanel();
       return;
     }
     const list = available();
@@ -962,6 +977,35 @@ export function initBuildingTool(scene, camera, domElement, network, opts = {}) 
       const tag = st === 'loading' ? ' ·加载中' : st === 'failed' ? ' ·模型失败' : (st === 'ready' ? '' : ' ·占位');
       strip.appendChild(mkChip(entry.it.name + ' ×' + entry.n + tag, () => { state.itemId = entry.it.id; refreshStrip(); }, 'grey', entry.it.id === state.itemId));
     }
+  }
+
+  // 右侧竖排面板（仅编辑模式）：操作 → 轴向 → 动作，三组竖着排，信息层级一眼看清。
+  // 与底部那条滑动调节条配套：这里选「改什么 / 改哪根轴」，底部滑「加多少 / 减多少」。
+  function buildEditPanel() {
+    editPanel.innerHTML = '';
+    // ① 操作模式
+    const g1 = mkGroup('操作');
+    for (const [op, text] of [['move', '移动'], ['scale', '缩放'], ['rotate', '旋转']]) {
+      g1.appendChild(mkChip(text, () => {
+        state.editOp = op;
+        state.editAxis = axesFor(op)[0][0]; // 换模式后轴可能不存在，落回该模式第一个可用轴
+        refreshStrip();
+      }, 'grey', state.editOp === op, false, true));
+    }
+    editPanel.appendChild(g1);
+    // ② 轴向（移动模式额外带步长切换）
+    const g2 = mkGroup('轴向');
+    for (const [ax, text] of axesFor(state.editOp)) {
+      g2.appendChild(mkChip(text, () => { state.editAxis = ax; refreshStrip(); }, 'grey', state.editAxis === ax, false, true));
+    }
+    if (state.editOp === 'move') g2.appendChild(mkChip('步长 ' + state.nudgeStep + 'm', cycleNudgeStep, 'grey', false, false, true));
+    editPanel.appendChild(g2);
+    // ③ 动作（无小标题：这排是终点操作，不该再占一层标题的高度）
+    const g3 = mkGroup('');
+    g3.appendChild(mkChip('移到准星', snapToAim, 'primary', false, false, true));
+    g3.appendChild(mkChip(coarse ? '删除' : '删除 · X', deleteEdit, 'red', false, false, true));
+    g3.appendChild(mkChip(coarse ? '完成' : '完成 · G', commitEdit, 'green', false, false, true));
+    editPanel.appendChild(g3);
   }
 
   // ---------- 进入 / 退出 ----------
