@@ -705,7 +705,10 @@ export function createNpcWorld(opts) {
     // ⚠ 无论有没有区域都要广播：以前没区域时直接 return，客户端连一次更新都收不到（表现为"人都定住了"）
     if (now - lastBroadcast >= BROADCAST_MS) {
       lastBroadcast = now;
-      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), rot: round1(s.rot), st: s.st })) });
+      // ⚠ 客户端自己驱动走位：下发「目标点」tx/tz（客户端用 tx/tz 走位）；同时保留 x/z（服务端 ghost
+      //   坐标，供 probe-npc-move 等守卫探针观测实际移动/绕障）与 rot（服务端自转朝向，仅做兼容/调试）。
+      //   客户端只消费 tx/tz/st，x/z/rot 客户端忽略（缺 tx/tz 时才回退用 x/z）。
+      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), rot: round1(s.rot), st: s.st })) });
     }
   }, TICK_MS);
   if (timer.unref) timer.unref();
@@ -726,11 +729,12 @@ export function createNpcWorld(opts) {
     return out;
   }
 
-  // 给新连上的客户端一份完整名单（名字/班级/当前大致位置）
+  // 给新连上的客户端一份完整名单（名字/班级/初始坐标 + 初始目标点）
   function roster() {
     return students.map((s) => ({
       id: s.id, name: s.name, cls: s.cls, sex: s.sex,
-      x: round2(s.x), z: round2(s.z), rot: round1(s.rot), st: s.st,
+      // ⚠ 初始坐标 x/z 给客户端落地 pstate；目标点 tx/tz 给客户端定初始走向（客户端驱动走位）
+      x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), st: s.st,
     }));
   }
 

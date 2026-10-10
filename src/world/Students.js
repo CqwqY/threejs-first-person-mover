@@ -1,14 +1,19 @@
-// 职责：校园里的学生 NPC（服务端权威，客户端只负责插值显示）。
-// - 名单由服务端 npc_roster 下发（姓名/班级/性别），位置由 5Hz 的 npc 广播持续更新；
-// - 客户端做的是「平滑跟随」：本地位置向服务端坐标缓动，避免 200ms 一跳的顿挫感；
-// - 走路/站立动画按本地实际位移速度混合（不需要服务端发动状态）；
+// 职责：校园里的学生 NPC。
+// - 名单/初始位置由服务端 npc_roster 下发（姓名/班级/性别 + 初始坐标）；移动目标(tx/tz)由 5Hz 的 npc 广播下发。
+// - 客户端**自己驱动位移**：每个学生持有一个 PlayerPhysics 实例，吃和玩家**同一份** colliders
+//   （含 trimesh 复杂碰撞），所以学生撞的墙、踩的坡、上的台阶都和玩家一致，不再穿墙、也不再只做坐标缓动。
+// - 服务端退化为「大脑」：定目标 + 按需求/课表决策去哪 + 触发 LLM 对话；实际走位/碰撞/朝向全在客户端算。
+// - 朝向用**真实速度方向**算（修掉早期服务端 rot 让模型"倒走"的 bug）；走路/站立动画按本地速度混合。
 // - 头顶名牌显示「姓名 · 班级」，说话/心理活动用气泡显示几秒后自动消失。
 //
 // ⚠ 单位与协议（与 server-remote/npcworld.js 对齐，改一端必须同步另一端）：
-//   坐标米、rot 是**度**、st 只有 'idle' | 'walk' | 'act' 三种。
+//   坐标米、st 只有 'idle' | 'walk' | 'act' 三种；客户端朝向是弧度（不依赖服务端 rot）。
 import * as THREE from 'three';
 import { instantiateRigged } from './AssetLoader.js';
 import { attachFakeShadow } from './FakeShadow.js';
+import { PlayerPhysics } from '../player/PlayerPhysics.js';
+import { sphereWorldMTV } from '../world/collision/worldQuery.js';
+import { Config } from '../config.js';
 
 // ⚠ 必须用带骨骼的 -rig 版本（tools/auto-rig.mjs 生成）：原版 boy/girl.glb 没有骨骼也没有动画，
 //   加载出来是个立牌 —— 表现就是"只会平移、没有走路动作"。
@@ -16,11 +21,35 @@ const MODEL = { m: '/assets/boy-rig.glb', f: '/assets/girl-rig.glb' };
 // ⚠ 模型正面偏 90°，与 PlayerModel 的 cfg.modelDeg 必须一致（那边真机校准过的值）。
 //   少了它，学生会侧着身子走。
 const MODEL_DEG = 90;
-const FOLLOW_LAMBDA = 6;      // 位置缓动系数：越大越贴服务端（太大会抖，太小会拖影）
-const ROT_LAMBDA = 8;         // 朝向缓动
+const ROT_LAMBDA = 8;         // 朝向缓动（仅视觉，物理朝向由真实速度决定）
 const TALK_RANGE = 3.2;       // 多近才能搭话（米）
 const BUBBLE_SEC = 5;         // 气泡停留时长（秒）
-const REF_SPEED = 1.25;       // walk 动画播满速对应的速度（与服务端 WALK_SPEED 一致）
+const REF_SPEED = 1.25;       // walk 动画播满速对应的速度（米/秒）
+
+// ⚠ 学生移动改用「跟玩家同一套」PlayerPhysics：吃同一份 colliders（含 trimesh 复杂碰撞），
+//   所以学生撞的墙、踩的坡、上的台阶都和玩家完全一致，不再只做坐标缓动（那会穿墙 + 只有平移）。
+// 服务端退化为只当「大脑」：定目标(tx/tz) + 触发 AI；实际位移/碰撞全在客户端算。
+const STUDENT_RADIUS = Config.PLAYER_RADIUS;   // 碰撞半径 = 玩家
+const STUDENT_HEIGHT = Config.PLAYER_HEIGHT;   // 身高 = 玩家
+const STUDENT_SPEED = 1.25;                     // 维持原服务端步行速度（米/秒）；speedMult 据此折算
+const WALK_PROBE = 0.7;                         // 前进方向探测距离（找一条不被墙挡的路）
+const ARRIVE_DIST = 1.6;                        // 到达目标阈值（与服务端一致）
+// 本地转向候选偏转（弧度）：0/±26/±51/±82/±127°——逐级加宽到「背对目标」，总能找到可走方向
+const STEER_FAN = [0, 0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 2.2, -2.2];
+
+// 复用的合成输入：NPC 没有 WASD/相机，每帧只把「forward」置 1、并把相机朝向 yaw 对准要走的路，
+// 即可复用 PlayerPhysics 的全部解算（重力/贴地/trimesh 子步进/OBB/凸包）。
+const _npcInput = {
+  _f: 0,
+  forwarded: () => _npcInput._f,
+  backwarded: () => 0,
+  strafeRight: () => 0,
+  strafeLeft: () => 0,
+  joyX: 0, joyY: 0, joyMagnitude: () => 0,
+  sprinting: () => false,
+  consumeJump: () => false,
+  isDown: () => false,
+};
 
 // 头顶名牌：画到 canvas 再贴成 Sprite（比 TextGeometry 省事，也不用在打包里塞字体）
 function makeNameTag(text, sub) {
@@ -102,6 +131,8 @@ function drawBubble(cv, text, isThink) {
 export function createStudents(opts) {
   const scene = opts.scene;
   const onSpeak = opts.onSpeak || (() => {}); // 气泡事件（Game 用它同步到对话栏）
+  // 世界碰撞体（与玩家同一份，含 trimesh 复杂碰撞）：Game 传进来的数组引用原地改写，这里直接复用
+  const colliders = opts.colliders || null;
 
   const root = new THREE.Group();
   root.name = 'students';
@@ -128,10 +159,19 @@ export function createStudents(opts) {
       bubbleUntil: 0,
       // 服务端坐标（目标）与本地显示坐标：分开存，才能做缓动
       tx: 0, tz: 0, trot: 0,
-      x: 0, z: 0, rot: 0,
+      x: 0, z: 0, rot: 0, yaw: 0, // yaw：客户端按真实速度算的朝向（弧度），不依赖服务端 rot
       st: 'idle',
       speed: 0,
+      // 每个学生一个独立物理实例（吃同一份 colliders，碰撞与玩家完全一致）
+      physics: new PlayerPhysics(),
+      pstate: { x: 0, y: STUDENT_HEIGHT, z: 0, onGround: false },
+      _arriveSent: 0,
     };
+    // 学生不跳：关掉跳跃，速度倍率折算到 STUDENT_SPEED（PlayerPhysics 默认按玩家 MOVE_SPEED 算）
+    s.physics.canJump = false;
+    s.physics.maxJumps = 0;
+    s.physics.jumpMult = 0;
+    s.physics.speedMult = STUDENT_SPEED / Config.MOVE_SPEED;
     root.add(s.holder);
     byId.set(id, s);
     return s;
@@ -203,12 +243,19 @@ export function createStudents(opts) {
       s.name = String(it.name || '同学');
       s.cls = String(it.cls || '');
       s.sex = it.sex === 'f' ? 'f' : 'm';
-      s.tx = Number(it.x) || 0;
-      s.tz = Number(it.z) || 0;
+      // ⚠ 协议：优先读 tx/tz（服务端下发的**目标点**）；兼容老协议只发 x/z 时退回用 x/z 当目标。
+      const gx = Number.isFinite(Number(it.tx)) ? Number(it.tx) : Number(it.x);
+      const gz = Number.isFinite(Number(it.tz)) ? Number(it.tz) : Number(it.z);
+      s.tx = Number.isFinite(gx) ? gx : 0;
+      s.tz = Number.isFinite(gz) ? gz : 0;
       s.trot = Number(it.rot) || 0;
       if (!s.model) {
-        s.x = s.tx; s.z = s.tz; s.rot = s.trot;
-        s.holder.position.set(s.x, 0, s.z);
+        // 初始位置用服务端当前坐标(x/z)落地 pstate（目标已在上面临时设好）
+        const ix = Number.isFinite(Number(it.x)) ? Number(it.x) : s.tx;
+        const iz = Number.isFinite(Number(it.z)) ? Number(it.z) : s.tz;
+        s.pstate.x = ix; s.pstate.z = iz; s.pstate.y = STUDENT_HEIGHT;
+        s.x = ix; s.z = iz; s.rot = s.trot;
+        s.holder.position.set(ix, 0, iz);
         s.holder.rotation.y = (s.rot * Math.PI) / 180;
         loadModel(s);
       }
@@ -227,13 +274,13 @@ export function createStudents(opts) {
     for (const it of list) {
       const s = byId.get(String(it.id));
       if (!s) continue;
-      const nx = Number(it.x);
-      const nz = Number(it.z);
+      // ⚠ 协议：广播的是**目标点** tx/tz（服务端只定目标，客户端走位）；兼容老协议读 x/z。
+      const nx = Number.isFinite(Number(it.tx)) ? Number(it.tx) : Number(it.x);
+      const nz = Number.isFinite(Number(it.tz)) ? Number(it.tz) : Number(it.z);
       // NaN 防线：服务端坐标一旦是 NaN，整个模型会消失且射线打不到（见项目记忆第 7 条）
       if (!Number.isFinite(nx) || !Number.isFinite(nz)) continue;
       s.tx = nx;
       s.tz = nz;
-      s.trot = Number(it.rot) || 0;
       s.st = String(it.st || 'idle');
     }
   }
@@ -263,41 +310,81 @@ export function createStudents(opts) {
     let best = null;
     let bestD = TALK_RANGE;
     for (const s of byId.values()) {
-      const d = Math.hypot(s.x - px, s.z - pz);
+      const d = Math.hypot(s.pstate.x - px, s.pstate.z - pz);
       if (d <= bestD) { bestD = d; best = s; }
     }
     return best;
   }
 
+  // ⚠ 学生走位改由客户端 PlayerPhysics 驱动（吃和玩家同一份 colliders，含 trimesh 复杂碰撞）。
+  // 服务端只下发「目标点」(tx/tz) 与状态 st；实际位移/碰撞/朝向都在这里算。
   function update(dt) {
     const now = performance.now() / 1000;
-    const kp = 1 - Math.exp(-FOLLOW_LAMBDA * dt);
-    const kr = 1 - Math.exp(-ROT_LAMBDA * dt);
+    const cs = colliders; // 同一份世界碰撞体（含 trimesh），与玩家共用
     for (const s of byId.values()) {
-      const dx = s.tx - s.x;
-      const dz = s.tz - s.z;
-      const stepX = dx * kp;
-      const stepZ = dz * kp;
-      s.x += stepX;
-      s.z += stepZ;
-      // 朝向：走最短弧（避免 350° → 10° 时整只转一大圈）
-      let dr = ((s.trot - s.rot + 540) % 360) - 180;
-      s.rot += dr * kr;
-      s.holder.position.set(s.x, 0, s.z);
-      s.holder.rotation.y = (s.rot * Math.PI) / 180;
-      // 动画：按本地实际速度混合 idle/walk
-      const speed = dt > 0 ? Math.hypot(stepX, stepZ) / dt : 0;
-      s.speed = speed;
+      const dx = s.tx - s.pstate.x;
+      const dz = s.tz - s.pstate.z;
+      const dist = Math.hypot(dx, dz);
+      const shouldWalk = s.st === 'walk';
+      const moving = shouldWalk && dist > 0.4;
+
+      if (cs) {
+        if (moving) {
+          // 朝目标的单位方向，再用 STEER_FAN 选一条不被墙挡的路（trimesh/盒都认）
+          const ux = dx / dist, uz = dz / dist;
+          let nx = ux, nz = uz;
+          const probeY = s.pstate.y - STUDENT_HEIGHT * 0.5;
+          for (const a of STEER_FAN) {
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const cx = ux * ca - uz * sa;
+            const cz = ux * sa + uz * ca;
+            const px = s.pstate.x + cx * WALK_PROBE;
+            const pz = s.pstate.z + cz * WALK_PROBE;
+            // sphereWorldMTV 复用缓冲：只判 null，不存引用
+            if (!sphereWorldMTV(cs, px, probeY, pz, STUDENT_RADIUS)) { nx = cx; nz = cz; break; }
+          }
+          // cameraYaw 让玩家模型朝 (-sin yaw, -cos yaw)；要朝 (nx,nz) 走 ⇒ yaw = atan2(-nx,-nz)
+          const yaw = Math.atan2(-nx, -nz);
+          _npcInput._f = 1;
+          s.physics.update(dt, _npcInput, yaw, s.pstate, cs);
+        } else {
+          // 站立：仍跑物理（重力+贴地+碰撞），但不给前进输入（人不会飘、不会穿地）
+          _npcInput._f = 0;
+          s.physics.update(dt, _npcInput, s.yaw || 0, s.pstate, cs);
+        }
+      } else {
+        // ⚠ 兜底（colliders 没注入时）：退回坐标缓动，免得人定住（无碰撞，会穿墙——只应急）
+        const k = 1 - Math.exp(-6 * dt);
+        s.pstate.x += dx * k;
+        s.pstate.z += dz * k;
+        s.pstate.y = STUDENT_HEIGHT;
+      }
+
+      // 写回显示：脚底 = 头部高 - 身高（PlayerPhysics 的 state.y 是头部/相机高）
+      s.x = s.pstate.x; s.z = s.pstate.z;
+      s.holder.position.set(s.pstate.x, s.pstate.y - STUDENT_HEIGHT, s.pstate.z);
+
+      // 朝向：优先用真实速度方向（修"倒走"），站立即无速度时退回朝目标方向；走最短弧平滑
+      const vx = s.physics.velocity.x, vz = s.physics.velocity.z;
+      const sp = Math.hypot(vx, vz);
+      let faceYaw = s.yaw;
+      if (sp > 0.05) faceYaw = Math.atan2(-vx, -vz);
+      else if (!cs && moving) faceYaw = Math.atan2(-(dx / dist), -(dz / dist));
+      let dYaw = ((faceYaw - s.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      s.yaw += dYaw * Math.min(1, dt * ROT_LAMBDA);
+      s.holder.rotation.y = s.yaw;
+
+      // 动画：按本地真实水平速度混合 idle/walk
+      s.speed = sp;
       if (s.mixer) {
         s.mixer.update(dt);
         if (s.act) {
-          const w = Math.max(0, Math.min(1, speed / REF_SPEED));
+          const w = Math.max(0, Math.min(1, sp / REF_SPEED));
           if (s.act.idle) s.act.idle.setEffectiveWeight(1 - w);
           if (s.act.walk) s.act.walk.setEffectiveWeight(w);
         }
       }
       if (s.bubble && s.bubble.spr.visible && now > s.bubbleUntil) s.bubble.spr.visible = false;
-      // 名牌始终面向相机由 Sprite 自动保证；走动时略微下压名牌避免和气泡叠在一起
       if (s.tag) s.tag.position.y = s.bubble && s.bubble.spr.visible ? 2.6 : 2.25;
     }
   }

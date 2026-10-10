@@ -523,6 +523,8 @@ export class Game {
     });
     this.students = createStudents({
       scene: this.scene,
+      // 与玩家同一份世界碰撞体（含 trimesh 复杂碰撞）：学生吃它，撞墙/踩坡/上台阶都和玩家一致
+      colliders: this.colliders,
       onSpeak: (info) => this._onStudentSpeak(info),
     });
     // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关对话栏
