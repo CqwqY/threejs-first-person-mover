@@ -1142,11 +1142,59 @@ console.log('[36] act 统一入口：LLM 自己选 type → 服务端按 type �
   ok(map({ type: 'zizzz', target: '', action: '去图书馆看书自习' }) === 'library', '未知 type → 本地从 action 文字里读出地方（library）', '');
   ok(map({ type: '奇怪的动作', target: '', action: '随便走走' }) === 'wander', '未知 type 且读不出地方 → 兜底 wander（不卡死）', '');
   ok(map({ goalType: 'canteen' }) === 'canteen', '模型不听话、直接给老格式 goalType → 原样放行（兼容）', '');
+  // ★ 「跟着某人」= 给**已有 person 原语**加 keep 参数（不是新造一个 follow 功能）
+  const fo = w.normalizeAct({ type: 'follow', target: '玩家', action: '跟着玩家' });
+  ok(fo && fo.seek === '玩家' && fo.keep === true, 'type=follow + target=玩家 → seek 玩家 + keep=true', JSON.stringify(fo));
+  const fo2 = w.normalizeAct({ type: 'move', action: '跟着他，别走丢' });
+  ok(fo2 && fo2.keep === true && fo2.seek === '玩家', '"跟着他别走丢"（自由文字，没点名）→ 默认跟着玩家', JSON.stringify(fo2));
+  const fo3 = w.normalizeAct({ goalType: 'follow', goalWho: '学生2' });
+  ok(fo3 && fo3.keep === true && fo3.seek === '学生2号', 'goalType=follow + goalWho=学生2 → 跟着那个学生', JSON.stringify(fo3));
+  // ★ seek 优先级最高：模型同时给 goalType=rest 和 seek（探针 [17] 那个真实形态）也不能被 rest 吞掉
+  const both = w.normalizeAct({ goalType: 'rest', seek: '玩家', goal: '去找玩家说说话' });
+  ok(both && both.seek === '玩家', 'goalType 与 seek 同时给 → seek 优先（不被 rest 吞掉）', JSON.stringify(both));
   // 区域用途反查（本地解释器）：从用户写的"用途"认出区域，而不是从自取的名字
   // （'躺平补觉的地方' 不含任何内置功能区关键词 → 只能靠 desc 命中）
   ok(w.resolvePlaceType('我想去躺平补觉的地方') === 'dorm', 'resolvePlaceType 从**用途**认区域（不靠内置词）', '');
   ok(w.zoneAiName({ desc: '看书自习的地方', name: '静谧小楼', type: 'library' }) === '看书自习的地方', 'zoneAiName 优先用用途', '');
   ok(w.zoneAiName({ name: '静谧小楼', type: 'library' }) === '图书馆', 'zoneAiName 没写用途时退到功能区标签（**绝不用名字**）', '');
+  w.dispose();
+}
+
+console.log('[37] 对话改道走统一翻译器 + 玩家对话的记忆**忠实**（★ 用户实测：说"跟我走"不动、mem 被篡改）');
+{
+  const dir = freshDir('talkeff');
+  writeScene(dir);
+  const list = questStudents([[0, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  let n = 0;
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind !== 'talk') return null;
+      n++;
+      // 第 1 句：模型**嘴上答应**跟着，goalType 填 follow（要真的落到 person+keep）
+      if (n === 1) return { say: '好的，我跟着你。', goalType: 'follow', goalWho: '玩家', mem: '玩家让我跟着他走' };
+      // 第 2 句：模型**什么改道信号都没给**（goalType 空）⇒ 绝不能把意图清掉/改成 wander
+      return { say: '我在等你说下一步。', goalType: '', mem: '玩家又说话了' };
+    },
+  });
+  w.setPlayerPositions([{ id: 'connA', owner: 'anon:ME', x: 8, z: 8 }]);
+  await sleep(80);
+  await w.talk('s1', '跟我走，跟紧一点', '测试玩家', null, 'anon:ME');
+  const st1 = w.stateOf('s1');
+  ok(st1 && st1.intent && st1.intent.goalType === 'person' && st1.intent.keep === true && st1.intent.seekPlayer === true,
+    '说"跟我走" → 真的落地成"跟着玩家"（person + keep，不是嘴上答应）', st1 && JSON.stringify(st1.intent));
+  // 记忆忠实：必须**包含玩家原话**（不能是模型自由发挥的 mem）
+  const m1 = (st1.mem || []).map((x) => String(x.text)).join('\n');
+  ok(/跟我走，跟紧一点/.test(m1), '玩家对话的记忆**含玩家原话**（不被模型自由发挥的 mem 篡改）', m1);
+  // 第 2 句：没给改道信号 → 意图保持"跟着玩家"不动
+  await w.talk('s1', '你在做什么呀？', '测试玩家', null, 'anon:ME');
+  const st2 = w.stateOf('s1');
+  ok(st2 && st2.intent && st2.intent.goalType === 'person' && st2.intent.keep === true,
+    '模型没给改道信号（goalType 空）→ **不动**正在做的事（不被 yield 成 wander/rest）', st2 && JSON.stringify(st2.intent));
+  const m2 = (st2.mem || []).map((x) => String(x.text)).join('\n');
+  ok(/你在做什么呀/.test(m2), '第 2 句也忠实记下原话', m2);
   w.dispose();
 }
 

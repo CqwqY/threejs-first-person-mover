@@ -1388,6 +1388,8 @@ httpServer.listen(PORT);
 const states = new Map();
 // id -> 出生点 {x, z, yaw}
 const spawns = new Map();
+// 连接 id -> 稳定身份键（u:<userId> / anon:<IP>）。NPC 的对话历史与关系按它记 ⇒ 重连不失忆。
+const connOwner = new Map();
 
 let nextId = 1;
 // 当前在线的玩家编号（用于头顶标记），分配时复用已释放的最小序号，避免数字因重连而无限堆高
@@ -1528,6 +1530,9 @@ wss.on('connection', (ws, req) => {
   const id = newId();
   ws.__id = id; // 记在连接上，便于 hit 广播时按 id 找到目标客户端
   ws.__ip = clientIpOf(req); // 真实 IP（代理后面 socket.remoteAddress 不可用）
+  // 连接 id → **稳定身份键**（u:<userId> / anon:<IP>）。NPC 的对话历史/关系按稳定键记，
+  //   这样玩家刷新/重连不会"失忆"；而实时坐标仍按连接 id 走（playerPositions[].id）。
+  connOwner.set(id, ownerKeyOf(ws));
   const num = allocNum(); // 复用最小空闲编号，避免重连把数字推到几十
   const spawn = spawnForNum(num);
   spawns.set(id, spawn);
@@ -1564,6 +1569,7 @@ wss.on('connection', (ws, req) => {
         console.warn('[relay] 鉴权异常（按游客处理）:', e); // 单条消息出错不能拖垮整个中继进程
       }
       ws.__profile = pub;
+      connOwner.set(id, ownerKeyOf(ws)); // 登录后稳定键从 anon:<ip> 变成 u:<id>，同步更新
       ws.send(JSON.stringify({ t: 'auth', ok: !!pub, profile: pub }));
       ws.send(JSON.stringify({ t: 'build', ev: 'owner', key: ownerKeyOf(ws) })); // 登录后归属键从 anon:<ip> 变成 u:<id>，重发一次
       // 若此前已上报过自身状态，立即用登录资料刷新并广播给他人
@@ -1582,9 +1588,11 @@ wss.on('connection', (ws, req) => {
       const text = String(msg.text || '').slice(0, 200);
       if (!sid || !text) return;
       const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username)) || (states.get(id) && states.get(id).nick) || '同学';
-      // 同一个学生同时只处理一句（AI 有冷却，并发多了会撞免费档限流）
-      // 末尾传 'p:<玩家id>'：让 NPC 的关系按**具体玩家**记（换个人是另一段交情）
-      npcWorld.talk(sid, text, String(nick).slice(0, 16), ws, 'p:' + id)
+      // ⚠⚠ 说话人身份必须用**稳定键**（ownerKeyOf：登录 = u:<userId>，游客 = anon:<IP>）。
+      //   以前用 'p:' + ws.__id（每次连接的随机 id）⇒ 玩家一刷新/重连 id 就变 ⇒ NPC 的对话历史
+      //   按人分桶（chatLog[who]）**整个取不到** ⇒ 每句话都被当成"第一句" ⇒ 只会回"你好，你要干什么"。
+      //   （用户实测："我发'你在做什么'，NPC 似乎并没有收到，而是说你好，你要干什么？"）
+      npcWorld.talk(sid, text, String(nick).slice(0, 16), ws, ownerKeyOf(ws))
         .then((out) => {
           // ⚠ 只回发起者（其他人由 npcWorld 里的 npc_say 广播拿到），否则发起者会看到两遍
           if (!out || !out.say) return;
@@ -1618,7 +1626,8 @@ wss.on('connection', (ws, req) => {
       const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username))
         || (states.get(id) && states.get(id).nick) || '同学';
       let out = null;
-      try { out = npcWorld.deliver(sid, item, String(nick).slice(0, 16), 'p:' + id); }
+      // 交付人用**稳定键**（ownerKeyOf）⇒ 玩家重连后仍能认出"是同一个人"
+      try { out = npcWorld.deliver(sid, item, String(nick).slice(0, 16), ownerKeyOf(ws)); }
       catch (e) { console.warn('[npc] 交付结算失败 ' + sid + '：' + ((e && e.message) || e)); }
       if (!out) return;
       ws.send(JSON.stringify({ t: 'npc_deliver', id: sid, ok: !!out.ok, item, reason: out.reason || '', reward: out.reward || 0, say: out.say || '' }));
@@ -2090,8 +2099,11 @@ wss.on('connection', (ws, req) => {
     if (npcWorld && npcWorld.setPlayerPositions) {
       const arr = [];
       for (const [pid, st] of states.entries()) {
-        // ⚠ 必须带 id：委托任务"回来复命"要知道回到**哪个**玩家身边（不只是"附近有没有人"）
-        if (Number.isFinite(Number(st.x)) && Number.isFinite(Number(st.z))) arr.push({ id: pid, x: Number(st.x), z: Number(st.z) });
+        // ⚠ 带两个 id：id = 连接 id（实时坐标用）；owner = **稳定身份键**（NPC 按它记关系/历史，
+        //   重连不变 ⇒ 委托复命/跟随不会因为玩家刷新就认不出人）。
+        if (Number.isFinite(Number(st.x)) && Number.isFinite(Number(st.z))) {
+          arr.push({ id: pid, owner: connOwner.get(pid) || ('anon:' + pid), x: Number(st.x), z: Number(st.z) });
+        }
       }
       npcWorld.setPlayerPositions(arr);
     }
@@ -2112,6 +2124,7 @@ wss.on('connection', (ws, req) => {
     }
     states.delete(id);
     spawns.delete(id);
+    connOwner.delete(id);
     freeNum(num); // 释放编号，供后续玩家复用
   });
 

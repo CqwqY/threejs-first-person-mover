@@ -117,6 +117,13 @@ const CHAT_NEAR_MAX = 4.0;     // 靠得近的一对，最迟多久开口（秒�
 const CHAT_GAP_MS = 25000;     // 全局最小间隔（毫秒）：**纯粹当成本保险**（不是触发条件，触发永远是"靠近+概率"）
 const PERSON_SEEK_TIMEOUT_MS = 90000; // 「去找某人」最多找这么久（追不上就回去干自己的事，别永远在外面晃）
 
+// ---------- 「跟着我」（玩家/LLM 自由说出的跟随意图）----------
+// ⚠ 这不是"新加一个叫 follow 的功能"：它是**已有原语 `person`（持续朝向某人）的一个参数** keep=true。
+//   LLM 自己决定要不要跟、跟谁（代码只提供"朝向某人 + 到跟前是否停"这两个旋钮）。
+const FOLLOW_KEEP = 3.5;         // 跟随保持的距离（米）：比这远就追，近了就停（别贴脸推玩家）
+const FOLLOW_REPATH_MS = 1200;   // 跟随途中多久重指一次目标**当前位置**（玩家一直在动）
+const FOLLOW_GIVEUP = 45;        // 目标离太远（米）就放弃跟随（追不上了，别满校园追）
+
 // ---------- P2：感知 ----------
 // NPC 会"注意到"身边经过的人/玩家 → 写一条**短观察**进 mem（记忆流，会被检索/喂 prompt）。
 // 开销靠"限流 + 超限先丢观察"控制，不靠另开缓冲：观察进 mem 才真的影响它之后的举止与说话。
@@ -427,8 +434,9 @@ export function createNpcWorld(opts) {
       return { ok: false, reason: '这个不是我要的（我要的是「' + w.itemName + '」）' };
     }
     applyMoodWord(s, '开心');
-    bumpRel(s, playerId || ('p:' + w.playerId), 0.7, '帮我买了' + w.itemName);
-    s.mem.push({ t: Date.now(), text: (playerName || '玩家') + '帮我买来了「' + w.itemName + '」，人挺靠谱', kind: 'trade', from: playerId || '' });
+    // 关系按**稳定键**记（w.playerId 已是完整键：u:/anon:/p:），别再加前缀
+    bumpRel(s, playerId || w.playerId || '', 0.7, '帮我买了' + w.itemName);
+    s.mem.push({ t: Date.now(), text: (playerName || '玩家') + '帮我买来了「' + w.itemName + '」，人挺靠谱', kind: 'trade', from: playerId || w.playerId || '' });
     trimMemory(s);
     const reward = w.reward;
     s.want = null;
@@ -437,6 +445,24 @@ export function createNpcWorld(opts) {
     saveStudents(students);
     console.info('[npc] ' + s.name + ' 收到「' + w.itemName + '」（' + (playerName || '玩家') + ' 交付，奖励 ¥' + reward + '）');
     return { ok: true, reward, itemName: w.itemName, say: '谢啦！这个给你当跑腿费，拿去买点别的。' };
+  }
+  // ---------- 玩家身份键（★ 统一处：别再到处 assume 'p:'）----------
+  // 稳定键：u:<userId>（登录）/ anon:<IP>（游客）/ p:<连接id>（旧存档）。重连不变的是前两种。
+  // 判定"这是不是玩家"：三种前缀都算（旧存档里还有 p:xxx，必须继续认）。
+  function isPlayerKey(k) {
+    const v = String(k || '');
+    return v.startsWith('p:') || v.startsWith('u:') || v.startsWith('anon:');
+  }
+  // 按身份键找玩家**当前**坐标：先按稳定键匹配（owner），再回退按连接 id 匹配（兼容旧的 p:<connId>）
+  function playerByOwner(key) {
+    const k = String(key || '');
+    if (!k) return null;
+    for (const p of playerPositions) if (isPlayerKey(k) && String(p.owner || '') === k) return p;
+    const bare = k.replace(/^(p:|u:|anon:)/, '');
+    for (const p of playerPositions) {
+      if (String(p.id) === bare || String(p.owner || '') === bare) return p;
+    }
+    return null;
   }
   // 按 id 找某个玩家的坐标（委托任务"回来复命"要知道是回到**哪个**玩家身边）
   function playerById(id) {
@@ -1375,9 +1401,11 @@ export function createNpcWorld(opts) {
   // 它自然从 type=explore / type=move+observe 的组合里涌现。
   // 这里把 act 归一成既有的 goalType 意图（走位 / 发帖 / 委托各系统直接复用，零重写）。
   // 兼容：① 模型不听话、直接给了老的 goalType → 原样放行；② type 认不出 → 从 action/target 的文字里读地方。
-  function normalizeAct(out) {
+  //
+  // ⚠★ translateIntent 是**纯翻译**（不再有"原样放行"的短路），供 plan/act 与对话改道**共用同一套**。
+  //   以前 applyTalkEffect 自己维护一份动作白名单 ⇒ 两处漂移（对话里说得出的动作、规划时说不出）。
+  function translateIntent(out) {
     if (!out) return out;
-    if (out.goalType) return out; // 老格式 / 模型直接给 goalType：原样走老逻辑
     const type = String(out.type || '').trim().toLowerCase();
     const target = String(out.target || '').trim();
     const action = String(out.action || '').trim();
@@ -1392,20 +1420,66 @@ export function createNpcWorld(opts) {
       mem: clampText(out.mem, 40),
       seek: '',
       post: '',
+      // keep：跟随标记（★ 不新增动作类型，只是给"朝向某人"这个**已有原语**加一个参数）——
+      //   普通 seek 到跟前就停（搭话）；keep=true 则保持距离一直跟着。LLM 自己决定要不要 keep。
+      keep: false,
     };
-    const has = (...xs) => xs.indexOf(type) >= 0;
+    // 「跟着/跟随/跟紧」是不是"持续跟随"的语义（LLM 的自由文字，也可能是 type 名）
+    const followish = /跟(着|上|紧|随|我来|我走|着他|着她)|跟随|follow|别走丢|跟上我/.test(type + ' ' + action + ' ' + target);
     const seekByName = (name) => {
       const o = resolveStudentByName(name);
       return o ? o.name : '';
     };
-    // 去找人（move/talk/goto 且 target 是人或"玩家"）
-    if (has('move', 'goto', 'go', 'walkto', 'walk_to', 'go_to', '去', '走到', 'talk', 'chat', 'speak', '找', '聊天')) {
-      if (/玩家/.test(target) || (!target && /玩家/.test(action))) { r.seek = '玩家'; r.goalType = 'wander'; return r; }
-      const nm = seekByName(target) || seekByName(action);
-      if (nm) { r.goalType = 'wander'; r.seek = nm; return r; }
-      if (has('talk', 'chat', 'speak', '找', '聊天')) { r.goalType = 'inquire'; return r; } // 只说"找人说话"没点名：当打听
-      const z = resolvePlaceType(target || action);
-      r.goalType = z || 'wander'; // 认出去哪就去；认不出就随便走走（绝不卡死）
+    // ★★ 显式 seek 优先级**最高**（在 goalType 之前判断）：
+    //   模型可能同时给了 goalType 和 seek（"goalType=rest, seek=玩家"）⇒ 那是"去找玩家"，
+    //   不能被 goalType=rest 提前 return 吞掉（探针 [17] 就是这么挂的）。
+    const explicitSeek = String(out.seek || '').trim();
+    if (explicitSeek) {
+      r.goalType = 'wander';
+      r.seek = (/玩家|那个人/.test(explicitSeek)) ? '玩家' : (seekByName(explicitSeek) || explicitSeek);
+      r.keep = followish || !!out.keep;
+      return r;
+    }
+    // 老格式：模型/上层直接给了 goalType → 优先按它归一（对话改道走的就是这条路）
+    const gRaw = String(out.goalType || '').trim().toLowerCase();
+    if (gRaw) {
+      if (gRaw === 'wander' || gRaw === 'rest' || gRaw === 'explore' || gRaw === 'inquire') { r.goalType = gRaw; return r; }
+      if (ZONE_TYPE_IDS.has(gRaw)) { r.goalType = gRaw; return r; }
+      // follow：跟着某人（goalWho 说是谁；没给就当"跟着玩家"，对话里"跟我走"就是这个）
+      if (gRaw === 'follow' || gRaw === '跟随' || gRaw === '跟着') {
+        r.goalType = 'wander'; r.keep = true;
+        const who2 = String(out.goalWho || '').trim();
+        r.seek = who2 ? (seekByName(who2) || who2) : '玩家'; // 解析成人名；没说跟谁 ⇒ 默认跟玩家
+        return r;
+      }
+      // wait：原地等（复用 rest，但**不挪窝**、等久一点）
+      if (gRaw === 'wait' || gRaw === '等' || gRaw === '等待') {
+        r.goalType = 'rest'; r.durationSec = clampInt(out.params && out.params.seconds, 10, 300, 60); return r;
+      }
+      // goalType 认不出（"打听"/"去吃饭"/"跟/影随"这种自由词）→ 把它**并入文字线索**，
+      //   下面按同一套文字判断（顺序：先去处，再自主动作）。这保证"模型自己起的名"也能落地。
+      //   ⚠ 不改 r.goalType 的默认值，落到后面统一处理。
+    }
+    // 显式 seek 已在上面处理，这里不再重复。
+    // 文字线索：type + goalType + action + target + goal（顺序无关，谁有信息用谁）
+    const hint = [type, gRaw, action, target, String(out.goal || '')].filter(Boolean).join(' ');
+    // 想找**人**（含"跟谁"）：人优先于地方（"跟着小明"里也有人名也有"跟着"）
+    // ⚠ "玩家"不是学生名，seekByName 认不出 ⇒ 先单独判"玩家/那个人"。
+    if (/玩家|那个人/.test(target) || (!target && /玩家/.test(action))) {
+      r.goalType = 'wander'; r.seek = '玩家'; r.keep = followish; return r;
+    }
+    const person = seekByName(target) || seekByName(action) || seekByName(gRaw);
+    if (person) { r.goalType = 'wander'; r.seek = person; r.keep = followish; return r; }
+    // 文字线索：**类型名**优先（type / goalType），它们是"这是什么动作"的直接声明；
+    // ⚠ 不用 goal/action 全文（那是"内容"，容易误判），内容只用于最后兜底找地方。
+    const tag = [type, gRaw].filter(Boolean).join(' ');
+    const has = (...xs) => xs.some((x) => tag.indexOf(x) >= 0);
+    // 纯跟随语义优先于"去某处"（"跟着他别走丢"里的动作词是"跟"，不是"去"；type 里也可能就写 follow）
+    if (followish) { r.seek = '玩家'; r.goalType = 'wander'; r.keep = true; return r; }
+    // 去某个地方（move/go/goto/去/走到…）：先去人（已在上面处理），再去地方
+    if (has('move', 'goto', 'go', 'walkto', 'walk_to', 'go_to', '去', '走到', '前往', '前往到')) {
+      const z2 = resolvePlaceType(target || action || String(out.goal || ''));
+      r.goalType = z2 || 'wander';
       return r;
     }
     if (has('inquire', 'ask', '打听', '问', '问问')) { r.goalType = 'inquire'; return r; }
@@ -1419,10 +1493,12 @@ export function createNpcWorld(opts) {
     }
     if (has('observe', 'watch', 'look_at', '看', '观察', '看看他', '看看她')) { r.goalType = 'rest'; return r; }
     if (has('wander', 'roam', 'stroll', 'walk', '溜达', '散步', '走走')) { r.goalType = 'wander'; return r; }
-    // 未知 type（它自己起的名）：从 action/target 的文字里读地方；读不出就随便走走
-    r.goalType = resolvePlaceType(action + ' ' + target) || 'wander';
+    // 未知 type（它自己起的名）：从 action/target/goal 的文字里读地方；读不出就随便走走
+    r.goalType = resolvePlaceType(action + ' ' + target + ' ' + String(out.goal || '')) || 'wander';
     return r;
   }
+  // 兼容壳：外部（探针 / 测试 / 老调用）仍按 normalizeAct 用；内部统一走 translateIntent。
+  function normalizeAct(out) { return translateIntent(out); }
 
   // ---------- System2：LLM 低频规划（"灵魂"） ----------
   // 每个 NPC 每隔 PLAN_INTERVAL_MS 让 GLM 想一次"接下来去哪、干什么、干多久"，落地成 s.intent；
@@ -1491,28 +1567,30 @@ export function createNpcWorld(opts) {
           console.info('[npc] ' + s.name + ' 要去公告栏贴通知：' + s.postIdea);
           return;
         }
-        // 「去找某人」：plan 给了 seek → 直接以那个人为目标（到了就交给闲聊系统，增加 AI 间互动）
+        // 「去找某人 / 跟着某人」：plan/act 给了 seek → 以那人为目标。
+        //   keep=true（"跟着/跟随"语义）= 到跟前**不停**，保持距离一直跟；否则到了就交给闲聊系统。
         if (out.seek) {
           const sq = String(out.seek).trim();
-          // 想找**玩家**：走过去（走到跟前站住，等人开口）—— 这是"AI 对玩家有兴趣"的落点
+          const keep = !!out.keep;
+          // 想找**玩家**：走到跟前（keep 时跟住不放）
           if (sq.indexOf('玩家') >= 0 || sq.indexOf('那个人') >= 0) {
             const p = nearestPlayer(s);
             if (p) {
-              s.intent = { goalType: 'person', goalText: '去找玩家', activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekPlayer: true, since: now };
+              s.intent = { goalType: 'person', goalText: keep ? '跟着玩家' : '去找玩家', activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekPlayer: true, keep, since: now };
               setTarget(s, Number(p.x), Number(p.z));
               s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
               s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt;
-              console.info('[npc] ' + s.name + ' 打算去找玩家');
+              console.info('[npc] ' + s.name + (keep ? ' 开始跟着玩家走' : ' 打算去找玩家'));
               return;
             }
           }
           const seeker = resolveStudentByName(sq);
           if (seeker && seeker !== s) {
-            s.intent = { goalType: 'person', goalText: '去找' + seeker.name, activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekId: seeker.id, since: now };
+            s.intent = { goalType: 'person', goalText: (keep ? '跟着' : '去找') + seeker.name, activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekId: seeker.id, keep, since: now };
             setTarget(s, Number(seeker.x), Number(seeker.z));
             s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
             s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt;
-            console.info('[npc] ' + s.name + ' 打算去找 ' + seeker.name);
+            console.info('[npc] ' + s.name + (keep ? ' 开始跟着 ' : ' 打算去找 ') + seeker.name);
             return;
           }
         }
@@ -1835,6 +1913,8 @@ export function createNpcWorld(opts) {
     s.rel[who] = cur;
   }
   // 对话"影响"落地：改心情、改对说话人的关系、必要时**直接改道**（这是"对话能改变它"的核心）。
+  // ⚠★ 改道走**同一套 normalizeAct 翻译器**（不再自己维护一份动作白名单）：
+  //   这样 LLM 在对话里说"跟着我/去操场/问问同学…"（甚至它自起的名）都会经同一个入口落到原语上。
   function applyTalkEffect(s, out, who) {
     if (!out) return;
     applyMoodWord(s, out.mood);
@@ -1842,32 +1922,58 @@ export function createNpcWorld(opts) {
     // ⚠ 这次是**委托办事**（有 task）⇒ 走位由任务状态机接管，别再用 goalType 改道：
     //   两套走位同时生效时，"让你去找人"会顺带触发一次无关的寻路（用户实测的"也触发寻路了"）。
     if (out.task && out.task.target) return;
-    // 因对话改道：只接受合法目标（已知区域 / wander / rest / 两个自主动作），其余忽略（不臆造去处）
-    const raw = String(out.goalType || '').trim().toLowerCase();
-    const gt = (raw === 'wander' || raw === 'rest') ? raw
-      : ZONE_TYPE_IDS.has(raw) ? raw
-        : (['explore', '看看学校', '逛逛', '参观', '探索', '去转转', '看看'].includes(raw) ? 'explore'
-          : (['inquire', 'ask', '问人', '打听', '问问', '找人聊聊'].includes(raw) ? 'inquire' : null));
-    if (!gt) return;
+    const now = Date.now();
     const note = '（受对话影响）' + clampText(out.mem || out.say || '', 40);
-    // "你四处问问同学""你去看看学校" —— 玩家这么说了，它就得真的去做（用户实测要的就是这个）
-    if (gt === 'explore') { startExplore(s, Date.now()); if (s.intent) s.intent.goalText = note; return; }
-    if (gt === 'inquire') { startInquire(s, Date.now()); if (s.intent) s.intent.goalText = note; return; }
-    if (gt === 'rest') {
-      s.st = 'act'; s.stayUntil = Date.now() + 30000;
-      s.intent = { goalType: 'rest', goalText: note, activity: '', plan: '', since: Date.now() };
-      return;
+
+    // ⚠★ 只认**显式的改道信号**：goalType / goalWho / seek。绝不用 say 的自由文字当依据
+    //   —— 否则模型随口一句"歇会儿/走走"就会把 NPC 正在做的事（比如刚听到的通知）覆盖掉。
+    const raw = String(out.goalType || '').trim().toLowerCase();
+    const goalWho = String(out.goalWho || out.seek || '').trim();
+    if (!raw && !goalWho) return; // 没给任何改道信号 ⇒ 什么都不动（只改心情/关系）
+    // 交给 translateIntent：把"自然语言的意图"统一翻成 {goalType,seek,keep,...}
+    //   goal 一起传：goalType 认不出时（如"去吃饭"），靠 goal 的文字读地方。
+    const tr = translateIntent({ goalType: raw, goalWho, seek: String(out.seek || ''), goal: String(out.goal || out.mem || ''), type: '', action: '', target: '', params: {} });
+    const gt = tr.goalType;
+
+    // 自主动作（两个"好奇"行为）：复用既有实现
+    if (gt === 'explore') { startExplore(s, now); if (s.intent) s.intent.goalText = note; return; }
+    if (gt === 'inquire') { startInquire(s, now); if (s.intent) s.intent.goalText = note; return; }
+    if (gt === 'rest') { s.st = 'act'; s.stayUntil = now + 30000; s.intent = { goalType: 'rest', goalText: note, activity: '', plan: '', since: now }; return; }
+    // 「去找某人 / 跟着某人」：复用 person 原语（keep 决定到跟前停不停）
+    if (tr.seek) {
+      const keep = !!tr.keep;
+      if (/玩家/.test(tr.seek)) {
+        const p = nearestPlayer(s);
+        if (!p) return;
+        s.intent = { goalType: 'person', goalText: keep ? '跟着玩家' : '去找玩家', activity: '', plan: '', seekPlayer: true, keep, since: now };
+        setTarget(s, Number(p.x), Number(p.z));
+        s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+        console.info('[npc] ' + s.name + (keep ? ' 开始跟着玩家走（对话）' : ' 去找玩家（对话）'));
+        return;
+      }
+      const t = resolveStudentByName(tr.seek);
+      if (t && t !== s) {
+        s.intent = { goalType: 'person', goalText: (keep ? '跟着' : '去找') + t.name, activity: '', plan: '', seekId: t.id, keep, since: now };
+        setTarget(s, Number(t.x), Number(t.z));
+        s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+        return;
+      }
     }
-    if (gt === 'wander') { wander(s, Date.now()); }
-    else { const z = pickOne(zonesOfType(gt)); if (!z) return; goZone(s, Date.now(), z); }
-    s.intent = { goalType: gt, goalText: note, activity: '', plan: '', since: Date.now() };
+    // 其余：合法区域 → 走过去；wander → 随便走走；认不出就**不动**（别臆造去处）
+    if (gt === 'wander') { wander(s, now); s.intent = { goalType: 'wander', goalText: note, activity: '', plan: '', since: now }; return; }
+    if (ZONE_TYPE_IDS.has(gt)) {
+      const z = pickOne(zonesOfType(gt));
+      if (!z) return;
+      goZone(s, now, z);
+      s.intent = { goalType: gt, goalText: note, activity: '', plan: '', since: now };
+    }
   }
   // 关系 key（'p:xxx' 玩家 / 学生 id）→ 人话名字。
   // ⚠ 以前直接把 's3' 这种**内部 id** 喂给模型，模型根本不知道那是谁，还容易把自己（s1）和对方搞混
   //   （"模糊自己和对方"就是这么来的）。统一解析成人名再进 prompt。
   function relNameOf(key) {
     const k = String(key || '');
-    if (k.startsWith('p:')) return '玩家';
+    if (isPlayerKey(k)) return '玩家';
     const o = students.find((x) => x.id === k);
     return o ? o.name : '';
   }
@@ -2071,7 +2177,9 @@ export function createNpcWorld(opts) {
       return t ? { x: Number(t.x), z: Number(t.z) } : null;
     }
     if (q.stage === 'return') {
-      const p = playerById(q.fromId) || nearestPlayer(s);
+      // ⚠ 用 stabil 键找人（q.fromId 是稳定键）⇒ 玩家刷新/重连后仍认得回去找谁；
+      //   认不出再退回"身边最近的玩家"（兜底，别让委托因为一次重连就失败）。
+      const p = playerByOwner(q.fromId) || playerById(q.fromId) || nearestPlayer(s);
       return p ? { x: Number(p.x), z: Number(p.z) } : null;
     }
     return null;
@@ -2128,7 +2236,7 @@ export function createNpcWorld(opts) {
       trimMemory(s); trimMemory(t); saveStudents(students);
       // 问到了 → 立刻掉头**走向委托你的玩家**复命（不是"附近有人就算到"）
       q.stage = 'return'; q.repathAt = 0; q.returnAt = Date.now();
-      const back = playerById(q.fromId) || nearestPlayer(s);
+      const back = playerByOwner(q.fromId) || playerById(q.fromId) || nearestPlayer(s);
       if (back) { setTarget(s, Number(back.x), Number(back.z)); s.st = 'walk'; s.walkUntil = Date.now() + WALK_TIMEOUT * 1000; s.stuck = 0; }
     } catch (e) {
       console.warn('[npc] 任务提问失败：' + ((e && e.message) || e));
@@ -2203,6 +2311,18 @@ export function createNpcWorld(opts) {
         s.mem.push({ t: now, text: mem, kind: kind === 'talk' ? 'say' : '', from: (extra && extra.who) || '', src: srcName });
         await trimMemory(s);
       }
+      // ★ 玩家对话的记忆**必须忠实**：模型自由发挥的 mem 经常篡改（实测：你问"食堂有什么好吃的"，
+      //   它记成"食堂今天推出了红烧肉"；你让它"站住等我"，它记成"周野似乎有事找我"）。
+      //   ⇒ talk 时**以玩家原话为准**生成一条结构化记忆（原话 + 我怎么回应的），
+      //     模型自己的 insights 挪去 think（内心活动），不再污染记忆流。
+      if (kind === 'talk' && extra && extra.text) {
+        const said = clampText(String(extra.text).replace(/\s+/g, ' ').trim(), 40);
+        const myReply = clampText(String(say || '').replace(/\s+/g, ' ').trim(), 30);
+        const who2 = String(extra.name || '玩家');
+        const text2 = '「' + who2 + '」对我说：「' + said + '」' + (myReply ? '，我回：「' + myReply + '」' : '');
+        s.mem.push({ t: now, text: clampText(text2, LEN_MEM), kind: 'say', from: String(extra.who || ''), src: who2 });
+        await trimMemory(s);
+      }
       // 对话/通知的"影响"：改心情 / 改关系 / 必要时改道（notice 也走这条 ⇒ 听到通知真的会改主意去）
       if (kind === 'talk' || kind === 'chat' || kind === 'notice') {
         try { applyTalkEffect(s, out, extra && extra.who); }
@@ -2219,7 +2339,9 @@ export function createNpcWorld(opts) {
             reward: Math.max(8, Math.round(it.price * WANT_REWARD_RATE)),
             reason: clampText(out.request.reason || '', 40),
             createdAt: now,
-            playerId: String((extra && extra.who) || '').replace(/^p:/, ''),
+            // ⚠ 存**完整稳定键**（u:/anon:/p:），别剥前缀：交付时玩家可能已重连，
+            //   靠稳定键才能认出"还是同一个人"，否则跨重连认不出来。
+            playerId: String((extra && extra.who) || ''),
           };
           s._wantAt = now;
           // say 里没说清楚就把请求补一句（玩家得看得懂"要什么"才能去买）
@@ -2456,24 +2578,36 @@ export function createNpcWorld(opts) {
         maybeReflect(s, now);
       }
       if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
-      // 「去找某人 / 去找玩家」：定期朝目标**当前位置**重指（两边都在动 → 会在中间碰头）；
-      //   ⚠ 到人跟前必须**站住**：以前只是清掉意图，人还按着对方**旧坐标**继续走 ⇒ 两人擦肩而过、
-      //   越走越远，永远开不了口。现在到 5m 内就停住等闲聊系统接手。
+      // 「去找某人 / 去找玩家 / 跟着某人」：定期朝目标**当前位置**重指（两边都在动 → 会在中间碰头）。
+      //   ⚠ keep=true（跟随）：**到了也不停**，保持 FOLLOW_KEEP 距离一直跟；玩家走远过头就放弃。
+      //   keep=false（找人搭话）：到 CHAT_RANGE 内站住，交给闲聊系统（以前只在清意图后继续走 ⇒ 擦肩而过）。
       if (!s.quest && s.intent && s.intent.goalType === 'person' && (s.intent.seekId || s.intent.seekPlayer)) {
         let tp = null;
         if (s.intent.seekPlayer) { const p = nearestPlayer(s); if (p) tp = { x: Number(p.x), z: Number(p.z) }; }
         else { const t = students.find((x) => x.id === s.intent.seekId); if (t) tp = { x: Number(t.x), z: Number(t.z) }; }
         const tooLong = now - Number(s.intent.since || 0) > PERSON_SEEK_TIMEOUT_MS;
         const d = tp ? Math.hypot(tp.x - Number(s.x), tp.z - Number(s.z)) : Infinity;
-        if (d < CHAT_RANGE) {
+        if (!tp || tooLong) {
+          s.intent = null;
+          s.decideAt = now; // 找不到人 / 追太久：立刻回日常规划，别在外面永远晃
+        } else if (s.intent.keep) {
+          // ---- 跟随：跟近到 FOLLOW_KEEP 就停下等；远了就继续追；玩家跑太远就放弃 ----
+          if (d > FOLLOW_GIVEUP) {
+            s.intent = null; s.decideAt = now;
+            console.info('[npc] ' + s.name + ' 跟丢了，回日常');
+          } else if (d <= FOLLOW_KEEP) {
+            s.tx = Number(s.x); s.tz = Number(s.z); s.wx = s.tx; s.wz = s.tz; s.path = null; s.pathIdx = 0;
+            s.st = 'act'; s.stayUntil = now + 1500; s.actStepAt = s.stayUntil; // 站住等玩家再走
+          } else if (now - Number(s._seekAt || 0) > FOLLOW_REPATH_MS) {
+            s._seekAt = now; setTarget(s, tp.x, tp.z);
+            s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+          }
+        } else if (d < CHAT_RANGE) {
           s.intent = null;
           s.tx = Number(s.x); s.tz = Number(s.z); s.wx = s.tx; s.wz = s.tz; s.path = null; s.pathIdx = 0;
           s.st = 'act';
           s.stayUntil = Math.max(Number(s.stayUntil || 0), now + (CHAT_INTERVAL + 15) * 1000);
           s.actStepAt = Number(s.stayUntil); // 等对方开口的这段时间别乱挪步
-        } else if (!tp || tooLong) {
-          s.intent = null;
-          s.decideAt = now; // 找不到人 / 追太久：立刻回日常规划，别在外面永远晃
         } else if (now - Number(s._seekAt || 0) > 2500) {
           s._seekAt = now; setTarget(s, tp.x, tp.z);
           s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
@@ -2704,9 +2838,9 @@ export function createNpcWorld(opts) {
       mood: { ...s.mood },
       goal: s.intent ? { type: s.intent.goalType, text: s.intent.goalText || '', activity: s.intent.activity || '' } : null,
       quest: s.quest ? { stage: s.quest.stage, targetName: s.quest.targetName, question: s.quest.question } : null,
-      // 关系：把人名解析出来给玩家看（p:xxx → 玩家；s2 → 该学生姓名）
+      // 关系：把人名解析出来给玩家看（玩家键 → 玩家；s2 → 该学生姓名）
       rel: Object.entries(s.rel || {}).map(([k, v]) => ({
-        who: String(k).startsWith('p:') ? '玩家' : ((students.find((x) => x.id === k) || {}).name || k),
+        who: isPlayerKey(k) ? '玩家' : ((students.find((x) => x.id === k) || {}).name || k),
         trust: Math.round((Number(v && v.trust) || 0) * 100) / 100,
       })).filter((x) => Math.abs(x.trust) > 0.05).sort((a, b) => Math.abs(b.trust) - Math.abs(a.trust)).slice(0, 5),
       needs: { ...s.needs },
