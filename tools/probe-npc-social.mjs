@@ -371,7 +371,8 @@ console.log('[10] NPC 之间离得远 → 主动**相向走近**，凑近了自�
     },
   });
   const d0 = distW(w, 's1', 's2');
-  await sleep(4200);
+  // 闲聊现在是**事件驱动**：靠得近就按概率开口（最多 CHAT_NEAR_MAX=4s 必开口），不再等 20s 的定时
+  await sleep(7500);
   const d1 = distW(w, 's1', 's2');
   const a = w.stateOf('s1'), b = w.stateOf('s2');
   w.dispose();
@@ -701,6 +702,69 @@ console.log('[21] 日计划：每游戏日生成一次，并注入之后每次 p
   w.dispose();
   ok(st && st.dayPlan && /书/.test(String(st.dayPlan.text)), '生成了"今日打算"', st && JSON.stringify(st.dayPlan));
   ok(String(planDayPlan || '') !== '', 'plan 的 prompt 里带上了【今天你本来打算】', 'dayPlan=' + planDayPlan);
+}
+
+console.log('[22] NPC 自己发公告：走到公告栏 → 让 AI 写一条贴出去 → 别的学生看到并照做');
+{
+  const dir = freshDir('post');
+  writeScene(dir);
+  writeZonesCustom(dir, [{ id: 'zp', name: '操场', type: 'playground', minX: 40, maxX: 60, minZ: -10, maxZ: 10 }]);
+  const blist = questStudents([[300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0], [440, 0]]);
+  for (const s of blist) { s.planAt = 1e15; s.decideAt = 1e15; s.st = 'idle'; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  const posted = [];
+  let w = null;
+  w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => (input.kind === 'post' ? { text: '下午四点半操场打球，想来的喊我' } : { say: '', think: '', mem: '' }),
+    // 替身 index.js 的 pushBoard：落盘 + 广播 + **喂回本世界**（其他学生看到并照做）
+    onPost: (text, from) => { posted.push({ text, from }); if (w) w.setBoard([text]); },
+  });
+  await sleep(60);
+  ok(w.debugPost('s1', '下午四点半操场打球') === true, '（模拟 plan 里 AI 说"这事要通知全校"）它决定去公告栏贴', '');
+  await sleep(400);
+  ok(posted.length === 1 && posted[0].from === '学生1号', 'AI 写完定稿并**真的贴出去**（走了 onPost）', JSON.stringify(posted));
+  ok(/操场/.test(String(posted[0] && posted[0].text)), '贴的内容是它本来想说的那件事', JSON.stringify(posted));
+  const st = w.stateOf('s1');
+  ok(st && st.postPending === false, '贴完清掉"要去贴"的状态', String(st && st.postPending));
+  ok(st && st.mem.some((m) => /贴了通知/.test(String(m.text))), '它自己记住了"我在公告栏贴了通知"', JSON.stringify(st && st.mem));
+  // 闭环：公告回到本世界 → 学生陆续看到 → 照做（往操场走）。
+  // ⚠ 广播是**轮流**下发的（announceIdx 从 0 开始）⇒ 第一个"听到"的就是 s1 本人，别把它排除掉。
+  let obey = 0;
+  for (const sid of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']) {
+    const x = w.stateOf(sid);
+    if (x && x.intent && x.intent.goalType === 'playground') obey++;
+  }
+  w.dispose();
+  ok(obey >= 1, '**公告真的起作用**：别的学生把它当通知照做（往操场走）', 'obey=' + obey);
+}
+
+console.log('[24] 不再站着发呆：到地方后的停留封顶 + 一结束就立刻重新决策');
+{
+  const dir = freshDir('nostand');
+  writeScene(dir);
+  writeZonesCustom(dir, [{ id: 'zc', name: '饭堂', type: 'canteen', minX: 29, maxX: 31, minZ: -1, maxZ: 1 }]);
+  const blist = questStudents([[30, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0]]);
+  for (const s of blist) { s.planAt = 0; s.decideAt = 0; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    // plan 故意要"在饭堂待 300 秒"（最大值）—— 到地方后**不许真站 300 秒**
+    askStudent: async (input) => (input.kind === 'plan'
+      ? { goalType: 'canteen', goal: '去饭堂吃饭', activity: '吃饭', plan: '', durationSec: 300, thought: '' }
+      : { say: '', think: '', mem: '' }),
+  });
+  await sleep(500);
+  const st = w.stateOf('s1');
+  const now = Date.now();
+  const remainS = st ? Math.round((st.stayUntil - now) / 1000) : -1;
+  w.dispose();
+  ok(st && st.st === 'act', '到饭堂开始"做活动"（不是一直走/一直站）', st && st.st);
+  ok(remainS >= 0 && remainS <= 47, '停留**封顶 45s**（不是按 plan 的 300s 干站）', '剩余 ' + remainS + 's');
+  // ⚠ 早先这条断言挂在 planAt 上 —— 那等于"活动一结束就让 LLM 重新规划"，会把调用量从 2 分钟
+  //   一次拉到 45 秒一次。正确做法是：**规则大脑**立刻接手，LLM 规划保持自己的节奏。
+  ok(st && st.decideAt <= st.stayUntil + 100, '歇够就让规则大脑立刻接手（不再干站着）', 'stayUntil-decideAt=' + (st && (st.stayUntil - st.decideAt)));
+  ok(st && st.planAt > st.stayUntil + 1000, 'LLM 规划仍保持 2 分钟节奏（没被拖到 45 秒一次）', 'planAt-stayUntil=' + (st && Math.round((st.planAt - st.stayUntil) / 1000)) + 's');
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

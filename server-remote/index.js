@@ -2199,6 +2199,8 @@ if (createNpcWorld) {
     broadcast: broadcastAll,
     getDayTime: () => (typeof dayTime === 'number' ? dayTime : 0.35), // 课程表跟世界时刻走
     askStudent: askStudent || undefined, // 没加载到就交给 npcworld 的空实现（学生照走，不对话）
+    // 学生自己发的公告：走和玩家同一条路（pushBoard：落盘 + 广播所有客户端 + 喂回 AI 让其他学生看到并照做）
+    onPost: (text, from) => pushBoard(text, from),
   });
   console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个；对话 ' + (askStudent ? '开' : '关'));
   if (npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6)); // 现有公告喂给 AI

@@ -95,16 +95,23 @@ const PLAN_DUR_MAX = 300;        // 单次活动最长时长（秒）
 
 // ---------- P1：NPC↔NPC 闲聊 ----------
 const CHAT_RANGE = 5.0;        // 多近算"凑到一起聊天"（米）
-const CHAT_COOLDOWN = 90;      // 同一个学生两次参与闲聊的最小间隔（秒）
+const CHAT_COOLDOWN = 70;      // 同一个学生两次参与闲聊的最小间隔（秒）
 const CHAT_INTERVAL = 20;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量（再降一点：用户要"AI 之间有对话的欲望"）
 // "做活动"时别站桩：隔一会儿在附近挪两步（减少"我要学习然后就一动不动"的无实物表演）
-const ACT_STEP_MIN = 7000;     // 两次"挪步"的最小间隔（毫秒）
-const ACT_STEP_MAX = 15000;    // 最大间隔
-const ACT_STEP_DIST_MIN = 1.2; // 挪步距离范围（米）
-const ACT_STEP_DIST_MAX = 3.0;
+const ACT_STEP_MIN = 3500;     // 两次"挪步"的最小间隔（毫秒）—— 调密一点，别看着像杵着发呆
+const ACT_STEP_MAX = 7000;     // 最大间隔
+const ACT_STEP_DIST_MIN = 2.0; // 挪步距离范围（米）
+const ACT_STEP_DIST_MAX = 5.0;
+// 一件事最多"站"多久（秒）：到点就**立刻重新决策**（事件驱动），绝不站着干等 2 分钟
+const ACT_STAY_MAX = 45;
+const REST_STAY_MAX = 70;      // "原地歇着"的上限（歇够了也该起来）
 const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
 const CHAT_SEEK_RANGE = 45;    // 「想聊天但离得远」时最远会**主动走近**的距离（米）——再远就不追了
-const MEET_INTERVAL = 12;      // 全局两次「撮合一对走近」的最小间隔（秒）——别让 8 个人同时乱窜
+const MEET_INTERVAL = 10;      // 全局两次「撮合一对走近」的最小间隔（秒）——别让 8 个人同时乱窜
+// ⚠ 闲聊改成**事件驱动**（用户明确要求）：靠得近就按概率开口，而不是"等 CHAT_INTERVAL 时间到"。
+//   概率有上界：同一对靠得近最多 CHAT_NEAR_MAX 秒必开口一次（免得纯随机导致偶尔一直不说话）。
+const CHAT_NEAR_MAX = 4.0;     // 靠得近的一对，最迟多久开口（秒）
+const CHAT_GAP_MS = 25000;     // 全局最小间隔（毫秒）：**纯粹当成本保险**（不是触发条件，触发永远是"靠近+概率"）
 const PERSON_SEEK_TIMEOUT_MS = 90000; // 「去找某人」最多找这么久（追不上就回去干自己的事，别永远在外面晃）
 
 // ---------- P2：感知 ----------
@@ -147,6 +154,14 @@ function bearingName(dx, dz) {
   const a = Math.atan2(dx, -dz);
   return DIR8[Math.round(((a + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8];
 }
+
+// ---------- NPC 发布公告：自己走到公告栏，让 AI 写一条通知贴上去 ----------
+// 触发是**事件驱动**的：规划时 AI 觉得"这事得告诉全校"，就在 plan 里给 post ⇒ 它走去公告栏贴。
+// 贴出去的和玩家贴的完全同路：进公告栏、广播给所有客户端、**其他学生看到并照做**（闭环）。
+const POST_NEAR = 2.5;         // 离公告栏多近算"走到板子前了"（米）
+const POST_CD = 480000;        // 同一个学生两次贴公告的最小间隔（8 分钟）
+const POST_GLOBAL_CD = 150000; // 全局两次 NPC 贴公告的最小间隔（2.5 分钟）——别刷屏
+const POST_TIMEOUT = 90000;    // 从"决定去贴"到"贴出去"的总超时（走不到/被挡住就作罢）
 
 // ---------- 反向委托：NPC 请玩家跑腿（去商店买某件东西、带回来交给它）----------
 // 「必须是游戏真能做的」：商品目录来自服务端 SHOP（客户端 /api/shop 拿到的同一份），
@@ -248,6 +263,8 @@ export function createNpcWorld(opts) {
   const broadcast = opts.broadcast || (() => {});
   const getDayTime = opts.getDayTime || (() => 0.35);
   const askStudent = opts.askStudent || (async () => null); // 由 ai-student.js 注入；没配也不影响走路
+  // 由 index.js 注入：把一条公告真正发出去（落盘 + 广播给所有客户端 + 喂回本世界让其他学生看到）
+  const onPost = opts.onPost || null;
 
   // ---------- 可训练策略网络（阶段1~5 的产物） ----------
   // 守卫式接入：模型不存在 / 损坏 / 契约不一致 → policyReady=false，decide() 自动退回规则大脑，零行为回归风险。
@@ -687,6 +704,9 @@ export function createNpcWorld(opts) {
           dayPlan: null,     // 今日打算：{text, at}
           dayPlanAt: 0,      // 上次生成日计划的时刻（时间字段，必须有初值）
           dayPlanSeq: -1,    // 生成时所处的"游戏日"序号（跨天要重生成；累加型字段，必须有初值）
+          postPending: false, // 是否正要去公告栏贴通知（走位到板子前才真正贴）
+          postIdea: '',       // 它想贴的那件事（plan 给的原始想法）
+          _postAt: 0,         // 上次"决定去贴 / 真的贴了"的时刻（限流+超时；时间字段，必须有初值）
           actStepAt: 0,  // 下一次"做活动时挪两步"的时刻（时间字段，必须有初值）
           actResume: 0,  // 挪步前记下的停留截止（回来接着做活动；0 = 当前不是挪步）
         };
@@ -709,6 +729,9 @@ export function createNpcWorld(opts) {
       if (!Number.isFinite(Number(s.dayPlanAt))) { s.dayPlanAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.dayPlanSeq))) { s.dayPlanSeq = -1; dirty = true; }
       if (s.dayPlan !== null && typeof s.dayPlan !== 'object') { s.dayPlan = null; dirty = true; }
+      if (!Number.isFinite(Number(s._postAt))) { s._postAt = 0; dirty = true; }
+      if (typeof s.postPending !== 'boolean') { s.postPending = false; dirty = true; }
+      if (typeof s.postIdea !== 'string') { s.postIdea = ''; dirty = true; }
       if (!Number.isFinite(Number(s.actStepAt))) { s.actStepAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.actResume))) { s.actResume = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
@@ -784,9 +807,31 @@ export function createNpcWorld(opts) {
       s.decideAt = now + rand(DECIDE_MIN, DECIDE_MAX) * 1000;
       return;
     }
-    // 24 次都挑不到（被建筑围死了）：原地发呆 3 秒再试，绝不静默卡住
+    // 兜底 1：出生点那圈被建筑围死 → 换参考点：从**当前位置**往更大范围试（别因为锚点被堵就永远发呆）
+    for (let i = 0; i < 16; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = rand(6, WANDER_RADIUS * 1.6);
+      const x = Number(s.x) + Math.cos(a) * r;
+      const z = Number(s.z) + Math.sin(a) * r;
+      if (blocked(x, z)) continue;
+      setTarget(s, x, z);
+      s.st = 'walk';
+      s.walkUntil = now + WALK_TIMEOUT * 1000;
+      s.stuck = 0;
+      s.decideAt = now + rand(DECIDE_MIN, DECIDE_MAX) * 1000;
+      return;
+    }
+    // 兜底 2：连远处的点也挑不到（真空里 / 全被围）→ 短等再试，绝不静默卡住
     s.st = 'idle';
-    s.decideAt = now + 3000;
+    s.decideAt = now + 2500;
+  }
+  // 挑一个"不是我正待着的"区域：否则站在饭堂里决定"去饭堂" ⇒ 一步不动 ⇒ 看着像发呆
+  function pickZoneAway(s, type) {
+    const list = zonesOfType(type);
+    if (!list.length) return null;
+    const here = zoneAt(Number(s.x), Number(s.z));
+    const other = here ? list.filter((z) => z.id !== here.id) : list;
+    return pickOne(other.length ? other : list);
   }
 
   // 当前世界时刻（小时）：0 = 00:00
@@ -882,8 +927,8 @@ export function createNpcWorld(opts) {
       }
     }
     let target = null;
-    if (seg && Math.random() < 0.7) target = pickOne(zonesOfType(seg.type));
-    if (!target) target = pickOne(zonesOfType(needType(s)));
+    if (seg && Math.random() < 0.7) target = pickZoneAway(s, seg.type);
+    if (!target) target = pickZoneAway(s, needType(s));
     // 没有对应类型的区域：自由漫步，别硬塞一个无关目的地（那会让角色"不知道自己在哪"）
     if (!target) { wander(s, now); return; }
     goZone(s, now, target);
@@ -931,13 +976,13 @@ export function createNpcWorld(opts) {
   function applyPolicy(s, now) {
     const a = policy.net.decide(buildState(s));
     if (policy.net.isZone(a)) {
-      const target = pickOne(zonesOfType(a));
+      const target = pickZoneAway(s, a);
       if (target) { goZone(s, now, target); return; }
       wander(s, now); return; // 没这种类型的区域：自由漫步兜底
     }
     if (a === 'wander') { wander(s, now); return; }
-    if (a === 'rest') { s.st = 'act'; s.stayUntil = now + rand(STAY_MIN, STAY_MAX) * 1000; s.decideAt = now + rand(DECIDE_MIN, DECIDE_MAX) * 1000; return; }
-    if (a === 'chat_with') { s.st = 'act'; s.stayUntil = now + rand(20, 50) * 1000; s.decideAt = now + rand(DECIDE_MIN, DECIDE_MAX) * 1000; return; }
+    if (a === 'rest') { s.st = 'act'; s.stayUntil = now + Math.min(rand(STAY_MIN, STAY_MAX), ACT_STAY_MAX) * 1000; s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX); s.decideAt = s.stayUntil; return; }
+    if (a === 'chat_with') { s.st = 'act'; s.stayUntil = now + Math.min(rand(20, 50), ACT_STAY_MAX) * 1000; s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX); s.decideAt = s.stayUntil; return; }
     if (a === 'follow_player' || a === 'help_player') {
       const p = nearestPlayer(s);
       if (p) {
@@ -1033,6 +1078,20 @@ export function createNpcWorld(opts) {
         }
         const goalType = resolveGoalType(out.goalType);
         const durMs = clampInt(out.durationSec, PLAN_DUR_MIN, PLAN_DUR_MAX, 60) * 1000;
+        // 事件驱动：AI 觉得"这事得告诉全校"（比如约人去操场、捡到东西找失主）→ 先走去公告栏贴出来。
+        // 走位交给 System1；到板子前才真正让 AI 写定稿并发布（见 publishPost）。
+        if (out.post && onPost && !s.postPending &&
+            now - Number(s._postAt || 0) > POST_CD && now - lastNpcPost > POST_GLOBAL_CD) {
+          s.postIdea = clampText(out.post, 40);
+          s.postPending = true;
+          s._postAt = now;
+          s.intent = { goalType: 'board', goalText: '去公告栏贴通知', activity: clampText(s.postIdea, 40), plan: '', since: now };
+          setTarget(s, BOARD_POS.x, BOARD_POS.z);
+          s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+          s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt;
+          console.info('[npc] ' + s.name + ' 要去公告栏贴通知：' + s.postIdea);
+          return;
+        }
         // 「去找某人」：plan 给了 seek → 直接以那个人为目标（到了就交给闲聊系统，增加 AI 间互动）
         if (out.seek) {
           const sq = String(out.seek).trim();
@@ -1075,13 +1134,16 @@ export function createNpcWorld(opts) {
         }
         if (goalType === 'rest') {
           s.st = 'act';
-          s.stayUntil = Math.max(now + durMs, now + PLAN_INTERVAL_MS);
-          s.planAt = now + PLAN_INTERVAL_MS;
-          s.decideAt = s.planAt;
+          // 歇也有上限：歇够了**立刻**重新决策（别一歇两分钟杵在那儿）
+          s.stayUntil = now + Math.min(durMs, REST_STAY_MAX * 1000);
+          s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX);
+          // ⚠ 只把**规则大脑**的决策点提前（歇够就换事做），LLM 规划仍保持 PLAN_INTERVAL_MS 的节奏
+          //   —— 否则"activity 一结束就 plan"会把 GLM 调用量从 2 分钟一次拉到 45 秒一次。
+          s.decideAt = s.stayUntil;
           return;
         }
         if (goalType === 'wander') { wander(s, now); s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt; return; }
-        const target = pickOne(zonesOfType(goalType));
+        const target = pickZoneAway(s, goalType);
         if (!target) { wander(s, now); s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt; return; } // 没这种区域：自由漫步兜底
         goZone(s, now, target);          // 落地走位目标
         s._stayMs = durMs;               // 到达后按 plan 的时长停留（决策一次、干一会活）
@@ -1358,6 +1420,16 @@ export function createNpcWorld(opts) {
       }
     }
     return best;
+  }
+  // "靠得近就该开口"：随机但**有上界** —— 同一对靠得近最多 CHAT_NEAR_MAX 秒一定会聊起来。
+  // 每拍的成功率取 dt/剩余时间：既有人味（随机几拍之后才开口），又不会出现"两人站一起半天不说话"。
+  function chatRoll(a, b, now, dt) {
+    if (!(a._nearWith === b.id && b._nearWith === a.id)) {
+      a._nearWith = b.id; b._nearWith = a.id; a._nearSince = now;
+    }
+    const el = Math.max(0, (now - Number(a._nearSince || now)) / 1000);
+    const remain = Math.max(0.2, CHAT_NEAR_MAX - el);
+    return el >= CHAT_NEAR_MAX || Math.random() < dt / remain;
   }
   // 想聊但离得远 → 两人**相向走近**（纯走位、不花 LLM）；靠近后由 pickPair(CHAT_RANGE) 接手开聊。
   // 这一步治"AI 之间各站各的、永远凑不到一起"。
@@ -1846,6 +1918,11 @@ export function createNpcWorld(opts) {
       }
       // 委托过期作废（没人理就算了，别一直挂在身上）
       if (s.want && now - Number(s.want.createdAt || 0) > WANT_EXPIRE) { s.want = null; s._wantAt = now; }
+      // 去公告栏贴通知：走到板子前 → 让 AI 写一条贴出去；走不到（超时）就作罢，不静默挂着
+      if (s.postPending) {
+        if (now - Number(s._postAt || 0) > POST_TIMEOUT) { s.postPending = false; s._postAt = now; }
+        else if (!s._posting && Math.hypot(Number(s.x) - BOARD_POS.x, Number(s.z) - BOARD_POS.z) < POST_NEAR) publishPost(s, now);
+      }
       // 斯坦福那套的两层"想"：先有今日主线（日计划），再回头把经历想成认识（反思）。
       // 都只在人闲/做着事时进行，且全局每类同时只跑一个（不花走位时间、不刷爆额度）。
       if (!s.quest && (s.st === 'idle' || s.st === 'act')) {
@@ -1879,7 +1956,11 @@ export function createNpcWorld(opts) {
       if (s.st === 'act') {
         if (now >= Number(s.stayUntil || 0)) {
           if (Number(s.actResume || 0) > now) s.stayUntil = s.actResume; // 挪步中（保险）
-          else s.st = 'idle';
+          else {
+            // 事做完了 → 立刻 idle，让**规则大脑**下一拍就接手（LLM 规划仍按 PLAN_INTERVAL_MS 来）
+            s.st = 'idle';
+            s.decideAt = Math.min(Number(s.decideAt || 0) || now, now);
+          }
         } else if (!s.quest && Number(s.actResume || 0) === 0 && now >= Number(s.actStepAt || 0)) {
           // 停着"做活动"：隔一会儿在附近挪两步 —— 别一动不动（治"我要学习然后就不动了"的无实物表演）
           const p = nearbyPoint(s, ACT_STEP_DIST_MIN, ACT_STEP_DIST_MAX);
@@ -1896,10 +1977,13 @@ export function createNpcWorld(opts) {
             s.st = 'act'; s.stayUntil = s.actResume; s.actResume = 0; s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX);
           } else {
             s.st = 'act';
-            // 按 plan 的时长停留（决策一次、干一会活）；至少覆盖到下一次规划点，活动短也不至于杵着发呆
+            // 按 plan 的时长停留（决策一次、干一会活），但**封顶 ACT_STAY_MAX**：
+            // ⚠ 以前是 max(now+时长, planAt)，而 planAt 最远 2 分钟 ⇒ 一到地方就站 2 分钟不动（"老发呆"的真凶）。
             const stayMs = Number.isFinite(Number(s._stayMs)) ? Number(s._stayMs) : rand(STAY_MIN, STAY_MAX) * 1000;
-            s.stayUntil = Math.max(now + stayMs, Number(s.planAt || 0));
+            s.stayUntil = now + Math.min(stayMs, ACT_STAY_MAX * 1000);
             s._stayMs = undefined;
+            // 活动一结束就立刻让**规则大脑**接手（事件驱动，不再干站着）；LLM 规划保持自己的节奏
+            s.decideAt = s.stayUntil;
             s.stuck = 0;
             s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX);
             triggerAI(s, 'arrive'); // 到达目的地：触发一次内心独白（内部有冷却，绝大多数会被节流掉）
@@ -1941,11 +2025,17 @@ export function createNpcWorld(opts) {
     pumpAnnounce(now); // 广播器：轮流让一个学生"听到"（一个个来，不并发打爆 GLM）
     // NPC↔NPC 社交：① 已经凑得近 → 直接开聊；② 离得远 → 撮合一对**相向走近**（纯走位、不花 LLM），
     //   走到一起了下一拍就走 ① 开聊。以前只认"已经凑到 5m 内"，而他们各忙各的很少凑近 ⇒ 几乎从不说话。
-    if (!chatBusy && now - lastChatStart > CHAT_INTERVAL * 1000) {
-      // ①"已经凑得近"：允许正在走位的人也停下来聊（人味）；②离得远才要求两人闲着再专门绕过去
+    // ⚠ 改**事件驱动**（用户明确要求）：靠得近就按概率开口，而不是"等 CHAT_INTERVAL 时间到"。
+    if (!chatBusy) {
+      // ①"已经凑得近"：允许正在走位的人也停下来聊（人味）
       const near = pickPair(now, CHAT_RANGE, true);
-      if (near) { lastChatStart = now; converse(near[0], near[1]); }
-      else if (now - lastMeetStart > MEET_INTERVAL * 1000) {
+      if (near) {
+        if (now - lastChatStart > CHAT_GAP_MS && chatRoll(near[0], near[1], now, dt)) {
+          lastChatStart = now;
+          converse(near[0], near[1]);
+        }
+      } else if (now - lastMeetStart > MEET_INTERVAL * 1000) {
+        // ②离得远：撮合一对相向走近（纯走位、不花 LLM），走近了自然走 ①
         const far = pickPair(now, CHAT_SEEK_RANGE, false);
         if (far) { lastMeetStart = now; startMeet(far[0], far[1], now); }
       }
@@ -1982,7 +2072,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0 };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
   }
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
@@ -2065,6 +2155,59 @@ export function createNpcWorld(opts) {
     startQuest(s, t.name, question, fromId || '', '玩家');
     return { targetId: t.id, targetName: t.name };
   }
+  // ---------- 走到公告栏 → 让 AI 写一条通知贴出去 ----------
+  let postBusy = false;      // 全局同一时刻只写一条（控并发/额度）
+  let lastNpcPost = 0;       // 上一次 NPC 贴公告的时刻（全局节流；累加型字段，必须有初值）
+  async function publishPost(s, now) {
+    if (postBusy || s._posting) return false;
+    s._posting = true; postBusy = true;
+    s.postPending = false;
+    s._postAt = now;
+    try {
+      const out = await askStudent({
+        student: {
+          name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st,
+          needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s), boardLine: boardLine(),
+          mates: students.filter((x) => x !== s).map((x) => x.name),
+        },
+        memory: pickMemory(s, null),
+        kind: 'post',
+        hour: hourNow(),
+        idea: String(s.postIdea || ''), // 它在规划时想说的那件事
+      });
+      const txt = clampText(out && out.text, 40);
+      if (txt && onPost) {
+        onPost(txt, s.name); // → index.js pushBoard：落盘 + 广播所有客户端 + 喂回本世界（其他学生会看到并照做）
+        lastNpcPost = now;
+        s.mem.push({ t: now, text: '我在公告栏贴了通知：「' + txt + '」', kind: 'post', imp: 0.85 });
+        trimMemory(s);
+        applyMoodWord(s, '开心');
+        broadcast({ t: 'npc_say', id: s.id, say: '贴好啦，大家看公告栏。' });
+        console.info('[npc] ' + s.name + ' 在公告栏贴了通知：' + txt);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      console.warn('[npc] 贴公告失败 ' + s.id + '：' + ((e && e.message) || e));
+      return false;
+    } finally {
+      s._posting = false; postBusy = false;
+    }
+  }
+  // 调试/探针用：强制去贴一张（跳过 plan 的"AI 想不想贴"）
+  function debugPost(id, idea) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s.postIdea = clampText(idea || '操场集合', 40);
+    s.postPending = true;
+    s._postAt = Date.now();
+    // 直接摆到公告栏跟前，便于探针立刻验证"到了就贴"
+    s.x = BOARD_POS.x + 1; s.z = BOARD_POS.z;
+    s.tx = s.x; s.tz = s.z; s.wx = s.x; s.wz = s.z; s.path = null; s.pathIdx = 0;
+    s.st = 'act'; s.stayUntil = Date.now() + 5000;
+    return true;
+  }
+
   // 调试/探针用：强制想一次（清掉限流）
   function debugReflect(id) {
     const s = students.find((x) => x.id === String(id));
@@ -2122,5 +2265,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, memImportance, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, boardPosts: () => boardPosts.slice(), memImportance, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }
