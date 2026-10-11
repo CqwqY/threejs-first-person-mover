@@ -205,6 +205,13 @@ const OBS_NOTABLE_DIST = 8;      // 玩家/同学进到这个距离才算"值得
 const INQUIRE_CD = 150000;       // 同一个学生两次"主动去问人"的最小间隔（毫秒）
 const INQUIRE_NEAR = 3.0;        // 走到多近才算"问上了"（米）
 const INQUIRE_TIMEOUT = 60000;   // 去问人的总超时（走不到就作废，绝不悬着）
+// 问与答之间留一点停顿（两次生成是独立调用；这点间隔让气泡像"一句问、一句答"，也顺带错开 GLM 限流）
+const INQUIRE_TURN_GAP_MS = 900;
+// ---- 物理原语序列（原语化）：LLM 输出 plan:[{op,...}]，服务端按序执行 ----
+const PRIM_MAX_STEPS = 6;        // 一个序列最多几步（控单次调用的"想多远"，也防它写 100 步）
+// ---- 未完成事项（#2）：记忆要有"状态"，不只是流水账 ----
+const PENDING_MAX = 5;           // 最多挂几件"还没了的事"
+const PENDING_CTX = 3;           // 喂 prompt 时最多带几条
 const EXPLORE_CD = 120000;       // 同一个学生两次"去学校某处看看"的最小间隔（毫秒）
 const SEEN_MAX = 24;             // "去过哪些地方"最多记多少个（环形截断，防无限增长）
 
@@ -843,6 +850,13 @@ export function createNpcWorld(opts) {
           values: (old && typeof old.values === 'string') ? old.values : '',        // 价值观（"我是谁"要累积、措辞不变）
           narrative: (old && Array.isArray(old.narrative)) ? old.narrative : [],   // 自我叙事层（反思产物，累积非覆盖）
           _impAtReflect: (old && Number.isFinite(Number(old._impAtReflect))) ? Number(old._impAtReflect) : 0, // 累加型字段，必须有初值
+          // ---- 物理原语序列（原语化）：LLM 用 6 个原语自己组合出的"动作序列" ----
+          prPlan: null,      // 当前正在执行的原语序列 {steps,idx,stepEndAt,since,_execd}；null = 没有
+          prLookAt: null,    // 持续的"看向"目标 {x,z,until}（人会动，到点前每拍刷新朝向）
+          prDoneAt: 0,       // 上一段原语序列结束的时刻（时间字段，必须有初值）
+          prWaitUntil: 0,    // 走位原语的等待截止（时间字段，必须有初值）
+          heardKey: '',      // 最近"已听过的广播"的键（同一条只听一次，治重复写入；字符串，必须有初值）
+          pending: (old && Array.isArray(old.pending)) ? old.pending : [], // 未完成事项（"还没了的事"；数组，必须有初值）
         };
       });
       dirty = true;
@@ -880,6 +894,13 @@ export function createNpcWorld(opts) {
       if (typeof s.values !== 'string') { s.values = ''; dirty = true; }
       if (!Array.isArray(s.narrative)) { s.narrative = []; dirty = true; }
       if (!Number.isFinite(Number(s._impAtReflect))) { s._impAtReflect = 0; dirty = true; }
+      // 物理原语序列（老存档没有 ⇒ 补初值，否则参与运算变 NaN 静默失效）
+      if (s.prPlan !== null && typeof s.prPlan !== 'object') { s.prPlan = null; dirty = true; }
+      if (s.prLookAt !== null && typeof s.prLookAt !== 'object') { s.prLookAt = null; dirty = true; }
+      if (!Number.isFinite(Number(s.prDoneAt))) { s.prDoneAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.prWaitUntil))) { s.prWaitUntil = 0; dirty = true; }
+      if (typeof s.heardKey !== 'string') { s.heardKey = ''; dirty = true; }
+      if (!Array.isArray(s.pending)) { s.pending = []; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.y))) { s.y = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
@@ -1185,7 +1206,7 @@ export function createNpcWorld(opts) {
     s._obsAt = now;
     s._obsSeen = text;
     s.noticed = text; // 进下一次 prompt 的【你刚刚注意到】
-    s.mem.push({ t: now, text, kind: 'obs' });
+    remember(s, { t: now, text, kind: 'obs' });
     if (here) markSeen(s, here.id); // 到过就记下来（"看看学校"优先挑没去过的）
     trimMemory(s);
     // 高重要度观察 → 把决策点拉到当下（下一拍就重新想；限流防抖）
@@ -1239,7 +1260,11 @@ export function createNpcWorld(opts) {
     s.st = 'act'; s.stayUntil = now + 6000;
     s.tx = Number(s.x); s.tz = Number(s.z); s.wx = s.tx; s.wz = s.tz; s.path = null; s.pathIdx = 0;
     try {
-      const out = await askStudent({
+      // ---------- 第一步：**只**让 s 想清楚"它要问什么"（扮演 s 一个人）----------
+      // ⚠★ 以前这里一次调用同时产出"我问的"和"对方答的" —— 那是**伪造**：对方 agent 从没参与生成，
+      //   却被写进 t.mem 当成"我说过的话"。Flash 一次演两个人还会把两边的语气/名字搅在一起。
+      //   现在拆成两次生成：这一步只演 s，下一步把问题**真的喂给 t 的 agent**，由 t 自己回答。
+      const ask = await askStudent({
         student: {
           name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: 'act',
           needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s),
@@ -1252,25 +1277,29 @@ export function createNpcWorld(opts) {
         gap: knowledgeGap(t, s, 2).map((m) => String(m.text || '')), // ★ 对方可能知道、我这边没有的
         kind: 'inquire',
       });
-      const q = clampText(out && out.question, 60);
-      const a = clampText(out && out.answer, 80);
+      const q = clampText(ask && ask.question, 60);
       if (!q) return; // 没问出东西就不硬编（避免"无实物表演"）
-      const ts = Date.now();
-      // 台词逐句广播（附近的玩家能偷听到"同学之间在打听事"）
+      const ts1 = Date.now();
+      // s 开口：广播"我问的这句话"（附近的玩家能偷听到"同学之间在打听事"）
       speak(s.id, t.name + '，' + q);
-      speak(t.id, a || '（他说不太清楚）');
-      // 记忆归属按**实际台词**拼，并带上"听谁说的"（src）
-      s.mem.push({ t: ts, text: '我问' + t.name + '「' + q + '」，' + (a ? ('他说：' + a) : '他也没说清'), kind: 'chat', src: t.name, imp: 0.5 });
-      t.mem.push({ t: ts, text: s.name + '来问我「' + q + '」，我说：' + (a || '…'), kind: 'chat', src: s.name, imp: 0.45 });
-      bumpRel(s, t.id, 0.12, '');   // 主动找人说话 → 关系近一点
+      // s 这边**立刻**记下"我问了谁什么"（答案还不知道，等对方答完再补一条）—— 心理活动也留下
+      s.mem.push({ t: ts1, text: '我去问' + t.name + '「' + q + '」', kind: 'chat', src: t.name, from: t.id, imp: 0.5 });
+      const thq = clampText(ask && ask.think, LEN_THINK) || ('我去问' + t.name + '关于「' + q + '」');
+      s.think.push({ t: ts1, text: thq });
+      if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
+      // ---------- 第二步：把问题**真的递给 t 的 agent**，由 t 自己（它的人设/心情/记忆/立场）回答 ----------
+      //   这就是"两次生成"：s 只说 s 的话，t 只说 t 的话。两边各写各的记忆，归属真实。
+      //   ⚠ 抽成独立函数：这一步的 try/finally 只管"占用—释放 t"，别和上面的流程搅在一起。
+      await sleep(INQUIRE_TURN_GAP_MS); // 像真问答那样有个间隔
+      await answerAs(t, s, q, now);
+      // 关系/心情：s 主动找人说话 → 近一点；被搭话的 t 也亲近一点点
+      bumpRel(s, t.id, 0.12, '');
       bumpRel(t, s.id, 0.08, '');
       applyMoodWord(s, '好奇');
-      const th = clampText(out && out.think, LEN_THINK) || ('我去问了' + t.name + '关于「' + q + '」');
-      s.think.push({ t: ts, text: th });
-      if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
+      t.aiAt = Date.now(); // t 刚被真实调用过：把它的冷却推后
       trimMemory(s); trimMemory(t);
       saveStudents(students);
-      console.info('[npc] ' + s.name + ' 问 ' + t.name + '：「' + q + '」→ ' + (a || '…'));
+      console.info('[npc] ' + s.name + ' 问 ' + t.name + '：「' + q + '」（两次生成）');
     } catch (e) {
       console.warn('[npc] 四处问人失败 ' + s.id + '：' + ((e && e.message) || e));
     } finally {
@@ -1278,6 +1307,54 @@ export function createNpcWorld(opts) {
       s.decideAt = Date.now(); // 问完立刻回到日常（不留悬空意图）
       s.st = 'act';
       s.stayUntil = Math.max(Number(s.stayUntil || 0), Date.now() + 3000);
+    }
+  }
+  // 被问方（t）**独立的一次生成**：把 s 问的问题递给 t 自己的 agent，由它自己回答。
+  // ⚠ 这就是 #12 的修法 —— 不再"一次调用演两个人"：t 的回答**必须**由 t 自己生成，否则就是伪造归属。
+  //   三道诚实底线：① t 正忙 ⇒ 记"他没接话"，不并发打 GLM；② 生成失败 ⇒ 记"他没说清楚"，绝不编一句填上；
+  //   ③ 生成成功 ⇒ s、t **各写各的记忆**（"我问…他答…" / "X 问我…我答…"），内容对称、归属真实。
+  async function answerAs(t, s, q, now) {
+    if (aiBusy.has(t.id)) {
+      s.mem.push({ t: Date.now(), text: '我去问' + t.name + '「' + q + '」，他正忙、没接话', kind: 'chat', src: t.name, from: t.id, imp: 0.4 });
+      speak(t.id, '（他正忙着，没接话）');
+      return;
+    }
+    aiBusy.add(t.id); // 占用它：期间别的触发别再调它（避免并发打 GLM / 两处同时改它的状态）
+    try {
+      const ans = await askStudent({
+        student: {
+          name: t.name, cls: t.cls, persona: t.persona, sex: t.sex, place: placeOf(t), st: t.st,
+          needs: t.needs, mood: t.mood, rel: topRel(t), player: playerWhere(t),
+          boardLine: boardLine(), scene: sceneLine(t), places: placesLine(t), heard: heardLine(t, now), self: selfProfile(t),
+        },
+        memory: pickMemory(t, null),
+        thinks: recentThinks(t),
+        kind: 'ask',
+        question: q,
+        askerName: s.name,
+      });
+      const a = clampText(ans && ans.say, LEN_SAY);
+      const ts = Date.now();
+      // t 的**心理活动**：它被问到时心里怎么想（"每一次 AI 调用都产生心理活动"）
+      const tht = clampText(ans && ans.think, LEN_THINK);
+      if (tht) {
+        t.think.push({ t: ts, text: tht });
+        if (t.think.length > MEM_MAX) t.think.splice(0, t.think.length - MEM_MAX);
+      }
+      if (a) {
+        s.mem.push({ t: ts, text: '我问' + t.name + '「' + q + '」，他答：' + a, kind: 'chat', src: t.name, from: t.id, imp: 0.5 });
+        t.mem.push({ t: ts, text: s.name + '问我「' + q + '」，我答：' + a, kind: 'chat', src: s.name, from: s.id, imp: 0.45 });
+      } else {
+        s.mem.push({ t: ts, text: '我问' + t.name + '「' + q + '」，他没接话', kind: 'chat', src: t.name, from: t.id, imp: 0.4 });
+      }
+      speak(t.id, a || '（他没接话）');
+    } catch (e) {
+      // ⚠ 对方那一步失败**不能吞、更不能编**：明确告诉 s"他没说清楚"
+      console.warn('[npc] 被问方回答失败 ' + t.id + '：' + ((e && e.message) || e));
+      s.mem.push({ t: Date.now(), text: '我去问' + t.name + '「' + q + '」，他没说清楚', kind: 'chat', src: t.name, from: t.id, imp: 0.4 });
+      speak(t.id, '（他说不太清楚）');
+    } finally {
+      aiBusy.delete(t.id); // 释放：它答完了
     }
   }
   // 给 AI 的"公告栏"：**不管有没有内容都要说**（否则它根本不知道学校有这块板子）
@@ -1436,6 +1513,169 @@ export function createNpcWorld(opts) {
     }
   }
 
+  // ---------- ★★ 物理原语执行器（原语化 S1/S2）----------
+  // 用户的核心洞察：**工具清单的粒度，决定了 LLM 的自由度。**
+  //   语义工具越多（follow / explore / 打招呼…），LLM 越被限制（只能在那个框里填参数）；
+  //   物理原语越底层（move_to / look_at / say / wait / emote / interact），LLM 越自由
+  //   ——它自己用 3 个原语就能拼出"跟随""远远跟着""假装跟着其实在观察""打招呼"…
+  // ⇒ 所以 LLM 的工具清单**只给这 6 个原语**；复杂行为给它**组合示例**教它怎么拼，不给工具替它拼。
+  //
+  // 服务端这边只做三件事（**执行层不判断"LLM 想做什么"**，只判断"这个原语怎么执行"）：
+  //   ① 解析：把 target（人名/地名/坐标）解析成真实坐标
+  //   ② 执行：每个原语映射到**已有的物理能力**（setTarget / speak / st='act' / 已有交互）——不新增行为逻辑
+  //   ③ 循环/超时：序列跑到哪算哪，跑完/被打断再问下一次
+  //
+  // 三道保险（防"LLM 说飞到天上"）：
+  //   ① 原语**封闭**：清单外的 op（fly / become_teacher）→ 丢弃这一条（不崩溃、不重复烧钱）
+  //   ② 解析失败**跳过该条**，继续下一条；全跳过 → 退化成 wait（站着），并记一条 think
+  //   ③ **物理世界是最终裁判**：走不走得通由 A* + 客户端三维碰撞定（和"跟随"没有区别，不会穿墙）
+  const PRIMITIVES = new Set(['move_to', 'look_at', 'say', 'wait', 'emote', 'interact']);
+  // emote 目前**没有素材**（前端只加载了 idle/walk 两个 clip）⇒ 先做"占位 emote"：
+  //   映射到已有 clip（都落成 idle/walk）+ 头顶气泡一个表情符号（复用名字气泡的 canvas）。
+  //   ⚠ prompt 里诚实写明"emote 目前只支持简易表现"，别让它以为能跳芭蕾。
+  const EMOTE_FACE = { wave: '👋', nod: '🙂', shake: '🙅', sit: '🪑', laugh: '😄', cry: '😢', think: '🤔', idle: '', hi: '👋' };
+
+  // 解析一个原语的 target → 真实坐标 {x,z}（认人名 / 地名 / "玩家" / "random" / 直接坐标）
+  function resolvePrimTarget(s, target) {
+    const t = String(target || '').trim();
+    if (!t) return null;
+    // "random" / 空 → 附近随机点（"四处走走"就靠它）
+    if (/^(random|随便|附近|anywhere)$/i.test(t)) {
+      const p = nearbyPoint(s, 3, 12);
+      return p ? { x: p.x, z: p.z } : null;
+    }
+    // 玩家
+    if (/玩家|那个人/.test(t)) {
+      const p = nearestPlayer(s);
+      return p ? { x: Number(p.x), z: Number(p.z) } : null;
+    }
+    // 同学（人名）
+    const mate = resolveStudentByName(t);
+    if (mate && mate !== s) return { x: Number(mate.x), z: Number(mate.z) };
+    // 功能区 / 地名
+    const zt = resolvePlaceType(t);
+    if (zt) { const z = pickOne(zonesOfType(zt)); if (z) { const c = zoneCenter(z); return { x: c.x, z: c.z }; } }
+    // 直接给了坐标：{x,z} 或 "x,z"
+    const m2 = t.match(/^(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)$/);
+    if (m2) return { x: Number(m2[1]), z: Number(m2[2]) };
+    return null; // 认不出 ⇒ 调用方跳过这一条
+  }
+  // 解析"要看向谁"→ 一个坐标（look_at 用；人走动了要实时取）
+  function resolveLookTarget(s, target) {
+    const p = resolvePrimTarget(s, target);
+    return p || null;
+  }
+  // 把一个原语落地成 s 的当前物理状态（返回 false = 该条解析失败，跳过）
+  function execPrimitive(s, step, now) {
+    if (!step || typeof step !== 'object') return false;
+    const op = String(step.op || '').trim().toLowerCase();
+    if (!PRIMITIVES.has(op)) return false;               // 保险①：清单外用词 → 直接丢这一条
+    if (op === 'move_to') {
+      const p = resolvePrimTarget(s, step.target != null ? step.target : step.to);
+      if (!p) return false;                              // 保险②：解析不出 → 跳过这一条
+      setTarget(s, p.x, p.z);                            // 复用既有 A* + 直线预判（寻路一行不改）
+      s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+      s.prWaitUntil = 0;
+      return true;
+    }
+    if (op === 'look_at') {
+      const p = resolveLookTarget(s, step.target);
+      if (!p) return false;
+      // 朝向约定与客户端一致：atan2(-dx, -dz)（见 rot 的用法）
+      s.rot = Math.atan2(-(Number(p.x) - Number(s.x)), -(Number(p.z) - Number(s.z)));
+      s.prLookAt = { x: p.x, z: p.z, until: now + Math.max(1000, Number(step.sec || 3) * 1000) }; // 到点前持续盯（人会动）
+      // 看向某人时**不挪窝**：站着看（st='act' + 一小段停留）
+      if (s.st !== 'walk') { s.st = 'act'; s.stayUntil = Math.max(Number(s.stayUntil || 0), now + 3000); }
+      return true;
+    }
+    if (op === 'say') {
+      const txt = clampText(step.text != null ? step.text : step.say, LEN_SAY);
+      if (!txt) return false;
+      speak(s.id, txt);                                  // 复用唯一说话入口（广播 + 8m 内听到）
+      return true;
+    }
+    if (op === 'wait') {
+      const sec = clampInt(step.sec != null ? step.sec : step.seconds, 1, 300, 5);
+      s.st = 'act'; s.stayUntil = now + sec * 1000;
+      return true;
+    }
+    if (op === 'emote') {
+      // 占位：把表情符号挂头顶走气泡；动作本身落成 idle（没素材）
+      const face = EMOTE_FACE[String(step.type || step.emote || 'idle').toLowerCase()];
+      if (face) { try { broadcast({ t: 'npc_say', id: String(s.id), name: s.name, say: face }); } catch { /* 广播失败无妨 */ } }
+      s.st = 'act'; s.stayUntil = Math.max(Number(s.stayUntil || 0), now + 2000);
+      return true;
+    }
+    if (op === 'interact') {
+      const t = String(step.target || '').toLowerCase();
+      // 公告栏：复用"去贴通知"的既有流程（postPending 才是真正贴）
+      if (/board|公告|公告栏/.test(t)) { goZone(s, now, { id: 'board', minX: BOARD_POS.x - 1, maxX: BOARD_POS.x + 1, minZ: BOARD_POS.z - 1, maxZ: BOARD_POS.z + 1 }); return true; }
+      // 其它可交互物（门/柜台）暂时落成"站住面对"（物理交互后续接）
+      s.st = 'act'; s.stayUntil = Math.max(Number(s.stayUntil || 0), now + 2000);
+      return true;
+    }
+    return false;
+  }
+  // 把 LLM 给的原语序列挂到 s 上（S1 新通道）。返回是否受理。
+  //   序列格式：plan:[{op,target|text|sec|type}, ...]（3~6 步）
+  function acceptPrimitivePlan(s, list, now) {
+    if (!Array.isArray(list) || !list.length) return false;
+    const steps = list.slice(0, PRIM_MAX_STEPS)
+      .map((x) => (x && typeof x === 'object') ? x : null)
+      .filter((x) => x && PRIMITIVES.has(String(x.op || '').trim().toLowerCase())); // 先滤掉清单外的
+    if (!steps.length) { s.prPlan = null; return false; }                            // 全非法 ⇒ 不受理（上层回退）
+    s.prPlan = { steps, idx: 0, stepEndAt: 0, since: now };
+    s.prDoneAt = now;
+    return true;
+  }
+  // 主循环每拍调：推进 s 当前的原语序列（走完一条 → 下一条；卡住/到点 → 顺延）
+  function pumpPrimitivePlan(s, now) {
+    const p = s.prPlan;
+    if (!p || !p.steps || p.idx >= p.steps.length) { if (p) s.prPlan = null; return; }
+    // 当前步是否"已经做完"：等待类看 stepEndAt；走位类看是否到点/超时
+    if (Number(p.stepEndAt) && now < Number(p.stepEndAt)) return; // 还在这一步里（wait/act）
+    const st = p.steps[p.idx];
+    const op = String(st.op || '').toLowerCase();
+    // 执行（首次进入这一步时 exec；之后靠"是否到位"判断完成）
+    if (!p._execd) {
+      const ok = execPrimitive(s, st, now);
+      p._execd = true;
+      if (!ok) { p.idx++; p._execd = false; return; } // 保险②：这条解析失败 → 跳过，继续下一条
+      // 给出这一步的"预期结束时刻"
+      if (op === 'wait' || op === 'emote' || op === 'look_at') {
+        p.stepEndAt = now + (op === 'wait' ? clampInt(st.sec != null ? st.sec : st.seconds, 1, 300, 5) * 1000
+          : op === 'look_at' ? 3000 : 2000);
+      } else if (op === 'say' || op === 'interact') {
+        p.stepEndAt = now + 1500; // 说/交互：一句/一下就完了
+      } else if (op === 'move_to') {
+        p.stepEndAt = 0; // 走位：靠"到点"判断，不靠时间
+      } else {
+        p.stepEndAt = now + 2000;
+      }
+      return;
+    }
+    // 走位类：到位 / 超时就推进
+    if (op === 'move_to') {
+      const dx = Number(s.tx) - Number(s.x), dz = Number(s.tz) - Number(s.z);
+      const arrived = (dx * dx + dz * dz) < 1.2 * 1.2 || String(s.st) !== 'walk';
+      if (arrived) { p.idx++; p._execd = false; p.stepEndAt = 0; }
+      return;
+    }
+    if (p.stepEndAt && now >= p.stepEndAt) { p.idx++; p._execd = false; p.stepEndAt = 0; }
+  }
+  // 取消当前原语序列（S4：治"别跟着我"）—— 清掉剩余步，立刻回到日常决策
+  function cancelPrimitivePlan(s, now) {
+    if (!s.prPlan) return false;
+    s.prPlan = null;
+    s.prLookAt = null;
+    s.st = 'act';
+    s.stayUntil = Math.max(Number(s.stayUntil || 0), now + 1000);
+    s.decideAt = now;
+    return true;
+  }
+  // 原语序列执行**不属于** translateIntent 的返回结构；它是与 goalType 并列的**新通道**。
+  //   translateIntent 只负责"老路"（goalType/seek/post 的翻译）；plan 通道由 acceptPrimitivePlan 接管。
+
   // ---------- 斯坦福「统一决策入口」act：LLM 自己选 type，服务端只做映射 ----------
   // 论文/DeepSeek 稿的核心：**没有"服务端决定现在该调哪个 kind"这一步**。LLM 输出 action + type + target
   // + params，服务端只负责"这个 type 怎么执行"。行为空间不再被提前枚举 —— "四处看看"不需要一个新 kind，
@@ -1566,6 +1806,7 @@ export function createNpcWorld(opts) {
             scene: sceneLine(s),   // 场景识别：附近有什么地标 / 谁在附近（不然它"看不见"学校）
             places: placesLine(s), // 学校有哪些地方、哪些去过（"看看学校"得先知道能去哪）
             noticed: String(s.noticed || ''), // 刚刚注意到的事（观察打断计划后的线索）
+            pending: pendingLine(s), // 还没了的事（让它带着"未完成的挂念"做决定）
           },
           memory: pickMemory(s, null),
           // 斯坦福「统一决策入口」：不再问它"你要填哪个模板"，而是让它自己决定做什么（type 由它选）。
@@ -1575,6 +1816,29 @@ export function createNpcWorld(opts) {
         });
         // act → 既有 goalType 意图（服务端只做映射）；兼容它直接给 goalType 的老写法
         const out = normalizeAct(raw);
+        // ★★ 原语序列通道（原语化 S1）：LLM 给了 plan:[{op,...}] 就用它 —— **优先于 goalType**。
+        //   这是"工具清单只给物理原语"的落点：它自己用 move_to/look_at/say/wait/emote/interact 拼出的序列，
+        //   服务端只按序执行（不判断"它想干嘛"）。给了 plan 就不再走 goalType 那条老路。
+        if (raw && Array.isArray(raw.plan)) {
+          const accepted = acceptPrimitivePlan(s, raw.plan, now);
+          if (accepted) {
+            s.intent = {
+              goalType: 'primitive',
+              goalText: clampText(raw.action || raw.type || '（一串动作）', 80),
+              activity: '',
+              // plan 文本用**过滤后**的序列（清单外的 op 已在 acceptPrimitivePlan 里丢掉）
+              plan: s.prPlan.steps.map((x) => String(x.op || '')).filter(Boolean).join(' → '),
+              since: now,
+            };
+            const thoughtC = clampText(raw.think, LEN_THINK);
+            if (thoughtC) { s.think.push({ t: now, text: thoughtC }); if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX); }
+            if (raw.mem) { s.mem.push({ t: now, text: clampText(raw.mem, LEN_MEM), kind: 'act' }); await trimMemory(s); }
+            s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt;
+            saveStudents(students);
+            console.info('[npc] ' + s.name + ' 原语序列：' + s.intent.plan);
+            return;
+          }
+        }
         if (!out || !out.goalType) {
           // GLM 没给有效动作 → 回退规则大脑（保留走位能力，不静默卡死）
           s.intent = null;
@@ -1823,7 +2087,7 @@ export function createNpcWorld(opts) {
         ? ('我在' + where + '听见' + on + '说「' + clampText(lastSay.replace(/^（[^）]*）/, ''), 18) + '」')
         : ('我在' + where + '看见' + on + doing);
     }
-    s.mem.push({ t: now, text, kind: 'obs', from: isPlayer ? '' : best.id, src: isPlayer ? '亲眼看到的' : ('我在' + where + '亲眼看到的') });
+    remember(s, { t: now, text, kind: 'obs', from: isPlayer ? '' : best.id, src: isPlayer ? '亲眼看到的' : ('我在' + where + '亲眼看到的') });
     trimMemory(s); // 超限时先丢观察（不花 LLM），见 trimMemory
   }
 
@@ -1913,7 +2177,28 @@ export function createNpcWorld(opts) {
     });
     // 分高优先，同分按时间近的优先；选完再按时间顺序排回去（别让记忆乱序，模型会读着别扭）
     scored.sort((a, b) => (b.score - a.score) || (b.i - a.i));
-    return scored.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
+    // ★ 分层保底（#5/#17）：光按三分公式排，"我看到的（obs）"重要度低、量大，会被"我聊过的（chat）"挤光
+    //   ⇒ 变成"只记得聊过什么、不记得看见什么"。这里**按 channel 配额**：先在每个 channel 内部排，
+    //   再轮流取（各 channel 至少分到一条），剩下的名额才按全局分补。这样"看见的"和"聊过的"都进得了 prompt。
+    const byCh = {};
+    for (const x of scored) {
+      const ch = String((x.m && x.m.channel) || (x.m && x.m.kind) || 'act');
+      (byCh[ch] || (byCh[ch] = [])).push(x);
+    }
+    const picked = [];
+    const used = new Set();
+    const chOrder = Object.keys(byCh).sort((a, b) => byCh[b][0].score - byCh[a][0].score); // 强 channel 先取
+    for (const ch of chOrder) {
+      if (picked.length >= MEM_CTX) break;
+      // 每个 channel 保底一条：优先"重要度高的"（reflect/quest 这种必须先占位），其次分高
+      const best = byCh[ch].slice().sort((p, q) => (memImportance(q.m) - memImportance(p.m)) || (q.score - p.score))[0];
+      if (best && !used.has(best.i)) { picked.push(best); used.add(best.i); }
+    }
+    for (const x of scored) {
+      if (picked.length >= MEM_CTX) break;
+      if (!used.has(x.i)) { picked.push(x); used.add(x.i); }
+    }
+    return picked.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
   }
   // ---------- ★ 具体化三件套：关注点 / 信息差 / 具体记忆 ----------
   // 用户的核心判断：**"AI 社交泛，是因为它们没有具体的事可聊。记忆太泛、没有信息差、没有关注点、对话没目的。"**
@@ -2071,6 +2356,20 @@ export function createNpcWorld(opts) {
     //   —— 否则模型随口一句"歇会儿/走走"就会把 NPC 正在做的事（比如刚听到的通知）覆盖掉。
     const raw = String(out.goalType || '').trim().toLowerCase();
     const goalWho = String(out.goalWho || out.seek || '').trim();
+    // ★ S4：通用 cancel —— LLM 说"停下/别跟着我/不用了/别跟了"（goalType=cancel/stop 或 goalWho 里带"别跟"）
+    //   就**清掉当前的原语序列 + 跟随意图**，立刻回到日常。这就是治"别跟着我"的落点：
+    //   以前"跟随"是个写死的 type，没法取消；现在它只是一串 move_to，cancel 就是把剩下的步清空。
+    const cancelish = /^(cancel|stop|halt|停|停下|别动|站住)$/.test(raw)
+      || /别跟|不用跟|不要跟|别再跟|不用了|停下|站住|别动/.test(raw + ' ' + goalWho + ' ' + String(out.say || ''));
+    if (cancelish && !out.task) {
+      cancelPrimitivePlan(s, now);
+      s.intent = null;
+      s.st = 'act'; s.stayUntil = Math.max(Number(s.stayUntil || 0), now + 1500);
+      s.decideAt = now;
+      s.mem.push({ t: now, text: note, kind: 'act', imp: 0.4 });
+      console.info('[npc] ' + s.name + ' 取消当前动作（对话）');
+      return;
+    }
     if (!raw && !goalWho) return; // 没给任何改道信号 ⇒ 什么都不动（只改心情/关系）
     // 交给 translateIntent：把"自然语言的意图"统一翻成 {goalType,seek,keep,...}
     //   goal 一起传：goalType 认不出时（如"去吃饭"），靠 goal 的文字读地方。
@@ -2266,6 +2565,7 @@ export function createNpcWorld(opts) {
             name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st,
             needs: a.needs, mood: a.mood, rel: topRel(a), player: playerWhere(a),
             boardLine: boardLine(), self: selfProfile(a),
+            pending: pendingLine(a), // ★ 还没了的事（让它接得上上次、不重新懵）
             // 场景/通知：让他讲的是"我这儿的实况"，不是空话
             scene: sceneLine(a), heard: heardLine(a, t0),
           },
@@ -2329,8 +2629,8 @@ export function createNpcWorld(opts) {
         const headB = '我和' + a.name + (topicAll ? '聊到' + topicAll : '聊了两句');
         const tailA = aSaid.length ? ('：我说「' + aSaid[0] + '」，' + b.name + '说「' + (bSaid[0] || '') + '」') : '';
         const tailB = bSaid.length ? ('：' + a.name + '说「' + (aSaid[0] || '') + '」，我说「' + bSaid[0] + '」') : '';
-        a.mem.push({ t: rt, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id, src: b.name });
-        b.mem.push({ t: rt, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id, src: a.name });
+        a.mem.push({ t: rt, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id, src: b.name, channel: 'chat' });
+        b.mem.push({ t: rt, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id, src: a.name, channel: 'chat' });
         // ★ 知识分享的落地：如果这一轮里某方**讲了一件"事情"**（share 字段：谁把什么告诉了谁），
         //   就把它结构化成一条带来源的记忆写进**听者**那边 —— "（X 告诉我）…" 的传播链就是这么建起来的。
         //   注意：只记 LLM 明确标出的"分享"（不是每句话都当知识），免得把寒暄也记成见闻。
@@ -2373,6 +2673,24 @@ export function createNpcWorld(opts) {
       a.talkingUntil = until; b.talkingUntil = until;
       // 见完面了：清掉"去找某人"的意图（否则会一直占着，导致他俩再也不能被撮合）
       for (const x of [a, b]) if (x.intent && x.intent.goalType === 'person') x.intent = null;
+      // ★ 未完成事项（#2）：这轮对话**没聊出结论**（谁问了个问题、对方没给答案；或说了"等下/回头/再看看"）
+      //   ⇒ 给它生成一条待办，下次见面接得上，不用重新懵。
+      try {
+        if (replied && topicAll) {
+          const said = transcript.map((x) => String(x.text || '')).join(' ');
+          const pendingish = /(等下|一会|回头|再看看|再说|待会|稍后|明天|以后|不确定|不知道|没答|谁去|要不要)/.test(said);
+          if (pendingish) {
+            for (const x of [a, b]) {
+              const other = x === a ? b : a;
+              if (addPending(x, '和' + other.name + '聊' + topicAll + '，还没定下来', Date.now(), other.id)) {
+                x.think.push({ t: Date.now(), text: '我和' + other.name + '聊' + topicAll + '这事，还没说定。' });
+                if (x.think.length > MEM_MAX) x.think.splice(0, x.think.length - MEM_MAX);
+              }
+            }
+            saveStudents(students);
+          }
+        }
+      } catch { /* 待办生成失败不影响主流程 */ }
       chatBusy = false;
     }
   }
@@ -2542,6 +2860,7 @@ export function createNpcWorld(opts) {
           heard: heardLine(s, now),
           // 场景识别（我周围有什么 / 学校有哪些地方 / 刚注意到什么）→ 说话才有"现场感"
           scene: sceneLine(s), places: placesLine(s), noticed: String(s.noticed || ''),
+          pending: pendingLine(s),
           // 商店在售：它"反过来请玩家代买"时，只能点**真实在售**的东西（不然会开口要一件买不到的）
           shop: kind === 'talk' ? shopPool.slice(0, 40).map((x) => x.name) : undefined,
         },
@@ -2627,6 +2946,133 @@ export function createNpcWorld(opts) {
     }
   }
 
+  // ---------- ★★ 记忆流清洗：统一写入入口 remember() ----------
+  // 用户诊断的 22 条里，记忆流层面占了 10 条：没有所有者 / 不去重 / 不一致 / 不分层 / 混主题 /
+  //   摘要失真 / 名字乱窜 / 广播重复… 根因是**写入散落各处、各写各的、写完不管**。
+  // ⇒ 立一个**唯一写入入口**（类比 speak() 是唯一说话入口）：所有"新记忆"都过它，
+  //   在**写入前**统一做五件事（全部纯本地、零 LLM 调用）：
+  //     ① 归属：每条钉 owner（= 这个学生自己的 id）—— 检索/调试时永远分得清"谁的经历"
+  //     ② 分层：补 channel（obs/chat/announce/notice/reflect/act/trade/quest）—— 观察与对话不再混成一锅
+  //     ③ 去重：与近 N 条**文本近重复**（同 channel + 前 8 字）⇒ 合并而不是再写一条（治"同一件事写两遍"）
+  //     ④ 一致：与近 N 条**互相矛盾**（"他不知情" vs "他回应了"）⇒ 不写（保留更早那条，避免自相矛盾）
+  //     ⑤ 名字：写入前按 SEEDS 人名表纠错（"林之夏"→"林知夏"），治"名字乱窜"
+  //   返回 true = 真的写进去了；false = 被判重/矛盾而跳过。
+  const NAME_FIX = SEEDS.map((x) => String(x.name || '')).filter(Boolean);
+  // 同音/形近易错字纠错：把文本里"同一个姓 + 长度相同"的疑似名字换成正确人名（保守，只改高置信的）
+  function fixNames(s, text) {
+    let t = String(text || '');
+    if (!t || !NAME_FIX.length) return t;
+    // 直接命中就不动
+    if (NAME_FIX.some((n) => t.indexOf(n) >= 0)) return t;
+    // 逐个"疑似名"（2~3 个汉字、不在人名表里）→ 找一个"首字相同 + 长度相同"的人名替换
+    for (const cand of t.match(/[\u4e00-\u9fa5]{2,3}/g) || []) {
+      if (NAME_FIX.some((n) => n.indexOf(cand) >= 0 || cand.indexOf(n) >= 0)) continue;
+      const hit = NAME_FIX.find((n) => n.length === cand.length && n[0] === cand[0] && n !== cand);
+      if (hit && /^[\u4e00-\u9fa5]+$/.test(cand)) { t = t.split(cand).join(hit); break; } // 只改第一个，避免误伤
+    }
+    return t;
+  }
+  // 近重复判定：同 channel 且"去掉（来源）前缀后的前 8 字"相同 ⇒ 视为同一件事
+  function memKey(m) {
+    const t = String((m && m.text) || '').replace(/^（[^）]*）/, '').replace(/^(我|今天)?在\S{1,6}(看见|听见|看到)/, '').trim();
+    return t.slice(0, 8);
+  }
+  function isDuplicate(s, rec) {
+    const all = s.mem || [];
+    const key = memKey(rec);
+    if (!key || key.length < 4) return false;
+    // 只看最近 8 条（性能 + 只防"刚写过的又写一遍"）
+    for (let i = all.length - 1, n = 0; i >= 0 && n < 8; i--, n++) {
+      const m = all[i];
+      if (!m) continue;
+      if (String(m.channel || '') !== String(rec.channel || '')) continue;
+      if (memKey(m) === key) return true;
+    }
+    return false;
+  }
+  // 矛盾判定（保守）：新记忆说"某人回应/知道/说"，而近条目说"某人不知情/没反应" ⇒ 冲突
+  //   （用户举的例子："一条说林知夏回应了，另一条说林知夏不知情"）
+  function isConflict(s, rec) {
+    const txt = String(rec.text || '');
+    const all = s.mem || [];
+    const pos = /(回应|答应了|告诉我|说：|知情|同意)/.test(txt);
+    const neg = /(不知情|没回应|没理我|没接话|不知道|没说话|不在)/.test(txt);
+    if (!pos && !neg) return false;
+    for (let i = all.length - 1, n = 0; i >= 0 && n < 6; i--, n++) {
+      const m = all[i]; if (!m) continue;
+      const mt = String(m.text || '');
+      // 同一批人（共享一个人名）且**极性相反** ⇒ 判矛盾
+      const shared = NAME_FIX.some((nm) => txt.indexOf(nm) >= 0 && mt.indexOf(nm) >= 0);
+      if (!shared) continue;
+      const mPos = /(回应|答应了|告诉我|说：|知情|同意)/.test(mt);
+      const mNeg = /(不知情|没回应|没理我|没接话|不知道|没说话|不在)/.test(mt);
+      if ((pos && mNeg) || (neg && mPos)) return true;
+    }
+    return false;
+  }
+  // 唯一写入入口。rec = {text, kind, channel?, src?, from?, imp?}
+  //   channel 不传就从 kind 推（obs→obs，chat/say→chat，announce/notice→announce，reflect→reflect…）
+  function remember(s, rec) {
+    if (!s || !rec) return false;
+    const kind = String(rec.kind || 'act');
+    const channel = String(rec.channel || '').trim() ||
+      (kind === 'obs' ? 'obs'
+        : kind === 'chat' || kind === 'say' ? 'chat'
+          : kind === 'announce' || kind === 'notice' ? 'announce'
+            : kind === 'reflect' ? 'reflect'
+              : kind === 'quest' ? 'quest'
+                : kind === 'trade' || kind === 'want' ? 'trade'
+                  : 'act');
+    const text = clampText(fixNames(s, rec.text), LEN_MEM); // ⑤ 名字纠错；顺带截断
+    if (!text) return false;
+    const r = {
+      t: Number(rec.t) || Date.now(),
+      text,
+      kind,
+      channel,                       // ② 分层
+      owner: String(s.id),           // ① 归属
+    };
+    if (rec.src) r.src = String(rec.src);
+    if (rec.from) r.from = String(rec.from);
+    if (Number.isFinite(Number(rec.imp))) r.imp = clamp01(rec.imp);
+    if (isDuplicate(s, r)) return false;   // ③ 去重
+    if (isConflict(s, r)) return false;    // ④ 一致
+    if (rec.front) s.mem.unshift(r); else s.mem.push(r); // 摘要类放最前（代表最老的事）
+    return true;
+  }
+
+  // ---------- ★ 未完成事项（#2）：记忆不该只是流水账，要有"还欠着的事"这个状态 ----------
+  // 用户诊断："记忆里全是'Cai 叫我走''Cai 让我别跟'，但没有形成'Cai 到底要干嘛，这事还没完'的状态。
+  //   ⇒ AI 每次都在重新懵，每次都说'你好，有什么事吗'。"
+  // 落地：一个轻量列表 s.pending（最多 PENDING_MAX 条），每条 {text, since, withWho, done}。
+  //   来源：对话里"没结论"的事（委托没完成 / 问了没答 / 说了要去做还没做）→ 自动成待办。
+  //   消费：喂进 prompt 的【你还没了的事】—— 让它下次见面接得上、不重新懵。
+  function addPending(s, text, now, withWho) {
+    const t = clampText(text, 40);
+    if (!t) return false;
+    if (!Array.isArray(s.pending)) s.pending = [];
+    // 已有相近的待办（前 6 字相同）⇒ 只刷新时间，不重复加
+    const key = t.slice(0, 6);
+    const hit = s.pending.find((x) => String(x.text || '').slice(0, 6) === key);
+    if (hit) { hit.since = Number(hit.since || now); return false; }
+    s.pending.push({ text: t, since: now, withWho: String(withWho || ''), done: false });
+    if (s.pending.length > PENDING_MAX) s.pending.splice(0, s.pending.length - PENDING_MAX);
+    return true;
+  }
+  function donePending(s, key) {
+    if (!Array.isArray(s.pending)) return;
+    const k = String(key || '').slice(0, 6);
+    const hit = s.pending.find((x) => String(x.text || '').slice(0, 6) === k);
+    if (hit) hit.done = true;
+    s.pending = s.pending.filter((x) => !x.done);
+  }
+  // 把"还没了的事"拼成一段人话（喂 prompt；没有就空）
+  function pendingLine(s) {
+    const list = (Array.isArray(s.pending) ? s.pending : []).filter((x) => x && !x.done);
+    if (!list.length) return '';
+    return list.slice(-PENDING_CTX).map((x) => '- ' + String(x.text || '')).join('\n');
+  }
+
   // 记忆超上限：先让 AI 把最老的几条压成一条摘要，失败/仍超就直接丢最老的（粗暴但不会无限膨胀）
   async function trimMemory(s) {
     if (s.mem.length <= MEM_MAX) return;
@@ -2656,7 +3102,8 @@ export function createNpcWorld(opts) {
         playerName: '同学',
       });
       const summary = clampText(out && out.mem, LEN_MEM);
-      if (summary) s.mem.unshift({ t: Date.now(), text: summary });
+      // ⚠ 摘要也要过统一入口（去重/一致/名字纠错）；且**丢掉"未解决"的往事不能压掉**
+      if (summary) remember(s, { t: Date.now(), text: summary, kind: 'act', channel: 'act', imp: 0.4, front: true });
     } catch {
       /* 压缩失败就算了：上面已经 splice 掉最老的了 */
     }
@@ -2802,6 +3249,13 @@ export function createNpcWorld(opts) {
     }
     for (const s of students) {
       updateNeeds(s, dt, now);
+      // ★ 原语序列（原语化）：推进它当前那串 move_to/look_at/say/wait/emote —— 走完一步就下一步。
+      //   只推进"当前步"，不做任何"它想干嘛"的判断（执行层不管意图）。序列跑完 s.prPlan 自动清空。
+      pumpPrimitivePlan(s, now);
+      // "持续看向某人"：人会动 ⇒ 到点前每拍把朝向刷到目标的当前坐标（look_at 的持续性靠它）
+      if (s.prLookAt && now < Number(s.prLookAt.until || 0)) {
+        s.rot = Math.atan2(-(Number(s.prLookAt.x) - Number(s.x)), -(Number(s.prLookAt.z) - Number(s.z)));
+      } else if (s.prLookAt) { s.prLookAt = null; }
       perceive(s, now); // P2：看身边的人（廉价，限流）
       observeScene(s, now); // 场景识别：附近有谁/有什么地标 → 进记忆；要紧的会打断当前计划
       // 公告栏：路过就"看一眼"（限流）→ 记进记忆；**并且照做**（通知说了去哪就真去）
@@ -2886,7 +3340,10 @@ export function createNpcWorld(opts) {
         }
       }
       if (s.st === 'act') {
-        if (now >= Number(s.stayUntil || 0)) {
+        if (s.prPlan) {
+          // ★ 正在执行原语序列（wait/look_at/emote 这类"站着"的步）⇒ 不许"挪两步"打断、也不许自动转 idle。
+          //   序列的推进由 pumpPrimitivePlan 全权负责（它就是这些步的"计时器"）。
+        } else if (now >= Number(s.stayUntil || 0)) {
           if (Number(s.actResume || 0) > now) s.stayUntil = s.actResume; // 挪步中（保险）
           else {
             // 事做完了 → 立刻 idle，让**规则大脑**下一拍就接手（LLM 规划仍按 PLAN_INTERVAL_MS 来）
@@ -2964,6 +3421,10 @@ export function createNpcWorld(opts) {
             }
           }
         }
+      } else if (s.prPlan) {
+        // ★ 原语序列执行中（当前步是 move_to，在走路）：**什么都不抢** —— 等它走完这一步，
+        //   pumpPrimitivePlan 会推进下一步；序列结束（prPlan=null）后自然落回下面的 plan/decide。
+        //   ⚠ 不设这个分支，走位会被 planNext/decide 中途改道 ⇒ 序列永远走不完。
       } else if (!s.quest && now >= Number(s.planAt || 0) && !s._planning) {
         planNext(s, now); // System2：低频 LLM 规划（失败自动回退规则大脑）
       } else if (!s.quest && now >= Number(s.decideAt || 0)) {
@@ -3074,9 +3535,28 @@ export function createNpcWorld(opts) {
   let announceQueue = []; // 待下发的广播
   let announceIdx = 0;    // 轮流游标：下一个该"听到"广播的学生
   let announceAt = 0;     // 下次下发的时刻（时间字段，必须有初值）
+  // 广播内容审核（#20）：广播是**学校的正式通知**，不该播玩家私事/八卦。
+  //   用户实例："cai喜欢江晚吟" 被全校广播 —— 不合理，还制造混乱。
+  //   判据（保守，宁可漏放不可错放）：命中考勤/集合/考试/活动/失物/时间地点等"公务"词 ⇒ 放行；
+  //   命中"喜欢/暗恋/秘密/八卦/吵架/偷"等私事词，且**不含公务词** ⇒ 拦下。
+  const NOTICE_OK_WORDS = /(集合|开会|通知|考试|测验|作业|交|活动|比赛|报名|广播|提醒|注意|失物|丢|捡|招领|几点|时间|地点|操场|食堂|饭堂|教室|图书馆|宿舍|校门|喷泉|放假|开学|会议|值班|值日|停课|上课|社团|讲座|演出|运动会|班会|全校|全体)/;
+  const NOTICE_BAD_WORDS = /(喜欢|暗恋|爱上|表白|秘密|八卦|私下|偷偷|背着|吵架|打架|谁跟谁|勾搭|告状|打小报告)/;
+  function noticeAllowed(text) {
+    const t = String(text || '');
+    if (!t) return false;
+    if (NOTICE_BAD_WORDS.test(t) && !NOTICE_OK_WORDS.test(t)) return false; // 私事且无公务词 ⇒ 拦
+    return true;
+  }
   function announce(text, from) {
     const t = String(text || '').trim().slice(0, 120);
-    if (t) announceQueue.push({ text: t, from: String(from || '广播').slice(0, 16) });
+    if (!t) return false;
+    // 内容审核：玩家贴的私事/八卦不进全校广播（但公告栏本身照贴，只是不"广播出去"）
+    if (!noticeAllowed(t)) { console.info('[npc] 广播被内容审核拦下：' + clampText(t, 30)); return false; }
+    // 去重（#18）：同一条广播（前 12 字相同）在队列里已有 ⇒ 不再入队，避免"同一条写三遍"
+    const key = t.slice(0, 12);
+    if (announceQueue.some((x) => String(x.text || '').slice(0, 12) === key)) return false;
+    announceQueue.push({ text: t, from: String(from || '广播').slice(0, 16) });
+    return true;
   }
   // 主循环每拍调：每隔 ANNOUNCE_GAP_MS 让**一个**学生"听到"广播（轮流，不并发）
   function pumpAnnounce(now) {
@@ -3085,7 +3565,12 @@ export function createNpcWorld(opts) {
     const s = students[announceIdx % students.length];
     announceIdx++;
     const a = announceQueue[0];
-    s.mem.push({ t: now, text: '全校广播：「' + a.text + '」', kind: 'announce', src: String(a.from || '学校') });
+    // 去重（#18）：同一个人对**同一条**广播只听一次 —— 以前同一条会重复写进同一个人的记忆流，
+    //   检索时占满 top-k，让它以为"这件事特别重要"。
+    const hkey = String(a.text || '').slice(0, 12);
+    if (String(s.heardKey || '') === hkey) { if (announceIdx % students.length === 0) announceQueue.shift(); return; }
+    s.heardKey = hkey;
+    remember(s, { t: now, text: '全校广播：「' + a.text + '」', kind: 'announce', src: String(a.from || '学校') });
     // ⚠ 记住"最近听到的通知"：prompt 里的【最近的全校广播/公告】用它 —— 它得**照通知调整计划**，不能听过就忘
     s.heard = { text: String(a.text).slice(0, 120), from: String(a.from || '学校').slice(0, 16), t: now };
     trimMemory(s);
@@ -3287,5 +3772,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, boardPosts: () => boardPosts.slice(), memImportance, debugSelf, inferZone: inferZoneFromText, normalizeAct, zoneAiName, resolvePlaceType, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, debugRemember: (id, rec) => { const s = students.find((x) => x.id === String(id)); return s ? remember(s, rec || {}) : false; }, debugPending: (id) => { const s = students.find((x) => x.id === String(id)); return s ? pendingLine(s) : ''; }, debugMemAll: (id) => { const s = students.find((x) => x.id === String(id)); return s ? (s.mem || []).slice() : []; }, boardPosts: () => boardPosts.slice(), memImportance, debugSelf, inferZone: inferZoneFromText, normalizeAct, zoneAiName, resolvePlaceType, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }
