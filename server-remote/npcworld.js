@@ -115,6 +115,12 @@ const MEET_INTERVAL = 10;      // 全局两次「撮合一对走近」的最小�
 //   概率有上界：同一对靠得近最多 CHAT_NEAR_MAX 秒必开口一次（免得纯随机导致偶尔一直不说话）。
 const CHAT_NEAR_MAX = 4.0;     // 靠得近的一对，最迟多久开口（秒）
 const CHAT_GAP_MS = 25000;     // 全局最小间隔（毫秒）：**纯粹当成本保险**（不是触发条件，触发永远是"靠近+概率"）
+// ---------- 多轮持续对话（★ 用户要求："两个人的对话不止可以对话一轮"）----------
+// ⚠ 这不是"写死一个连聊 N 轮的功能"：我们只提供两个旋钮 —— ① 把**已经聊过的台词**作为上下文喂回去
+//   （LLM 自己决定要不要接着说、说什么）；② 每轮之后看 **LLM 的 continue 字段**决定收不收尾。
+//   代码只负责"把上文带回去 / 到顶了就停"，内容全归 LLM（遵循用户铁律）。
+const CHAT_ROUNDS_MAX = 4;      // 一段对话最多几轮 LLM 往返（控额度；超了自然散场）
+const CHAT_REPLY_GAP_MS = 900;  // 轮与轮之间的停顿（气泡之间别糊成一坨）
 const PERSON_SEEK_TIMEOUT_MS = 90000; // 「去找某人」最多找这么久（追不上就回去干自己的事，别永远在外面晃）
 
 // ---------- 「跟着我」（玩家/LLM 自由说出的跟随意图）----------
@@ -123,6 +129,14 @@ const PERSON_SEEK_TIMEOUT_MS = 90000; // 「去找某人」最多找这么久（
 const FOLLOW_KEEP = 3.5;         // 跟随保持的距离（米）：比这远就追，近了就停（别贴脸推玩家）
 const FOLLOW_REPATH_MS = 1200;   // 跟随途中多久重指一次目标**当前位置**（玩家一直在动）
 const FOLLOW_GIVEUP = 45;        // 目标离太远（米）就放弃跟随（追不上了，别满校园追）
+
+// ---------- 通用小工具 ----------
+// 延时（多轮对话轮之间喘气用）。
+// ⚠ 这里**不能** unref：它是被 await 的，一旦 unref 而此刻又没有别的活动句柄，
+//   事件循环会因为没有存活句柄而**提前退出**，await 就永远不 settle（Node 报 "unsettled top-level await"）。
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, Math.max(0, Number(ms) || 0)));
+}
 
 // ---------- P2：感知 ----------
 // NPC 会"注意到"身边经过的人/玩家 → 写一条**短观察**进 mem（记忆流，会被检索/喂 prompt）。
@@ -2051,6 +2065,11 @@ export function createNpcWorld(opts) {
     b.mem.push({ t: t0, text: '我和' + a.name + '聊了两句：' + tpl[1], kind: 'chat', from: a.id, src: a.name });
   }
   let chatBusy = false; // 同一时刻只跑一段闲聊（控并发 / 额度）
+  // 一段完整闲聊：**多轮往返** + 知识分享。
+  // ⚠ 为什么拆成循环而不是"一次出一整段脚本"：一次 LLM 出的脚本是**单轮快照**，说完就散；
+  //   用户要的是"能持续聊下去"。做法是把上一轮真实台词（`chat` 上下文）**回灌**进下一轮 prompt，
+  //   让 LLM 接着往下说（拼上下文的活交给 ai-student.js 的 prompt 组装，这里只负责把 transcript 传过去）。
+  //   要不要继续由 **LLM 的 continue 字段**决定（代码只提供旋钮，不写死对话内容）。
   async function converse(a, b) {
     if (chatBusy || !a || !b || a === b) return;
     chatBusy = true;
@@ -2058,55 +2077,112 @@ export function createNpcWorld(opts) {
     const t0 = Date.now();
     a.chatAt = t0; b.chatAt = t0;
     a.talkingUntil = t0 + 20000; b.talkingUntil = t0 + 20000; // 期间别再开聊、先站住
+    // 本次对话的完整台词流水（供多轮上下文 + 结尾的记忆归属），两人看到的是同一份
+    const transcript = [];
+    let topicAll = '';
+    let replied = false; // 是否至少聊过一轮（决定要不要写"聊了两句"的兜底记忆）
     try {
-      const bond = Number((a.rel[b.id] && a.rel[b.id].trust) || 0);
-      const out = await askStudent({
-        student: { name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st, needs: a.needs, mood: a.mood, rel: topRel(a), player: playerWhere(a), boardLine: boardLine(), self: selfProfile(a) },
-        partner: { name: b.name, cls: b.cls, persona: b.persona, sex: b.sex },
-        memory: pickMemory(a, null),
-        kind: 'chat',
-        bond,
-      });
-      const lines = (out && Array.isArray(out.lines)) ? out.lines.slice(0, 4) : [];
-      if (!lines.length) { templateChat(a, b); return; }
-      // 逐句广播（复用 npc_say → 客户端气泡；玩家能偷听到他们的对话）
-      lines.forEach((ln, i) => {
-        const who = ln.who === 'b' ? b : a;
-        const say = clampText(ln.text, LEN_SAY);
-        if (!say) return;
-        const delay = i * CHAT_LINE_GAP_MS;
-        if (delay === 0) broadcast({ t: 'npc_say', id: who.id, say });
-        else { const tm = setTimeout(() => broadcast({ t: 'npc_say', id: who.id, say }), delay); if (tm.unref) tm.unref(); }
-      });
-      a.st = 'act'; b.st = 'act';
-      const chatEnd = t0 + lines.length * CHAT_LINE_GAP_MS + 1500;
-      a.stayUntil = Math.max(Number(a.stayUntil || 0), chatEnd);
-      b.stayUntil = Math.max(Number(b.stayUntil || 0), chatEnd);
-      // 记忆（各自记）：**按实际台词结构化归属** —— 谁说的就是谁说的。
-      // ⚠ 以前直接信模型给的 memA/memB：一次调用同时写两个人的记忆，模型很容易把"我说/他说"写反、
-      //   或者把对方的经历写进自己的记忆（"记忆也不对"就是这儿）。这里用真实台词兜底，保证归属正确。
-      const aSaid = lines.filter((l) => l.who === 'a').map((l) => clampText(l.text, 20)).filter(Boolean);
-      const bSaid = lines.filter((l) => l.who === 'b').map((l) => clampText(l.text, 20)).filter(Boolean);
-      const topic = clampText(out.topic, 12);
-      const headA = '我和' + b.name + (topic ? '聊到' + topic : '聊了两句');
-      const headB = '我和' + a.name + (topic ? '聊到' + topic : '聊了两句');
-      const tailA = aSaid.length ? ('：我说「' + aSaid[0] + '」，' + b.name + '说「' + (bSaid[0] || '') + '」') : '';
-      const tailB = bSaid.length ? ('：' + a.name + '说「' + (aSaid[0] || '') + '」，我说「' + bSaid[0] + '」') : '';
-      a.mem.push({ t: t0, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id, src: b.name });
-      b.mem.push({ t: t0, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id, src: a.name });
-      // 模型给的"聊完记住的点"只进内心活动（不进记忆流，避免它把归属写乱）
-      if (out.memA) a.think.push({ t: t0, text: clampText(out.memA, LEN_THINK) });
-      if (out.memB) b.think.push({ t: t0, text: clampText(out.memB, LEN_THINK) });
-      for (const x of [a, b]) if (x.think.length > MEM_MAX) x.think.splice(0, x.think.length - MEM_MAX);
-      applyMoodWord(a, out.moodA);
-      applyMoodWord(b, out.moodB);
-      if (Number.isFinite(Number(out.bond))) { bumpRel(a, b.id, Number(out.bond) * 0.5); bumpRel(b, a.id, Number(out.bond) * 0.5); }
-      await trimMemory(a); await trimMemory(b);
-      saveStudents(students);
-      console.info('[npc] ' + a.name + ' ↔ ' + b.name + ' 闲聊：' + (clampText(out.topic, 16) || ''));
+      for (let round = 1; round <= CHAT_ROUNDS_MAX; round++) {
+        // ⚠ 每轮都重新取记忆：上一轮刚写进去的"他告诉我…"要能被下一轮看见（知识真的在流动）
+        const bond = Number((a.rel[b.id] && a.rel[b.id].trust) || 0);
+        const out = await askStudent({
+          student: {
+            name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st,
+            needs: a.needs, mood: a.mood, rel: topRel(a), player: playerWhere(a),
+            boardLine: boardLine(), self: selfProfile(a),
+            // 场景/通知：让他讲的是"我这儿的实况"，不是空话
+            scene: sceneLine(a), heard: heardLine(a, t0),
+          },
+          partner: { name: b.name, cls: b.cls, persona: b.persona, sex: b.sex },
+          // ★ 知识分享的关键：**两边各自**的记忆 + 见闻都喂进去，LLM 自然会把"我知道的事"讲出来。
+          memory: pickMemory(a, null),
+          partnerMemory: pickMemory(b, null),   // 对方知道的（问它"你知道吗"时能对得上）
+          partnerHeard: heardLine(b, t0),        // 对方最近听到的通知
+          // 已经聊过的上文（旧→新）——第二轮起才有，这就是"接着聊"的依据
+          chat: transcript.slice(),
+          kind: 'chat',
+          bond,
+          topic: topicAll,     // 已经聊的主题（让 LLM 别跑题）
+        });
+        // 兜底：LLM 挂了/空脚本 → 用模板寒暄收场（零成本，别僵住）
+        const lines = (out && Array.isArray(out.lines)) ? out.lines.slice(0, 4) : [];
+        if (!lines.length) {
+          if (!replied) { templateChat(a, b); return; }
+          break; // 已经聊过 ≥1 轮，这轮没接上就自然收尾
+        }
+        replied = true;
+        const rt = Date.now();
+        // 逐句广播（复用 npc_say → 客户端气泡；玩家能偷听到他们的对话）
+        lines.forEach((ln, i) => {
+          const who = ln.who === 'b' ? b : a;
+          const say = clampText(ln.text, LEN_SAY);
+          if (!say) return;
+          transcript.push({ speaker: who.name, who: ln.who === 'b' ? 'b' : 'a', text: say });
+          const delay = i * CHAT_LINE_GAP_MS;
+          if (delay === 0) broadcast({ t: 'npc_say', id: who.id, say });
+          else { const tm = setTimeout(() => broadcast({ t: 'npc_say', id: who.id, say }), delay); if (tm.unref) tm.unref(); }
+        });
+        // 站着聊：把停留时间顺延到这段说完之后（别聊到一半人走了）
+        a.st = 'act'; b.st = 'act';
+        const chatEnd = rt + lines.length * CHAT_LINE_GAP_MS + 1500;
+        a.stayUntil = Math.max(Number(a.stayUntil || 0), chatEnd);
+        b.stayUntil = Math.max(Number(b.stayUntil || 0), chatEnd);
+        // ⚠ 多轮会把占用时间拉长（可能 >20s）⇒ talkingUntil 也要跟着顺延，否则别处的限流会以为
+        //   他们"已经聊完了"，中途把两个人又派走去干别的（把人从对话里拽走）。
+        a.talkingUntil = Math.max(Number(a.talkingUntil || 0), chatEnd + 1000);
+        b.talkingUntil = Math.max(Number(b.talkingUntil || 0), chatEnd + 1000);
+        if (round === 1) {
+          topicAll = clampText(out.topic, 12);
+        } else if (out.topic) {
+          topicAll = clampText(out.topic, 12) || topicAll;
+        }
+        // 记忆（各自记）：**按实际台词结构化归属** —— 谁说的就是谁说的。
+        // ⚠ 以前直接信模型给的 memA/memB：一次调用同时写两个人的记忆，模型很容易把"我说/他说"写反、
+        //   或者把对方的经历写进自己的记忆（"记忆也不对"就是这儿）。这里用真实台词兜底，保证归属正确。
+        const aSaid = lines.filter((l) => l.who === 'a').map((l) => clampText(l.text, 20)).filter(Boolean);
+        const bSaid = lines.filter((l) => l.who === 'b').map((l) => clampText(l.text, 20)).filter(Boolean);
+        const headA = '我和' + b.name + (topicAll ? '聊到' + topicAll : '聊了两句');
+        const headB = '我和' + a.name + (topicAll ? '聊到' + topicAll : '聊了两句');
+        const tailA = aSaid.length ? ('：我说「' + aSaid[0] + '」，' + b.name + '说「' + (bSaid[0] || '') + '」') : '';
+        const tailB = bSaid.length ? ('：' + a.name + '说「' + (aSaid[0] || '') + '」，我说「' + bSaid[0] + '」') : '';
+        a.mem.push({ t: rt, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id, src: b.name });
+        b.mem.push({ t: rt, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id, src: a.name });
+        // ★ 知识分享的落地：如果这一轮里某方**讲了一件"事情"**（share 字段：谁把什么告诉了谁），
+        //   就把它结构化成一条带来源的记忆写进**听者**那边 —— "（X 告诉我）…" 的传播链就是这么建起来的。
+        //   注意：只记 LLM 明确标出的"分享"（不是每句话都当知识），免得把寒暄也记成见闻。
+        const sh = out && out.share;
+        if (sh && sh.what) {
+          const what = clampText(sh.what, 40);
+          const dir = String(sh.from || '').trim(); // 'a'=a 讲给 b 听，'b'=b 讲给 a 听
+          const speaker = (dir === 'b') ? b : a;
+          const listener = (dir === 'b') ? a : b;
+          if (what && speaker !== listener) {
+            listener.mem.push({ t: rt, text: clampText('（' + speaker.name + '告诉我）' + what, LEN_MEM), kind: 'chat', src: speaker.name, from: speaker.id, imp: 0.55 });
+            speaker.mem.push({ t: rt, text: clampText('我把「' + what + '」告诉了' + listener.name, LEN_MEM), kind: 'chat', src: listener.name, from: listener.id });
+            bumpRel(listener, speaker.id, 0.06, ''); // 有人告诉我点事 → 亲近一点
+          }
+        }
+        // 模型给的"聊完记住的点"只进内心活动（不进记忆流，避免它把归属写乱）
+        if (out.memA) a.think.push({ t: rt, text: clampText(out.memA, LEN_THINK) });
+        if (out.memB) b.think.push({ t: rt, text: clampText(out.memB, LEN_THINK) });
+        for (const x of [a, b]) if (x.think.length > MEM_MAX) x.think.splice(0, x.think.length - MEM_MAX);
+        applyMoodWord(a, out.moodA);
+        applyMoodWord(b, out.moodB);
+        if (Number.isFinite(Number(out.bond))) { bumpRel(a, b.id, Number(out.bond) * 0.5); bumpRel(b, a.id, Number(out.bond) * 0.5); }
+        await trimMemory(a); await trimMemory(b);
+        saveStudents(students);
+        const roundTopic = clampText(out.topic, 16) || topicAll;
+        console.info('[npc] ' + a.name + ' ↔ ' + b.name + ' 闲聊 第' + round + '轮：' + roundTopic);
+        // ---- 要不要**接着聊**：由 **LLM 的 continue 决定**（它想收尾就停），
+        //   概率只作为"还能再多聊一轮"的**成本保险**（不是决定性的抛硬币 —— 否则会随机砍掉正常对话）。
+        //   轮次上限 CHAT_ROUNDS_MAX 兜住总额度。----
+        if (out.continue === false) break;      // LLM 明确收尾
+        if (round >= CHAT_ROUNDS_MAX) break;    // 到轮次上限
+        await sleep(CHAT_REPLY_GAP_MS);         // 轮之间喘口气，像真在对话
+      }
     } catch (e) {
       console.warn('[npc] 闲聊失败 ' + a.id + '↔' + b.id + '：' + ((e && e.message) || e));
-      try { templateChat(a, b); } catch { /* 兜底也失败就算了 */ }
+      if (!replied) { try { templateChat(a, b); } catch { /* 兜底也失败就算了 */ } }
     } finally {
       a._chatting = false; b._chatting = false;
       const until = Date.now() + CHAT_COOLDOWN * 1000;

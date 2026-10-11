@@ -1198,5 +1198,115 @@ console.log('[37] 对话改道走统一翻译器 + 玩家对话的记忆**忠实
   w.dispose();
 }
 
+console.log('[38] 持续多轮对话：把上一轮真实台词回灌 → LLM 接着往下聊（★ 用户："对话不止一轮"）');
+{
+  const dir = freshDir('chat-multiround');
+  writeScene(dir);
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: i * 10, z: 0, hx: i * 10, hz: 0, tx: i * 10, tz: 0, wx: i * 10, wz: 0, path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 0, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.4, energy: 0.5, focus: 0.5 }, rel: {}, mem: [], think: [],
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const calls = [];
+  let round = 0;
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind !== 'chat') return null;
+      round++;
+      calls.push(input);
+      // 第 1 轮：明确说"还想接着聊"（continue=true）；第 2 轮：收尾（continue=false）
+      if (round === 1) {
+        return {
+          lines: [{ who: 'a', text: '哎你听说了吗？' }, { who: 'b', text: '听说啥？' }],
+          topic: '八卦', memA: '', memB: '', moodA: '好奇', moodB: '好奇', bond: 0.3, continue: true,
+        };
+      }
+      return {
+        lines: [{ who: 'a', text: '算了，回头再说吧。' }, { who: 'b', text: '行，回见。' }],
+        topic: '八卦', memA: '', memB: '', moodA: '平静', moodB: '平静', bond: 0, continue: false,
+      };
+    },
+  });
+  await sleep(50);
+  await w.forceChat('s1', 's2');
+  await sleep(300);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(calls.length >= 2, '连续聊了**多轮**（不是一次调用就散场）', '轮数=' + calls.length);
+  // 第 2 轮必须带上第 1 轮的真实台词（否则接不上 = 又变回单轮）
+  const second = calls[1];
+  const hist = ((second && second.chat) || []).map((m) => String((m && m.text) || '')).join('|');
+  ok(!!(second && Array.isArray(second.chat) && second.chat.length >= 2),
+    '第 2 轮带上了【你们已经说过的话】（多轮上下文）', second && JSON.stringify(second.chat));
+  ok(/你听说了吗/.test(hist), '上下文里含**第 1 轮的真实台词**（原话回灌，不是模型编的）', hist);
+  ok(!!(second && second.topic), '第 2 轮带上了已经聊的**主题**（别跑题）', second && second.topic);
+  // continue=false ⇒ 立刻收尾，不再追问第 3 轮
+  ok(calls.length === 2, 'LLM 说 continue=false → 当场收尾（不再多花一次调用）', '轮数=' + calls.length);
+  ok(!!st, 'stateOf 可读（没崩）', '');
+}
+
+console.log('[39] 分享知道的事：双方各自的记忆进 prompt + 讲的事写成带来源的记忆（★ 用户："分享自己知道的事情"）');
+{
+  const dir = freshDir('chat-share');
+  writeScene(dir);
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: i * 10, z: 0, hx: i * 10, hz: 0, tx: i * 10, tz: 0, wx: i * 10, wz: 0, path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 0, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.4, energy: 0.5, focus: 0.5 }, rel: {}, mem: [], think: [],
+    });
+  }
+  // s1 有一条"我知道的事"（食堂加了新菜）；s2 有一条不同的知识（明天英语小测）
+  list[0].mem = [{ t: Date.now(), text: '我看见食堂今天中午加了一道糖醋排骨', kind: 'obs' }];
+  list[1].mem = [{ t: Date.now(), text: '老师说周三英语有小测', kind: 'obs' }];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const calls = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind !== 'chat') return null;
+      calls.push(input);
+      return {
+        lines: [{ who: 'a', text: '跟你说，食堂今天有糖醋排骨！' }, { who: 'b', text: '真的啊，我明天去看看。' }],
+        topic: '食堂新菜', memA: '', memB: '', moodA: '开心', moodB: '好奇', bond: 0.4,
+        // a（s1）把自己知道的事讲给 b（s2）听
+        share: { from: 'a', what: '食堂今天中午加了一道糖醋排骨' },
+        continue: false,
+      };
+    },
+  });
+  await sleep(50);
+  const before = w.stateOf('s2');
+  await w.forceChat('s1', 's2');
+  await sleep(200);
+  const a = w.stateOf('s1'), b = w.stateOf('s2');
+  w.dispose();
+  // ① 双方各自的记忆都要进 prompt —— 才谈得上"讲我知道的事"
+  const first = calls[0] || {};
+  const memA = ((first && first.memory) || []).map((m) => String((m && m.text) || '')).join('|');
+  const memB = ((first && first.partnerMemory) || []).map((m) => String((m && m.text) || '')).join('|');
+  ok(/糖醋排骨/.test(memA), '自己的记忆进了 prompt（"我知道的事"）', memA);
+  ok(/英语有小测/.test(memB), '**对方**知道的也进了 prompt（接话/问它才有依据）', memB);
+  // ② 讲出去的事 → 写成**听者**那边带来源的记忆（传播链）
+  const bmem = (b.mem || []).map((m) => String(m.text)).join('\n');
+  ok(/糖醋排骨/.test(bmem), '听的人（s2）记住了**对方讲给他的事**', bmem);
+  ok(/学生1号/.test(bmem) && /告诉我/.test(bmem), '这条记忆带**来源**（"（学生1号告诉我）…"）—— 传播链', bmem);
+  const amem = (a.mem || []).map((m) => String(m.text)).join('\n');
+  ok(/告诉/.test(amem), '讲的人（s1）也记下"我把这件事告诉了谁"', amem);
+  ok(!!before, '（读状态没崩）', '');
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);
