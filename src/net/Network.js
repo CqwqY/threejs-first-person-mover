@@ -369,6 +369,12 @@ export class Network {
     if (out.length) this.send({ t: 'npc_state', list: out });
   }
 
+  // 反向委托：把 NPC 请你代买的东西交给它（物品的扣除在本地做，服务端只校验名字并结算奖励）
+  sendNpcDeliver(id, item) {
+    if (!id || !item) return;
+    this.send({ t: 'npc_deliver', id: String(id).slice(0, 24), item: String(item).slice(0, 24) });
+  }
+
   sendStudentTalk(id, text) {
     if (!id || !text) return;
     this.send({ t: 'npc_talk', id: String(id).slice(0, 24), text: String(text).slice(0, 200) });

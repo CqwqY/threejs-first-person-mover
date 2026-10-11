@@ -549,7 +549,11 @@ function sanitizeCombo(c) {
   }
   return out;
 }
-function saveShop(items) { fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2)); }
+function saveShop(items) {
+  fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2));
+  // 目录变了 → NPC「请玩家代买」的候选池跟着换（否则会开口要一件已经下架的东西）
+  if (npcWorld && npcWorld.setShopCatalog) npcWorld.setShopCatalog(items);
+}
 
 // ---- 公告栏（世界坐标 -22,17 那块板子）+ 校园广播器共用这份"公告"存储 ----
 const BOARD_FILE = path.join(DATA_DIR, 'board.json');
@@ -1564,6 +1568,24 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    // 反向委托：玩家把 NPC 要的东西送到它手上。
+    // ⚠ 客户端已从背包扣掉那件东西；服务端**不信前端**：名字对不上就拒绝，对得上才发奖励。
+    if (msg.t === 'npc_deliver') {
+      if (!npcWorld || !npcWorld.deliver) return;
+      const sid = String(msg.id || '').slice(0, 24);
+      const item = String(msg.item || '').slice(0, 24);
+      if (!sid || !item) return;
+      const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username))
+        || (states.get(id) && states.get(id).nick) || '同学';
+      let out = null;
+      try { out = npcWorld.deliver(sid, item, String(nick).slice(0, 16), 'p:' + id); }
+      catch (e) { console.warn('[npc] 交付结算失败 ' + sid + '：' + ((e && e.message) || e)); }
+      if (!out) return;
+      ws.send(JSON.stringify({ t: 'npc_deliver', id: sid, ok: !!out.ok, item, reason: out.reason || '', reward: out.reward || 0, say: out.say || '' }));
+      if (out.ok) broadcastAll({ t: 'npc_say', id: sid, say: out.say }); // 旁人也听得见这句道谢
+      return;
+    }
+
     // 匹配：请求进入对战房间（mode 指定玩法：'meteor' 躲避陨石混战 / 'grapple' 疯狂抓钩）
     if (msg.t === 'match') {
       const mode = String(msg.mode || 'meteor');
@@ -2180,6 +2202,8 @@ if (createNpcWorld) {
   });
   console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个；对话 ' + (askStudent ? '开' : '关'));
   if (npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6)); // 现有公告喂给 AI
+  // 商店目录注入给 NPC：它"请玩家代买"的候选池必须来自真实在售商品（否则会开口要一个买不到的东西）
+  if (npcWorld.setShopCatalog) npcWorld.setShopCatalog(SHOP);
 }
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);

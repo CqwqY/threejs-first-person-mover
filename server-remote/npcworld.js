@@ -62,12 +62,25 @@ const BROADCAST_MS = 200;
 const MEM_MAX = 20;
 // 一次给 AI 的记忆条数（只给被搭话的那个学生本人的，且按相关性挑，不是把一串全塞进去）
 const MEM_CTX = 4;
+// ---- 记忆检索（Generative Agents 的 retrieval）：相关度 + 新近度 + 重要度 三者加权 ----
+const MEM_W_REL = 1.0;    // 相关度权重（与"当前地点 + 对方这句话"的字面重合）
+const MEM_W_REC = 1.0;    // 新近度权重（指数衰减）
+const MEM_W_IMP = 1.2;    // 重要度权重（略高于其它两项：重要的事不该被冲掉）
+const MEM_RECENCY_HL = 25; // 新近度半衰期（分钟）：25 分钟衰减一半
+// 记忆重要度基线（0~1）：不额外调 LLM，按**类型 + 文本线索**给分（免费、确定性、可测）
+const MEM_BASE_IMP = { reflect: 0.95, quest: 0.8, trade: 0.8, want: 0.7, notice: 0.7, announce: 0.6, chat: 0.55, say: 0.55, obs: 0.2 };
+const MEM_HOT_WORDS = /(玩家|答应|承诺|喜欢|讨厌|吵架|生气|谢谢|帮我|送我|秘密|约定|道歉|一起|别告诉)/;
+// ---- 反思（reflection）与日计划（daily plan）----
+const REFLECT_MIN_NEW = 4;     // 至少攒了这么多条新记忆才值得想一次（控 LLM 调用）
+const REFLECT_CD = 8 * 60000;  // 同一个学生两次反思的最小间隔（8 分钟）
+const DAYPLAN_CD = 12 * 60000; // 日计划兜底重生成间隔（跨天时立刻重生成）
 const MEM_COMPRESS = 5;
 // 单条文本长度上限（入库前截断）。think 是**内部**独白（玩家看不到），写宽一点才有内容，
 // 它决定这个角色"脑子里在想什么"，进而影响记忆与后续举止。
 const LEN_SAY = 60;
 const LEN_THINK = 120;
 const LEN_MEM = 120;
+const LEN_PLAN_DAY = 120; // 日计划（一天的主线）长度上限
 // 同一个学生两次 AI 之间的最小间隔（秒）：防刷爆免费档
 const AI_COOLDOWN = 45;
 
@@ -134,6 +147,15 @@ function bearingName(dx, dz) {
   const a = Math.atan2(dx, -dz);
   return DIR8[Math.round(((a + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8];
 }
+
+// ---------- 反向委托：NPC 请玩家跑腿（去商店买某件东西、带回来交给它）----------
+// 「必须是游戏真能做的」：商品目录来自服务端 SHOP（客户端 /api/shop 拿到的同一份），
+// 玩家在商店买下 → 进背包 → 走到它面前点「交给 TA」→ 客户端从背包扣除 → 服务端校验并结算奖励。
+const WANT_CD = 150000;      // 同一个学生两次开口要东西的最小间隔（毫秒）
+const WANT_EXPIRE = 300000;  // 没人理的委托 5 分钟后作废
+const WANT_RANGE = 7;        // 玩家多近才算"能当面开口"（米）
+const WANT_MAX_PRICE = 130;  // 只要得起这个价位以内的东西（别让 AI 开口要三百块的锤子）
+const WANT_REWARD_RATE = 0.35; // 奖励 = 价格 × 这个比例（跑腿费，玩家小赚一点才有动力）
 
 // ---------- "人在台面/楼顶之上" ----------
 // 障碍表是**二维**的（只有占地，没有高度），所以它在 2D 里分不清两种完全不同的情况：
@@ -273,6 +295,64 @@ export function createNpcWorld(opts) {
   }
   // 这个学生是不是"站在台面/楼顶之上"（二维障碍表此时不可信）
   function elevated(s) { return Number(s.y) > HIGH_LEVEL_CLEAR; }
+
+  // ---------- 反向委托：商品目录（由 index.js 把服务端 SHOP 注入进来）----------
+  let shopPool = []; // [{ id, name, price, kind }]
+  function setShopCatalog(list) {
+    shopPool = (Array.isArray(list) ? list : [])
+      .filter((x) => x && x.name && Number(x.price) > 0 && Number(x.price) <= WANT_MAX_PRICE)
+      .map((x) => ({ id: String(x.id || x.name), name: String(x.name).slice(0, 20), price: Math.round(Number(x.price)), kind: String(x.kind || 'item') }))
+      .slice(0, 600);
+  }
+  // 它想要的东西：优先"能当礼物的小件"（书/笔/熊/垫/花…），没有就随便挑一个买得起的
+  const WANT_NICE = /(书|笔|熊|垫|花|画|毯|钟|伞|灯|杯|篮|球|琴|棋|模型|玩具|风筝|球拍|相框)/;
+  function wantPickItem() {
+    if (!shopPool.length) return null;
+    const nice = shopPool.filter((x) => WANT_NICE.test(x.name));
+    return pickOne(nice.length ? nice : shopPool);
+  }
+  // 当着玩家的面开口："能不能帮我买一个X带回来"
+  function wantAsk(s, now) {
+    const p = nearestPlayer(s);
+    if (!p) return false;
+    if (Math.hypot(Number(p.x) - Number(s.x), Number(p.z) - Number(s.z)) > WANT_RANGE) return false;
+    const it = wantPickItem();
+    if (!it) return false;
+    s.want = {
+      itemId: it.id, itemName: it.name, price: it.price,
+      reward: Math.max(8, Math.round(it.price * WANT_REWARD_RATE)),
+      createdAt: now, playerId: String(p.id || ''),
+    };
+    s._wantAt = now;
+    broadcast({ t: 'npc_say', id: s.id, say: '能帮我买一个「' + it.name + '」带回来吗？（约 ¥' + it.price + '）' });
+    s.mem.push({ t: now, text: '我请玩家帮我买一个「' + it.name + '」', kind: 'want' });
+    trimMemory(s);
+    console.info('[npc] ' + s.name + ' 请玩家代买「' + it.name + '」（¥' + it.price + '，报酬 ' + s.want.reward + '）');
+    return true;
+  }
+  // 玩家交付：校验物品对得上就结算（奖励由这里给，客户端只负责把背包里那件扣掉）
+  function deliver(sId, itemName, playerName, playerId) {
+    const s = students.find((x) => x.id === String(sId));
+    if (!s) return { ok: false, reason: '找不到这个同学' };
+    const w = s.want;
+    if (!w) return { ok: false, reason: '我现在没请你带东西呀' };
+    const got = String(itemName || '').trim();
+    // 名字要对得上（客户端只会在背包里确实有这件东西时才发，但服务端不信前端：对不上就拒绝）
+    if (!got || (got !== w.itemName && got.indexOf(w.itemName) < 0 && w.itemName.indexOf(got) < 0)) {
+      return { ok: false, reason: '这个不是我要的（我要的是「' + w.itemName + '」）' };
+    }
+    applyMoodWord(s, '开心');
+    bumpRel(s, playerId || ('p:' + w.playerId), 0.7, '帮我买了' + w.itemName);
+    s.mem.push({ t: Date.now(), text: (playerName || '玩家') + '帮我买来了「' + w.itemName + '」，人挺靠谱', kind: 'trade', from: playerId || '' });
+    trimMemory(s);
+    const reward = w.reward;
+    s.want = null;
+    s._wantAt = Date.now();
+    s._stuckN = 0;
+    saveStudents(students);
+    console.info('[npc] ' + s.name + ' 收到「' + w.itemName + '」（' + (playerName || '玩家') + ' 交付，奖励 ¥' + reward + '）');
+    return { ok: true, reward, itemName: w.itemName, say: '谢啦！这个给你当跑腿费，拿去买点别的。' };
+  }
   // 按 id 找某个玩家的坐标（委托任务"回来复命"要知道是回到**哪个**玩家身边）
   function playerById(id) {
     const key = String(id || '').replace(/^p:/, '');
@@ -600,6 +680,13 @@ export function createNpcWorld(opts) {
           think: Array.isArray(old && old.think) ? old.think : [],
           perceiveAt: 0, // 上次感知时刻（限流；时间字段，必须有初值）
           quest: null,   // 委托任务：{stage,targetId,targetName,question,fromId,fromName,answer,createdAt,repathAt}
+          want: null,    // 反向委托（它请玩家买东西）：{itemId,itemName,price,reward,createdAt,playerId}
+          _wantAt: 0,    // 上次开口/结算的时刻（限流；时间字段，必须有初值）
+          reflectAt: 0,      // 上次反思的时刻（限流；时间字段，必须有初值）
+          _memAtReflect: 0,  // 上次反思时的记忆条数（判断"攒够新记忆"；累加型字段，必须有初值）
+          dayPlan: null,     // 今日打算：{text, at}
+          dayPlanAt: 0,      // 上次生成日计划的时刻（时间字段，必须有初值）
+          dayPlanSeq: -1,    // 生成时所处的"游戏日"序号（跨天要重生成；累加型字段，必须有初值）
           actStepAt: 0,  // 下一次"做活动时挪两步"的时刻（时间字段，必须有初值）
           actResume: 0,  // 挪步前记下的停留截止（回来接着做活动；0 = 当前不是挪步）
         };
@@ -615,6 +702,13 @@ export function createNpcWorld(opts) {
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
       if (!Number.isFinite(Number(s.perceiveAt))) { s.perceiveAt = 0; dirty = true; }
       if (s.quest !== null && typeof s.quest !== 'object') { s.quest = null; dirty = true; }
+      if (s.want !== null && typeof s.want !== 'object') { s.want = null; dirty = true; }
+      if (!Number.isFinite(Number(s._wantAt))) { s._wantAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.reflectAt))) { s.reflectAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s._memAtReflect))) { s._memAtReflect = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.dayPlanAt))) { s.dayPlanAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.dayPlanSeq))) { s.dayPlanSeq = -1; dirty = true; }
+      if (s.dayPlan !== null && typeof s.dayPlan !== 'object') { s.dayPlan = null; dirty = true; }
       if (!Number.isFinite(Number(s.actStepAt))) { s.actStepAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.actResume))) { s.actResume = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
@@ -922,6 +1016,7 @@ export function createNpcWorld(opts) {
             rel: topRel(s), board: boardPosts.slice(-3),
             boardLine: boardLine(),          // ⚠ 没通知也要告诉它"学校有公告栏"（否则它不知道这块板子存在）
             player: playerWhere(s),          // 玩家在哪（距离/方位/地点，说人话）
+            dayPlan: s.dayPlan ? String(s.dayPlan.text || '') : '', // 今日主线（让零散决定有连续性）
             mates: students.filter((x) => x !== s).map((x) => x.name), // 班里的同学：给了名字它才"找得到人"
           },
           memory: pickMemory(s, null),
@@ -1142,18 +1237,34 @@ export function createNpcWorld(opts) {
     }
     return out;
   }
+  // 一条记忆有多重要（0~1）。有 imp 就用它，否则按类型 + 线索词现算（确定性，便于断言）。
+  function memImportance(m) {
+    if (!m) return 0.3;
+    if (Number.isFinite(Number(m.imp))) return clamp01(m.imp);
+    let v = MEM_BASE_IMP[m.kind] != null ? MEM_BASE_IMP[m.kind] : 0.4;
+    if (MEM_HOT_WORDS.test(String(m.text || ''))) v += 0.15;
+    return clamp01(v);
+  }
+  // 记忆检索（斯坦福 Generative Agents 的 retrieval）：score = 相关度 + 新近度 + 重要度。
+  //   relevance：与"当前地点 + 对方这句话"的字面重合（中文 2-gram）
+  //   recency  ：指数衰减（半衰期 MEM_RECENCY_HL 分钟）
+  //   importance：memImportance()（反思/委托/交付这类"大事"分高，路的观察分低）
   function pickMemory(s, extra) {
     const all = Array.isArray(s.mem) ? s.mem : [];
     if (all.length <= MEM_CTX) return all.slice();
+    const now = Date.now();
     const kws = memKeywords(placeOf(s) + ' ' + String((extra && extra.text) || ''));
     const scored = all.map((m, i) => {
       const txt = String((m && m.text) || '');
       let hit = 0;
       for (const k of kws) if (txt.indexOf(k) >= 0) hit++;
-      return { m, i, hit };
+      const rel = kws.length ? Math.min(1, hit / 6) : 0;
+      const ageMin = Math.max(0, (now - Number((m && m.t) || 0)) / 60000);
+      const rec = Math.pow(0.5, ageMin / MEM_RECENCY_HL);
+      return { m, i, score: MEM_W_REL * rel + MEM_W_REC * rec + MEM_W_IMP * memImportance(m) };
     });
-    // 相关度优先，同分按时间近的优先；选完再按时间顺序排回去（别让记忆乱序，模型会读着别扭）
-    scored.sort((a, b) => (b.hit - a.hit) || (b.i - a.i));
+    // 分高优先，同分按时间近的优先；选完再按时间顺序排回去（别让记忆乱序，模型会读着别扭）
+    scored.sort((a, b) => (b.score - a.score) || (b.i - a.i));
     return scored.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
   }
   // 心情词 → 落地成数值（0.5 权重混合，避免一次对话把情绪拉爆）
@@ -1486,6 +1597,8 @@ export function createNpcWorld(opts) {
           rel: topRel(s),    // 关系摘要（被对话改）→ 记得跟谁亲、跟谁不对付
           player: playerWhere(s), // 玩家在哪（说人话）→ 别一问"你在哪/玩家在哪"就瞎编
           boardLine: boardLine(),
+          // 商店在售：它"反过来请玩家代买"时，只能点**真实在售**的东西（不然会开口要一件买不到的）
+          shop: kind === 'talk' ? shopPool.slice(0, 40).map((x) => x.name) : undefined,
         },
         // ⚠ 只给**这个学生本人**的记忆，而且是挑出来的几条（不是整串）。
         //   混进别人的记忆 = 几个人的经历串台；一次给太多 = 模型自己搅成一团。
@@ -1511,6 +1624,27 @@ export function createNpcWorld(opts) {
       if (kind === 'talk' || kind === 'chat') {
         try { applyTalkEffect(s, out, extra && extra.who); }
         catch (e) { console.warn('[npc] 对话影响应用失败 ' + s.id + '：' + ((e && e.message) || e)); }
+      }
+      // 反向委托：对话里它**反过来请玩家帮忙**买件东西（LLM 给的 item 必须在商店目录里才对得上，
+      // 认不出就忽略 —— 绝不让它开口要一个游戏里买不到的东西）
+      if (kind === 'talk' && out.request && out.request.item && !s.want && (now - Number(s._wantAt || 0) > WANT_CD)) {
+        const q = String(out.request.item).trim();
+        const it = shopPool.find((x) => x.name === q) || shopPool.find((x) => q && x.name.indexOf(q) >= 0);
+        if (it) {
+          s.want = {
+            itemId: it.id, itemName: it.name, price: it.price,
+            reward: Math.max(8, Math.round(it.price * WANT_REWARD_RATE)),
+            reason: clampText(out.request.reason || '', 40),
+            createdAt: now,
+            playerId: String((extra && extra.who) || '').replace(/^p:/, ''),
+          };
+          s._wantAt = now;
+          // say 里没说清楚就把请求补一句（玩家得看得懂"要什么"才能去买）
+          if (String(say).indexOf(it.name) < 0) {
+            broadcast({ t: 'npc_say', id: s.id, say: '顺便——能帮我买一个「' + it.name + '」带回来吗？（约 ¥' + it.price + '）' });
+          }
+          console.info('[npc] ' + s.name + ' 请玩家代买「' + it.name + '」（对话触发）');
+        }
       }
       // 委托任务：玩家让 NPC 去找人/问事 → 建任务（真的会去办）
       if (kind === 'talk' && out.task && out.task.target) {
@@ -1540,7 +1674,15 @@ export function createNpcWorld(opts) {
     }
     if (s.mem.length <= MEM_MAX) return;
     try {
-      const oldest = s.mem.splice(0, MEM_COMPRESS).map((m) => String(m.text || ''));
+      // 压缩最老的几条，但**别把"反思"压掉**（那是它自己的认识，最该留）——优先挑最老的非反思记忆
+      const idx = [];
+      for (let i = 0; i < s.mem.length && idx.length < MEM_COMPRESS; i++) if (s.mem[i] && s.mem[i].kind !== 'reflect') idx.push(i);
+      for (let i = 0; i < s.mem.length && idx.length < MEM_COMPRESS; i++) if (idx.indexOf(i) < 0) idx.push(i);
+      idx.sort((a, b) => b - a);
+      const picked = [];
+      for (const i of idx) picked.push(s.mem.splice(i, 1)[0]);
+      picked.reverse();
+      const oldest = picked.map((m) => String((m && m.text) || ''));
       const out = await askStudent({
         student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: '校园里', st: s.st, needs: s.needs },
         memory: [],
@@ -1554,6 +1696,90 @@ export function createNpcWorld(opts) {
       /* 压缩失败就算了：上面已经 splice 掉最老的了 */
     }
     while (s.mem.length > MEM_MAX) s.mem.shift();
+  }
+
+  // ---------- 反思（reflection）：把近期经历压成"更高层的认识" ----------
+  // 斯坦福那套的关键一环：不只是记流水账，还会**回头想**。洞见进记忆流（重要度最高）⇒
+  // 被检索到 ⇒ 影响之后的说话与决定 ⇒ 角色越活越有"自己的想法"。
+  // 控成本：同一个学生 8 分钟最多想一次、且至少攒够 REFLECT_MIN_NEW 条新记忆；全局同一时刻只跑一个。
+  let reflectBusy = false;
+  function maybeReflect(s, now) {
+    if (reflectBusy || s._reflecting) return false;
+    if (now - Number(s.reflectAt || 0) < REFLECT_CD) return false;
+    if ((s.mem || []).length - Number(s._memAtReflect || 0) < REFLECT_MIN_NEW) return false;
+    s._reflecting = true; reflectBusy = true;
+    s.reflectAt = now;
+    s._memAtReflect = (s.mem || []).length;
+    (async () => {
+      try {
+        // 喂"最近 + 最重要"的几条：让它想值得想的事，而不是刚路过的观察
+        const recent = (s.mem || []).slice(-10)
+          .slice().sort((a, b) => memImportance(b) - memImportance(a)).slice(0, 6);
+        const out = await askStudent({
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s) },
+          memory: recent,
+          kind: 'reflect',
+        });
+        const list = (out && Array.isArray(out.insights)) ? out.insights.slice(0, 3) : [];
+        let n = 0;
+        for (const t of list) {
+          const txt = clampText(t, LEN_MEM);
+          if (!txt) continue;
+          s.mem.push({ t: now, text: txt, kind: 'reflect', imp: 0.95 }); // 重要度拉满：反思最该被记住
+          n++;
+        }
+        if (n) { await trimMemory(s); saveStudents(students); console.info('[npc] ' + s.name + ' 反思：' + clampText(list[0], 40)); }
+      } catch (e) {
+        console.warn('[npc] 反思失败 ' + s.id + '：' + ((e && e.message) || e));
+      } finally {
+        s._reflecting = false; reflectBusy = false;
+      }
+    })();
+    return true;
+  }
+
+  // ---------- 日计划（daily plan）：一天的主线 ----------
+  // 每"游戏日"给每个学生生成一次"今天大概想干什么"，注入到之后每次 plan 的 prompt 里 ⇒
+  // 零散的两分钟决定有了主线（斯坦福的分层规划：日计划 → 具体活动）。
+  let daySeq = 0;
+  let lastHourSeen = null;
+  function tickDay() {
+    const h = hourNow();
+    if (lastHourSeen === null) { lastHourSeen = h; return; }
+    // 世界时刻是 0~1 循环的：小时数从深夜往前跳到清晨/更早 = 跨了一天
+    if (lastHourSeen - h > 12) daySeq++;
+    lastHourSeen = h;
+  }
+  let dayPlanBusy = false;
+  function maybeDayPlan(s, now) {
+    if (dayPlanBusy || s._dayPlanning) return false;
+    if (s.dayPlan && Number(s.dayPlanSeq) === daySeq && now - Number(s.dayPlanAt || 0) < DAYPLAN_CD) return false;
+    s._dayPlanning = true; dayPlanBusy = true;
+    s.dayPlanAt = now; s.dayPlanSeq = daySeq;
+    (async () => {
+      try {
+        const h = hourNow();
+        const seg = scheduleType(h);
+        const out = await askStudent({
+          student: {
+            name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st,
+            needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s),
+            boardLine: boardLine(), mates: students.filter((x) => x !== s).map((x) => x.name),
+          },
+          memory: pickMemory(s, null),
+          kind: 'dayplan',
+          hour: h,
+          schedule: seg ? seg.label : '自由活动',
+        });
+        const txt = clampText(out && out.plan, LEN_PLAN_DAY);
+        if (txt) { s.dayPlan = { text: txt, at: now }; saveStudents(students); console.info('[npc] ' + s.name + ' 今日打算：' + txt); }
+      } catch (e) {
+        console.warn('[npc] 日计划失败 ' + s.id + '：' + ((e && e.message) || e));
+      } finally {
+        s._dayPlanning = false; dayPlanBusy = false;
+      }
+    })();
+    return true;
   }
 
   // ---------- 主循环 ----------
@@ -1611,6 +1837,20 @@ export function createNpcWorld(opts) {
         });
         trimMemory(s);
         if (last) obeyNotice([s], last, now); // 看懂了就去做
+      }
+      // 反向委托：玩家走到跟前时主动开口请它帮忙买东西（限流 + 有委托在身就免开尊口）
+      if (!s.quest && !s.want && !s._chatting && (s.st === 'idle' || s.st === 'act') &&
+          now - Number(s._wantAt || 0) > WANT_CD) {
+        s._wantAt = now; // 先占住冷却，避免误判/重入时连环开口
+        wantAsk(s, now);
+      }
+      // 委托过期作废（没人理就算了，别一直挂在身上）
+      if (s.want && now - Number(s.want.createdAt || 0) > WANT_EXPIRE) { s.want = null; s._wantAt = now; }
+      // 斯坦福那套的两层"想"：先有今日主线（日计划），再回头把经历想成认识（反思）。
+      // 都只在人闲/做着事时进行，且全局每类同时只跑一个（不花走位时间、不刷爆额度）。
+      if (!s.quest && (s.st === 'idle' || s.st === 'act')) {
+        maybeDayPlan(s, now);
+        maybeReflect(s, now);
       }
       if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
       // 「去找某人 / 去找玩家」：定期朝目标**当前位置**重指（两边都在动 → 会在中间碰头）；
@@ -1697,6 +1937,7 @@ export function createNpcWorld(opts) {
         if (hasZones) decide(s, now); else wander(s, now);
       }
     }
+    tickDay(); // 跨天检测（日计划的序号靠它推进）
     pumpAnnounce(now); // 广播器：轮流让一个学生"听到"（一个个来，不并发打爆 GLM）
     // NPC↔NPC 社交：① 已经凑得近 → 直接开聊；② 离得远 → 撮合一对**相向走近**（纯走位、不花 LLM），
     //   走到一起了下一拍就走 ① 开聊。以前只认"已经凑到 5m 内"，而他们各忙各的很少凑近 ⇒ 几乎从不说话。
@@ -1715,7 +1956,8 @@ export function createNpcWorld(opts) {
       // ⚠ 客户端自己驱动走位：下发 wx/wz（**当前路点**，A* 给的绕行点）让客户端照它走；tx/tz 仍是
       //   **最终目标**（到达判定/probes 观测用）。x/z/rot 是服务端 ghost（供 probe 观测，客户端忽略）。
       //   老客户端不认 wx/wz 就退回用 tx/tz（= 直走，行为不回归）。
-      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), wx: round2(s.wx), wz: round2(s.wz), rot: round1(s.rot), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '' })) });
+      // want：它正请你代买的商品名（客户端据此在搭话按钮旁显示「交给 TA」）——空字符串表示没有
+      broadcast({ t: 'npc', list: students.map((s) => ({ id: s.id, x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), wx: round2(s.wx), wz: round2(s.wz), rot: round1(s.rot), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '', want: s.want ? s.want.itemName : '' })) });
     }
   }, TICK_MS);
   if (timer.unref) timer.unref();
@@ -1740,7 +1982,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0 };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0 };
   }
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
@@ -1823,6 +2065,33 @@ export function createNpcWorld(opts) {
     startQuest(s, t.name, question, fromId || '', '玩家');
     return { targetId: t.id, targetName: t.name };
   }
+  // 调试/探针用：强制想一次（清掉限流）
+  function debugReflect(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s.reflectAt = 0; s._memAtReflect = 0;
+    return maybeReflect(s, Date.now());
+  }
+  function debugDayPlan(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s.dayPlan = null;
+    return maybeDayPlan(s, Date.now());
+  }
+  // 调试/探针用：看"这次会挑哪几条记忆喂给模型"（检索公式的可见化）
+  function debugPickMemory(id, text) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return null;
+    return pickMemory(s, { text: String(text || '') }).map((m) => ({ text: String((m && m.text) || ''), kind: (m && m.kind) || '', imp: memImportance(m) }));
+  }
+  // 调试/探针用：强制立刻规划一次
+  function debugPlan(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s._planning = false; s.planAt = 0;
+    planNext(s, Date.now());
+    return true;
+  }
   // 调试/探针用：手动撮合一段闲聊
   function forceChat(aId, bId) {
     const a = students.find((x) => x.id === String(aId));
@@ -1837,6 +2106,7 @@ export function createNpcWorld(opts) {
       id: s.id, name: s.name, cls: s.cls, sex: s.sex,
       // ⚠ 初始坐标 x/z 给客户端落地 pstate；目标点 tx/tz 给客户端定初始走向（客户端驱动走位）
       x: round2(s.x), z: round2(s.z), tx: round2(s.tx), tz: round2(s.tz), wx: round2(s.wx), wz: round2(s.wz), st: s.st, goal: s.intent ? (s.intent.goalType || '') : '',
+      want: s.want ? s.want.itemName : '',
     }));
   }
 
@@ -1852,5 +2122,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, memImportance, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

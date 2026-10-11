@@ -574,5 +574,134 @@ console.log('[17] 想去找玩家（plan.seek="玩家"）→ 真的朝玩家走'
   ok(st2 && st2.x > x0 + 0.1, '真的朝玩家（x=18）那边走', 'x ' + x0 + ' → ' + (st2 && st2.x));
 }
 
+console.log('[18] 反向委托：NPC 主动开口请玩家买东西 → 交付 → 结算；交错东西被拒');
+{
+  const dir = freshDir('want');
+  writeScene(dir);
+  const blist = questStudents([[0, 0], [8, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]]);
+  for (const s of blist) { s.planAt = 1e15; s.decideAt = 1e15; s.st = 'idle'; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  writeZones(dir);
+  const says = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    getDayTime: () => 0.35,
+    askStudent: async () => ({ say: '', think: '', mem: '' }),
+  });
+  // 商品目录 = 真实在售（服务端 SHOP 注入的那份）
+  w.setShopCatalog([
+    { id: 'bk', name: '一摞书', price: 55, kind: 'building' },
+    { id: 'tb', name: '玩具熊', price: 22, kind: 'building' },
+  ]);
+  w.setPlayerPositions([{ id: 'u1', x: 2, z: 0 }]); // 玩家就在 s1 跟前
+  await sleep(400);
+  const st = w.stateOf('s1');
+  ok(st && st.want && st.want.itemName && st.want.reward > 0, 'NPC 主动开口要东西（只能从真实在售里挑）', st && JSON.stringify(st.want));
+  ok(says.some((x) => /帮我买/.test(String(x.say))), '开口的话广播出来了（玩家看得见"要什么/多少钱"）', JSON.stringify(says));
+  const v0 = st ? st.mood.valence : 0;
+  const good = w.deliver('s1', st.want.itemName, '小明', 'p:u1');
+  const after = w.stateOf('s1');
+  ok(good.ok === true && good.reward > 0, '交付成功并给跑腿费（服务端算额度）', JSON.stringify(good));
+  ok(after && after.want === null, '交付后委托清空', JSON.stringify(after && after.want));
+  ok(after && after.mood.valence > v0, '收到东西心情变好', 'valence ' + v0 + ' → ' + (after && after.mood.valence));
+  ok(after && after.rel['p:u1'] && after.rel['p:u1'].trust > 0, '对玩家的关系提升', JSON.stringify(after && after.rel));
+  ok(after && after.mem.some((m) => /帮我买来了/.test(String(m.text))), '记了一条"他帮我买了…"', JSON.stringify(after && after.mem));
+  const st2 = w.stateOf('s2');
+  const bad = w.deliver('s2', '完全不相关的东西', '小明', 'p:u1');
+  ok(st2 && st2.want && bad.ok === false, '**交错东西被拒绝**（服务端不信前端，只认它要的那件）', JSON.stringify(bad));
+  w.dispose();
+}
+
+console.log('[19] 记忆检索：重要度 + 新近度 + 相关度 三者加权（斯坦福 retrieval）');
+{
+  const dir = freshDir('mem');
+  writeScene(dir);
+  const now = Date.now();
+  const mk = (kind, text, minutesAgo, imp) => ({ t: now - minutesAgo * 60000, text, kind, imp });
+  const list = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  list[0].mem = [
+    mk('obs', '我看见学生2号也在这一带', 0.2),                    // 最近，但最不重要
+    mk('obs', '我看见学生3号也在这一带', 0.5),
+    mk('obs', '我看见学生4号也在这一带', 1),
+    mk('obs', '我看见学生5号也在这一带', 2),
+    mk('obs', '我看见学生6号也在这一带', 3),
+    mk('trade', '玩家帮我买来了「一摞书」，人挺靠谱', 30, 0.95),   // 30 分钟前，但极重要
+    mk('chat', '我和学生7号聊到作业', 40, 0.55),
+    mk('say', '老师说要交作业了', 50, 0.55),
+  ];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => ({ say: '', think: '', mem: '' }) });
+  await sleep(60);
+  const picked = w.debugPickMemory('s1', '');
+  const texts = (picked || []).map((x) => x.text);
+  const impReflect = w.memImportance({ kind: 'reflect' });
+  const impObs = w.memImportance({ kind: 'obs' });
+  w.dispose();
+  ok(picked && picked.length <= 4, '只挑 4 条（MEM_CTX），不是把整串塞过去', JSON.stringify(texts));
+  ok(texts.some((t) => /一摞书/.test(t)), '**重要但较旧**的记忆仍被选上（重要度权重起作用）', JSON.stringify(texts));
+  ok(texts.some((t) => /也在这一带/.test(t)), '最近的观察也占得上位置（新近度起作用）', JSON.stringify(texts));
+  ok(impReflect > impObs, '重要度基线：反思 > 路过的观察', 'reflect=' + impReflect + ' obs=' + impObs);
+}
+
+console.log('[20] 反思：把经历想成"认识"（高重要度记忆），且会被限流');
+{
+  const dir = freshDir('reflect');
+  writeScene(dir);
+  const list = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  for (let i = 0; i < 4; i++) list[0].mem.push({ t: Date.now() - i * 60000, text: '学生' + (i + 2) + '号今天又在图书馆待着', kind: 'chat' });
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const kinds = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      kinds.push(String(input.kind || ''));
+      if (input.kind === 'reflect') return { insights: ['我最近好像老在图书馆，其实我更想找人打球'] };
+      if (input.kind === 'dayplan') return { plan: '今天随便逛逛' };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  await sleep(60);
+  const fired = w.debugReflect('s1'); // debugReflect 是"强制"钩子（会清限流），不能拿它测冷却
+  await sleep(200);
+  const st = w.stateOf('s1');
+  const n1 = kinds.filter((k) => k === 'reflect').length;
+  await sleep(700); // 冷却期内：自动路径不该再想
+  const n2 = kinds.filter((k) => k === 'reflect').length;
+  w.dispose();
+  ok(fired === true, '攒够新记忆 → 触发一次反思', '');
+  ok(n1 >= 1, '真的调了 reflect', 'kinds=' + kinds.join(','));
+  ok(st && st.mem.some((m) => /我更想找人打球/.test(String(m.text))), '洞见写进记忆流（之后的 prompt 会带上它）', JSON.stringify(st && st.mem));
+  ok(n2 === n1, '冷却期内**自动**路径不会再想一次（不刷 GLM）', 'reflect 次数 ' + n1 + ' → ' + n2);
+}
+
+console.log('[21] 日计划：每游戏日生成一次，并注入之后每次 plan 的 prompt');
+{
+  const dir = freshDir('dayplan');
+  writeScene(dir);
+  const blist = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  for (const s of blist) { s.planAt = 0; s.decideAt = 0; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  writeZones(dir);
+  let planDayPlan = null;
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'dayplan') return { plan: '今天想把那摞书看完，再去操场跑两圈' };
+      if (input.kind === 'plan') { planDayPlan = input.student && input.student.dayPlan; return null; }
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  await sleep(700); // 等日计划生成完
+  const st = w.stateOf('s1');
+  w.debugPlan('s1'); // 再规划一次：这次 prompt 里应该带上刚生成的日计划
+  await sleep(250);
+  w.dispose();
+  ok(st && st.dayPlan && /书/.test(String(st.dayPlan.text)), '生成了"今日打算"', st && JSON.stringify(st.dayPlan));
+  ok(String(planDayPlan || '') !== '', 'plan 的 prompt 里带上了【今天你本来打算】', 'dayPlan=' + planDayPlan);
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

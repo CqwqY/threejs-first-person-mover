@@ -19,7 +19,7 @@ import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
-import { loadWallet, buyItem, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName, isOwned } from '../player/Shop.js';
+import { loadWallet, buyItem, addCoins, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName, isOwned } from '../player/Shop.js';
 import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene, syncFakeWindowEnvs } from '../world/EditorBuildings.js';
 import { updateLod } from '../world/Lod.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
@@ -541,6 +541,7 @@ export class Game {
     // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关对话栏
     this._createChatTab();
     this._createBoardTab();
+    this._createDeliverTab();
     this._bindStudentTalk();
     // 公告栏初值：拉一次服务端已有公告画到板子上（之后靠 ws 的 board 消息实时更新）
     fetch(this._relayBase() + '/api/board').then((r) => r.json()).then((d) => { if (d && d.ok && this._board) this._board.setPosts(d.posts || []); }).catch(() => {});
@@ -1757,6 +1758,17 @@ export class Game {
       }
       case 'npc_zones': {
         // 编辑器改了功能区：本地不直接用（位置以服务端为准），只提示一下
+        break;
+      }
+      case 'npc_deliver': {
+        // 反向委托的结算回执：成功就给跑腿费（服务端算好的额度），失败说明原因
+        if (msg.ok) {
+          const r = Math.max(0, Math.floor(Number(msg.reward) || 0));
+          if (r > 0) { addCoins(this._profile, r); this._refreshCoins(); }
+          this._toast('✅ 交付成功' + (r > 0 ? '，拿到跑腿费 ¥' + r : ''));
+        } else if (msg.reason) {
+          this._toast('交付失败：' + String(msg.reason));
+        }
         break;
       }
       case 'board': {
@@ -4241,6 +4253,35 @@ export class Game {
     document.body.appendChild(el);
     this._boardTab = el;
   }
+
+  // 「把 X 交给 TA」：NPC 反过来请你代买东西时出现的按钮（背包里确实有那件东西才显示）。
+  // 点击 → 本地从背包扣掉 → 发 npc_deliver 让服务端校验并结算跑腿费。做成按钮是为了手机也能用。
+  _createDeliverTab() {
+    const el = document.createElement('div');
+    el.className = 'deliver-tab kui-btn';
+    el.textContent = '交给 TA';
+    el.style.cssText =
+      'position:fixed;right:26%;top:calc(50% + 104px);z-index:9501;cursor:pointer;display:none;' +
+      'padding:9px 12px;user-select:none;text-align:center;';
+    el.addEventListener('click', () => this._deliverToNearest());
+    document.body.appendChild(el);
+    this._deliverTab = el;
+  }
+
+  // 交付：背包里有那件东西才允许（本地记账），服务端再校验物品名是否就是它要的
+  _deliverToNearest() {
+    if (!this.students || !this.localState) return;
+    const s = this.students.nearest(this.localState.x, this.localState.z);
+    if (!s || !s.want) return;
+    const key = getBagKey(this._profile);
+    const name = String(s.want);
+    const bag = loadBag(key);
+    if (!Number(bag[name] || 0)) { this._toast('背包里没有「' + name + '」，先去小满杂货铺买一个'); return; }
+    removeFromBag(key, name, 1); // 先从背包扣掉（服务端不信前端，只校验名字并给奖励）
+    this.network.sendNpcDeliver(s.id, name);
+    this._toast('把「' + name + '」交给了' + s.name + '…');
+    if (this.shop && this.shop.isOpen()) this.shop.render();
+  }
   _nearBoard() {
     if (!this.localState) return false;
     return Math.hypot(Number(this.localState.x) - -22, Number(this.localState.z) - 17) < 6.5;
@@ -4249,10 +4290,12 @@ export class Game {
   // 每帧刷新搭话/公告栏选项卡：靠近谁就写谁的名字；没人但靠近公告栏就显示公告栏
   _updateTalkTab() {
     if (!this._chatTab || !this.students || !this.localState) return;
+    const hideDeliver = () => { if (this._deliverTab) this._deliverTab.style.display = 'none'; };
     const busy = (this.aiChat && this.aiChat.isOpen()) || (this._announce && this._announce.isOpen());
     if (busy) {
       this._chatTab.style.display = 'none';
       if (this._boardTab) this._boardTab.style.display = 'none';
+      hideDeliver();
       return;
     }
     const s = this.students.nearest(this.localState.x, this.localState.z);
@@ -4261,9 +4304,17 @@ export class Game {
       if (this._chatTab.textContent !== text) this._chatTab.textContent = text;
       this._chatTab.style.display = '';
       if (this._boardTab) this._boardTab.style.display = 'none';
+      // 反向委托：它请你带了东西、而且你背包里确实有 → 亮出「交给 TA」
+      const bag = s.want ? loadBag(getBagKey(this._profile)) : null;
+      if (this._deliverTab && s.want && bag && Number(bag[String(s.want)] || 0) > 0) {
+        const t2 = '交给' + s.name + '「' + s.want + '」';
+        if (this._deliverTab.textContent !== t2) this._deliverTab.textContent = t2;
+        this._deliverTab.style.display = '';
+      } else hideDeliver();
       return;
     }
     this._chatTab.style.display = 'none';
+    hideDeliver();
     if (this._boardTab) this._boardTab.style.display = this._nearBoard() ? '' : 'none';
   }
 
@@ -6163,6 +6214,8 @@ export class Game {
     if (this._merchantHint) this._merchantHint.style.display = 'none';
     if (this._vehHint) this._vehHint.style.display = 'none';
     if (this._chatTab) this._chatTab.style.display = 'none';
+    if (this._deliverTab) this._deliverTab.style.display = 'none';
+    if (this._boardTab) this._boardTab.style.display = 'none';
 
     this._mainColliders = this.colliders.slice(); // 快照主世界碰撞体内容（退出时还原）
     // 按模式换场景：陨石混战 = 平地竞技场；疯狂抓钩 = 柱子林 + 底部岩浆

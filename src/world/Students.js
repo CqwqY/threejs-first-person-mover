@@ -168,6 +168,7 @@ export function createStudents(opts) {
 
       x: 0, z: 0, rot: 0, yaw: 0, // yaw：客户端按真实速度算的朝向（弧度），不依赖服务端 rot
       st: 'idle',
+      want: '',   // 它正请玩家代买的商品名（服务端下发）；空 = 没有请求
       speed: 0,
       // 每个学生一个独立物理实例（吃同一份 colliders，碰撞与玩家完全一致）
       physics: new PlayerPhysics(),
@@ -260,6 +261,7 @@ export function createStudents(opts) {
       s.gx = Number.isFinite(Number(it.wx)) ? Number(it.wx) : s.tx;
       s.gz = Number.isFinite(Number(it.wz)) ? Number(it.wz) : s.tz;
       s.trot = Number(it.rot) || 0;
+      s.want = String(it.want || '');
       if (!s.model) {
         // 初始位置用服务端当前坐标(x/z)落地 pstate（目标已在上面临时设好）
         const ix = Number.isFinite(Number(it.x)) ? Number(it.x) : s.tx;
@@ -296,6 +298,7 @@ export function createStudents(opts) {
       s.gx = Number.isFinite(Number(it.wx)) ? Number(it.wx) : nx;
       s.gz = Number.isFinite(Number(it.wz)) ? Number(it.wz) : nz;
       s.st = String(it.st || 'idle');
+      s.want = String(it.want || '');
     }
   }
 
