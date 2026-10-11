@@ -4121,6 +4121,15 @@ export function createEditor() {
       del.style.cssText = 'flex:0 0 auto;padding:2px 6px';
       del.onclick = () => { zoneList.splice(i, 1); renderZoneList(); drawZoneViz(); };
       row.appendChild(del);
+      // 「用途」：**这才是喂给 AI 的"这地方是干嘛的"**。名字（上面那个）只给编辑器和玩家看 ——
+      // 用户明确要求"不要把区域名字告诉 AI，容易误解"（自取名会让模型瞎猜功能）。
+      const desc = document.createElement('input');
+      desc.type = 'text';
+      desc.value = z.desc || '';
+      desc.placeholder = '用途／内容（AI 看到的说法，如：看书自习、上课、吃饭）';
+      desc.style.cssText = 'flex:1 0 100%;margin-top:2px;font-size:11px';
+      desc.oninput = () => { zoneList[i].desc = desc.value; };
+      row.appendChild(desc);
       StepUI.zonesList.appendChild(row);
     });
     if (!zoneList.length) StepUI.zonesList.innerHTML = '<div style="color:#7d8894">（还没标任何区域 —— 点「加一个区域」或「用选中建筑生成」）</div>';
@@ -4163,7 +4172,7 @@ export function createEditor() {
   if (StepUI.zonesRefresh) StepUI.zonesRefresh.onclick = () => fetchZones();
   if (StepUI.zonesSave) StepUI.zonesSave.onclick = () => saveZones();
   if (StepUI.zonesAdd) StepUI.zonesAdd.onclick = () => {
-    zoneList.push({ id: 'z' + (Date.now() % 100000), name: '新区域', type: 'other', minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
+    zoneList.push({ id: 'z' + (Date.now() % 100000), name: '新区域', desc: '', type: 'other', minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
     renderZoneList(); drawZoneViz();
   };
   // 用选中建筑的外接框生成：选中教学楼点一下就出矩形，不用手输坐标
@@ -4176,6 +4185,7 @@ export function createEditor() {
     zoneList.push({
       id: 'z' + (Date.now() % 100000),
       name: String(sel.name || '建筑').slice(0, 16),
+      desc: '',
       type: 'classroom',
       minX: r1(box.min.x), maxX: r1(box.max.x),
       minZ: r1(box.min.z), maxZ: r1(box.max.z),

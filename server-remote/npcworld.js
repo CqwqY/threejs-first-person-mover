@@ -68,7 +68,7 @@ const MEM_W_REC = 1.0;    // 新近度权重（指数衰减）
 const MEM_W_IMP = 1.2;    // 重要度权重（略高于其它两项：重要的事不该被冲掉）
 const MEM_RECENCY_HL = 25; // 新近度半衰期（分钟）：25 分钟衰减一半
 // 记忆重要度基线（0~1）：不额外调 LLM，按**类型 + 文本线索**给分（免费、确定性、可测）
-const MEM_BASE_IMP = { reflect: 0.95, quest: 0.8, trade: 0.8, want: 0.7, notice: 0.7, announce: 0.6, chat: 0.55, say: 0.55, obs: 0.2 };
+const MEM_BASE_IMP = { reflect: 0.95, quest: 0.8, trade: 0.8, want: 0.7, notice: 0.7, announce: 0.6, chat: 0.55, say: 0.55, act: 0.5, obs: 0.2 };
 const MEM_HOT_WORDS = /(玩家|答应|承诺|喜欢|讨厌|吵架|生气|谢谢|帮我|送我|秘密|约定|道歉|一起|别告诉)/;
 // ---- 反思（reflection）与日计划（daily plan）----
 const REFLECT_MIN_NEW = 4;     // 至少攒了这么多条新记忆才值得想一次（控 LLM 调用）
@@ -485,6 +485,9 @@ export function createNpcWorld(opts) {
       out.push({
         id: String(z.id || ('z' + (out.length + 1))).slice(0, 24),
         name: clampText(z.name, 16) || '未命名区域',
+        // 用途/内容：**这是给 AI 看的那个"地名"**（用户可自己写）。名字（name）只给编辑器和玩家看 ——
+        // 用户明确要求"不要把名字告诉 AI，容易误解"（如"花草阁"这种自取名会让模型瞎猜功能）。
+        desc: clampText(z.desc, 60),
         type: ZONE_TYPE_IDS.has(String(z.type)) ? String(z.type) : 'other',
         minX: Math.min(minX, maxX),
         maxX: Math.max(minX, maxX),
@@ -968,18 +971,40 @@ export function createNpcWorld(opts) {
     }
     return null;
   }
-  // 任意坐标 → 人话地名（"图书馆" / "学生饭堂（饭堂）" / "校园里"）
+  // AI 眼里的"这是什么地方"：**优先用用户写的用途(desc)，其次才是功能区类型标签**。
+  // ⚠ 绝不用区域的名字（name）—— 用户明确要求"不要告诉 AI 名字，容易误解"：
+  //   自取的名字（"花草阁""第三院落"）模型只会瞎猜它是干什么的；而"用途"才是它真正需要的信息。
+  function zoneAiName(z) {
+    if (!z) return '';
+    const d = String(z.desc || '').trim();
+    if (d) return d;
+    const t = ZONE_TYPES.find((x2) => x2.id === z.type);
+    return (t && t.label) || '某处';
+  }
+  // 任意坐标 → 人话地名（"图书馆" / "看书自习的地方" / "校园里"）
   function placeNameAt(x, z, zoneId) {
     const zn = zoneAt(Number(x), Number(z)) || zoneById(zoneId);
     if (!zn) return '校园里';
-    const t = ZONE_TYPES.find((x2) => x2.id === zn.type);
-    const label = (t && t.label) || '';
-    const nm = String(zn.name || '');
-    if (!label) return nm || '校园里';
-    if (nm && nm.indexOf(label) >= 0) return nm; // 名字里已经带类型（"图书馆"）就不重复
-    return nm ? nm + '（' + label + '）' : label;
+    return zoneAiName(zn) || '校园里';
   }
-  // 给 AI 的"我在哪"：区域名 + 类型标签。都不在就老实说"校园里"，绝不臆造地点。
+  // 本地"解释器"：把一句自然语言里的"要去哪"读出来。先认功能区常识词，再认**用户自己写的用途**（desc）。
+  // 用于 act 的 target 认不出、或 LLM goalType 认不出时的兜底 —— 纯本地，不花 LLM 调用。
+  function resolvePlaceType(text) {
+    const t = String(text || '');
+    if (!t) return null;
+    const byWord = inferZoneFromText(t);
+    if (byWord) return byWord;
+    for (const z of zones) {
+      const d = String(z.desc || '').trim();
+      if (!d) continue;
+      if (t.indexOf(d) >= 0) return z.type;
+      for (const w of d.split(/[、，,。;；:：\s/|｜]+/)) {
+        if (w.length >= 2 && t.indexOf(w) >= 0) return z.type;
+      }
+    }
+    return null;
+  }
+  // 给 AI 的"我在哪"：用户写的用途 / 类型标签（**不含自取的名字**）。都不在就老实说"校园里"，绝不臆造地点。
   function placeOf(s) { return placeNameAt(s.x, s.z, s.zoneId); }
   // 给 AI 的"玩家在哪"：说人话（距离 + 方位 + 地点）。
   // ⚠ 模型拿不到坐标，不把位置翻译成人话，它就只能瞎猜（用户实测："AI 对玩家位置不清"）。
@@ -1344,6 +1369,61 @@ export function createNpcWorld(opts) {
     }
   }
 
+  // ---------- 斯坦福「统一决策入口」act：LLM 自己选 type，服务端只做映射 ----------
+  // 论文/DeepSeek 稿的核心：**没有"服务端决定现在该调哪个 kind"这一步**。LLM 输出 action + type + target
+  // + params，服务端只负责"这个 type 怎么执行"。行为空间不再被提前枚举 —— "四处看看"不需要一个新 kind，
+  // 它自然从 type=explore / type=move+observe 的组合里涌现。
+  // 这里把 act 归一成既有的 goalType 意图（走位 / 发帖 / 委托各系统直接复用，零重写）。
+  // 兼容：① 模型不听话、直接给了老的 goalType → 原样放行；② type 认不出 → 从 action/target 的文字里读地方。
+  function normalizeAct(out) {
+    if (!out) return out;
+    if (out.goalType) return out; // 老格式 / 模型直接给 goalType：原样走老逻辑
+    const type = String(out.type || '').trim().toLowerCase();
+    const target = String(out.target || '').trim();
+    const action = String(out.action || '').trim();
+    const params = (out.params && typeof out.params === 'object') ? out.params : {};
+    const r = {
+      goalType: 'wander',
+      goal: clampText(action || target, 80),
+      activity: clampText(action, 120),
+      plan: '',
+      durationSec: clampInt(params.durationSec != null ? params.durationSec : params.duration, 30, 300, 60),
+      thought: clampText(out.think, 120),
+      mem: clampText(out.mem, 40),
+      seek: '',
+      post: '',
+    };
+    const has = (...xs) => xs.indexOf(type) >= 0;
+    const seekByName = (name) => {
+      const o = resolveStudentByName(name);
+      return o ? o.name : '';
+    };
+    // 去找人（move/talk/goto 且 target 是人或"玩家"）
+    if (has('move', 'goto', 'go', 'walkto', 'walk_to', 'go_to', '去', '走到', 'talk', 'chat', 'speak', '找', '聊天')) {
+      if (/玩家/.test(target) || (!target && /玩家/.test(action))) { r.seek = '玩家'; r.goalType = 'wander'; return r; }
+      const nm = seekByName(target) || seekByName(action);
+      if (nm) { r.goalType = 'wander'; r.seek = nm; return r; }
+      if (has('talk', 'chat', 'speak', '找', '聊天')) { r.goalType = 'inquire'; return r; } // 只说"找人说话"没点名：当打听
+      const z = resolvePlaceType(target || action);
+      r.goalType = z || 'wander'; // 认出去哪就去；认不出就随便走走（绝不卡死）
+      return r;
+    }
+    if (has('inquire', 'ask', '打听', '问', '问问')) { r.goalType = 'inquire'; return r; }
+    if (has('explore', 'look', 'visit', 'see', '看看', '逛', '逛逛', '参观', '探索', '转转')) { r.goalType = 'explore'; return r; }
+    if (has('post', 'announce', '通知', '公告', '贴')) { r.post = clampText(params.text || action || target, 40); return r; }
+    if (has('rest', 'stay', 'idle', 'sit', '歇', '休息', '待着', '发呆')) { r.goalType = 'rest'; return r; }
+    if (has('wait', '等', '等待', '等一会')) {
+      r.goalType = 'rest';
+      r.durationSec = clampInt(params.seconds != null ? params.seconds : params.duration, 5, 300, 30);
+      return r;
+    }
+    if (has('observe', 'watch', 'look_at', '看', '观察', '看看他', '看看她')) { r.goalType = 'rest'; return r; }
+    if (has('wander', 'roam', 'stroll', 'walk', '溜达', '散步', '走走')) { r.goalType = 'wander'; return r; }
+    // 未知 type（它自己起的名）：从 action/target 的文字里读地方；读不出就随便走走
+    r.goalType = resolvePlaceType(action + ' ' + target) || 'wander';
+    return r;
+  }
+
   // ---------- System2：LLM 低频规划（"灵魂"） ----------
   // 每个 NPC 每隔 PLAN_INTERVAL_MS 让 GLM 想一次"接下来去哪、干什么、干多久"，落地成 s.intent；
   // 本地代码（System1）每帧按 intent 走位/绕障/碰撞/动画（决策一次、干一会活）。
@@ -1356,7 +1436,7 @@ export function createNpcWorld(opts) {
       try {
         const h = hourNow();
         const seg = scheduleType(h);
-        const out = await askStudent({
+        const raw = await askStudent({
           student: {
             name: s.name, cls: s.cls, persona: s.persona, sex: s.sex,
             place: placeOf(s), self: selfProfile(s), // 结构化自我档案（固定分层，放最前 ⇒ 身份稳、状态准）
@@ -1371,12 +1451,15 @@ export function createNpcWorld(opts) {
             noticed: String(s.noticed || ''), // 刚刚注意到的事（观察打断计划后的线索）
           },
           memory: pickMemory(s, null),
-          kind: 'plan',
+          // 斯坦福「统一决策入口」：不再问它"你要填哪个模板"，而是让它自己决定做什么（type 由它选）。
+          kind: 'act',
           hour: h,
           schedule: seg ? seg.label : '自由活动',
         });
+        // act → 既有 goalType 意图（服务端只做映射）；兼容它直接给 goalType 的老写法
+        const out = normalizeAct(raw);
         if (!out || !out.goalType) {
-          // GLM 没给有效意图 → 回退规则大脑（保留走位能力，不静默卡死）
+          // GLM 没给有效动作 → 回退规则大脑（保留走位能力，不静默卡死）
           s.intent = null;
           s.decideAt = now;
           decide(s, now);
@@ -1389,7 +1472,7 @@ export function createNpcWorld(opts) {
           const rawGt = String(out.goalType || '').trim().toLowerCase();
           const looksWander = !rawGt || ['wander', 'walk', 'roam', 'stroll', '游荡', '散步', '溜达', '随便走走'].includes(rawGt);
           if (!looksWander) {
-            const guess = inferZoneFromText(String(out.goal || '') + ' ' + String(out.activity || ''));
+            const guess = resolvePlaceType(String(out.goal || '') + ' ' + String(out.activity || ''));
             if (guess) { goalType = guess; console.info('[npc] ' + s.name + ' 意图解释器：从「' + clampText(out.goal, 20) + '」读出去 ' + guess); }
           }
         }
@@ -1441,12 +1524,17 @@ export function createNpcWorld(opts) {
           since: now,
         };
         recordPlanFeed(s, goalType); // 慢环：把这次 LLM 决策写成训练标签（SFT + DPO 偏好对）
-        // plan 自带的内心考量入库（驱动记忆与后续举止）
+        // act 自带的内心活动入库（驱动记忆与后续举止）。每一次决策都有心理活动 —— 用户明确要求。
         const thought = clampText(out.thought, LEN_THINK);
         if (thought) {
           s.think.push({ t: now, text: thought });
           if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
           saveStudents(students);
+        }
+        // act 认为"值得记住的事"也进记忆流（斯坦福：计划的产物要回写记忆，影响后续行为）
+        if (out.mem) {
+          s.mem.push({ t: now, text: clampText(out.mem, LEN_MEM), kind: 'act' });
+          await trimMemory(s);
         }
         if (goalType === 'rest') {
           s.st = 'act';
@@ -2448,7 +2536,13 @@ export function createNpcWorld(opts) {
               trimMemory(s);
               s.noticed = '我刚到' + placeOf(s) + '，' + lm;
             }
-            triggerAI(s, 'arrive'); // 到达目的地：触发一次内心独白（内部有冷却，绝大多数会被节流掉）
+            // 斯坦福：**到达是"感知"的一部分，不再单独调一次 LLM** —— 写进【你刚刚注意到】，
+            // 由下一次 act 一起想（这正是"arrive 从独立调用降级为 act 的输入"，也省一次调用）。
+            {
+              const scA = sceneOf(s);
+              s.noticed = '我刚走到' + placeOf(s)
+                + (scA.landmarks.length ? ('，旁边是' + scA.landmarks.slice(0, 2).map((l) => l.name).join('、')) : '') + '。';
+            }
           }
         } else {
           // ⚠ 没有这两条兜底，目标不可达（点在墙里 / 五个方向全被挡）会**永久卡在 walk**：
@@ -2790,5 +2884,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, boardPosts: () => boardPosts.slice(), memImportance, debugSelf, inferZone: inferZoneFromText, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, boardPosts: () => boardPosts.slice(), memImportance, debugSelf, inferZone: inferZoneFromText, normalizeAct, zoneAiName, resolvePlaceType, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

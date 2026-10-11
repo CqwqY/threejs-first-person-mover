@@ -203,5 +203,22 @@ console.log('[11] 冲突裁决规则：行为与性格冲突→按性格；记�
   ok(/按性格来/.test(sysP) && /以当下为准/.test(sysP), 'SYSTEM_PLAN 同样有这两条裁决规则', '');
 }
 
+console.log('[12] act（斯坦福统一决策入口）：kind=act 走 SYSTEM_ACT，且要求"type 由你自己选 + 不编楼名"');
+{
+  await askStudent({
+    student: { ...base, self: '· 我是谁（永不变）：我叫顾星桥…', scene: '能看到：看书的地方（东约 20m）', places: '看书的地方（还没去过）' },
+    memory: [], kind: 'act', hour: 10, schedule: '自由活动',
+  });
+  const p = userTextOf(captured.length - 1);
+  const sys = systemTextOf(captured.length - 1);
+  ok(/【本次任务】/.test(p), 'act 有【本次任务】段（kind 降级为输出模板）', p.slice(-120));
+  ok(/"action"/.test(sys) && /"type"/.test(sys), 'SYSTEM_ACT 讲清了输出 {action,type,...}', sys.slice(0, 80));
+  ok(/你自己选/.test(sys), 'SYSTEM_ACT 明确"type 由你自己选"（不是服务端预设）', '');
+  ok(/不要编造没听说过的楼名/.test(sys) || /功能区说法/.test(sys),
+    'SYSTEM_ACT 要求用"功能区说法"、别编楼名（因为我们不喂区域名字）', '');
+  ok(/think/.test(sys) && /内心活动/.test(sys), 'SYSTEM_ACT 要求输出 think 心理活动', '');
+  ok(/第一人称/.test(sys), 'SYSTEM_ACT 要求第一人称', '');
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

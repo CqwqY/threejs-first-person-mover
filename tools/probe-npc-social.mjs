@@ -65,7 +65,7 @@ console.log('[1] 搭话改变心情/关系/去向');
     askStudent: async (input) => {
       seen.push({ kind: input.kind, mood: input.student && input.student.mood, rel: input.student && input.student.rel });
       if (input.kind === 'talk') return { say: '好呀，谢谢！', think: '他挺客气', mem: '玩家请我吃饭', mood: '开心', affinity: 0.8, goalType: 'canteen' };
-      if (input.kind === 'plan') return { goalType: 'rest', goal: '歇会', activity: '', plan: '', durationSec: 60, thought: '' };
+      if ((input.kind === 'plan' || input.kind === 'act')) return { goalType: 'rest', goal: '歇会', activity: '', plan: '', durationSec: 60, thought: '' };
       return { say: '', think: '', mem: '' };
     },
   });
@@ -97,7 +97,7 @@ console.log('[2] plan 的 prompt 带 mood/rel（"改变"能传给下一次决策
     getDayTime: () => 0.35,
     askStudent: async (input) => {
       if (input.kind === 'talk') return { say: '嗯', think: '', mem: '', mood: '开心', affinity: 0.9, goalType: '' };
-      if (input.kind === 'plan') { planMood = input.student && input.student.mood; planRel = input.student && input.student.rel; return null; } // 回 null → 回退规则大脑（只看 prompt 是否带 mood/rel）
+      if ((input.kind === 'plan' || input.kind === 'act')) { planMood = input.student && input.student.mood; planRel = input.student && input.student.rel; return null; } // 回 null → 回退规则大脑（只看 prompt 是否带 mood/rel）
       return { say: '', think: '', mem: '' };
     },
   });
@@ -137,7 +137,7 @@ console.log('[3] NPC↔NPC 闲聊：双方都记账/改心情/改关系，台词
         lines: [{ who: 'a', text: '你听说玩家的事了吗？' }, { who: 'b', text: '没，快说说。' }, { who: 'a', text: '回头讲给你。' }],
         topic: '玩家八卦', memA: '我向学生2号号打听了玩家的事', memB: '学生1号号要跟我讲玩家的事', moodA: '开心', moodB: '好奇', bond: 0.5,
       };
-      if (input.kind === 'plan') return null;
+      if ((input.kind === 'plan' || input.kind === 'act')) return null;
       return { say: '', think: '', mem: '' };
     },
   });
@@ -321,7 +321,7 @@ console.log('[9] 公告栏 → AI 规划时带上公告；广播器 → 轮流�
   let planBoard = null;
   const w = createNpcWorld({
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
-    askStudent: async (input) => { if (input.kind === 'plan') { planBoard = input.student && input.student.board; return null; } return { say: '', think: '', mem: '' }; },
+    askStudent: async (input) => { if ((input.kind === 'plan' || input.kind === 'act')) { planBoard = input.student && input.student.board; return null; } return { say: '', think: '', mem: '' }; },
   });
   w.setBoard(['操场下午有活动']);
   await sleep(400);
@@ -506,7 +506,7 @@ console.log('[14] plan 的 prompt：公告栏"始终存在" + 玩家在哪（人
   let cap = null;
   const w = createNpcWorld({
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
-    askStudent: async (input) => { if (input.kind === 'plan') { cap = input.student; return null; } return { say: '', think: '', mem: '' }; },
+    askStudent: async (input) => { if ((input.kind === 'plan' || input.kind === 'act')) { cap = input.student; return null; } return { say: '', think: '', mem: '' }; },
   });
   w.setPlayerPositions([{ id: 'u1', x: 60, z: 0 }]);
   await sleep(400);
@@ -576,7 +576,7 @@ console.log('[17] 想去找玩家（plan.seek="玩家"）→ 真的朝玩家走'
   writeZones(dir);
   const w = createNpcWorld({
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
-    askStudent: async (input) => (input.kind === 'plan'
+    askStudent: async (input) => ((input.kind === 'plan' || input.kind === 'act')
       ? { goalType: 'rest', goal: '去找玩家说说话', activity: '', plan: '', durationSec: 60, thought: '', seek: '玩家' }
       : { say: '', think: '', mem: '' }),
   });
@@ -707,7 +707,7 @@ console.log('[21] 日计划：每游戏日生成一次，并注入之后每次 p
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
     askStudent: async (input) => {
       if (input.kind === 'dayplan') return { plan: '今天想把那摞书看完，再去操场跑两圈' };
-      if (input.kind === 'plan') { planDayPlan = input.student && input.student.dayPlan; return null; }
+      if ((input.kind === 'plan' || input.kind === 'act')) { planDayPlan = input.student && input.student.dayPlan; return null; }
       return { say: '', think: '', mem: '' };
     },
   });
@@ -766,7 +766,7 @@ console.log('[24] 不再站着发呆：到地方后的停留封顶 + 一结束�
   const w = createNpcWorld({
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
     // plan 故意要"在饭堂待 300 秒"（最大值）—— 到地方后**不许真站 300 秒**
-    askStudent: async (input) => (input.kind === 'plan'
+    askStudent: async (input) => ((input.kind === 'plan' || input.kind === 'act')
       ? { goalType: 'canteen', goal: '去饭堂吃饭', activity: '吃饭', plan: '', durationSec: 300, thought: '' }
       : { say: '', think: '', mem: '' }),
   });
@@ -861,11 +861,12 @@ console.log('[27] 场景识别：附近地标 / 附近的人 / 学校有哪些�
 {
   const dir = freshDir('scene');
   writeScene(dir);
-  // s1 站在"第一食堂"里；操场/图书馆都在 45m 内 ⇒ 应该被算成"你附近的地标"
+  // s1 站在 canteen 里；操场/图书馆都在 45m 内 ⇒ 应该被算成"你附近的地标"。
+  // ⚠ 名字故意起得"花"（花草阁/东边大空地/静谧小楼）：**AI 只该看到"用途"，不该看到名字**（用户要求）。
   writeZonesCustom(dir, [
-    { id: 'zc', name: '第一食堂', type: 'canteen', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
-    { id: 'zg', name: '大操场', type: 'playground', minX: 62, maxX: 72, minZ: 45, maxZ: 55 },
-    { id: 'zl', name: '图书馆', type: 'library', minX: 74, maxX: 84, minZ: 45, maxZ: 55 },
+    { id: 'zc', name: '花草阁', desc: '吃饭的地方', type: 'canteen', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
+    { id: 'zg', name: '东边大空地', desc: '打球运动的地方', type: 'playground', minX: 62, maxX: 72, minZ: 45, maxZ: 55 },
+    { id: 'zl', name: '静谧小楼', type: 'library', minX: 74, maxX: 84, minZ: 45, maxZ: 55 },
   ]);
   const list = questStudents([[50, 50], [200, 0], [220, 0], [240, 0], [260, 0], [280, 0], [300, 0], [320, 0]]);
   for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
@@ -874,17 +875,20 @@ console.log('[27] 场景识别：附近地标 / 附近的人 / 学校有哪些�
   const plans = [];
   const w = createNpcWorld({
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
-    askStudent: async (input) => { if (input.kind === 'plan') plans.push(input.student); return null; },
+    askStudent: async (input) => { if ((input.kind === 'plan' || input.kind === 'act')) plans.push(input.student); return null; },
   });
   w.setPlayerPositions([{ id: 'u1', x: 52, z: 50 }]); // 玩家 2m 外 ⇒ 应出现在"你身边有人"
   await sleep(200);
   const sc = w.debugScene('s1');
   w.dispose();
   const lm = ((sc && sc.landmarks) || []).map((x) => x.name).join(' | ');
-  ok(!!sc && sc.place.indexOf('食堂') >= 0, '知道自己在"第一食堂"里', sc && sc.place);
-  ok(/大操场/.test(lm) && /图书馆/.test(lm), '算出了附近的地标（操场/图书馆）', lm);
+  ok(!!sc && sc.place.indexOf('吃饭的地方') >= 0, '知道自己站在"吃饭的地方"里（用**用途**描述，不是自取的名字）', sc && sc.place);
+  ok(!!sc && sc.place.indexOf('花草阁') < 0, '★ 区域的**名字**没有喂给 AI（"花草阁"不出现在它看到的描述里）', sc && sc.place);
+  ok(/打球运动的地方/.test(lm) && /图书馆/.test(lm), '算出了附近地标（用途优先；没写用途的用功能区标签兜底）', lm);
+  ok(!/东边大空地|静谧小楼/.test(lm), '★ 附近地标也不带区域名字（只给"用途/功能区"）', lm);
   ok(!!(sc && sc.people.some((p) => p.name === '玩家')), '算出"玩家就在我旁边"', JSON.stringify((sc && sc.people) || []));
   ok(!!(sc && /还没去过/.test(String(sc.places))), '"学校有哪些地方 + 哪些没去过"给了它', String(sc && sc.places).slice(0, 80));
+  ok(!/东边大空地|静谧小楼|花草阁/.test(String(sc && sc.places)), '★【学校有哪些地方】同样只给用途/功能区，不给名字', String(sc && sc.places).slice(0, 80));
   const p0 = plans[0];
   ok(!!(p0 && String(p0.scene || '').length), 'plan 的 prompt 带上了【你周围的场景】', p0 && String(p0.scene).slice(0, 60));
   ok(!!(p0 && /还没去过/.test(String(p0.places || ''))), 'plan 的 prompt 带上了【学校有哪些地方】', p0 && String(p0.places).slice(0, 60));
@@ -916,7 +920,7 @@ console.log('[29] 看看学校：挑一个没去过的区域走过去看 → 到
   const dir = freshDir('explore');
   writeScene(dir);
   writeZonesCustom(dir, [
-    { id: 'zg', name: '大操场', type: 'playground', minX: 4, maxX: 8, minZ: -2, maxZ: 2 },
+    { id: 'zg', name: '东边大空地', desc: '打球的地方', type: 'playground', minX: 4, maxX: 8, minZ: -2, maxZ: 2 },
     { id: 'zl', name: '图书馆', type: 'library', minX: 60, maxX: 70, minZ: -5, maxZ: 5 },
   ]);
   const list = questStudents([[0, 0], [200, 0], [220, 0], [240, 0], [260, 0], [280, 0], [300, 0], [320, 0]]);
@@ -931,7 +935,7 @@ console.log('[29] 看看学校：挑一个没去过的区域走过去看 → 到
   const mid = w.stateOf('s1');
   ok(!!(mid.intent && mid.intent.goalType === 'explore'), '选了 explore（去看看学校某处）', JSON.stringify(mid.intent));
   ok(mid.st === 'walk', '真的动身了（不是嘴上说说）', mid.st);
-  ok(/大操场/.test(String((mid.intent || {}).goalText || '')), '优先挑**没去过**的地方（图书馆已去过 → 挑了操场）', (mid.intent || {}).goalText);
+  ok(/打球的地方/.test(String((mid.intent || {}).goalText || '')), '优先挑**没去过**的地方（图书馆已去过 → 挑了操场），且用**用途**称呼它', (mid.intent || {}).goalText);
   await sleep(9000);
   const st = w.stateOf('s1');
   w.dispose();
@@ -1068,7 +1072,7 @@ console.log('[34] 本地解释器：goalType 认不出，但话里说了"去哪"
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
     askStudent: async (input) => {
       kinds.push(String(input.kind || ''));
-      if (input.kind === 'plan') return { goalType: '去吃饭', goal: '想去食堂吃点东西', activity: '打饭', durationSec: 120, thought: '有点饿' };
+      if ((input.kind === 'plan' || input.kind === 'act')) return { goalType: '去吃饭', goal: '想去食堂吃点东西', activity: '打饭', durationSec: 120, thought: '有点饿' };
       return { say: '', think: '', mem: '' };
     },
   });
@@ -1077,7 +1081,7 @@ console.log('[34] 本地解释器：goalType 认不出，但话里说了"去哪"
   w.dispose();
   ok(!!st && st.intent && st.intent.goalType === 'canteen',
     '解释器把「想去食堂…」（goalType 认不出）读成 canteen 并落地', st && JSON.stringify(st.intent));
-  ok(kinds.filter((k) => k === 'plan').length === 1, '解释是**本地**做的，没有为它多花一次 LLM 调用', 'kinds=' + kinds.join(','));
+  ok(kinds.filter((k) => k === 'act').length === 1, '解释是**本地**做的，没有为它多花一次 LLM 调用', 'kinds=' + kinds.join(','));
 }
 
 console.log('[35] 结构化自我档案：npcworld 把固定分层的"自我"注入 plan prompt，身份锚在前、叙事在后');
@@ -1093,7 +1097,7 @@ console.log('[35] 结构化自我档案：npcworld 把固定分层的"自我"注
   const plans = [];
   const w = createNpcWorld({
     dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
-    askStudent: async (input) => { if (input.kind === 'plan') plans.push(input.student); return null; },
+    askStudent: async (input) => { if ((input.kind === 'plan' || input.kind === 'act')) plans.push(input.student); return null; },
   });
   await sleep(400);
   const dbg = w.debugSelf('s1');
@@ -1105,6 +1109,45 @@ console.log('[35] 结构化自我档案：npcworld 把固定分层的"自我"注
   ok(selfText.indexOf('我是谁') < selfText.indexOf('我的近况'), '分层顺序固定：身份 → 近况 → 叙事（不漂移）', '');
   ok(/挺喜欢一个人待着/.test(selfText), '自我叙事层进了档案（反思越多越"有自己"）', '');
   ok(!!dbg && typeof dbg.values === 'string' && dbg.values.length > 0, '价值观已稳定派生（"我是谁"要措辞不变）', dbg && dbg.values);
+}
+
+console.log('[36] act 统一入口：LLM 自己选 type → 服务端按 type 映射（kind 只是输出模板了）');
+{
+  const dir = freshDir('act');
+  writeScene(dir);
+  // 名字故意起得"花"，用途才是 AI 看到的说法
+  writeZonesCustom(dir, [
+    { id: 'zc', name: '花草阁', desc: '吃饭的地方', type: 'canteen', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
+    { id: 'zl', name: '静谧小楼', desc: '看书自习的地方', type: 'library', minX: 70, maxX: 80, minZ: 40, maxZ: 60 },
+    { id: 'zd', name: '西楼', desc: '躺平补觉的地方', type: 'dorm', minX: 90, maxX: 100, minZ: 40, maxZ: 60 },
+  ]);
+  const list = questStudents([[0, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => null });
+  await sleep(60);
+  const map = (o) => { const r = w.normalizeAct(o); return r && r.goalType; };
+  // LLM 自己给的 type → 服务端映射（老 plan 字段被 normalizeAct 归一成同样的意图）
+  ok(map({ type: 'move', target: '吃饭的地方', action: '去吃饭' }) === 'canteen', 'type=move + 用途说法 → 去 canteen', '');
+  ok(map({ type: 'move', target: '食堂', action: '去吃饭' }) === 'canteen', 'type=move + 功能区说法（食堂）也认', '');
+  const seek = w.normalizeAct({ type: 'talk', target: '学生2', action: '找学生2说话' });
+  ok(seek && seek.seek === '学生2号', 'type=talk + 人名 → 交给"去找人"（seek 带人名，不是乱走）', JSON.stringify(seek));
+  ok(map({ type: 'inquire', target: '', action: '想打听点事' }) === 'inquire', 'type=inquire → 四处问人', '');
+  ok(map({ type: 'explore', target: '', action: '去四处看看' }) === 'explore', 'type=explore → 看看学校', '');
+  ok(map({ type: 'rest', target: '', action: '歇会儿' }) === 'rest', 'type=rest → 原地歇着', '');
+  ok(map({ type: 'wait', target: '', action: '等一会儿', params: { seconds: 30 } }) === 'rest', 'type=wait → 原地等（复用 rest）', '');
+  ok(map({ type: 'move', target: '玩家', action: '去找玩家' }) === 'wander' && w.normalizeAct({ type: 'move', target: '玩家' }).seek === '玩家',
+    'type=move + 玩家 → 去找玩家', '');
+  // 未知 type（它自己起的名字）：从 action 的文字里读地方；读不出就随便走走（绝不卡死）
+  ok(map({ type: 'zizzz', target: '', action: '去图书馆看书自习' }) === 'library', '未知 type → 本地从 action 文字里读出地方（library）', '');
+  ok(map({ type: '奇怪的动作', target: '', action: '随便走走' }) === 'wander', '未知 type 且读不出地方 → 兜底 wander（不卡死）', '');
+  ok(map({ goalType: 'canteen' }) === 'canteen', '模型不听话、直接给老格式 goalType → 原样放行（兼容）', '');
+  // 区域用途反查（本地解释器）：从用户写的"用途"认出区域，而不是从自取的名字
+  // （'躺平补觉的地方' 不含任何内置功能区关键词 → 只能靠 desc 命中）
+  ok(w.resolvePlaceType('我想去躺平补觉的地方') === 'dorm', 'resolvePlaceType 从**用途**认区域（不靠内置词）', '');
+  ok(w.zoneAiName({ desc: '看书自习的地方', name: '静谧小楼', type: 'library' }) === '看书自习的地方', 'zoneAiName 优先用用途', '');
+  ok(w.zoneAiName({ name: '静谧小楼', type: 'library' }) === '图书馆', 'zoneAiName 没写用途时退到功能区标签（**绝不用名字**）', '');
+  w.dispose();
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

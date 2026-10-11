@@ -71,14 +71,14 @@ console.log('[1] planNext 真的提交意图：目标点落在对应 zone 内且
     getDayTime: () => 0.35, // 8.4 点：课表是 classroom，但 LLM 意图（canteen）应胜出
     askStudent: async (input) => {
       kinds.push(String(input.kind || ''));
-      if (input.kind === 'plan') return { goalType: 'canteen', goal: '去吃饭', activity: '打饭坐下吃', plan: '走到饭堂', durationSec: 120, thought: '有点饿' };
+      if ((input.kind === 'plan' || input.kind === 'act')) return { goalType: 'canteen', goal: '去吃饭', activity: '打饭坐下吃', plan: '走到饭堂', durationSec: 120, thought: '有点饿' };
       return { say: '嗯。', think: '', mem: '' };
     },
   });
   await sleep(2000);
   w.dispose();
   firstS1 = frames.find((f) => f.find((s) => s.id === 's1'))?.find((s) => s.id === 's1');
-  ok(kinds.includes('plan'), '确实走到了 LLM 规划调用（kind=plan）', 'kinds=' + kinds.join(','));
+  ok(kinds.includes('act'), '确实走到了 LLM 决策调用（斯坦福统一入口 kind=act）', 'kinds=' + kinds.join(','));
   const last1 = frames[frames.length - 1]?.find((s) => s.id === 's1');
   ok(!!last1, '拿到 s1 的最终帧');
   if (last1) {
@@ -118,7 +118,7 @@ console.log('[2] GLM 返回 null（宕机/没配 key）→ 回退规则大脑，
     dataDir: dir,
     broadcast: (m) => { if (m.t === 'npc') frames.push(m.list.map((s) => ({ id: s.id, x: s.x, z: s.z, tx: s.tx, tz: s.tz, st: s.st, goal: s.goal }))); },
     getDayTime: () => 0.35,
-    askStudent: async (input) => (input.kind === 'plan' ? null : { say: '', think: '', mem: '' }),
+    askStudent: async (input) => ((input.kind === 'plan' || input.kind === 'act') ? null : { say: '', think: '', mem: '' }),
   });
   await sleep(2600);
   w.dispose();
@@ -142,7 +142,7 @@ console.log('[3] GLM 返回非法 goalType（"zzz"）→ 归一成 wander，照�
     dataDir: dir,
     broadcast: (m) => { if (m.t === 'npc') frames.push(m.list.map((s) => ({ id: s.id, x: s.x, z: s.z, tx: s.tx, tz: s.tz, st: s.st, goal: s.goal }))); },
     getDayTime: () => 0.35,
-    askStudent: async (input) => (input.kind === 'plan'
+    askStudent: async (input) => ((input.kind === 'plan' || input.kind === 'act')
       ? { goalType: 'zzz', goal: '随便', activity: '溜达', plan: '走走', durationSec: 120, thought: '不知道' }
       : { say: '', think: '', mem: '' }),
   });

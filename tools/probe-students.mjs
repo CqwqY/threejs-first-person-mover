@@ -77,7 +77,8 @@ console.log('[5] 角色数据库与 AI 触发时机');
 ok(/STUDENTS_FILE/.test(SRC.world) && /function ensureStudents/.test(SRC.world), '角色档案落盘 students.json');
 ok(/const AI_COOLDOWN = 45/.test(SRC.world), '同一学生 AI 冷却（防刷爆免费档）');
 ok(/kind !== 'talk'/.test(SRC.world), '玩家搭话不受冷却限制');
-ok(/triggerAI\(s, 'arrive'\)/.test(SRC.world), '到达目的地触发一次内心独白');
+ok(/s\.noticed = '我刚走到'/.test(SRC.world), '到达是"感知的一部分"（写进【你刚刚注意到】）');
+ok(!/triggerAI\(s, 'arrive'\)/.test(SRC.world), '★ 到达不再单独打一次 LLM（斯坦福：arrive 降级为 act 的输入）');
 ok(/KIND_HINT/.test(SRC.ai) && /talk:|arrive:|event:|compress:/.test(SRC.ai), 'AI 区分 对话/到达/事件/压缩 四种任务');
 ok(/getDayTime/.test(SRC.index), '课程表跟服务端世界时刻走');
 

@@ -239,8 +239,8 @@ console.log('[4] 知道自己在哪：place 按**当前坐标**判定，不是�
   writeScene(dir);
   writeStudents(dir, 50, 50); // 全部站在教室区域里
   fs.writeFileSync(path.join(dir, 'zones.json'), JSON.stringify([
-    { id: 'za', name: '第一教学楼', type: 'classroom', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
-    { id: 'zb', name: '市图书馆', type: 'library', minX: -80, maxX: -60, minZ: -80, maxZ: -60 },
+    { id: 'za', name: '第一教学楼', desc: '上课的教室', type: 'classroom', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
+    { id: 'zb', name: '市图书馆', desc: '借书看书的地方', type: 'library', minX: -80, maxX: -60, minZ: -80, maxZ: -60 },
   ]));
   const seen = [];
   const w = createNpcWorld({
@@ -256,8 +256,8 @@ console.log('[4] 知道自己在哪：place 按**当前坐标**判定，不是�
   const out = await w.talk('s1', '你在哪？', '同学');
   w.dispose();
   ok(seen.length > 0, '搭话确实走到了 AI 调用', '次数=' + seen.length);
-  ok(/第一教学楼/.test(seen[0]), '站在教学楼里就说教学楼（不是图书馆）', '实际="' + seen[0] + '"');
-  ok(!/图书馆/.test(seen[0]), '不会把教学楼说成图书馆');
+  ok(/上课的教室/.test(seen[0]), '站在教学楼里就说"上课的教室"（按坐标判定的那个区域；用**用途**称呼，不是自取名字）', '实际="' + seen[0] + '"');
+  ok(!/借书看书|图书馆/.test(seen[0]), '不会把教学楼说成图书馆');
   ok(!!out && !!out.say, 'talk 返回了 say');
 }
 
