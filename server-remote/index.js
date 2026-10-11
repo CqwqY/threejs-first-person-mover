@@ -889,6 +889,13 @@ const httpServer = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true, status: npcWorld ? npcWorld.loadPolicyStatus() : { ready: false } }));
     return;
   }
+  // 校卡：看某个学生的性格/心情/当前目标/关系/近期记忆（只读，公开）
+  if (req.method === 'GET' && url.pathname === '/api/npc/card') {
+    res.setHeader('Content-Type', 'application/json');
+    const sid = String(url.searchParams.get('id') || '');
+    res.end(JSON.stringify({ ok: true, card: npcWorld ? npcWorld.card(sid) : null }));
+    return;
+  }
 
   // 账号相关接口（注册/登录/资料/登出）：已处理则返回
   if (await auth.handleRequest(req, res, url)) return;

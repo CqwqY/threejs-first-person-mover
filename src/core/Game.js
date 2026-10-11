@@ -10,6 +10,7 @@ import { keyBadge } from '../ui/KeyHints.js';
 import { fullscreenSupported, isFullscreen, toggleFullscreen, onFullscreenChange } from '../ui/fullscreen.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
+import { createNpcCard } from '../ui/NpcCard.js';
 import { createChatBox } from '../ui/ChatBox.js';
 import { createStudents } from '../world/Students.js';
 import { createVehicle } from '../world/Vehicle.js';
@@ -521,6 +522,9 @@ export class Game {
       if (this.mobileControls) this.mobileControls.setHidden(false);
       this._talkId = ''; // 关掉面板就结束这次对话，下次靠近重新开始
     });
+    // 校卡：对话面板右上角的「校卡」按钮 → 拉服务端资料（性格/心情/目标/关系/记忆）并弹出
+    this.npcCard = createNpcCard();
+    this.aiChat.setOnCard(() => this._openNpcCard());
     this.students = createStudents({
       scene: this.scene,
       // 与玩家同一份世界碰撞体（含 trimesh 复杂碰撞）：学生吃它，撞墙/踩坡/上台阶都和玩家一致
@@ -4613,6 +4617,17 @@ export class Game {
     //   此刻 _awaitReplyId 还没清空，onSpeak→_onStudentSpeak 会按它跳过，不会把这句话又塞进对话栏。
     if (this.students && msg.say) this.students.onSay({ id: msg.id, say: msg.say });
     if (this._awaitReplyId === String(msg.id || '')) this._awaitReplyId = '';
+  }
+
+  // 校卡：拉某个学生的资料并弹出（性格 / 心情 / 当前目标 / 关系 / 近期记忆）
+  _openNpcCard() {
+    const id = this._talkId;
+    if (!id || !this.npcCard) return;
+    const base = Config.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    fetch(base + '/api/npc/card?id=' + encodeURIComponent(id))
+      .then((r) => r.json())
+      .then((d) => { this.npcCard.show(d && d.card); this.npcCard.open(); })
+      .catch(() => { this.npcCard.show(null); this.npcCard.open(); });
   }
 
   // 别人跟同一个学生说话时，自己这边也能在对话栏里看到（气泡由 Students 自己显示）

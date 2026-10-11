@@ -279,5 +279,28 @@ console.log('[7] 委托任务：找到人 → 问 → 回来复命（全流程�
   ok(st && st.quest === null, '任务完成并清空', st && JSON.stringify(st.quest));
 }
 
+console.log('[8] 校卡：card() 返回性格/心情/目标/关系（人名）/记忆');
+{
+  const dir = freshDir('card');
+  writeScene(dir);
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents([[0, 0]]), null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => (input.kind === 'talk'
+      ? { say: '嗯', think: '', mem: '玩家跟我打了招呼', mood: '开心', affinity: 0.5, goalType: '' }
+      : { say: '', think: '', mem: '' }),
+  });
+  await sleep(60);
+  await w.talk('s1', '你好', '小明', null, 'p:u1');
+  await sleep(120);
+  const c = w.card('s1');
+  w.dispose();
+  ok(c && c.name && c.cls && c.persona, 'card 有基本资料（姓名/班级/性格）', c && JSON.stringify({ name: c.name, cls: c.cls }));
+  ok(c && c.mood && typeof c.mood.valence === 'number', 'card 带心情', c && JSON.stringify(c.mood));
+  ok(c && Array.isArray(c.mem) && c.mem.length > 0, 'card 带近期记忆', c && ('memLen=' + (c.mem || []).length));
+  ok(c && Array.isArray(c.rel) && c.rel.some((r) => r.who === '玩家'), '关系已解析成人名（玩家）', c && JSON.stringify(c.rel));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

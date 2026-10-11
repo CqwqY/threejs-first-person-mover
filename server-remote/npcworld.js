@@ -83,7 +83,12 @@ const PLAN_DUR_MAX = 300;        // 单次活动最长时长（秒）
 // ---------- P1：NPC↔NPC 闲聊 ----------
 const CHAT_RANGE = 5.0;        // 多近算"凑到一起聊天"（米）
 const CHAT_COOLDOWN = 90;      // 同一个学生两次参与闲聊的最小间隔（秒）
-const CHAT_INTERVAL = 45;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量
+const CHAT_INTERVAL = 30;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量（略降以增加互动）
+// "做活动"时别站桩：隔一会儿在附近挪两步（减少"我要学习然后就一动不动"的无实物表演）
+const ACT_STEP_MIN = 7000;     // 两次"挪步"的最小间隔（毫秒）
+const ACT_STEP_MAX = 15000;    // 最大间隔
+const ACT_STEP_DIST_MIN = 1.2; // 挪步距离范围（米）
+const ACT_STEP_DIST_MAX = 3.0;
 const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
 
 // ---------- P2：感知 ----------
@@ -509,6 +514,8 @@ export function createNpcWorld(opts) {
           think: Array.isArray(old && old.think) ? old.think : [],
           perceiveAt: 0, // 上次感知时刻（限流；时间字段，必须有初值）
           quest: null,   // 委托任务：{stage,targetId,targetName,question,fromId,fromName,answer,createdAt,repathAt}
+          actStepAt: 0,  // 下一次"做活动时挪两步"的时刻（时间字段，必须有初值）
+          actResume: 0,  // 挪步前记下的停留截止（回来接着做活动；0 = 当前不是挪步）
         };
       });
       dirty = true;
@@ -522,6 +529,8 @@ export function createNpcWorld(opts) {
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
       if (!Number.isFinite(Number(s.perceiveAt))) { s.perceiveAt = 0; dirty = true; }
       if (s.quest !== null && typeof s.quest !== 'object') { s.quest = null; dirty = true; }
+      if (!Number.isFinite(Number(s.actStepAt))) { s.actStepAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.actResume))) { s.actResume = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.decideAt))) { s.decideAt = 0; dirty = true; }
@@ -565,6 +574,17 @@ export function createNpcWorld(opts) {
     }
     const c = zoneCenter(z);
     return blocked(c.x, c.z) ? null : c;
+  }
+  // 以当前位置为中心、半径 [minD,maxD] 内找一个站得住的点（"做活动时挪两步"用）
+  function nearbyPoint(s, minD, maxD) {
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = rand(minD, maxD);
+      const x = Number(s.x) + Math.cos(a) * r;
+      const z = Number(s.z) + Math.sin(a) * r;
+      if (!blocked(x, z)) return { x, z };
+    }
+    return null;
   }
   // 未标功能区时的降级漫步：围绕出生锚点找一个站得住的落点
   function wander(s, now) {
@@ -798,6 +818,18 @@ export function createNpcWorld(opts) {
         }
         const goalType = resolveGoalType(out.goalType);
         const durMs = clampInt(out.durationSec, PLAN_DUR_MIN, PLAN_DUR_MAX, 60) * 1000;
+        // 「去找某人」：plan 给了 seek → 直接以那个人为目标（到了就交给闲聊系统，增加 AI 间互动）
+        if (out.seek) {
+          const seeker = resolveStudentByName(out.seek);
+          if (seeker && seeker !== s) {
+            s.intent = { goalType: 'person', goalText: '去找' + seeker.name, activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekId: seeker.id, since: now };
+            setTarget(s, Number(seeker.x), Number(seeker.z));
+            s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+            s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt;
+            console.info('[npc] ' + s.name + ' 打算去找 ' + seeker.name);
+            return;
+          }
+        }
         s.intent = {
           goalType,
           goalText: clampText(out.goal || '', 80),
@@ -1351,21 +1383,43 @@ export function createNpcWorld(opts) {
       updateNeeds(s, dt, now);
       perceive(s, now); // P2：看身边的人（廉价，限流）
       if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
+      // 「去找某人」：定期朝那个人重指（人也在动）；到了就清掉意图 → 交给闲聊系统自然发起对话
+      if (!s.quest && s.intent && s.intent.goalType === 'person' && s.intent.seekId) {
+        const t = students.find((x) => x.id === s.intent.seekId);
+        if (!t || Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) < CHAT_RANGE) { s.intent = null; }
+        else if (now - Number(s._seekAt || 0) > 2500) {
+          s._seekAt = now; setTarget(s, Number(t.x), Number(t.z));
+          s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+        }
+      }
       if (s.st === 'act') {
-        if (now >= Number(s.stayUntil || 0)) { s.st = 'idle'; }
+        if (now >= Number(s.stayUntil || 0)) {
+          if (Number(s.actResume || 0) > now) s.stayUntil = s.actResume; // 挪步中（保险）
+          else s.st = 'idle';
+        } else if (!s.quest && Number(s.actResume || 0) === 0 && now >= Number(s.actStepAt || 0)) {
+          // 停着"做活动"：隔一会儿在附近挪两步 —— 别一动不动（治"我要学习然后就不动了"的无实物表演）
+          const p = nearbyPoint(s, ACT_STEP_DIST_MIN, ACT_STEP_DIST_MAX);
+          if (p) { s.actResume = Number(s.stayUntil || 0); setTarget(s, p.x, p.z); s.st = 'walk'; s.walkUntil = now + 5000; s.stuck = 0; }
+          else s.actStepAt = now + 8000;
+        }
       } else if (s.st === 'walk') {
         const bx = Number(s.x);
         const bz = Number(s.z);
         const arrived = stepMove(s, dt);
         if (arrived) {
-          s.st = 'act';
-          // 按 plan 的时长停留（决策一次、干一会活）；至少覆盖到下一次规划点，活动短也不至于杵着发呆
-          const stayMs = Number.isFinite(Number(s._stayMs)) ? Number(s._stayMs) : rand(STAY_MIN, STAY_MAX) * 1000;
-          s.stayUntil = Math.max(now + stayMs, Number(s.planAt || 0));
-          s._stayMs = undefined;
-          s.stuck = 0;
-          // 到达目的地：触发一次内心独白（内部有冷却，绝大多数会被节流掉）
-          triggerAI(s, 'arrive');
+          if (Number(s.actResume || 0) > now) {
+            // 挪步结束：回到"做活动"，恢复原来的停留截止
+            s.st = 'act'; s.stayUntil = s.actResume; s.actResume = 0; s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX);
+          } else {
+            s.st = 'act';
+            // 按 plan 的时长停留（决策一次、干一会活）；至少覆盖到下一次规划点，活动短也不至于杵着发呆
+            const stayMs = Number.isFinite(Number(s._stayMs)) ? Number(s._stayMs) : rand(STAY_MIN, STAY_MAX) * 1000;
+            s.stayUntil = Math.max(now + stayMs, Number(s.planAt || 0));
+            s._stayMs = undefined;
+            s.stuck = 0;
+            s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX);
+            triggerAI(s, 'arrive'); // 到达目的地：触发一次内心独白（内部有冷却，绝大多数会被节流掉）
+          }
         } else {
           // ⚠ 没有这两条兜底，目标不可达（点在墙里 / 五个方向全被挡）会**永久卡在 walk**：
           //   永远不会到达、decideAt 也永远不刷新 ⇒ 人再也不动，而且零报错。
@@ -1375,7 +1429,9 @@ export function createNpcWorld(opts) {
             // 先重算路径（局部最小 / 障碍刚变）；试过还是卡才放弃，且**绝不重置 planAt**
             // ⚠ 曾经这里设 planAt = now + 8000：一卡就每 8s 重调一次 GLM，8 个 NPC 频繁卡会把
             //   调用量刷到设计值（4 次/分）的十几倍 ⇒ 服务端/额度开销飙升。规则大脑兜底足够，且不花 LLM。
-            if (Number(s.pathTries || 0) < 2 && nav) {
+            if (Number(s.actResume || 0) > now) {
+              s.st = 'act'; s.stayUntil = s.actResume; s.actResume = 0; s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX); s.stuck = 0;
+            } else if (Number(s.pathTries || 0) < 2 && nav) {
               s.pathTries = Number(s.pathTries || 0) + 1;
               setTarget(s, Number(s.tx), Number(s.tz));
               s.stuck = 0;
@@ -1431,6 +1487,25 @@ export function createNpcWorld(opts) {
     if (!s) return null;
     return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
   }
+  // 「校卡」：给玩家看的角色资料（性格 + 心情 + 当前目标 + 关系 + 近期记忆）
+  function card(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return null;
+    return {
+      id: s.id, name: s.name, cls: s.cls, sex: s.sex, persona: s.persona,
+      place: placeOf(s),
+      mood: { ...s.mood },
+      goal: s.intent ? { type: s.intent.goalType, text: s.intent.goalText || '', activity: s.intent.activity || '' } : null,
+      quest: s.quest ? { stage: s.quest.stage, targetName: s.quest.targetName, question: s.quest.question } : null,
+      // 关系：把人名解析出来给玩家看（p:xxx → 玩家；s2 → 该学生姓名）
+      rel: Object.entries(s.rel || {}).map(([k, v]) => ({
+        who: String(k).startsWith('p:') ? '玩家' : ((students.find((x) => x.id === k) || {}).name || k),
+        trust: Math.round((Number(v && v.trust) || 0) * 100) / 100,
+      })).filter((x) => Math.abs(x.trust) > 0.05).sort((a, b) => Math.abs(b.trust) - Math.abs(a.trust)).slice(0, 5),
+      needs: { ...s.needs },
+      mem: (s.mem || []).slice(-8).map((m) => ({ t: m.t, text: m.text, kind: m.kind || '' })),
+    };
+  }
   // 调试/探针用：直接派一个任务（跳过 LLM 解析）
   function debugStartQuest(sId, targetIdOrName, question, fromId) {
     const s = students.find((x) => x.id === String(sId));
@@ -1469,5 +1544,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }
