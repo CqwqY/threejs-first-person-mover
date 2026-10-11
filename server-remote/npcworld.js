@@ -186,6 +186,14 @@ const BOARD_POS = { x: -22, z: 17 }; // 公告栏世界坐标（与客户端摆�
 const BOARD_READ_RANGE = 6;          // 离公告栏多近算"看见公告"（米）
 const BOARD_READ_CD = 300000;        // 同一 NPC 两次读公告的最小间隔（5 分钟）
 const ANNOUNCE_GAP_MS = 4000;        // 广播轮流下发给 AI 的间隔（一个个来，不并发打爆 GLM）
+
+// ---------- 对话上下文（多轮）+ 内心活动 ----------
+// ⚠ 以前每次搭话都是"全新一次调用"，只带最后一句 ⇒ 它接不上上一句（用户实测"聊天不知道上下文"）。
+//   现在按（学生 × 说话人）保留最近几轮原话，拼进 prompt；talk 完把这一轮也写回去。
+const CHATLOG_MAX = 8;               // 每人每说话人保留的最近对话条数（4 轮）
+const CHATLOG_TTL = 600000;          // 对话历史有效期：10 分钟没继续就不再带（旧话题别一直压着）
+const THINK_CTX = 3;                 // prompt 里带几条"最近的心里话"（让内心有连续性）
+const NOTICE_HEARD_TTL = 600000;     // "最近听到的广播/公告"有效期（10 分钟）
 const CHAT_TEMPLATES = [       // GLM 失败/超预算时的兜底寒暄（零成本，别让"人"僵住）
   ['你今天也在这儿啊？', '嗯，随便转转。'],
   ['刚才那节好困啊。', '可不是嘛，我差点睡着。'],
@@ -695,6 +703,9 @@ export function createNpcWorld(opts) {
           rel: (old && old.rel && typeof old.rel === 'object') ? old.rel : {},
           mem: Array.isArray(old && old.mem) ? old.mem : [],
           think: Array.isArray(old && old.think) ? old.think : [],
+          // 对话上下文：{ 'p:<玩家id>': [{who:'p'|'n', text, t}] } —— 只保留最近几轮（见 CHATLOG_*）
+          chatLog: (old && old.chatLog && typeof old.chatLog === 'object') ? old.chatLog : {},
+          heard: (old && old.heard && typeof old.heard === 'object') ? old.heard : null, // 最近听到的广播/公告：{text,from,t}
           perceiveAt: 0, // 上次感知时刻（限流；时间字段，必须有初值）
           quest: null,   // 委托任务：{stage,targetId,targetName,question,fromId,fromName,answer,createdAt,repathAt}
           want: null,    // 反向委托（它请玩家买东西）：{itemId,itemName,price,reward,createdAt,playerId}
@@ -720,6 +731,8 @@ export function createNpcWorld(opts) {
       if (!s.rel || typeof s.rel !== 'object') { s.rel = {}; dirty = true; }
       if (!Array.isArray(s.mem)) { s.mem = []; dirty = true; }
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
+      if (!s.chatLog || typeof s.chatLog !== 'object' || Array.isArray(s.chatLog)) { s.chatLog = {}; dirty = true; }
+      if (s.heard !== null && typeof s.heard !== 'object') { s.heard = null; dirty = true; }
       if (!Number.isFinite(Number(s.perceiveAt))) { s.perceiveAt = 0; dirty = true; }
       if (s.quest !== null && typeof s.quest !== 'object') { s.quest = null; dirty = true; }
       if (s.want !== null && typeof s.want !== 'object') { s.want = null; dirty = true; }
@@ -909,7 +922,7 @@ export function createNpcWorld(opts) {
       return '学校在' + where + '立了一块**公告栏**，玩家和学校会往上贴通知；现在上面还没有新通知（你路过那一带可以看看）。';
     }
     return '学校在' + where + '有一块**公告栏**，最近的通知：' + boardPosts.slice(-3).join('；')
-      + '。**看到通知要照做**（通知说去哪/干什么，就优先去那儿）。';
+      + '。这些是**学校的正式通知**：说到去哪、什么时候，就要**照它调整你接下来的安排**（把通知里那个地方排进你的计划里）。';
   }
 
   // 选目标：课程表时段优先（70%），否则按需求；都没有区域就原地发呆
@@ -1329,6 +1342,39 @@ export function createNpcWorld(opts) {
     scored.sort((a, b) => (b.score - a.score) || (b.i - a.i));
     return scored.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
   }
+  // ---------- 对话上下文（多轮）----------
+  // 每个学生按「说话人」分别留一份最近的对话原话。为什么要按人分：同一个学生可能先跟 A 聊、
+  // 再跟 B 聊，混在一起会把两个话题接串（"你刚才说"指的是谁说的都乱了）。
+  function chatHistory(s, who, now) {
+    const key = String(who || 'p:?');
+    const all = (s.chatLog && Array.isArray(s.chatLog[key])) ? s.chatLog[key] : [];
+    // 过期的不带（旧话题别一直压着当下）
+    const fresh = all.filter((m) => now - Number((m && m.t) || 0) < CHATLOG_TTL);
+    return fresh.slice(-CHATLOG_MAX);
+  }
+  function pushChat(s, who, role, text) {
+    const t = String(text || '').trim();
+    if (!t) return;
+    const key = String(who || 'p:?');
+    if (!s.chatLog || typeof s.chatLog !== 'object') s.chatLog = {};
+    if (!Array.isArray(s.chatLog[key])) s.chatLog[key] = [];
+    s.chatLog[key].push({ who: role === 'p' ? 'p' : 'n', text: clampText(t, 120), t: Date.now() });
+    if (s.chatLog[key].length > CHATLOG_MAX * 2) s.chatLog[key].splice(0, s.chatLog[key].length - CHATLOG_MAX * 2);
+  }
+  // 最近几条"心里话"（think 流）——喂回 prompt，让它的内心有连续性（想的事能接上）
+  function recentThinks(s) {
+    return (Array.isArray(s.think) ? s.think : []).slice(-THINK_CTX)
+      .map((x) => String((x && x.text) || '').trim()).filter(Boolean);
+  }
+  // "最近听到的广播/公告"：一句话给人话（带来源），过期就不带
+  function heardLine(s, now) {
+    const h = s.heard;
+    if (!h || !h.text) return '';
+    if (now - Number(h.t || 0) > NOTICE_HEARD_TTL) return '';
+    const from = String(h.from || '学校');
+    return '【' + from + '】' + String(h.text);
+  }
+
   // 心情词 → 落地成数值（0.5 权重混合，避免一次对话把情绪拉爆）
   function applyMoodWord(s, word) {
     const m = MOOD_TABLE[String(word || '').replace(/\s/g, '')];
@@ -1624,6 +1670,13 @@ export function createNpcWorld(opts) {
       });
       q.answer = clampText(ans && ans.say, LEN_SAY) || '（他说不知道）';
       const ts = Date.now();
+      // ⚠ 被问的同学也要留下**心理活动**（"每一次 AI 调用都产生心理活动"）：
+      //   以前这里只用了 say，它"心里怎么想"被直接丢了。
+      const tth = clampText(ans && ans.think, LEN_THINK);
+      if (tth) {
+        t.think.push({ t: ts, text: tth });
+        if (t.think.length > MEM_MAX) t.think.splice(0, t.think.length - MEM_MAX);
+      }
       s.mem.push({ t: ts, text: '我问' + t.name + '「' + q.question + '」，他答：' + q.answer, kind: 'quest', from: t.id });
       t.mem.push({ t: ts, text: s.name + '问我「' + q.question + '」', kind: 'quest', from: s.id });
       broadcast({ t: 'npc_say', id: t.id, say: q.answer });
@@ -1655,7 +1708,9 @@ export function createNpcWorld(opts) {
   async function triggerAI(s, kind, extra) {
     const now = Date.now();
     if (aiBusy.has(s.id)) return null;
-    if (kind !== 'talk' && now - Number(s.aiAt || 0) < AI_COOLDOWN * 1000) return null;
+    // notice（听到广播/公告）与 talk 一样属**事件驱动**：广播本身已被玩家侧 60s 限流 + 轮流 4s 一个个下发，
+    // 不再叠 AI_COOLDOWN —— 否则 8 个学生轮流一圈 32s < 45s，会有学生"听到了却没有心理活动"。
+    if (kind !== 'talk' && kind !== 'notice' && now - Number(s.aiAt || 0) < AI_COOLDOWN * 1000) return null;
     s.aiAt = now;
     aiBusy.add(s.id);
     try {
@@ -1669,12 +1724,18 @@ export function createNpcWorld(opts) {
           rel: topRel(s),    // 关系摘要（被对话改）→ 记得跟谁亲、跟谁不对付
           player: playerWhere(s), // 玩家在哪（说人话）→ 别一问"你在哪/玩家在哪"就瞎编
           boardLine: boardLine(),
+          // 最近听到的广播/公告（说人话）→ 它得**照通知调整计划**，不能听过就忘
+          heard: heardLine(s, now),
           // 商店在售：它"反过来请玩家代买"时，只能点**真实在售**的东西（不然会开口要一件买不到的）
           shop: kind === 'talk' ? shopPool.slice(0, 40).map((x) => x.name) : undefined,
         },
         // ⚠ 只给**这个学生本人**的记忆，而且是挑出来的几条（不是整串）。
         //   混进别人的记忆 = 几个人的经历串台；一次给太多 = 模型自己搅成一团。
         memory: pickMemory(s, extra),
+        // 最近的心里话（think 流）→ 让内心有连续性：它上一刻在想的事，这一刻还接得上
+        thinks: recentThinks(s),
+        // 对话上下文：这一轮**之前**的最近几轮原话（带顺序），否则它接不上上一句
+        chat: kind === 'talk' ? chatHistory(s, extra && extra.who, now) : undefined,
         kind,
         playerText: extra && extra.text ? String(extra.text) : '',
         playerName: extra && extra.name ? String(extra.name) : '同学',
@@ -1692,8 +1753,8 @@ export function createNpcWorld(opts) {
         s.mem.push({ t: now, text: mem, kind: kind === 'talk' ? 'say' : '', from: (extra && extra.who) || '' });
         await trimMemory(s);
       }
-      // 对话的"影响"：改心情 / 改关系 / 必要时改道（只对 talk/chat 生效）
-      if (kind === 'talk' || kind === 'chat') {
+      // 对话/通知的"影响"：改心情 / 改关系 / 必要时改道（notice 也走这条 ⇒ 听到通知真的会改主意去）
+      if (kind === 'talk' || kind === 'chat' || kind === 'notice') {
         try { applyTalkEffect(s, out, extra && extra.who); }
         catch (e) { console.warn('[npc] 对话影响应用失败 ' + s.id + '：' + ((e && e.message) || e)); }
       }
@@ -2062,9 +2123,14 @@ export function createNpcWorld(opts) {
   async function talk(studentId, text, playerName, except, whoId) {
     const s = students.find((x) => x.id === String(studentId));
     if (!s) return null;
-    // whoId：说话人的稳定标识（如 'p:<玩家id>'）→ 关系按人记，换个玩家是另一段交情
-    const out = await triggerAI(s, 'talk', { text: String(text || '').slice(0, 200), name: playerName || '同学', who: whoId ? String(whoId).slice(0, 40) : '' });
+    // whoId：说话人的稳定标识（如 'p:<玩家id>'）→ 关系按人记、对话历史也按人分，换个玩家是另一段交情
+    const who = whoId ? String(whoId).slice(0, 40) : '';
+    const out = await triggerAI(s, 'talk', { text: String(text || '').slice(0, 200), name: playerName || '同学', who });
+    // ⚠ 无论成功与否，都把这轮**玩家说的话**记进对话历史 —— 下一句它才接得上（"我刚才说的那事…"）
+    pushChat(s, who, 'p', text);
     if (!out) return { say: '', think: '' };
+    if (out.say) pushChat(s, who, 'n', out.say);
+    saveStudents(students);
     broadcast({ t: 'npc_say', id: s.id, say: out.say }, except);
     return out;
   }
@@ -2072,7 +2138,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, think: (s.think || []).slice(-3), heard: s.heard ? { ...s.heard } : null, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
   }
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
@@ -2122,8 +2188,14 @@ export function createNpcWorld(opts) {
     announceIdx++;
     const a = announceQueue[0];
     s.mem.push({ t: now, text: '全校广播：「' + a.text + '」', kind: 'announce' });
+    // ⚠ 记住"最近听到的通知"：prompt 里的【最近的全校广播/公告】用它 —— 它得**照通知调整计划**，不能听过就忘
+    s.heard = { text: String(a.text).slice(0, 120), from: String(a.from || '学校').slice(0, 16), t: now };
     trimMemory(s);
     obeyNotice([s], a.text, now); // 听到了就**照做**（通知说了去哪就真去）
+    // ⚠ 听到通知要有**心理活动**：调一次 AI 产出 think（"无论发生什么调用 AI 的事都要产生心理活动"）。
+    //   不 await（别拖慢广播轮询）；失败时 triggerAI 自己会 console.warn，这里只兜住 Promise。
+    triggerAI(s, 'notice', { text: a.text, name: a.from })
+      .catch((e) => console.warn('[npc] 广播心理活动失败 ' + s.id + '：' + ((e && e.message) || e)));
     if (announceIdx % students.length === 0) announceQueue.shift(); // 一轮走完才轮到下一条
   }
 
@@ -2180,6 +2252,12 @@ export function createNpcWorld(opts) {
         onPost(txt, s.name); // → index.js pushBoard：落盘 + 广播所有客户端 + 喂回本世界（其他学生会看到并照做）
         lastNpcPost = now;
         s.mem.push({ t: now, text: '我在公告栏贴了通知：「' + txt + '」', kind: 'post', imp: 0.85 });
+        // ⚠ 贴通知也是一次 AI 调用 → 要有心理活动（进 think 流，之后 prompt 会带上）
+        const pth = clampText(out && out.think, LEN_THINK);
+        if (pth) {
+          s.think.push({ t: now, text: pth });
+          if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
+        }
         trimMemory(s);
         applyMoodWord(s, '开心');
         broadcast({ t: 'npc_say', id: s.id, say: '贴好啦，大家看公告栏。' });

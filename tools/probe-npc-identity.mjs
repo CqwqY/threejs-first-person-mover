@@ -19,6 +19,7 @@ globalThis.fetch = async (url, opts) => {
   return { ok: true, json: async () => ({ choices: [{ message: { content: '{"goalType":"rest","say":"嗯"}' } }] }) };
 };
 const userTextOf = (i) => String((captured[i].messages[1] && captured[i].messages[1].content) || '');
+const systemTextOf = (i) => String((captured[i].messages[0] && captured[i].messages[0].content) || '');
 
 const base = {
   name: '顾星桥', cls: '高二(3)班', sex: 'm', persona: '话痨，什么都懂一点，喜欢给同学起外号',
@@ -85,6 +86,55 @@ console.log('[5] 同学问的问题里出现"我自己的名字" → 也要提�
   });
   const p = userTextOf(4);
   ok(/就是你本人/.test(p), 'ask prompt：问到你名字时明确"就是你本人"', p.slice(-160));
+}
+
+console.log('[6] SYSTEM（talk）：开篇钉死"你是谁"+ 第一人称 + 公告与广播段');
+{
+  await askStudent({ student: { ...base }, memory: [], kind: 'talk', playerName: '小明', playerText: '你好' });
+  const sys = systemTextOf(5);
+  ok(/【你是谁】/.test(sys), 'SYSTEM 开篇有【你是谁】身份段', sys.slice(0, 60));
+  ok(/不是旁观者|不是第三者/.test(sys), 'SYSTEM 明确"你不是旁观者/第三者"', '');
+  ok(/第一人称/.test(sys), 'SYSTEM 要求"一律用第一人称我"（不许第三人称说自己）', '');
+  ok(/【公告与广播】/.test(sys), 'SYSTEM 有【公告与广播】段（要照通知调整行动）', '');
+  ok(/【刚才的对话】/.test(sys), 'SYSTEM 说明"刚才的对话"是多轮原文（要接着聊）', '');
+  ok(/【最近心里在想】|你最近心里在想/.test(sys), 'SYSTEM 说明心里话是自己刚才的内心活动', '');
+}
+
+console.log('[7] talk 多轮：按顺序带上"刚才的对话" + 最近的心里话');
+{
+  await askStudent({
+    student: { ...base }, memory: [], kind: 'talk', playerName: '小明',
+    playerText: '你刚才说的是哪一科来着？',
+    chat: [
+      { who: 'p', text: '老师今天留了什么作业？', t: 1 },
+      { who: 'n', text: '语文两页，数学还有一套卷子。', t: 2 },
+    ],
+    thinks: ['他又在追问作业的事。'],
+  });
+  const p = userTextOf(6);
+  ok(/【刚才你和小明对话|【刚才你和.*的对话/.test(p), 'prompt 有【刚才你和玩家的对话】段', p.slice(-320));
+  ok(/小明：老师今天留了什么作业？/.test(p), '历史里玩家的话带说话人标签', '');
+  ok(/你：语文两页/.test(p), '历史里 AI 自己的话也带标签（分得清谁说）', '');
+  const iQ = p.indexOf('老师今天留了什么作业？');
+  const iA = p.indexOf('语文两页');
+  ok(iQ >= 0 && iA > iQ, '历史是**按时间顺序**（旧→新），不是倒着堆', 'iQ=' + iQ + ' iA=' + iA);
+  ok(/【你最近心里在想】/.test(p) && /他又在追问作业的事/.test(p), 'prompt 带上【你最近心里在想】（内心连续性）', '');
+}
+
+console.log('[8] notice：听到广播 → 有心理活动 + 明确"必须照通知决策"');
+{
+  await askStudent({
+    student: { ...base, heard: '【广播】注意，操场集合，下午四点有篮球赛' },
+    memory: [], kind: 'notice', playerName: '广播',
+  });
+  const p = userTextOf(7);
+  const sys = systemTextOf(7);
+  ok(p.indexOf('【最近的全校广播') >= 0, 'prompt 有【最近的全校广播/公告】段', p.slice(0, 200));
+  ok(/操场集合/.test(p), '通知内容真的进了 prompt', '');
+  ok(/正式通知/.test(p) && /照它调整/.test(p), 'prompt 明确"这是正式通知，要照它调整行动"', '');
+  ok(/think/.test(sys) && /心理活动/.test(sys), 'SYSTEM_NOTICE 要求输出 think 心理活动', sys.slice(0, 80));
+  ok(/必须照通知决策/.test(sys), 'SYSTEM_NOTICE 有"必须照通知决策"硬约束', '');
+  ok(/第一人称/.test(sys), 'SYSTEM_NOTICE 要求第一人称', '');
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

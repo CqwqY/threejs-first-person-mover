@@ -390,12 +390,22 @@ console.log('[11] 委托：真的走到**远处的玩家**身边复命');
   const dir = freshDir('quest-return');
   writeScene(dir);
   const pos = [[0, 0], [2.5, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]];
-  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents(pos), null, 2)); // s1/s2 相距 2.5m（<3 → 立刻"找到"）
+  const qlist = questStudents(pos); // s1/s2 相距 2.5m（<3 → 立刻"找到"）
+  // ⚠ 本用例只验"委托走位"，必须屏蔽**无关系统**：s1/s2 靠得近会触发 NPC↔NPC 自动闲聊
+  //   （chatAt:0 → 冷却已过 ⇒ pickPair 选到它俩 → 冻结走位）⇒ 假性抖动（实测 d 在 3.5~5.4 乱跳）。
+  //   把 chatAt 顶到未来 = 闲聊冷却永远没过，走位才可复现。
+  for (const s of qlist) s.chatAt = 1e15;
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(qlist, null, 2));
   writeZones(dir);
   const says = [];
+  let reportPos = null; // ⚠ "复命时"的位置：必须在 reportQuest 广播**那一刻**取（见下）
   const w = createNpcWorld({
     dataDir: dir,
-    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    broadcast: (m) => {
+      if (m.t !== 'npc_say') return;
+      says.push({ id: m.id, say: m.say });
+      if (!reportPos && m.id === 's1' && /问到了/.test(String(m.say))) reportPos = w.stateOf('s1');
+    },
     getDayTime: () => 0.35,
     askStudent: async (input) => {
       if (input.kind === 'talk') return { say: '好，我这就去', think: '', mem: '', task: { target: '学生2号', question: '1+1等于几' } };
@@ -409,12 +419,16 @@ console.log('[11] 委托：真的走到**远处的玩家**身边复命');
   await w.talk('s1', '帮我找学生2号问他1+1等于几再回来', '小明', null, 'p:u1');
   await sleep(1500);
   const mid = w.stateOf('s1');
-  await sleep(4200);
+  // ⚠ 走位是 WALK_SPEED=1.25 m/s 的真实速度：s1(0,0)→s2(2.5,0) 已在 3m 内（立刻"找到"）→ 转向玩家(7,0)，约 5.6m≈4.5s。
+  await sleep(7000);
   const st = w.stateOf('s1');
   w.dispose();
   ok(mid && mid.x > 0.5, '问完之后**朝玩家那边走**（x 变大，不是原地喊）', 'mid.x=' + (mid && mid.x.toFixed(2)));
   ok(says.some((x) => /等于2/.test(String(x.say))), '把答案说出来复命', JSON.stringify(says));
-  ok(st && Math.hypot(st.x - PX, st.z - PZ) < 3.5, '复命时人已经**走到玩家身边**（<3.5m）', st && ('d=' + Math.hypot(st.x - PX, st.z - PZ).toFixed(2)));
+  // ⚠ 不能拿"固定 sleep 之后"的坐标当"复命位置"：复命后 NPC 进入 act 待机，会做**原地微动作**
+  //   （ACT_STEP 随机朝后挪一小步）⇒ 固定时刻取样会抓到一个"已经漂回去"的点（实测 d 在 3.35~4.92 乱跳）。
+  //   语义上"复命时"就是 reportQuest 广播那一刻 ⇒ 在 broadcast 回调里就地取样（见 reportPos）。
+  ok(reportPos && Math.hypot(reportPos.x - PX, reportPos.z - PZ) < 3.5, '复命时人已经**走到玩家身边**（<3.5m）', reportPos && ('d=' + Math.hypot(reportPos.x - PX, reportPos.z - PZ).toFixed(2)));
   ok(st && st.quest === null, '任务完成并清空', st && JSON.stringify(st.quest));
 }
 
@@ -765,6 +779,80 @@ console.log('[24] 不再站着发呆：到地方后的停留封顶 + 一结束�
   //   一次拉到 45 秒一次。正确做法是：**规则大脑**立刻接手，LLM 规划保持自己的节奏。
   ok(st && st.decideAt <= st.stayUntil + 100, '歇够就让规则大脑立刻接手（不再干站着）', 'stayUntil-decideAt=' + (st && (st.stayUntil - st.decideAt)));
   ok(st && st.planAt > st.stayUntil + 1000, 'LLM 规划仍保持 2 分钟节奏（没被拖到 45 秒一次）', 'planAt-stayUntil=' + (st && Math.round((st.planAt - st.stayUntil) / 1000)) + 's');
+}
+
+console.log('[25] 多轮上下文：第二句接得上第一句 + 心里话进 prompt');
+{
+  const dir = freshDir('chatlog');
+  writeScene(dir);
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents([]), null, 2));
+  writeZones(dir);
+  const seen = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'talk') {
+        seen.push(input);
+        return { say: '语文两页，数学还有一套卷子。', think: '他又在追问作业的事。', mem: '' };
+      }
+      return null; // 其它 kind 一律不响应（避免噪音）
+    },
+  });
+  w.setPlayerPositions([]);
+  await sleep(60);
+  await w.talk('s1', '老师今天留了什么作业？', '小明', null, 'p:u1');
+  await sleep(90);
+  await w.talk('s1', '你刚才说的是哪一科来着？', '小明', null, 'p:u1');
+  await sleep(90);
+  const second = seen[1];
+  w.dispose();
+  ok(seen.length >= 2, '两次搭话都调了 AI', 'n=' + seen.length);
+  ok(!!(second && Array.isArray(second.chat) && second.chat.length >= 2),
+    '第二轮带上了【刚才你和玩家的对话】历史（多轮上下文）', second && JSON.stringify(second.chat));
+  const hist = ((second && second.chat) || []).map((m) => String((m && m.text) || '')).join('|');
+  ok(/作业/.test(hist), '历史里有第一轮**玩家**说的话（接得上"刚才那事"）', hist);
+  ok(/语文两页/.test(hist), '历史里有第一轮**AI 自己**的回答（不是只记玩家的话）', hist);
+  const th = ((second && second.thinks) || []).map((x) => String(x)).join('|');
+  ok(/追问作业/.test(th), '【你最近心里在想】带上了上一轮的内心活动（内心有连续性）', th);
+}
+
+console.log('[26] 广播/公告 → 产生心理活动（think 入库）+ 记下"最近听到的通知"');
+{
+  const dir = freshDir('notice');
+  writeScene(dir);
+  writeZonesCustom(dir, [{ id: 'zp', name: '操场', type: 'playground', minX: 40, maxX: 60, minZ: -10, maxZ: 10 }]);
+  const blist = questStudents([[300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0], [440, 0]]);
+  for (const s of blist) { s.planAt = 1e15; s.decideAt = 1e15; s.st = 'idle'; s.aiAt = 0; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  const notices = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'notice') {
+        notices.push(input);
+        return { say: '', think: '操场好像有比赛，我有点想去看看。', mem: '' };
+      }
+      return null;
+    },
+  });
+  w.setPlayerPositions([]);
+  await sleep(60);
+  w.announce('注意，操场集合，下午四点有篮球赛');
+  await sleep(4700); // ANNOUNCE_GAP_MS=4000：至少一个学生"听到"并产生心理活动
+  let withThink = 0, withHeard = 0;
+  for (const sid of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']) {
+    const st = w.stateOf(sid);
+    if (!st) continue;
+    if ((st.think || []).some((x) => /操场|比赛/.test(String(x.text)))) withThink++;
+    if (st.heard && /操场/.test(String(st.heard.text || ''))) withHeard++;
+  }
+  const n0 = notices[0];
+  w.dispose();
+  ok(notices.length >= 1, '听到广播的学生调了一次 AI（kind=notice）——"调用 AI 的事都要有心理活动"', 'n=' + notices.length);
+  ok(withThink >= 1, '广播产生了**心理活动**并入库（think 流）', 'think=' + withThink);
+  ok(withHeard >= 1, '记下"最近听到的通知"（下一步 prompt 会带上）', 'heard=' + withHeard);
+  ok(!!(n0 && String((n0.student && n0.student.heard) || '') !== ''),
+    'prompt 里带了【最近的全校广播/公告】', n0 && JSON.stringify(n0.student && n0.student.heard));
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
