@@ -102,5 +102,50 @@ console.log('[2] plan 的 prompt 带 mood/rel（"改变"能传给下一次决策
   ok(!!planRel && typeof planRel === 'object', 'plan prompt 带 rel（关系摘要）', JSON.stringify(planRel));
 }
 
+console.log('[3] NPC↔NPC 闲聊：双方都记账/改心情/改关系，台词广播出来');
+{
+  const dir = freshDir('chat');
+  writeScene(dir);
+  // 学生彼此拉开 >5m：避免主循环自动开聊，专测 forceChat
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: i * 10, z: 0, hx: i * 10, hz: 0, tx: i * 10, tz: 0, wx: i * 10, wz: 0, path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 0, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.4, energy: 0.5, focus: 0.5 }, rel: {}, mem: [], think: [],
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const says = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'chat') return {
+        lines: [{ who: 'a', text: '你听说玩家的事了吗？' }, { who: 'b', text: '没，快说说。' }, { who: 'a', text: '回头讲给你。' }],
+        topic: '玩家八卦', memA: '我向学生2号号打听了玩家的事', memB: '学生1号号要跟我讲玩家的事', moodA: '开心', moodB: '好奇', bond: 0.5,
+      };
+      if (input.kind === 'plan') return null;
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  await sleep(50);
+  await w.forceChat('s1', 's2');
+  await sleep(2600); // 等延迟广播的第 2~3 句
+  const a = w.stateOf('s1'), b = w.stateOf('s2');
+  w.dispose();
+  ok(says.length >= 2, '对话台词广播出来了（≥2 句，玩家能偷听）', JSON.stringify(says));
+  ok(says.some((s) => s.id === 's1') && says.some((s) => s.id === 's2'), '两个学生都发了言', JSON.stringify(says.map((s) => s.id)));
+  ok(!!a && a.mem.some((m) => /打听|玩家/.test(m.text)), 's1 记住了这次闲聊', a && JSON.stringify(a.mem));
+  ok(!!b && b.mem.length > 0, 's2 也记住了这次闲聊', b && JSON.stringify(b.mem));
+  ok(!!a && a.rel['s2'] && a.rel['s2'].trust > 0, '关系双向更新：s1 对 s2 trust>0', a && JSON.stringify(a.rel));
+  ok(!!b && b.rel['s1'] && b.rel['s1'].trust > 0, '关系双向更新：s2 对 s1 trust>0', b && JSON.stringify(b.rel));
+  ok(!!a && a.mood.valence > 0.4, '情绪被聊到（moodA 开心 → valence 升）', a && ('valence=' + a.mood.valence.toFixed(3)));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

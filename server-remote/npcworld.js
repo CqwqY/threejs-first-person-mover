@@ -80,6 +80,18 @@ const PLAN_STAGGER_MS = 15000;   // 8 个 NPC 依次错开 15s（总跨度 120s 
 const PLAN_DUR_MIN = 30;         // 单次活动最短时长（秒）
 const PLAN_DUR_MAX = 300;        // 单次活动最长时长（秒）
 
+// ---------- P1：NPC↔NPC 闲聊 ----------
+const CHAT_RANGE = 5.0;        // 多近算"凑到一起聊天"（米）
+const CHAT_COOLDOWN = 90;      // 同一个学生两次参与闲聊的最小间隔（秒）
+const CHAT_INTERVAL = 45;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量
+const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
+const CHAT_TEMPLATES = [       // GLM 失败/超预算时的兜底寒暄（零成本，别让"人"僵住）
+  ['你今天也在这儿啊？', '嗯，随便转转。'],
+  ['刚才那节好困啊。', '可不是嘛，我差点睡着。'],
+  ['去食堂吗？', '等我一下，马上。'],
+  ['你看见我的笔了吗？', '没注意，问问别人吧。'],
+];
+
 // 课程表（世界时刻的小时 → 该时段最该去的区域类型；null = 自由活动看需求）
 const SCHEDULE = [
   { from: 0, to: 6.5, type: 'dorm', label: '睡觉' },
@@ -457,6 +469,8 @@ export function createNpcWorld(opts) {
           path: null,    // A* 折线 [{x,z},...]；null = 直走
           pathIdx: 0,
           pathTries: 0,  // 卡住后重算路径的次数（累加型字段，必须有初值）
+          chatAt: 0,        // 上次参与闲聊的时刻（限流用；累加/时间型字段，必须有初值）
+          talkingUntil: 0,  // 闲聊占用到的时刻（这段时间内别再开聊、先站住）
           walkUntil: 0, // 本次行走的放弃时刻（毫秒）
           stuck: 0,     // 连续没位移的拍数（累加型字段，必须有初值）
           rot: 0,
@@ -500,6 +514,8 @@ export function createNpcWorld(opts) {
       if (s.path !== null && !Array.isArray(s.path)) { s.path = null; dirty = true; }
       if (!Number.isFinite(Number(s.pathIdx))) { s.pathIdx = 0; dirty = true; }
       if (!Number.isFinite(Number(s.pathTries))) { s.pathTries = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.chatAt))) { s.chatAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.talkingUntil))) { s.talkingUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.walkUntil))) { s.walkUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stuck))) { s.stuck = 0; dirty = true; }
     }
@@ -918,26 +934,31 @@ export function createNpcWorld(opts) {
     scored.sort((a, b) => (b.hit - a.hit) || (b.i - a.i));
     return scored.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
   }
+  // 心情词 → 落地成数值（0.5 权重混合，避免一次对话把情绪拉爆）
+  function applyMoodWord(s, word) {
+    const m = MOOD_TABLE[String(word || '').replace(/\s/g, '')];
+    if (!m) return;
+    const old = s.mood || { valence: 0.5, energy: 0.6, focus: 0.5 };
+    s.mood = {
+      valence: clamp01(Number(old.valence) * 0.5 + m.v * 0.5),
+      energy: clamp01(Number(old.energy) * 0.5 + m.e * 0.5),
+      focus: clamp01(Number(old.focus) * 0.5 + m.f * 0.5),
+    };
+  }
+  // 关系增量（s 对 who 的信任/好感）
+  function bumpRel(s, who, delta, note) {
+    if (!who || !Number.isFinite(Number(delta))) return;
+    const cur = (s.rel[who] && typeof s.rel[who] === 'object') ? s.rel[who] : { trust: 0 };
+    cur.trust = Math.max(-1, Math.min(1, (Number(cur.trust) || 0) + Number(delta)));
+    cur.last = Date.now();
+    if (note) cur.note = clampText(note, LEN_MEM);
+    s.rel[who] = cur;
+  }
   // 对话"影响"落地：改心情、改对说话人的关系、必要时**直接改道**（这是"对话能改变它"的核心）。
   function applyTalkEffect(s, out, who) {
     if (!out) return;
-    const mood = MOOD_TABLE[String(out.mood || '').replace(/\s/g, '')];
-    if (mood) {
-      const old = s.mood || { valence: 0.5, energy: 0.6, focus: 0.5 };
-      s.mood = {
-        valence: clamp01(Number(old.valence) * 0.5 + mood.v * 0.5),
-        energy: clamp01(Number(old.energy) * 0.5 + mood.e * 0.5),
-        focus: clamp01(Number(old.focus) * 0.5 + mood.f * 0.5),
-      };
-    }
-    const aff = Number(out.affinity);
-    if (Number.isFinite(aff) && who) {
-      const cur = (s.rel[who] && typeof s.rel[who] === 'object') ? s.rel[who] : { trust: 0 };
-      cur.trust = Math.max(-1, Math.min(1, (Number(cur.trust) || 0) + aff * 0.6));
-      cur.last = Date.now();
-      if (out.mem) cur.note = clampText(out.mem, LEN_MEM);
-      s.rel[who] = cur;
-    }
+    applyMoodWord(s, out.mood);
+    if (Number.isFinite(Number(out.affinity))) bumpRel(s, who, Number(out.affinity) * 0.6, out.mem);
     // 因对话改道：只接受合法目标（已知区域 / wander / rest），其余忽略（不臆造去处）
     const raw = String(out.goalType || '').trim().toLowerCase();
     const gt = (raw === 'wander' || raw === 'rest') ? raw : (ZONE_TYPE_IDS.has(raw) ? raw : null);
@@ -960,6 +981,91 @@ export function createNpcWorld(opts) {
     const out = {};
     for (const it of items) out[it.k] = Math.round(it.t * 100) / 100;
     return out;
+  }
+
+  // ---------- P1：NPC↔NPC 闲聊（同学之间"活起来"）----------
+  // 一次 LLM 出一段 2~4 句脚本 → 双方各写记忆（含对方）、改心情、改彼此关系；台词逐句广播（玩家能偷听）。
+  // 全局限流（CHAT_INTERVAL）+ 个人冷却（CHAT_COOLDOWN）+ 模板兜底 = 不刷爆 GLM、也绝不静默卡住。
+  function pickChatPair(now) {
+    let best = null, bd = CHAT_RANGE * CHAT_RANGE;
+    for (let i = 0; i < students.length; i++) {
+      const a = students[i];
+      if (a._chatting || now < Number(a.talkingUntil || 0) || now - Number(a.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
+      if (a.st !== 'idle' && a.st !== 'act') continue;
+      for (let j = i + 1; j < students.length; j++) {
+        const b = students[j];
+        if (b._chatting || now < Number(b.talkingUntil || 0) || now - Number(b.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
+        if (b.st !== 'idle' && b.st !== 'act') continue;
+        const dx = Number(a.x) - Number(b.x), dz = Number(a.z) - Number(b.z);
+        const d = dx * dx + dz * dz;
+        if (d < bd) { bd = d; best = [a, b]; }
+      }
+    }
+    return best;
+  }
+  // GLM 失败/空脚本时的兜底寒暄（零成本，别让"人"僵住）
+  function templateChat(a, b) {
+    const tpl = CHAT_TEMPLATES[Math.floor(Math.random() * CHAT_TEMPLATES.length)];
+    const t0 = Date.now();
+    a.st = 'act'; b.st = 'act';
+    a.stayUntil = Math.max(Number(a.stayUntil || 0), t0 + 5000);
+    b.stayUntil = Math.max(Number(b.stayUntil || 0), t0 + 5000);
+    broadcast({ t: 'npc_say', id: a.id, say: tpl[0] });
+    const tm = setTimeout(() => broadcast({ t: 'npc_say', id: b.id, say: tpl[1] }), CHAT_LINE_GAP_MS);
+    if (tm.unref) tm.unref();
+    a.mem.push({ t: t0, text: '我和' + b.name + '聊了两句：' + tpl[0], kind: 'chat', from: b.id });
+    b.mem.push({ t: t0, text: '我和' + a.name + '聊了两句：' + tpl[1], kind: 'chat', from: a.id });
+  }
+  let chatBusy = false; // 同一时刻只跑一段闲聊（控并发 / 额度）
+  async function converse(a, b) {
+    if (chatBusy || !a || !b || a === b) return;
+    chatBusy = true;
+    a._chatting = true; b._chatting = true;
+    const t0 = Date.now();
+    a.chatAt = t0; b.chatAt = t0;
+    a.talkingUntil = t0 + 20000; b.talkingUntil = t0 + 20000; // 期间别再开聊、先站住
+    try {
+      const bond = Number((a.rel[b.id] && a.rel[b.id].trust) || 0);
+      const out = await askStudent({
+        student: { name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st, needs: a.needs, mood: a.mood, rel: topRel(a) },
+        partner: { name: b.name, cls: b.cls, persona: b.persona, sex: b.sex },
+        memory: pickMemory(a, null),
+        kind: 'chat',
+        bond,
+      });
+      const lines = (out && Array.isArray(out.lines)) ? out.lines.slice(0, 4) : [];
+      if (!lines.length) { templateChat(a, b); return; }
+      // 逐句广播（复用 npc_say → 客户端气泡；玩家能偷听到他们的对话）
+      lines.forEach((ln, i) => {
+        const who = ln.who === 'b' ? b : a;
+        const say = clampText(ln.text, LEN_SAY);
+        if (!say) return;
+        const delay = i * CHAT_LINE_GAP_MS;
+        if (delay === 0) broadcast({ t: 'npc_say', id: who.id, say });
+        else { const tm = setTimeout(() => broadcast({ t: 'npc_say', id: who.id, say }), delay); if (tm.unref) tm.unref(); }
+      });
+      a.st = 'act'; b.st = 'act';
+      const chatEnd = t0 + lines.length * CHAT_LINE_GAP_MS + 1500;
+      a.stayUntil = Math.max(Number(a.stayUntil || 0), chatEnd);
+      b.stayUntil = Math.max(Number(b.stayUntil || 0), chatEnd);
+      // 记忆（各自记）+ 心情 + 彼此关系（双向）
+      if (out.memA) a.mem.push({ t: t0, text: clampText(out.memA, LEN_MEM), kind: 'chat', from: b.id });
+      if (out.memB) b.mem.push({ t: t0, text: clampText(out.memB, LEN_MEM), kind: 'chat', from: a.id });
+      applyMoodWord(a, out.moodA);
+      applyMoodWord(b, out.moodB);
+      if (Number.isFinite(Number(out.bond))) { bumpRel(a, b.id, Number(out.bond) * 0.5); bumpRel(b, a.id, Number(out.bond) * 0.5); }
+      await trimMemory(a); await trimMemory(b);
+      saveStudents(students);
+      console.info('[npc] ' + a.name + ' ↔ ' + b.name + ' 闲聊：' + (clampText(out.topic, 16) || ''));
+    } catch (e) {
+      console.warn('[npc] 闲聊失败 ' + a.id + '↔' + b.id + '：' + ((e && e.message) || e));
+      try { templateChat(a, b); } catch { /* 兜底也失败就算了 */ }
+    } finally {
+      a._chatting = false; b._chatting = false;
+      const until = Date.now() + CHAT_COOLDOWN * 1000;
+      a.talkingUntil = until; b.talkingUntil = until;
+      chatBusy = false;
+    }
   }
 
   // 产出 {say, think, mem} 后清洗入库；think 广播给附近玩家看，say 走对话或气泡。
@@ -1041,6 +1147,7 @@ export function createNpcWorld(opts) {
   let lastBroadcast = 0;
   let lastHint = 0;      // 上一次打"没标功能区"提示的时间（累加型字段，必须有初值）
   let lastObstacle = Date.now(); // 上一次重载障碍表的时间
+  let lastChatStart = 0;         // 上一次"新开闲聊"的时刻（累加型字段，必须有初值）
   const timer = setInterval(() => {
     const now = Date.now();
     const dt = Math.min(1.5, (now - lastTick) / 1000);
@@ -1118,6 +1225,11 @@ export function createNpcWorld(opts) {
         if (hasZones) decide(s, now); else wander(s, now);
       }
     }
+    // NPC↔NPC 闲聊：凑近 + 都闲着 → 开一段短对话（全局 CHAT_INTERVAL 限流，防刷 GLM）
+    if (!chatBusy && now - lastChatStart > CHAT_INTERVAL * 1000) {
+      const pair = pickChatPair(now);
+      if (pair) { lastChatStart = now; converse(pair[0], pair[1]); }
+    }
     // ⚠ 无论有没有区域都要广播：以前没区域时直接 return，客户端连一次更新都收不到（表现为"人都定住了"）
     if (now - lastBroadcast >= BROADCAST_MS) {
       lastBroadcast = now;
@@ -1149,7 +1261,14 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, mem: (s.mem || []).slice(-3), st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+  }
+  // 调试/探针用：手动撮合一段闲聊
+  function forceChat(aId, bId) {
+    const a = students.find((x) => x.id === String(aId));
+    const b = students.find((x) => x.id === String(bId));
+    if (!a || !b) return null;
+    return converse(a, b);
   }
 
   // 给新连上的客户端一份完整名单（名字/班级/初始坐标 + 初始目标点）
@@ -1173,5 +1292,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, forceChat, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }
