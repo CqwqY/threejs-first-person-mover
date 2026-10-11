@@ -211,5 +211,73 @@ console.log('[5] 成本护栏：观察多到超上限时，先丢观察、**不�
   ok(st && Number(st.memLen) <= 20, 'mem 已回落到上限以内', st && ('len=' + st.memLen));
 }
 
+function questStudents(positions) {
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    const p = positions[i] || [100 + i * 20, 100]; // 默认 20m 间距：够远，不会自动闲聊、也不到"找到"距离
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: p[0], z: p[1], hx: p[0], hz: p[1], tx: p[0], tz: p[1], wx: p[0], wz: p[1], path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 1e15, planAt: 1e15, intent: null, quest: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0, perceiveAt: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.5, energy: 0.6, focus: 0.5 }, rel: {}, mem: [], think: [],
+    });
+  }
+  return list;
+}
+
+console.log('[6] 委托任务：解析"去找谁、问什么"→ 建任务并朝目标走');
+{
+  const dir = freshDir('quest-goto');
+  writeScene(dir);
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents([]), null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => (input.kind === 'talk'
+      ? { say: '好', think: '', mem: '', task: { target: '学生2号', question: '1+1等于几' } }
+      : { say: '', think: '', mem: '' }),
+  });
+  w.setPlayerPositions([{ id: 'u1', x: -100, z: -100 }]); // 玩家很远 → 先停在 goto
+  await sleep(60);
+  await w.talk('s1', '帮我找学生2号，问他1+1等于几，回来告诉我', '小明', null, 'p:u1');
+  await sleep(420);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(st && st.quest && st.quest.targetId === 's2', '任务已创建且把人名解析成目标 id（学生2号→s2）', st && JSON.stringify(st.quest));
+  ok(st && st.quest && /1\+1/.test(String(st.quest.question)), '任务带上了要问的问题', st && JSON.stringify(st.quest));
+  ok(st && st.st === 'walk', 'NPC 朝目标走动起来了', st && st.st);
+}
+
+console.log('[7] 委托任务：找到人 → 问 → 回来复命（全流程，含一次 LLM 提问）');
+{
+  const dir = freshDir('quest-full');
+  writeScene(dir);
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents([[0, 0], [0, 2]]), null, 2)); // s1 与 s2 相距 2m（< 3m 就"找到"）
+  writeZones(dir);
+  const says = [];
+  const kinds = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      kinds.push(String(input.kind || ''));
+      if (input.kind === 'talk') return { say: '好，我这就去', think: '', mem: '', task: { target: '学生2号', question: '1+1等于几' } };
+      if (input.kind === 'ask') return { say: '等于2', think: '', mem: '' };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  w.setPlayerPositions([{ id: 'u1', x: 0, z: 0 }]); // 玩家就在 s1 身边
+  await sleep(60);
+  await w.talk('s1', '帮我找学生2号问他1+1等于几再回来', '小明', null, 'p:u1');
+  await sleep(900);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(kinds.includes('ask'), '真的去"问"了（一次 LLM 提问调用）', 'kinds=' + kinds.join(','));
+  ok(says.some((x) => /等于2/.test(String(x.say))), '回来复命：把答案说出来了', JSON.stringify(says));
+  ok(st && st.quest === null, '任务完成并清空', st && JSON.stringify(st.quest));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

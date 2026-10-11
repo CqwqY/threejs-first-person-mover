@@ -1935,8 +1935,9 @@ wss.on('connection', (ws, req) => {
     // 把当前所有玩家的坐标喂给 NPC 世界（playerNear 特征用；没有 NPC 世界时跳过）
     if (npcWorld && npcWorld.setPlayerPositions) {
       const arr = [];
-      for (const s of states.values()) {
-        if (Number.isFinite(Number(s.x)) && Number.isFinite(Number(s.z))) arr.push({ x: Number(s.x), z: Number(s.z) });
+      for (const [pid, st] of states.entries()) {
+        // ⚠ 必须带 id：委托任务"回来复命"要知道回到**哪个**玩家身边（不只是"附近有没有人"）
+        if (Number.isFinite(Number(st.x)) && Number.isFinite(Number(st.z))) arr.push({ id: pid, x: Number(st.x), z: Number(st.z) });
       }
       npcWorld.setPlayerPositions(arr);
     }

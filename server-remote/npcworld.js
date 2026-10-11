@@ -92,6 +92,11 @@ const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒�
 const PERCEIVE_RANGE = 12;      // 感知半径（米）
 const PERCEIVE_CD = 10000;      // 同一个 NPC 两次"观察"的最小间隔（毫秒）
 const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注意到"（免得盯着一个人反复记）
+
+// ---------- P3：委托任务（"去找谁、问什么、回来复命"）----------
+const QUEST_TIMEOUT_MS = 180000; // 任务总超时（3 分钟没办成就放弃并回报，绝不静默卡住）
+const QUEST_REPATH_MS = 2500;    // 目标会动：每隔这么久重新指向目标（开销极小：setTarget 有直线预判）
+const QUEST_MEET_DIST = 3.0;     // 多近算"找到 TA 了"（米）
 const CHAT_TEMPLATES = [       // GLM 失败/超预算时的兜底寒暄（零成本，别让"人"僵住）
   ['你今天也在这儿啊？', '嗯，随便转转。'],
   ['刚才那节好困啊。', '可不是嘛，我差点睡着。'],
@@ -180,6 +185,13 @@ export function createNpcWorld(opts) {
   // 玩家坐标（由 index.js 每收到玩家 state 就喂一次），供 playerNear 特征用
   let playerPositions = [];
   function setPlayerPositions(list) { playerPositions = Array.isArray(list) ? list : []; }
+  // 按 id 找某个玩家的坐标（委托任务"回来复命"要知道是回到**哪个**玩家身边）
+  function playerById(id) {
+    const key = String(id || '').replace(/^p:/, '');
+    if (!key) return null;
+    for (const p of playerPositions) if (String(p.id) === key) return p;
+    return null;
+  }
 
   const ZONES_FILE = path.join(dataDir, 'zones.json');
   const STUDENTS_FILE = path.join(dataDir, 'students.json');
@@ -496,6 +508,7 @@ export function createNpcWorld(opts) {
           mem: Array.isArray(old && old.mem) ? old.mem : [],
           think: Array.isArray(old && old.think) ? old.think : [],
           perceiveAt: 0, // 上次感知时刻（限流；时间字段，必须有初值）
+          quest: null,   // 委托任务：{stage,targetId,targetName,question,fromId,fromName,answer,createdAt,repathAt}
         };
       });
       dirty = true;
@@ -508,6 +521,7 @@ export function createNpcWorld(opts) {
       if (!Array.isArray(s.mem)) { s.mem = []; dirty = true; }
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
       if (!Number.isFinite(Number(s.perceiveAt))) { s.perceiveAt = 0; dirty = true; }
+      if (s.quest !== null && typeof s.quest !== 'object') { s.quest = null; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.decideAt))) { s.decideAt = 0; dirty = true; }
@@ -1030,11 +1044,11 @@ export function createNpcWorld(opts) {
     let best = null, bd = CHAT_RANGE * CHAT_RANGE;
     for (let i = 0; i < students.length; i++) {
       const a = students[i];
-      if (a._chatting || now < Number(a.talkingUntil || 0) || now - Number(a.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
+      if (a._chatting || a.quest || now < Number(a.talkingUntil || 0) || now - Number(a.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
       if (a.st !== 'idle' && a.st !== 'act') continue;
       for (let j = i + 1; j < students.length; j++) {
         const b = students[j];
-        if (b._chatting || now < Number(b.talkingUntil || 0) || now - Number(b.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
+        if (b._chatting || b.quest || now < Number(b.talkingUntil || 0) || now - Number(b.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
         if (b.st !== 'idle' && b.st !== 'act') continue;
         const dx = Number(a.x) - Number(b.x), dz = Number(a.z) - Number(b.z);
         const d = dx * dx + dz * dz;
@@ -1108,6 +1122,105 @@ export function createNpcWorld(opts) {
     }
   }
 
+  // ---------- P3：委托任务 ----------
+  // 玩家让 NPC「去找 X 问 Y，回来告诉我」→ s.quest 驱动状态机：
+  //   goto(走向目标，目标会动→定期重指) → ask(问，一次 LLM) → return(走回玩家) → report(复命)。
+  // 全程超时兜底；找不到人/找不到玩家/提问失败一律**出声**回报，绝不静默卡住。
+  function resolveStudentByName(name) {
+    const q = String(name || '').trim();
+    if (!q) return null;
+    return students.find((x) => x.name === q)
+      || students.find((x) => x.name && (x.name.indexOf(q) >= 0 || q.indexOf(x.name) >= 0))
+      || null;
+  }
+  function startQuest(s, targetName, question, fromId, fromName) {
+    const t = resolveStudentByName(targetName);
+    if (!t || t === s) {
+      broadcast({ t: 'npc_say', id: s.id, say: '你说的「' + String(targetName || '').slice(0, 8) + '」，我这儿对不上人呀。' });
+      return;
+    }
+    const now = Date.now();
+    s.quest = {
+      stage: 'goto', targetId: t.id, targetName: t.name,
+      question: clampText(question, 80) || '（没说要问啥）',
+      fromId: String(fromId || ''), fromName: String(fromName || '玩家'),
+      answer: '', createdAt: now, repathAt: 0,
+    };
+    s.intent = { goalType: 'quest', goalText: '去找' + t.name, activity: '', plan: '', since: now };
+    broadcast({ t: 'npc_say', id: s.id, say: '好，我去找' + t.name + '问问。' });
+    console.info('[npc] ' + s.name + ' 接下委托：找 ' + t.name + ' 问「' + s.quest.question + '」');
+  }
+  function failQuest(s, why) {
+    const had = !!s.quest;
+    s.quest = null;
+    s.intent = null;
+    if (had) broadcast({ t: 'npc_say', id: s.id, say: '（' + String(why || '这事没办成') + '，回头再跟你说）' });
+    console.warn('[npc] ' + s.id + ' 任务中断：' + why);
+  }
+  function updateQuest(s, now) {
+    const q = s.quest;
+    if (!q) return;
+    if (now - Number(q.createdAt || 0) > QUEST_TIMEOUT_MS) { failQuest(s, '时间太久'); return; }
+    if (q.stage === 'goto') {
+      const t = students.find((x) => x.id === q.targetId);
+      if (!t) { failQuest(s, '找不到' + q.targetName); return; }
+      if (Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) < QUEST_MEET_DIST) { askQuest(s, t); return; }
+      if (now - Number(q.repathAt || 0) > QUEST_REPATH_MS) { // 目标会动 → 定期重指
+        q.repathAt = now; setTarget(s, Number(t.x), Number(t.z));
+        s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+      }
+      return;
+    }
+    if (q.stage === 'asking') return; // 等 LLM 回话
+    if (q.stage === 'return') {
+      const p = playerById(q.fromId);
+      if (!p) { failQuest(s, '没找到你'); return; }
+      if (Math.hypot(Number(p.x) - Number(s.x), Number(p.z) - Number(s.z)) < QUEST_MEET_DIST) { reportQuest(s); return; }
+      if (now - Number(q.repathAt || 0) > QUEST_REPATH_MS) { // 玩家也在动
+        q.repathAt = now; setTarget(s, Number(p.x), Number(p.z));
+        s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+      }
+      return;
+    }
+  }
+  async function askQuest(s, t) {
+    const q = s.quest;
+    if (!q) return;
+    q.stage = 'asking';
+    s.st = 'act'; s.stayUntil = Date.now() + 6000;
+    broadcast({ t: 'npc_say', id: s.id, say: t.name + '，' + String(q.question).slice(0, 30) + '？' });
+    try {
+      const ans = await askStudent({
+        student: { name: t.name, cls: t.cls, persona: t.persona, sex: t.sex, place: placeOf(t), st: t.st, needs: t.needs, mood: t.mood, rel: topRel(t) },
+        memory: pickMemory(t, null),
+        kind: 'ask',
+        question: q.question,
+        askerName: s.name,
+      });
+      q.answer = clampText(ans && ans.say, LEN_SAY) || '（他说不知道）';
+      const ts = Date.now();
+      s.mem.push({ t: ts, text: '我问' + t.name + '「' + q.question + '」，他答：' + q.answer, kind: 'quest', from: t.id });
+      t.mem.push({ t: ts, text: s.name + '问我「' + q.question + '」', kind: 'quest', from: s.id });
+      broadcast({ t: 'npc_say', id: t.id, say: q.answer });
+      trimMemory(s); trimMemory(t); saveStudents(students);
+      q.stage = 'return'; q.repathAt = 0;
+    } catch (e) {
+      console.warn('[npc] 任务提问失败：' + ((e && e.message) || e));
+      failQuest(s, '话没问成');
+    }
+  }
+  function reportQuest(s) {
+    const q = s.quest;
+    if (!q) return;
+    const line = q.targetName + '说：' + q.answer;
+    broadcast({ t: 'npc_say', id: s.id, say: '问到了 —— ' + line });
+    s.st = 'act'; s.stayUntil = Date.now() + 5000;
+    s.mem.push({ t: Date.now(), text: '我把' + q.targetName + '的话回报给了玩家', kind: 'quest' });
+    console.info('[npc] ' + s.name + ' 完成委托：' + line);
+    s.quest = null;
+    s.intent = null;
+  }
+
   // 产出 {say, think, mem} 后清洗入库；think 广播给附近玩家看，say 走对话或气泡。
   // ⚠ 冷却：同一个学生 AI_COOLDOWN 秒内只调一次（免费档有限流，8 个学生不能一起刷）。
   let aiBusy = new Set();
@@ -1150,6 +1263,11 @@ export function createNpcWorld(opts) {
       if (kind === 'talk' || kind === 'chat') {
         try { applyTalkEffect(s, out, extra && extra.who); }
         catch (e) { console.warn('[npc] 对话影响应用失败 ' + s.id + '：' + ((e && e.message) || e)); }
+      }
+      // 委托任务：玩家让 NPC 去找人/问事 → 建任务（真的会去办）
+      if (kind === 'talk' && out.task && out.task.target) {
+        try { startQuest(s, out.task.target, out.task.question, extra && extra.who, extra && extra.name); }
+        catch (e) { console.warn('[npc] 任务创建失败 ' + s.id + '：' + ((e && e.message) || e)); }
       }
       saveStudents(students);
       return { say, think };
@@ -1232,6 +1350,7 @@ export function createNpcWorld(opts) {
     for (const s of students) {
       updateNeeds(s, dt, now);
       perceive(s, now); // P2：看身边的人（廉价，限流）
+      if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
       if (s.st === 'act') {
         if (now >= Number(s.stayUntil || 0)) { s.st = 'idle'; }
       } else if (s.st === 'walk') {
@@ -1267,9 +1386,9 @@ export function createNpcWorld(opts) {
             }
           }
         }
-      } else if (now >= Number(s.planAt || 0) && !s._planning) {
+      } else if (!s.quest && now >= Number(s.planAt || 0) && !s._planning) {
         planNext(s, now); // System2：低频 LLM 规划（失败自动回退规则大脑）
-      } else if (now >= Number(s.decideAt || 0)) {
+      } else if (!s.quest && now >= Number(s.decideAt || 0)) {
         // 仅在首次 LLM 规划之前用规则大脑 / 漫步保活，避免开局集体杵着不动
         if (hasZones) decide(s, now); else wander(s, now);
       }
@@ -1310,7 +1429,16 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+  }
+  // 调试/探针用：直接派一个任务（跳过 LLM 解析）
+  function debugStartQuest(sId, targetIdOrName, question, fromId) {
+    const s = students.find((x) => x.id === String(sId));
+    if (!s) return null;
+    const t = students.find((x) => x.id === String(targetIdOrName)) || resolveStudentByName(targetIdOrName);
+    if (!t) return null;
+    startQuest(s, t.name, question, fromId || '', '玩家');
+    return { targetId: t.id, targetName: t.name };
   }
   // 调试/探针用：手动撮合一段闲聊
   function forceChat(aId, bId) {
@@ -1341,5 +1469,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, forceChat, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

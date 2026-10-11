@@ -47,9 +47,11 @@ const _npcInput = {
   strafeLeft: () => 0,
   joyX: 0, joyY: 0, joyMagnitude: () => 0,
   sprinting: () => false,
-  consumeJump: () => false,
+  // 前方全被挡时由 update 置 _jump：一次性消费（PlayerPhysics 会把它当"本帧按了跳"）
+  consumeJump: () => { const j = _npcInput._jump; _npcInput._jump = false; return j; },
   isDown: () => false,
 };
+_npcInput._jump = false; // 累加/一次性标志，必须有初值
 
 // 头顶名牌：画到 canvas 再贴成 Sprite（比 TextGeometry 省事，也不用在打包里塞字体）
 function makeNameTag(text, sub) {
@@ -172,10 +174,10 @@ export function createStudents(opts) {
       pstate: { x: 0, y: STUDENT_HEIGHT, z: 0, onGround: false },
       _arriveSent: 0,
     };
-    // 学生不跳：关掉跳跃，速度倍率折算到 STUDENT_SPEED（PlayerPhysics 默认按玩家 MOVE_SPEED 算）
-    s.physics.canJump = false;
-    s.physics.maxJumps = 0;
-    s.physics.jumpMult = 0;
+    // 学生会跳（能越过矮挡/上台阶），但不乱跳：只有在"前方所有方向都被挡"时才起跳（见 update）
+    s.physics.canJump = true;
+    s.physics.maxJumps = 1;
+    s.physics.jumpMult = 1;
     s.physics.speedMult = STUDENT_SPEED / Config.MOVE_SPEED;
     s.physics.bound = bound; // 与玩家同一份边界（不是 PlayerPhysics 的 GROUND_* 默认矩形）
     root.add(s.holder);
@@ -359,6 +361,7 @@ export function createStudents(opts) {
           else if (fdist > 1e-3) { ux = fdx / fdist; uz = fdz / fdist; }
           if (ux || uz) { s._lastUx = ux; s._lastUz = uz; }
           let nx = ux, nz = uz;
+          let found = false;
           const probeY = s.pstate.y - STUDENT_HEIGHT * 0.5;
           if (ux || uz) {
             for (const a of STEER_FAN) {
@@ -368,9 +371,11 @@ export function createStudents(opts) {
               const px = s.pstate.x + cx * WALK_PROBE;
               const pz = s.pstate.z + cz * WALK_PROBE;
               // sphereWorldMTV 复用缓冲：只判 null，不存引用
-              if (!sphereWorldMTV(cs, px, probeY, pz, STUDENT_RADIUS)) { nx = cx; nz = cz; break; }
+              if (!sphereWorldMTV(cs, px, probeY, pz, STUDENT_RADIUS)) { nx = cx; nz = cz; found = true; break; }
             }
           }
+          // 前方 9 个方向全被挡 → 起跳试试（越过矮挡 / 上台阶），别死顶在墙上
+          if (!found && (ux || uz)) _npcInput._jump = true;
           // cameraYaw 让玩家模型朝 (-sin yaw, -cos yaw)；要朝 (nx,nz) 走 ⇒ yaw = atan2(-nx,-nz)
           const yaw = Math.atan2(-nx, -nz);
           _npcInput._f = 1;
