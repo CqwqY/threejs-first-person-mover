@@ -4679,7 +4679,8 @@ export class Game {
 
   // 服务端 HTTP 基址（ws → http）
   _relayBase() { return Config.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:'); }
-  _myNick() { return (this._profile && (this._profile.nickname || this._profile.username)) || '玩家'; }
+  // ⚠ 这里原来还定义了第二个 _myNick（重复类成员，后者覆盖前者）——已删掉重复的那份（唯一的见文件后段），
+  //   否则 esbuild 会报 duplicate-class-member，行为上也是"最后一个赢"、前面那份纯属死代码。
 
   // 校园广播器：输入一句话 → 服务端轮流下发给所有 AI
   _openBroadcast() {
@@ -4702,7 +4703,7 @@ export class Game {
     });
   }
 
-  // 公告栏：看已有公告 + 贴一张（全校 AI 决策时会看到）
+  // 公告栏：看已有公告 + 贴一张（全校 AI 决策时会看到）+ 撤回自己的公告
   _openBoardPanel() {
     if (!this._announce) return;
     const post = async (text) => {
@@ -4717,10 +4718,24 @@ export class Game {
         return { ok: true };
       } catch (e) { return { ok: false, reason: '网络不通' }; }
     };
+    // 撤回：删掉后服务端会把它从 AI 的视野里移除（AI 不再照它行动），并广播刷新公告栏贴图
+    const del = async (id) => {
+      try {
+        const r = await fetch(this._relayBase() + '/api/board', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, from: this._myNick() }),
+        });
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) return { ok: false, reason: (d && d.error) || '撤回失败' };
+        this._toast('已撤回这条公告');
+        if (Array.isArray(d.posts) && this._board) this._board.setPosts(d.posts);
+        return { ok: true, posts: d.posts || [] };
+      } catch (e) { return { ok: false, reason: '网络不通' }; }
+    };
     fetch(this._relayBase() + '/api/board').then((r) => r.json()).then((d) => {
-      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告（全校 AI 决策时会看到）…', posts: (d && d.posts) || [], onSubmit: post });
+      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告（全校 AI 决策时会看到）…', posts: (d && d.posts) || [], onSubmit: post, onDelete: del });
     }).catch(() => {
-      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告…', onSubmit: post });
+      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告…', onSubmit: post, onDelete: del });
     });
   }
 

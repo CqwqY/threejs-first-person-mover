@@ -1,8 +1,9 @@
 // 职责：发布面板（广播器 / 公告栏共用）——一段输入 + 可选的历史列表。
-// open({ title, placeholder, posts, onSubmit })：posts 非空时先显示历史（公告栏用）。
+// open({ title, placeholder, posts, onSubmit, onDelete })：posts 非空时先显示历史（公告栏用）。
+// 传了 onDelete 时每条历史右侧出现撤回按钮（撤回后**服务端会把它从 AI 的视野里删掉**）。
 import { ensureTheme } from './theme.js';
 
-const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 export function createAnnouncePanel() {
   ensureTheme();
@@ -41,6 +42,22 @@ export function createAnnouncePanel() {
   const textEl = root.querySelector('.ap-text');
   const errEl = root.querySelector('.ap-err');
   let onSubmit = null;
+  let onDelete = null;
+
+  // 渲染历史列表（每条：正文 + 发布人 + 撤回按钮）
+  function renderList(posts) {
+    const list = Array.isArray(posts) ? posts : [];
+    if (!list.length) { postsWrap.style.display = 'none'; listEl.innerHTML = ''; return; }
+    postsWrap.style.display = '';
+    listEl.innerHTML = list.slice(-8).map((p) => {
+      const id = esc(p && p.id);
+      return '<div style="display:flex;gap:6px;align-items:flex-start;">'
+        + '<span style="flex:1;">· ' + esc(p && p.text) + '<span style="opacity:.6;">　— ' + esc((p && p.from) || '') + '</span></span>'
+        + (onDelete ? '<span class="ap-del" data-id="' + id + '" title="撤回这条公告" '
+          + 'style="cursor:pointer;color:var(--kui-danger,#d9534f);opacity:.75;padding:0 4px;">撤回</span>' : '')
+        + '</div>';
+    }).join('');
+  }
 
   function open(opts) {
     const o = opts || {};
@@ -48,11 +65,8 @@ export function createAnnouncePanel() {
     textEl.value = '';
     textEl.placeholder = String(o.placeholder || '说点什么…');
     errEl.textContent = '';
-    const posts = Array.isArray(o.posts) ? o.posts : null;
-    if (posts && posts.length) {
-      postsWrap.style.display = '';
-      listEl.innerHTML = posts.slice(-8).map((p) => '<div>· ' + esc(p.text) + '<span style="opacity:.6;">　— ' + esc(p.from || '') + '</span></div>').join('');
-    } else { postsWrap.style.display = 'none'; listEl.innerHTML = ''; }
+    onDelete = typeof o.onDelete === 'function' ? o.onDelete : null;
+    renderList(o.posts);
     onSubmit = typeof o.onSubmit === 'function' ? o.onSubmit : null;
     root.classList.remove('hidden');
     root.style.display = 'flex';
@@ -72,9 +86,25 @@ export function createAnnouncePanel() {
     } catch (e) { errEl.textContent = '发布失败（网络？）'; }
   }
 
+  // 撤回：点列表里的"撤回" → 回调服务端删除 → 用返回的最新列表刷新
+  async function del(id) {
+    if (!onDelete || !id) return;
+    errEl.textContent = '撤回中…';
+    try {
+      const r = await onDelete(id);
+      if (r && r.ok === false) { errEl.textContent = String(r.reason || '撤回失败'); return; }
+      errEl.textContent = '';
+      renderList(r && r.posts);
+    } catch (e) { errEl.textContent = '撤回失败（网络？）'; }
+  }
+
   root.querySelector('.close').addEventListener('click', close);
   root.querySelector('.ap-cancel').addEventListener('click', close);
   root.querySelector('.ap-send').addEventListener('click', submit);
+  listEl.addEventListener('click', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('.ap-del') : null;
+    if (t) del(t.getAttribute('data-id'));
+  });
   root.addEventListener('click', (e) => { if (e.target === root) close(); });
   textEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } });
 

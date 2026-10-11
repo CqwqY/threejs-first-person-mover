@@ -855,5 +855,167 @@ console.log('[26] 广播/公告 → 产生心理活动（think 入库）+ 记下
     'prompt 里带了【最近的全校广播/公告】', n0 && JSON.stringify(n0.student && n0.student.heard));
 }
 
+console.log('[27] 场景识别：附近地标 / 附近的人 / 学校有哪些地方 → 进 prompt 的【你周围的场景】');
+{
+  const dir = freshDir('scene');
+  writeScene(dir);
+  // s1 站在"第一食堂"里；操场/图书馆都在 45m 内 ⇒ 应该被算成"你附近的地标"
+  writeZonesCustom(dir, [
+    { id: 'zc', name: '第一食堂', type: 'canteen', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
+    { id: 'zg', name: '大操场', type: 'playground', minX: 62, maxX: 72, minZ: 45, maxZ: 55 },
+    { id: 'zl', name: '图书馆', type: 'library', minX: 74, maxX: 84, minZ: 45, maxZ: 55 },
+  ]);
+  const list = questStudents([[50, 50], [200, 0], [220, 0], [240, 0], [260, 0], [280, 0], [300, 0], [320, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  list[0].planAt = 0; // 只让 s1 立刻规划一次（拿它的 prompt 来断言）
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const plans = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => { if (input.kind === 'plan') plans.push(input.student); return null; },
+  });
+  w.setPlayerPositions([{ id: 'u1', x: 52, z: 50 }]); // 玩家 2m 外 ⇒ 应出现在"你身边有人"
+  await sleep(200);
+  const sc = w.debugScene('s1');
+  w.dispose();
+  const lm = ((sc && sc.landmarks) || []).map((x) => x.name).join(' | ');
+  ok(!!sc && sc.place.indexOf('食堂') >= 0, '知道自己在"第一食堂"里', sc && sc.place);
+  ok(/大操场/.test(lm) && /图书馆/.test(lm), '算出了附近的地标（操场/图书馆）', lm);
+  ok(!!(sc && sc.people.some((p) => p.name === '玩家')), '算出"玩家就在我旁边"', JSON.stringify((sc && sc.people) || []));
+  ok(!!(sc && /还没去过/.test(String(sc.places))), '"学校有哪些地方 + 哪些没去过"给了它', String(sc && sc.places).slice(0, 80));
+  const p0 = plans[0];
+  ok(!!(p0 && String(p0.scene || '').length), 'plan 的 prompt 带上了【你周围的场景】', p0 && String(p0.scene).slice(0, 60));
+  ok(!!(p0 && /还没去过/.test(String(p0.places || ''))), 'plan 的 prompt 带上了【学校有哪些地方】', p0 && String(p0.places).slice(0, 60));
+}
+
+console.log('[28] 观察打断计划：玩家走近 → 写进记忆 + 决策点被拉到当下');
+{
+  const dir = freshDir('observe');
+  writeScene(dir);
+  writeZonesCustom(dir, [{ id: 'zg', name: '大操场', type: 'playground', minX: -20, maxX: 20, minZ: -20, maxZ: 20 }]);
+  const list = questStudents([[0, 0], [200, 0], [220, 0], [240, 0], [260, 0], [280, 0], [300, 0], [320, 0]]);
+  const far = Date.now() + 3600e3;
+  for (const s of list) { s.planAt = 1e15; s.decideAt = far; s.chatAt = 1e15; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => null });
+  w.setPlayerPositions([{ id: 'u1', x: 3, z: 0 }]); // 玩家 3m 内 ⇒ 高重要度观察
+  await sleep(60);
+  const before = w.stateOf('s1').decideAt;
+  w.debugObserve('s1');
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(st.noticed && /玩家/.test(st.noticed), '【你刚刚注意到】记下了"看见玩家"', st.noticed);
+  ok((st.mem || []).some((m) => /玩家/.test(String(m.text))), '观察真的进了记忆流（会被检索、喂进 prompt）', JSON.stringify((st.mem || []).map((m) => m.text)));
+  ok(st.decideAt <= Date.now(), '★★ 高重要度观察把决策点拉到当下（缺口 A：看到才会改主意，而不是等计划做完）', 'before=' + before + ' after=' + st.decideAt);
+}
+
+console.log('[29] 看看学校：挑一个没去过的区域走过去看 → 到了写观察 + 记下"去过"');
+{
+  const dir = freshDir('explore');
+  writeScene(dir);
+  writeZonesCustom(dir, [
+    { id: 'zg', name: '大操场', type: 'playground', minX: 4, maxX: 8, minZ: -2, maxZ: 2 },
+    { id: 'zl', name: '图书馆', type: 'library', minX: 60, maxX: 70, minZ: -5, maxZ: 5 },
+  ]);
+  const list = questStudents([[0, 0], [200, 0], [220, 0], [240, 0], [260, 0], [280, 0], [300, 0], [320, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  // ⚠ 让它只有一个"没去过"的地方可挑（图书馆标成已去过）——否则 exploreTarget 会随机挑，
+  //   挑到 65m 外的图书馆时 9 秒内走不到，用例就抖了。
+  list[0].seenZones = ['zl'];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => null });
+  await sleep(60);
+  w.debugExplore('s1');
+  const mid = w.stateOf('s1');
+  ok(!!(mid.intent && mid.intent.goalType === 'explore'), '选了 explore（去看看学校某处）', JSON.stringify(mid.intent));
+  ok(mid.st === 'walk', '真的动身了（不是嘴上说说）', mid.st);
+  ok(/大操场/.test(String((mid.intent || {}).goalText || '')), '优先挑**没去过**的地方（图书馆已去过 → 挑了操场）', (mid.intent || {}).goalText);
+  await sleep(9000);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok((st.mem || []).some((m) => /我特意到/.test(String(m.text))), '到达后写下"我特意到…转了一圈"的观察', JSON.stringify((st.mem || []).map((m) => m.text)));
+  ok(Array.isArray(st.seenZones) && st.seenZones.length >= 1, '记下了"去过哪些地方"（下次优先去没去过的）', JSON.stringify(st.seenZones));
+  ok((st.think || []).some((x) => /看看/.test(String(x.text))), '还留下一条内心活动', JSON.stringify((st.think || []).map((x) => x.text)));
+}
+
+console.log('[30] 四处问人：走到同学跟前打听 → 问句/回答都播出来 + 双方记忆带来源');
+{
+  const dir = freshDir('inquire');
+  writeScene(dir);
+  writeZones(dir);
+  const list = questStudents([[0, 0], [2.2, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const seen = [];
+  const says = [];
+  const w = createNpcWorld({
+    dataDir: dir, getDayTime: () => 0.35,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push(m); },
+    askStudent: async (input) => {
+      if (input.kind === 'inquire') {
+        seen.push(input);
+        return { question: '周三是不是有测验？', answer: '嗯，周三上午数学。', think: '记住了，周三得复习。', mem: '顾星桥说周三有测验' };
+      }
+      return null;
+    },
+  });
+  await sleep(60);
+  w.debugInquire('s1', 's2');
+  await sleep(1000);
+  const a = w.stateOf('s1'), b = w.stateOf('s2');
+  w.dispose();
+  const inp = seen[0];
+  ok(!!inp, '走到跟前就调了一次 AI（kind=inquire）——"四处问人"真会发生', 'n=' + seen.length);
+  ok(!!(inp && String((inp.student && inp.student.scene) || '').length), '问人时也带上了场景识别', inp && String((inp.student && inp.student.scene) || '').slice(0, 40));
+  ok(!!(inp && inp.other && inp.other.name === '学生2号'), 'prompt 里明确了"要问的人是谁"', inp && JSON.stringify(inp.other));
+  ok(says.some((x) => /周三是不是有测验/.test(String(x.say))) && says.some((x) => /周三上午数学/.test(String(x.say))),
+    '问句与回答都播了出来（附近玩家能偷听）', JSON.stringify(says));
+  ok(!!a && (a.mem || []).some((m) => /学生2号/.test(String(m.text)) && m.src === '学生2号'),
+    '问的人记住了"我问了谁什么"，并标了来源（缺口 D）', a && JSON.stringify(a.mem));
+  ok(!!b && (b.mem || []).some((m) => /学生1号/.test(String(m.text)) && m.src === '学生1号'),
+    '被问的人也留了记忆（含来源标注）', b && JSON.stringify(b.mem));
+}
+
+console.log('[31] 玩家说"你去看看学校/四处问问" → 它真的改道去做（applyTalkEffect 收这两个动作）');
+{
+  const dir = freshDir('talkgoal');
+  writeScene(dir);
+  writeZones(dir);
+  const list = questStudents([[0, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  let n = 0;
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind !== 'talk') return null;
+      n++;
+      return n === 1 ? { say: '好，我去转转。', goalType: 'explore', mem: '四处看看' } : { say: '行，我去打听打听。', goalType: '打听', mem: '问问同学' };
+    },
+  });
+  await sleep(60);
+  await w.talk('s1', '你去看看学校吧', '小明', null, 'p:u1');
+  const g1 = w.stateOf('s1').intent && w.stateOf('s1').intent.goalType;
+  await w.talk('s1', '再去四处问问同学', '小明', null, 'p:u1');
+  const g2 = w.stateOf('s1').intent && w.stateOf('s1').intent.goalType;
+  w.dispose();
+  ok(g1 === 'explore', '说"去看看学校" → 意图变成 explore（真的改道）', g1);
+  ok(g2 === 'inquire', '说"四处问问同学" → 意图变成 inquire', g2);
+}
+
+console.log('[32] 公告可剔除：按 id 精确删 + 删完重新喂给 AI（静态断言 index.js）');
+{
+  const src = fs.readFileSync(new URL('../server-remote/index.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  ok(/function newBoardId\(\)/.test(src), '公告有稳定 id 生成器', '');
+  ok(/id: newBoardId\(\)/.test(src), 'pushBoard 给每条公告写 id', '');
+  ok(/function removeBoardPost\(id, by\)/.test(src), '有 removeBoardPost（按 id 精确删，不误伤同内容的另一条）', '');
+  ok(/req\.method === 'DELETE' && url\.pathname === '\/api\/board'/.test(src), '有 DELETE /api/board 路由', '');
+  ok(/for \(const p of list\) if \(p && !p\.id\)/.test(src), '老存档缺 id 会自动补齐（前端撤回按钮才可用）', '');
+  const i = src.indexOf('function removeBoardPost');
+  const body = src.slice(i, i + 900);
+  ok(/setBoard/.test(body), '★★ 删完把最新公告重新喂给 AI ⇒ 删了它就不再照做', '');
+  ok(/broadcastAll/.test(body), '删完广播刷新所有客户端的公告栏', '');
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

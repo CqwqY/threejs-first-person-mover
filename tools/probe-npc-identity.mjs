@@ -137,5 +137,40 @@ console.log('[8] notice：听到广播 → 有心理活动 + 明确"必须照通
   ok(/第一人称/.test(sys), 'SYSTEM_NOTICE 要求第一人称', '');
 }
 
+console.log('[9] 场景识别 / 记忆来源 / 四处问人：都进了 prompt');
+{
+  const lastUser = () => String((captured[captured.length - 1].messages[1] && captured[captured.length - 1].messages[1].content) || '');
+  const lastSys = () => String((captured[captured.length - 1].messages[0] && captured[captured.length - 1].messages[0].content) || '');
+
+  // plan：场景识别三段（附近有什么 / 有哪些地方 / 刚注意到什么）
+  await askStudent({
+    student: { ...base, scene: '能看到：大操场（东约 20m）', places: '大操场（还没去过）、图书馆（去过）', noticed: '我看见玩家就在我附近' },
+    memory: [], kind: 'plan', hour: 14, schedule: '自由活动',
+  });
+  const p = lastUser();
+  ok(/【你周围的场景】/.test(p) && /大操场/.test(p), 'plan prompt 有【你周围的场景】', p.slice(0, 140));
+  ok(/【学校有哪些地方】/.test(p) && /还没去过/.test(p), 'plan prompt 有【学校有哪些地方】', '');
+  ok(/【你刚刚注意到】/.test(p), 'plan prompt 有【你刚刚注意到】（观察进 prompt）', '');
+
+  // 记忆带传播来源（缺口 D）→ 渲染成"（顾星桥告诉我）"
+  await askStudent({
+    student: { ...base }, memory: [{ t: Date.now(), text: '周三有测验', kind: 'chat', src: '顾星桥' }],
+    kind: 'talk', playerName: '小明', playerText: '最近有啥事吗',
+  });
+  const p2 = lastUser();
+  ok(/顾星桥告诉我/.test(p2), '★★ 记忆带来源：渲染成"（顾星桥告诉我）"', p2.slice(-220));
+
+  // 四处问人：SYSTEM_INQUIRE + 明确"你要问的人是谁"
+  await askStudent({
+    student: { ...base }, other: { name: '陈屿', cls: '高二(3)班', persona: '安静，话不多' },
+    memory: [], kind: 'inquire',
+  });
+  const p3 = lastUser();
+  const sys3 = lastSys();
+  ok(/【你要问的人】/.test(p3) && /陈屿/.test(p3), 'inquire prompt 指明"你要问的人"', p3.slice(-180));
+  ok(/answer/.test(sys3) && /对方/.test(sys3), 'SYSTEM_INQUIRE 要求给出"以对方口吻"的回答', sys3.slice(0, 90));
+  ok(/第一人称/.test(sys3), 'SYSTEM_INQUIRE 要求第一人称（不许把自己写成第三人称）', '');
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

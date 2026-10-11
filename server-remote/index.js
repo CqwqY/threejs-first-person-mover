@@ -558,22 +558,45 @@ function saveShop(items) {
 // ---- 公告栏（世界坐标 -22,17 那块板子）+ 校园广播器共用这份"公告"存储 ----
 const BOARD_FILE = path.join(DATA_DIR, 'board.json');
 const BOARD_MAX = 20;   // 只留最近 20 条
+let _boardSeq = 0;
+// 每条公告给个**稳定 id**：撤回时按 id 精确删（按文本删会误伤同内容的另一条）
+function newBoardId() { return 'b' + Date.now().toString(36) + (++_boardSeq).toString(36); }
 let BOARD = (() => {
-  try { const d = JSON.parse(fs.readFileSync(BOARD_FILE, 'utf8')); return Array.isArray(d && d.posts) ? d.posts : []; }
-  catch (e) { return []; }
+  try {
+    const d = JSON.parse(fs.readFileSync(BOARD_FILE, 'utf8'));
+    const list = Array.isArray(d && d.posts) ? d.posts : [];
+    // 老存档没有 id ⇒ 补一个（否则前端撤回按钮没得可用）
+    let fixed = false;
+    for (const p of list) if (p && !p.id) { p.id = newBoardId(); fixed = true; }
+    if (fixed) { try { fs.writeFileSync(BOARD_FILE, JSON.stringify({ posts: list }, null, 2)); } catch (e) { /* 写不了就内存里留存 */ } }
+    return list;
+  } catch (e) { return []; }
 })();
 function saveBoard() { try { fs.writeFileSync(BOARD_FILE, JSON.stringify({ posts: BOARD }, null, 2)); } catch (e) { /* 写不了就内存里留存 */ } }
 // 发布一条公告：落盘 + 推给 AI（npcWorld.setBoard，AI 决策时会"看公告"）+ 广播给所有客户端
 function pushBoard(text, from) {
   const t = String(text == null ? '' : text).trim().slice(0, 120);
   if (!t) return null;
-  const rec = { text: t, at: Date.now(), from: String(from || '玩家').slice(0, 16) };
+  const rec = { id: newBoardId(), text: t, at: Date.now(), from: String(from || '玩家').slice(0, 16) };
   BOARD.push(rec);
   if (BOARD.length > BOARD_MAX) BOARD.splice(0, BOARD.length - BOARD_MAX);
   saveBoard();
   if (npcWorld && npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6));
   broadcastAll({ t: 'board', posts: BOARD.slice(-8) });
   return rec;
+}
+// 撤回一条公告（贴错了/事过境迁）：从存储里删掉，**重新喂给 AI** ⇒ 删了它就不再照着做；同时广播刷新前端
+function removeBoardPost(id, by) {
+  const key = String(id == null ? '' : id);
+  if (!key) return false;
+  const i = BOARD.findIndex((x) => String((x && x.id) || '') === key);
+  if (i < 0) return false;
+  const gone = BOARD.splice(i, 1)[0];
+  saveBoard();
+  if (npcWorld && npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6));
+  broadcastAll({ t: 'board', posts: BOARD.slice(-8) });
+  console.info('[board] 撤下公告（' + String(by || '玩家') + '）：' + String((gone && gone.text) || '').slice(0, 40));
+  return true;
 }
 // 简易限流：按 客户端 ip 限制频率（公告栏 5s / 广播 60s）
 const _lastPostAt = new Map();
@@ -953,6 +976,21 @@ const httpServer = http.createServer(async (req, res) => {
       if (!rec) return deny('内容不能为空');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, post: rec }));
+    });
+    return;
+  }
+  // ---- 撤回公告：贴错了/过期了 ⇒ 删掉它就**不再进 AI 的视野**（AI 也不再照着它行动）----
+  if (req.method === 'DELETE' && url.pathname === '/api/board') {
+    let body = '';
+    req.on('data', (c) => { if ((body += c).length > 8e3) req.destroy(); });
+    req.on('end', () => {
+      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
+      let data; try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
+      const id = (data && data.id != null) ? data.id : url.searchParams.get('id'); // 支持 body {id} 或 ?id=
+      if (!rateOk(_lastPostAt, ipOf(req), 3000)) return deny('操作太快了，歇会儿', 429);
+      if (!removeBoardPost(id, data && data.from)) return deny('没找到这条公告', 404);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, posts: BOARD.slice(-8) }));
     });
     return;
   }

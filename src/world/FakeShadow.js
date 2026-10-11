@@ -55,7 +55,7 @@ export function attachFakeShadow(parent, opts = {}) {
   const r = opts.radius != null ? opts.radius : 0.5;
   const y = opts.y != null ? opts.y : 0.02;
   const geo = new THREE.PlaneGeometry(r * 2, r * 2);
-  const mat = blobMaterial();
+  let mat = blobMaterial();
   if (opts.opacity != null) mat = mat.clone(), (mat.opacity = opts.opacity);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2; // 平铺到地面

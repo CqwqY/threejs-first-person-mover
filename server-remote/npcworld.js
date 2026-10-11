@@ -155,6 +155,26 @@ function bearingName(dx, dz) {
   return DIR8[Math.round(((a + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8];
 }
 
+// ---------- 场景识别（斯坦福的 observation：它得"看得见"周围有什么）----------
+// 服务端手上就有 zones（区域名/范围）+ 学生/玩家坐标，所以"看到什么"根本不必问客户端：
+// 直接算"我在哪 + 附近有哪些地方 + 附近有谁在做什么" ⇒ 拼成【你周围的场景】喂给模型。
+// 没有这一段，模型只知道"我在饭堂"，不知道"饭堂旁边就是操场""公告栏那边有人"，说什么都虚。
+const SCENE_RANGE = 45;          // 多远以内的地标算"你附近"（米）
+const SCENE_MAX_LANDMARKS = 4;   // prompt 里最多列几个附近地标（别把 prompt 塞满）
+const SCENE_MAX_PEOPLE = 3;      // prompt 里最多列几个附近的人
+const OBS_CD = 12000;            // 同一个学生两次"注意到点什么"的最小间隔（毫秒）
+const OBS_INTERRUPT_CD = 30000;  // 观察触发"打断当前计划"的最小间隔（防抖；斯坦福缺口 A）
+const OBS_NOTABLE_DIST = 8;      // 玩家/同学进到这个距离才算"值得抬头看一眼"（米）
+
+// ---------- 四处问人 / 看看学校（自主行为）----------
+// 用户实测："我让他四处问人他是不会的，让他看看学校也是不会的" —— 因为原来 goalType 里
+// 根本没有这两种"自发的好奇心"。补成两个一等公民动作，LLM 能选、规则大脑能兜底、玩家让它做也真做。
+const INQUIRE_CD = 150000;       // 同一个学生两次"主动去问人"的最小间隔（毫秒）
+const INQUIRE_NEAR = 3.0;        // 走到多近才算"问上了"（米）
+const INQUIRE_TIMEOUT = 60000;   // 去问人的总超时（走不到就作废，绝不悬着）
+const EXPLORE_CD = 120000;       // 同一个学生两次"去学校某处看看"的最小间隔（毫秒）
+const SEEN_MAX = 24;             // "去过哪些地方"最多记多少个（环形截断，防无限增长）
+
 // ---------- NPC 发布公告：自己走到公告栏，让 AI 写一条通知贴上去 ----------
 // 触发是**事件驱动**的：规划时 AI 觉得"这事得告诉全校"，就在 plan 里给 post ⇒ 它走去公告栏贴。
 // 贴出去的和玩家贴的完全同路：进公告栏、广播给所有客户端、**其他学生看到并照做**（闭环）。
@@ -263,8 +283,13 @@ function resolveGoalType(g) {
   if (ZONE_TYPE_IDS.has(x)) return x;
   if (['wander', 'walk', 'roam', 'stroll', '游荡', '散步', '溜达', '随便走走'].includes(x)) return 'wander';
   if (['rest', 'stay', 'idle', 'sit', '休息', '待着', '歇着', '发呆'].includes(x)) return 'rest';
+  // 自主好奇心的两个一等公民动作（"四处问人""看看学校"）——认不出就退回 wander，绝不卡死
+  if (['explore', 'look', 'visit', 'see', '看看', '看看学校', '逛逛', '参观', '探索', '去转转'].includes(x)) return 'explore';
+  if (['inquire', 'ask', 'askaround', 'chat_with', '问人', '打听', '问问', '找人聊', '聊天', '找人说说话'].includes(x)) return 'inquire';
   return 'wander';
 }
+// 这两个是"抽象动作"（不是具体功能区），走位目标由代码现挑（见 exploreTarget / startInquire）
+const ABSTRACT_GOALS = new Set(['wander', 'rest', 'explore', 'inquire']);
 
 export function createNpcWorld(opts) {
   const dataDir = opts.dataDir;
@@ -720,6 +745,13 @@ export function createNpcWorld(opts) {
           _postAt: 0,         // 上次"决定去贴 / 真的贴了"的时刻（限流+超时；时间字段，必须有初值）
           actStepAt: 0,  // 下一次"做活动时挪两步"的时刻（时间字段，必须有初值）
           actResume: 0,  // 挪步前记下的停留截止（回来接着做活动；0 = 当前不是挪步）
+          // 场景识别 / 自主行为（新增字段一律在这给初值，否则累加/时间字段参与运算变 NaN 静默失效）
+          noticed: '',       // 刚刚注意到的场景线索（进 prompt；字符串，必须有初值）
+          _obsAt: 0,         // 上次"注意到点什么"的时刻（限流；时间字段，必须有初值）
+          _interruptAt: 0,   // 上次被观察打断计划的时刻（防抖；时间字段，必须有初值）
+          _inquireAt: 0,     // 上次主动去问人的时刻（限流；时间字段，必须有初值）
+          _exploreAt: 0,     // 上次去学校某处看看的时刻（限流；时间字段，必须有初值）
+          seenZones: [],     // 去过/看过的区域 id（"看看学校"优先挑没去过的；数组，必须有初值）
         };
       });
       dirty = true;
@@ -747,6 +779,12 @@ export function createNpcWorld(opts) {
       if (typeof s.postIdea !== 'string') { s.postIdea = ''; dirty = true; }
       if (!Number.isFinite(Number(s.actStepAt))) { s.actStepAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.actResume))) { s.actResume = 0; dirty = true; }
+      if (typeof s.noticed !== 'string') { s.noticed = ''; dirty = true; }
+      if (!Number.isFinite(Number(s._obsAt))) { s._obsAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s._interruptAt))) { s._interruptAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s._inquireAt))) { s._inquireAt = 0; dirty = true; }
+      if (!Number.isFinite(Number(s._exploreAt))) { s._exploreAt = 0; dirty = true; }
+      if (!Array.isArray(s.seenZones)) { s.seenZones = []; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.y))) { s.y = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
@@ -913,6 +951,200 @@ export function createNpcWorld(opts) {
     if (d <= 90) return '玩家离你有点远（约 ' + d + 'm，在你的' + bearingName(dx, dz) + '方向，' + at + '那边）';
     return '玩家离你很远（约 ' + d + 'm）';
   }
+  // ---------- 场景识别（斯坦福的 observation）----------
+  // 服务端手上就有 zones + 所有人坐标 ⇒ "看得见什么"不用问客户端，直接算。
+  // 产出三类线索：① 我在哪个区域 ② 附近有哪些地标（区域名/公告栏 + 方位距离）③ 附近有谁在做什么。
+  function doingWord(o) {
+    const st = String((o && o.st) || '');
+    if (st === 'walk') return '在往别处走';
+    if (st === 'act') return '停下来做自己的事';
+    return '待在那儿';
+  }
+  // 附近的人（同学 + 玩家）：按距离排序取前几个
+  function peopleNear(s, maxDist, maxN) {
+    const out = [];
+    for (const o of students) {
+      if (o === s) continue;
+      const dx = Number(o.x) - Number(s.x), dz = Number(o.z) - Number(s.z);
+      const d = Math.hypot(dx, dz);
+      if (d <= maxDist) out.push({ id: o.id, name: String(o.name || '同学'), dist: d, dir: bearingName(dx, dz), doing: doingWord(o) });
+    }
+    for (const p of playerPositions) {
+      const dx = Number(p.x) - Number(s.x), dz = Number(p.z) - Number(s.z);
+      const d = Math.hypot(dx, dz);
+      if (d <= maxDist) out.push({ id: 'player', name: '玩家', dist: d, dir: bearingName(dx, dz), doing: '在附近' });
+    }
+    out.sort((a, b) => a.dist - b.dist);
+    return out.slice(0, maxN);
+  }
+  // 场景快照：{ place, hereType, landmarks:[{id,name,type,dist,dir,posts}], people:[...] }
+  function sceneOf(s) {
+    const here = zoneAt(Number(s.x), Number(s.z)) || zoneById(s.zoneId);
+    const lm = [];
+    for (const z of zones) {
+      if (here && z.id === here.id) continue; // 自己正待着的区域不用再列一遍
+      const c = zoneCenter(z);
+      const dx = c.x - Number(s.x), dz = c.z - Number(s.z);
+      const d = Math.hypot(dx, dz);
+      if (d > SCENE_RANGE) continue;
+      lm.push({ id: z.id, name: placeNameAt(c.x, c.z, z.id), type: z.type, dist: d, dir: bearingName(dx, dz), posts: 0 });
+    }
+    // 公告栏是"特殊地标"（不在 zones 里，但全校都认它）
+    const bx = BOARD_POS.x - Number(s.x), bz = BOARD_POS.z - Number(s.z);
+    const bd = Math.hypot(bx, bz);
+    if (bd <= SCENE_RANGE) lm.push({ id: '__board', name: '公告栏', type: 'board', dist: bd, dir: bearingName(bx, bz), posts: boardPosts.length });
+    lm.sort((a, b) => a.dist - b.dist);
+    return {
+      place: placeOf(s),
+      hereType: here ? here.type : null,
+      landmarks: lm.slice(0, SCENE_MAX_LANDMARKS),
+      people: peopleNear(s, SCENE_RANGE, SCENE_MAX_PEOPLE),
+    };
+  }
+  // 场景 → 一句人话（进 prompt 的【你周围的场景】）
+  function sceneLine(s) {
+    const sc = sceneOf(s);
+    const parts = [];
+    if (sc.landmarks.length) {
+      parts.push('能看到：' + sc.landmarks.map((l) => l.name + '（' + l.dir + '约 ' + Math.round(l.dist) + 'm'
+        + (l.id === '__board' ? (l.posts ? '，上面有 ' + l.posts + ' 条通知' : '，板子是空的') : '') + '）').join('、'));
+    }
+    if (sc.people.length) {
+      parts.push('你身边有人：' + sc.people.map((p) => p.name + '（' + p.dir + '约 ' + Math.round(p.dist) + 'm，' + p.doing + '）').join('；'));
+    }
+    return parts.join('　');
+  }
+  // 全校有哪些地方（"看看学校"得先知道能去哪）+ 哪些已经去过
+  function placesLine(s) {
+    if (!zones.length) return '';
+    const seen = new Set(Array.isArray(s.seenZones) ? s.seenZones : []);
+    return zones.slice(0, 12).map((z) => {
+      const c = zoneCenter(z);
+      return placeNameAt(c.x, c.z, z.id) + (seen.has(z.id) ? '（去过）' : '（还没去过）');
+    }).join('、');
+  }
+  function markSeen(s, id) {
+    if (!id || id === '__board') return;
+    if (!Array.isArray(s.seenZones)) s.seenZones = [];
+    if (s.seenZones.includes(id)) return;
+    s.seenZones.push(id);
+    if (s.seenZones.length > SEEN_MAX) s.seenZones.splice(0, s.seenZones.length - SEEN_MAX);
+  }
+  // 观察流：注意到什么 → 进记忆（带来源）+ 必要时**打断当前计划**（斯坦福缺口 A：看到才会改主意）
+  function observeScene(s, now) {
+    if (now - Number(s._obsAt || 0) < OBS_CD) return;
+    if (s.quest || s._chatting || s._inquiring) return; // 办事/聊天中不打扰
+    const sc = sceneOf(s);
+    const here = zoneAt(Number(s.x), Number(s.z));
+    const p = sc.people.find((x) => x.id === 'player' && x.dist <= OBS_NOTABLE_DIST);
+    const mate = sc.people.find((x) => x.id !== 'player' && x.dist <= OBS_NOTABLE_DIST);
+    const board = sc.landmarks.find((l) => l.id === '__board' && l.posts > 0 && l.dist <= OBS_NOTABLE_DIST);
+    // 优先级：玩家 > 新通知 > 第一次到的区域 > 同学
+    let text = '';
+    let notable = false;
+    if (p) { text = '我看见玩家就在我附近（' + p.dir + '约 ' + Math.round(p.dist) + 'm）'; notable = true; }
+    else if (board) { text = '我路过公告栏，上面贴着 ' + board.posts + ' 条通知'; notable = true; }
+    else if (here && !(Array.isArray(s.seenZones) ? s.seenZones : []).includes(here.id)) {
+      text = '我第一次到' + placeOf(s) + (sc.landmarks.length ? ('，旁边就是' + sc.landmarks.slice(0, 2).map((l) => l.name).join('、')) : '');
+    } else if (mate) { text = '我看见' + mate.name + mate.doing + '（' + mate.dir + '约 ' + Math.round(mate.dist) + 'm）'; }
+    if (!text) return;
+    if (String(s._obsSeen || '') === text) return; // 同一条别反复记
+    s._obsAt = now;
+    s._obsSeen = text;
+    s.noticed = text; // 进下一次 prompt 的【你刚刚注意到】
+    s.mem.push({ t: now, text, kind: 'obs' });
+    if (here) markSeen(s, here.id); // 到过就记下来（"看看学校"优先挑没去过的）
+    trimMemory(s);
+    // 高重要度观察 → 把决策点拉到当下（下一拍就重新想；限流防抖）
+    if (notable && now - Number(s._interruptAt || 0) > OBS_INTERRUPT_CD) {
+      s._interruptAt = now;
+      s.decideAt = Math.min(Number(s.decideAt || 0) || now, now);
+    }
+  }
+  // ---------- 自主行为①「看看学校」：挑一个**还没去过**的区域走过去看 ----------
+  function exploreTarget(s) {
+    if (!zones.length) return null;
+    const seen = new Set(Array.isArray(s.seenZones) ? s.seenZones : []);
+    const here = zoneAt(Number(s.x), Number(s.z));
+    const fresh = zones.filter((z) => !seen.has(z.id) && (!here || z.id !== here.id));
+    const pool = fresh.length ? fresh : zones.filter((z) => !here || z.id !== here.id);
+    return pool.length ? pickOne(pool) : null;
+  }
+  function startExplore(s, now) {
+    const z = exploreTarget(s);
+    if (!z) { wander(s, now); return; }
+    s._exploreAt = now;
+    s.intent = { goalType: 'explore', goalText: '去' + placeNameAt(zoneCenter(z).x, zoneCenter(z).z, z.id) + '看看', activity: '四处看看', plan: '', since: now };
+    goZone(s, now, z);
+  }
+  // ---------- 自主行为②「四处问人」：走到一个同学跟前，问它一件自己好奇的事 ----------
+  function inquireTarget(s) {
+    let best = null, bd = Infinity;
+    for (const o of students) {
+      if (o === s) continue;
+      if (o.quest || o._chatting || o._inquiring) continue; // 人家正忙，别去烦
+      const d = Math.hypot(Number(o.x) - Number(s.x), Number(o.z) - Number(s.z));
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best;
+  }
+  function startInquire(s, now) {
+    if (now - Number(s._inquireAt || 0) < INQUIRE_CD) { wander(s, now); return; }
+    const t = inquireTarget(s);
+    if (!t) { wander(s, now); return; }
+    s._inquireAt = now;
+    s.intent = { goalType: 'inquire', goalText: '去问问' + t.name, activity: '', plan: '', seekId: t.id, since: now };
+    setTarget(s, Number(t.x), Number(t.z));
+    s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+    s.decideAt = now + INQUIRE_TIMEOUT;
+    console.info('[npc] ' + s.name + ' 去找 ' + t.name + ' 打听打听');
+  }
+  // 走到跟前 → 一次 LLM 调用产出「问句 + 对方回答」；双方都写**带来源**的记忆（缺口 D）
+  async function inquireWith(s, t, now) {
+    if (s._inquiring) return;
+    s._inquiring = true;
+    s.st = 'act'; s.stayUntil = now + 6000;
+    s.tx = Number(s.x); s.tz = Number(s.z); s.wx = s.tx; s.wz = s.tz; s.path = null; s.pathIdx = 0;
+    try {
+      const out = await askStudent({
+        student: {
+          name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: 'act',
+          needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s),
+          boardLine: boardLine(), scene: sceneLine(s), places: placesLine(s), heard: heardLine(s, now),
+        },
+        other: { name: t.name, cls: t.cls, persona: t.persona },
+        memory: pickMemory(s, null),
+        thinks: recentThinks(s),
+        kind: 'inquire',
+      });
+      const q = clampText(out && out.question, 60);
+      const a = clampText(out && out.answer, 80);
+      if (!q) return; // 没问出东西就不硬编（避免"无实物表演"）
+      const ts = Date.now();
+      // 台词逐句广播（附近的玩家能偷听到"同学之间在打听事"）
+      broadcast({ t: 'npc_say', id: s.id, say: t.name + '，' + q });
+      broadcast({ t: 'npc_say', id: t.id, say: a || '（他说不太清楚）' });
+      // 记忆归属按**实际台词**拼，并带上"听谁说的"（src）
+      s.mem.push({ t: ts, text: '我问' + t.name + '「' + q + '」，' + (a ? ('他说：' + a) : '他也没说清'), kind: 'chat', src: t.name, imp: 0.5 });
+      t.mem.push({ t: ts, text: s.name + '来问我「' + q + '」，我说：' + (a || '…'), kind: 'chat', src: s.name, imp: 0.45 });
+      bumpRel(s, t.id, 0.12, '');   // 主动找人说话 → 关系近一点
+      bumpRel(t, s.id, 0.08, '');
+      applyMoodWord(s, '好奇');
+      const th = clampText(out && out.think, LEN_THINK) || ('我去问了' + t.name + '关于「' + q + '」');
+      s.think.push({ t: ts, text: th });
+      if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
+      trimMemory(s); trimMemory(t);
+      saveStudents(students);
+      console.info('[npc] ' + s.name + ' 问 ' + t.name + '：「' + q + '」→ ' + (a || '…'));
+    } catch (e) {
+      console.warn('[npc] 四处问人失败 ' + s.id + '：' + ((e && e.message) || e));
+    } finally {
+      s._inquiring = false;
+      s.decideAt = Date.now(); // 问完立刻回到日常（不留悬空意图）
+      s.st = 'act';
+      s.stayUntil = Math.max(Number(s.stayUntil || 0), Date.now() + 3000);
+    }
+  }
   // 给 AI 的"公告栏"：**不管有没有内容都要说**（否则它根本不知道学校有这块板子）
   function boardWhere() { return placeNameAt(BOARD_POS.x, BOARD_POS.z, ''); }
   function boardLine() {
@@ -930,6 +1162,17 @@ export function createNpcWorld(opts) {
     if (policyReady) { applyPolicy(s, now); return; }
     const h = hourNow();
     const seg = scheduleType(h);
+    // 自主好奇心（用户："AI 能做的自主行为不够"）：偶尔自己去"打听点事 / 到学校某处看看"。
+    // ⚠ 只在有区域、非上课时段发作；概率低 + 有个人冷却 ⇒ 不喧宾夺主。
+    //   探针若要确定性，把 `_inquireAt`/`_exploreAt` 顶到未来即可屏蔽（同 chatAt 的做法）。
+    if (zones.length && !(seg && seg.type === 'classroom')) {
+      if (Number((s.needs || {}).social) > 0.55 && now - Number(s._inquireAt || 0) > INQUIRE_CD && Math.random() < 0.25) {
+        startInquire(s, now); return;
+      }
+      if (now - Number(s._exploreAt || 0) > EXPLORE_CD && Math.random() < 0.15) {
+        startExplore(s, now); return;
+      }
+    }
     // 心情偏置：心情差 / 没力气又不上课 → 更想回去歇；心情好又有精力 → 更想去活动（"对话改变它"落到行为）
     const mood = s.mood || { valence: 0.5, energy: 0.6 };
     if (!(seg && seg.type === 'classroom')) {
@@ -1031,6 +1274,9 @@ export function createNpcWorld(opts) {
   function ruleAltAction(s) { const seg = scheduleType(hourNow()); return seg ? seg.type : needType(s); }
   function recordPlanFeed(s, goalType) {
     try {
+      // inquire/explore 是"LLM 独有"的抽象动作，策略网络的 15 动作 schema 里没有它们
+      //   ⇒ 不写进训练集（否则会教出一个永远只会 'other' 的网络）。
+      if (goalType === 'inquire' || goalType === 'explore') return;
       const action = actionOfGoal(goalType);
       if (!ACTIONS.includes(action)) return;
       fs.mkdirSync(FEED_DIR, { recursive: true });
@@ -1076,6 +1322,9 @@ export function createNpcWorld(opts) {
             player: playerWhere(s),          // 玩家在哪（距离/方位/地点，说人话）
             dayPlan: s.dayPlan ? String(s.dayPlan.text || '') : '', // 今日主线（让零散决定有连续性）
             mates: students.filter((x) => x !== s).map((x) => x.name), // 班里的同学：给了名字它才"找得到人"
+            scene: sceneLine(s),   // 场景识别：附近有什么地标 / 谁在附近（不然它"看不见"学校）
+            places: placesLine(s), // 学校有哪些地方、哪些去过（"看看学校"得先知道能去哪）
+            noticed: String(s.noticed || ''), // 刚刚注意到的事（观察打断计划后的线索）
           },
           memory: pickMemory(s, null),
           kind: 'plan',
@@ -1156,6 +1405,9 @@ export function createNpcWorld(opts) {
           return;
         }
         if (goalType === 'wander') { wander(s, now); s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt; return; }
+        // 两个"自主好奇心"动作：走位目标由代码现挑（不是具体功能区）
+        if (goalType === 'inquire') { s.planAt = now + PLAN_INTERVAL_MS; startInquire(s, now); return; }
+        if (goalType === 'explore') { s.planAt = now + PLAN_INTERVAL_MS; startExplore(s, now); return; }
         const target = pickZoneAway(s, goalType);
         if (!target) { wander(s, now); s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt; return; } // 没这种区域：自由漫步兜底
         goZone(s, now, target);          // 落地走位目标
@@ -1295,7 +1547,7 @@ export function createNpcWorld(opts) {
     s._seenAt[key] = now;
     // ⚠ 观察**写进 mem**（真正的记忆流）：它会被检索、喂给 prompt，真的影响之后的举止与说话。
     const text = isPlayer ? '我看见玩家从我附近过去了' : ('我看见' + String(best.name || '同学') + '也在这一带');
-    s.mem.push({ t: now, text, kind: 'obs', from: isPlayer ? '' : best.id });
+    s.mem.push({ t: now, text, kind: 'obs', from: isPlayer ? '' : best.id, src: isPlayer ? '亲眼看到' : ('亲眼看到' + String(best.name || '')) });
     trimMemory(s); // 超限时先丢观察（不花 LLM），见 trimMemory
   }
 
@@ -1403,11 +1655,17 @@ export function createNpcWorld(opts) {
     // ⚠ 这次是**委托办事**（有 task）⇒ 走位由任务状态机接管，别再用 goalType 改道：
     //   两套走位同时生效时，"让你去找人"会顺带触发一次无关的寻路（用户实测的"也触发寻路了"）。
     if (out.task && out.task.target) return;
-    // 因对话改道：只接受合法目标（已知区域 / wander / rest），其余忽略（不臆造去处）
+    // 因对话改道：只接受合法目标（已知区域 / wander / rest / 两个自主动作），其余忽略（不臆造去处）
     const raw = String(out.goalType || '').trim().toLowerCase();
-    const gt = (raw === 'wander' || raw === 'rest') ? raw : (ZONE_TYPE_IDS.has(raw) ? raw : null);
+    const gt = (raw === 'wander' || raw === 'rest') ? raw
+      : ZONE_TYPE_IDS.has(raw) ? raw
+        : (['explore', '看看学校', '逛逛', '参观', '探索', '去转转', '看看'].includes(raw) ? 'explore'
+          : (['inquire', 'ask', '问人', '打听', '问问', '找人聊聊'].includes(raw) ? 'inquire' : null));
     if (!gt) return;
     const note = '（受对话影响）' + clampText(out.mem || out.say || '', 40);
+    // "你四处问问同学""你去看看学校" —— 玩家这么说了，它就得真的去做（用户实测要的就是这个）
+    if (gt === 'explore') { startExplore(s, Date.now()); if (s.intent) s.intent.goalText = note; return; }
+    if (gt === 'inquire') { startInquire(s, Date.now()); if (s.intent) s.intent.goalText = note; return; }
     if (gt === 'rest') {
       s.st = 'act'; s.stayUntil = Date.now() + 30000;
       s.intent = { goalType: 'rest', goalText: note, activity: '', plan: '', since: Date.now() };
@@ -1441,9 +1699,9 @@ export function createNpcWorld(opts) {
   // 全局限流（CHAT_INTERVAL）+ 个人冷却（CHAT_COOLDOWN）+ 模板兜底 = 不刷爆 GLM、也绝不静默卡住。
   // 这个学生此刻能不能参与闲聊（"有任务在身 / 正要去见某人 / 刚聊过"都排除）
   function chatIdle(x, now, allowWalk) {
-    if (x._chatting || x.quest) return false;
-    // 已经在去见某人/办事的路上，别重复派
-    if (x.intent && (x.intent.goalType === 'person' || x.intent.goalType === 'quest')) return false;
+    if (x._chatting || x._inquiring || x.quest) return false;
+    // 已经在去见某人/办事的路上，别重复派（含"四处问人"——否则两套系统会抢同一个人）
+    if (x.intent && (x.intent.goalType === 'person' || x.intent.goalType === 'quest' || x.intent.goalType === 'inquire')) return false;
     if (now < Number(x.talkingUntil || 0)) return false;
     if (now - Number(x.chatAt || 0) < CHAT_COOLDOWN * 1000) return false;
     if (allowWalk) return true;
@@ -1496,8 +1754,8 @@ export function createNpcWorld(opts) {
     broadcast({ t: 'npc_say', id: a.id, say: tpl[0] });
     const tm = setTimeout(() => broadcast({ t: 'npc_say', id: b.id, say: tpl[1] }), CHAT_LINE_GAP_MS);
     if (tm.unref) tm.unref();
-    a.mem.push({ t: t0, text: '我和' + b.name + '聊了两句：' + tpl[0], kind: 'chat', from: b.id });
-    b.mem.push({ t: t0, text: '我和' + a.name + '聊了两句：' + tpl[1], kind: 'chat', from: a.id });
+    a.mem.push({ t: t0, text: '我和' + b.name + '聊了两句：' + tpl[0], kind: 'chat', from: b.id, src: b.name });
+    b.mem.push({ t: t0, text: '我和' + a.name + '聊了两句：' + tpl[1], kind: 'chat', from: a.id, src: a.name });
   }
   let chatBusy = false; // 同一时刻只跑一段闲聊（控并发 / 额度）
   async function converse(a, b) {
@@ -1541,8 +1799,8 @@ export function createNpcWorld(opts) {
       const headB = '我和' + a.name + (topic ? '聊到' + topic : '聊了两句');
       const tailA = aSaid.length ? ('：我说「' + aSaid[0] + '」，' + b.name + '说「' + (bSaid[0] || '') + '」') : '';
       const tailB = bSaid.length ? ('：' + a.name + '说「' + (aSaid[0] || '') + '」，我说「' + bSaid[0] + '」') : '';
-      a.mem.push({ t: t0, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id });
-      b.mem.push({ t: t0, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id });
+      a.mem.push({ t: t0, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id, src: b.name });
+      b.mem.push({ t: t0, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id, src: a.name });
       // 模型给的"聊完记住的点"只进内心活动（不进记忆流，避免它把归属写乱）
       if (out.memA) a.think.push({ t: t0, text: clampText(out.memA, LEN_THINK) });
       if (out.memB) b.think.push({ t: t0, text: clampText(out.memB, LEN_THINK) });
@@ -1677,8 +1935,8 @@ export function createNpcWorld(opts) {
         t.think.push({ t: ts, text: tth });
         if (t.think.length > MEM_MAX) t.think.splice(0, t.think.length - MEM_MAX);
       }
-      s.mem.push({ t: ts, text: '我问' + t.name + '「' + q.question + '」，他答：' + q.answer, kind: 'quest', from: t.id });
-      t.mem.push({ t: ts, text: s.name + '问我「' + q.question + '」', kind: 'quest', from: s.id });
+      s.mem.push({ t: ts, text: '我问' + t.name + '「' + q.question + '」，他答：' + q.answer, kind: 'quest', from: t.id, src: t.name });
+      t.mem.push({ t: ts, text: s.name + '问我「' + q.question + '」', kind: 'quest', from: s.id, src: s.name });
       broadcast({ t: 'npc_say', id: t.id, say: q.answer });
       trimMemory(s); trimMemory(t); saveStudents(students);
       // 问到了 → 立刻掉头**走向委托你的玩家**复命（不是"附近有人就算到"）
@@ -1726,6 +1984,8 @@ export function createNpcWorld(opts) {
           boardLine: boardLine(),
           // 最近听到的广播/公告（说人话）→ 它得**照通知调整计划**，不能听过就忘
           heard: heardLine(s, now),
+          // 场景识别（我周围有什么 / 学校有哪些地方 / 刚注意到什么）→ 说话才有"现场感"
+          scene: sceneLine(s), places: placesLine(s), noticed: String(s.noticed || ''),
           // 商店在售：它"反过来请玩家代买"时，只能点**真实在售**的东西（不然会开口要一件买不到的）
           shop: kind === 'talk' ? shopPool.slice(0, 40).map((x) => x.name) : undefined,
         },
@@ -1749,8 +2009,10 @@ export function createNpcWorld(opts) {
         if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
       }
       if (mem) {
-        // 归属：这条记忆是"谁带来的"（玩家= p:<id>，或同学 id）——存档里带上，别再让记忆悬空
-        s.mem.push({ t: now, text: mem, kind: kind === 'talk' ? 'say' : '', from: (extra && extra.who) || '' });
+        // 归属：这条记忆是"谁带来的"（玩家= p:<id>，或同学 id）——存档里带上，别再让记忆悬空。
+        // src = 人话来源（"听谁说的"）⇒ 检索输出成"（顾星桥告诉我）…"（斯坦福缺口 D：记忆有传播链）。
+        const srcName = (kind === 'talk' || kind === 'notice') ? String((extra && extra.name) || '') : '';
+        s.mem.push({ t: now, text: mem, kind: kind === 'talk' ? 'say' : '', from: (extra && extra.who) || '', src: srcName });
         await trimMemory(s);
       }
       // 对话/通知的"影响"：改心情 / 改关系 / 必要时改道（notice 也走这条 ⇒ 听到通知真的会改主意去）
@@ -1958,6 +2220,7 @@ export function createNpcWorld(opts) {
     for (const s of students) {
       updateNeeds(s, dt, now);
       perceive(s, now); // P2：看身边的人（廉价，限流）
+      observeScene(s, now); // 场景识别：附近有谁/有什么地标 → 进记忆；要紧的会打断当前计划
       // 公告栏：路过就"看一眼"（限流）→ 记进记忆；**并且照做**（通知说了去哪就真去）
       if (!s.quest && now >= Number(s._boardAt || 0) &&
           Math.hypot(Number(s.x) - BOARD_POS.x, Number(s.z) - BOARD_POS.z) < BOARD_READ_RANGE) {
@@ -1967,6 +2230,7 @@ export function createNpcWorld(opts) {
           t: now,
           text: last ? ('我在公告栏看到：' + last) : '我去公告栏看了一眼，上面还没有新通知',
           kind: 'obs',
+          src: last ? '公告栏' : '',
         });
         trimMemory(s);
         if (last) obeyNotice([s], last, now); // 看懂了就去做
@@ -2014,6 +2278,18 @@ export function createNpcWorld(opts) {
           s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
         }
       }
+      // 「四处问人」：朝目标同学走，走到跟前就开口打听（一次 LLM 调出"问句 + 对方回答"）
+      if (!s.quest && s.intent && s.intent.goalType === 'inquire' && s.intent.seekId && !s._inquiring) {
+        const t = students.find((x) => x.id === s.intent.seekId);
+        const tooLong = now - Number(s.intent.since || 0) > INQUIRE_TIMEOUT;
+        const d = t ? Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) : Infinity;
+        if (!t || tooLong) { s.intent = null; s.decideAt = now; } // 找不到人 / 走太久：作罢，回日常
+        else if (d < INQUIRE_NEAR) { s.intent = null; inquireWith(s, t, now); }
+        else if (now - Number(s._seekAt || 0) > 2500) {
+          s._seekAt = now; setTarget(s, Number(t.x), Number(t.z));
+          s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+        }
+      }
       if (s.st === 'act') {
         if (now >= Number(s.stayUntil || 0)) {
           if (Number(s.actResume || 0) > now) s.stayUntil = s.actResume; // 挪步中（保险）
@@ -2047,6 +2323,18 @@ export function createNpcWorld(opts) {
             s.decideAt = s.stayUntil;
             s.stuck = 0;
             s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX);
+            // 「看看学校」到达：真"看了一眼"——把眼前的场景写成记忆 + 一条内心活动（场景识别落地到行为）
+            if (s.intent && s.intent.goalType === 'explore') {
+              const zn = zoneAt(Number(s.x), Number(s.z));
+              markSeen(s, zn ? zn.id : '');
+              const sc = sceneOf(s);
+              const lm = sc.landmarks.length ? ('这边还有' + sc.landmarks.map((l) => l.name).join('、')) : '这边没什么特别的';
+              s.mem.push({ t: now, text: '我特意到' + placeOf(s) + '转了一圈，' + lm, kind: 'obs', imp: 0.45 });
+              s.think.push({ t: now, text: '我过来看看' + placeOf(s) + '这边是什么样。' });
+              if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
+              trimMemory(s);
+              s.noticed = '我刚到' + placeOf(s) + '，' + lm;
+            }
             triggerAI(s, 'arrive'); // 到达目的地：触发一次内心独白（内部有冷却，绝大多数会被节流掉）
           }
         } else {
@@ -2138,7 +2426,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, think: (s.think || []).slice(-3), heard: s.heard ? { ...s.heard } : null, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, think: (s.think || []).slice(-3), heard: s.heard ? { ...s.heard } : null, noticed: String(s.noticed || ''), seenZones: (s.seenZones || []).slice(), st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
   }
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
@@ -2187,7 +2475,7 @@ export function createNpcWorld(opts) {
     const s = students[announceIdx % students.length];
     announceIdx++;
     const a = announceQueue[0];
-    s.mem.push({ t: now, text: '全校广播：「' + a.text + '」', kind: 'announce' });
+    s.mem.push({ t: now, text: '全校广播：「' + a.text + '」', kind: 'announce', src: String(a.from || '学校') });
     // ⚠ 记住"最近听到的通知"：prompt 里的【最近的全校广播/公告】用它 —— 它得**照通知调整计划**，不能听过就忘
     s.heard = { text: String(a.text).slice(0, 120), from: String(a.from || '学校').slice(0, 16), t: now };
     trimMemory(s);
@@ -2313,6 +2601,46 @@ export function createNpcWorld(opts) {
     planNext(s, Date.now());
     return true;
   }
+  // 调试/探针用：场景识别（附近地标/人 + 学校有哪些地方）的可见化
+  function debugScene(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return null;
+    return { ...sceneOf(s), line: sceneLine(s), places: placesLine(s) };
+  }
+  // 调试/探针用：强制"去看看学校"（清冷却）
+  function debugExplore(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s._exploreAt = 0;
+    startExplore(s, Date.now());
+    return true;
+  }
+  // 调试/探针用：强制"四处问人"（可选指定目标，便于确定性断言）
+  function debugInquire(id, targetId) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s._inquireAt = 0;
+    if (targetId) {
+      const t = students.find((x) => x.id === String(targetId));
+      if (!t || t === s) return false;
+      s.intent = { goalType: 'inquire', goalText: '去问问' + t.name, activity: '', plan: '', seekId: t.id, since: Date.now() };
+      setTarget(s, Number(t.x), Number(t.z));
+      s.st = 'walk'; s.walkUntil = Date.now() + WALK_TIMEOUT * 1000; s.stuck = 0;
+      s.decideAt = Date.now() + INQUIRE_TIMEOUT;
+      return true;
+    }
+    startInquire(s, Date.now());
+    return true;
+  }
+  // 调试/探针用：强制"观察一次"（清限流）
+  function debugObserve(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return false;
+    s._obsAt = 0; s._obsSeen = '';
+    observeScene(s, Date.now());
+    s._obsSeen = ''; // 允许探针反复观察同一现场
+    return true;
+  }
   // 调试/探针用：手动撮合一段闲聊
   function forceChat(aId, bId) {
     const a = students.find((x) => x.id === String(aId));
@@ -2343,5 +2671,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, boardPosts: () => boardPosts.slice(), memImportance, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, boardPosts: () => boardPosts.slice(), memImportance, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }
