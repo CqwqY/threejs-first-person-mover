@@ -108,6 +108,15 @@ const QUEST_MEET_DIST = 3.0;     // 多近算"找到 TA 了"（米）
 const QUEST_CLOSE_ENOUGH = 12;   // "够近了"：复命追太久还贴不到 3m（玩家在楼里/卡住）就到这个距离就地汇报
 const QUEST_SOFT_MS = 30000;     // 进入"返回复命"阶段多久后，开始接受"够近就算到"（别让委托永远悬着）
 
+// ---------- "人在台面/楼顶之上" ----------
+// 障碍表是**二维**的（只有占地，没有高度），所以它在 2D 里分不清两种完全不同的情况：
+//   ① 出生点正好落在楼里 → 真·被困住，要"脱困推出"；
+//   ② 人站在**楼顶/台面之上**（合法的）→ 却被当成"困在楼里"，于是每拍把它往外推、
+//      下发的绕行点也全在楼里 ⇒ 表现为"在碰撞体上方时寻路有问题 / 站着打转"。
+// 客户端每 ~1.5s 回报每个学生的**脚底高度**（`setHeights`），据此判定属于②：
+// 高于一层台阶就认为"在台面之上" ⇒ 关掉二维寻路与脱困，改由客户端真实的三维碰撞决定走位。
+const HIGH_LEVEL_CLEAR = 0.6;
+
 // ---------- D/E：校园广播器 + 公告栏 ----------
 const BOARD_POS = { x: -22, z: 17 }; // 公告栏世界坐标（与客户端摆的那块板子一致）
 const BOARD_READ_RANGE = 6;          // 离公告栏多近算"看见公告"（米）
@@ -201,6 +210,19 @@ export function createNpcWorld(opts) {
   // 玩家坐标（由 index.js 每收到玩家 state 就喂一次），供 playerNear 特征用
   let playerPositions = [];
   function setPlayerPositions(list) { playerPositions = Array.isArray(list) ? list : []; }
+  // 客户端回报的学生"脚底高度"（只报已落地的值）：见 HIGH_LEVEL_CLEAR 那段说明。
+  function setHeights(list) {
+    if (!Array.isArray(list)) return;
+    for (const it of list) {
+      if (!it) continue;
+      const s = students.find((x) => x.id === String(it.id || ''));
+      if (!s) continue;
+      const y = Number(it.y);
+      if (Number.isFinite(y) && y >= -8 && y <= 300) s.y = y;
+    }
+  }
+  // 这个学生是不是"站在台面/楼顶之上"（二维障碍表此时不可信）
+  function elevated(s) { return Number(s.y) > HIGH_LEVEL_CLEAR; }
   // 按 id 找某个玩家的坐标（委托任务"回来复命"要知道是回到**哪个**玩家身边）
   function playerById(id) {
     const key = String(id || '').replace(/^p:/, '');
@@ -461,7 +483,9 @@ export function createNpcWorld(opts) {
   function setTarget(s, x, z) {
     s.tx = x; s.tz = z; s.pathTries = 0;
     // ⚡ 直线可达就不寻路：省掉绝大多数 A*（近距离 wander、无遮挡的目标都不用建/跑网格）。
-    s.path = (nav && !lineFree(Number(s.x), Number(s.z), x, z)) ? findPath(Number(s.x), Number(s.z), x, z) : null;
+    // ⚠ 但"站在台面/楼顶之上"时二维障碍表不可信（楼顶在表里就是实心）：直线预判会说"穿墙" ⇒
+    //   算出来的路点全落在楼里 ⇒ 人原地打转。这种情况**不寻路**，直接走直线，交给客户端三维碰撞。
+    s.path = (!elevated(s) && nav && !lineFree(Number(s.x), Number(s.z), x, z)) ? findPath(Number(s.x), Number(s.z), x, z) : null;
     s.pathIdx = 0;
     if (s.path && s.path.length) { s.wx = s.path[0].x; s.wz = s.path[0].z; }
     else { s.wx = x; s.wz = z; }
@@ -510,6 +534,7 @@ export function createNpcWorld(opts) {
           walkUntil: 0, // 本次行走的放弃时刻（毫秒）
           stuck: 0,     // 连续没位移的拍数（累加型字段，必须有初值）
           rot: 0,
+          y: 0,        // 脚底高度（客户端每 ~1.5s 回报；服务端靠它判断"是否站在台面/楼顶之上"）
           st: 'idle',
           zoneId: '',
           stayUntil: 0,
@@ -543,6 +568,7 @@ export function createNpcWorld(opts) {
       if (!Number.isFinite(Number(s.actStepAt))) { s.actStepAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.actResume))) { s.actResume = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
+      if (!Number.isFinite(Number(s.y))) { s.y = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.decideAt))) { s.decideAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.planAt))) { s.planAt = 0; dirty = true; }
@@ -913,7 +939,10 @@ export function createNpcWorld(opts) {
     const uz = dz / dist;
     // 脱困：正站在障碍里（出生点落楼里 / 场景改动被压住）→ 朝"背离这栋楼"的方向挪到出楼为止。
     // ⚠ 方向必须背离楼心，不能朝目标走（朝目标走 = 允许横穿整栋楼，真·穿墙）。
-    const hit = blockedBy(Number(s.x), Number(s.z));
+    // ⚠ 站在台面/楼顶之上（客户端回报的高度）：二维障碍表不可信 —— 不脱困、不做阻挡判定，
+    //   直接朝路点走，能不能走由客户端真实的三维碰撞裁决（否则每拍被"脱困"推出、来回打转）。
+    const up = elevated(s);
+    const hit = up ? null : blockedBy(Number(s.x), Number(s.z));
     if (hit) {
       let ex = Number(s.x) - hit.x;
       let ez = Number(s.z) - hit.z;
@@ -938,7 +967,7 @@ export function createNpcWorld(opts) {
       const nz = ux * sa + uz * ca;
       const px = Number(s.x) + nx * stepLen;
       const pz = Number(s.z) + nz * stepLen;
-      if (!blocked(px, pz)) {
+      if (up || !blocked(px, pz)) {
         s.x = px;
         s.z = pz;
         // ⚠ 必须与玩家模型同一套约定（Game.js：fwd = (-sin yaw, ·, -cos yaw) ⇒ yaw = atan2(-dx, -dz)）。
@@ -1056,6 +1085,9 @@ export function createNpcWorld(opts) {
     if (!out) return;
     applyMoodWord(s, out.mood);
     if (Number.isFinite(Number(out.affinity))) bumpRel(s, who, Number(out.affinity) * 0.6, out.mem);
+    // ⚠ 这次是**委托办事**（有 task）⇒ 走位由任务状态机接管，别再用 goalType 改道：
+    //   两套走位同时生效时，"让你去找人"会顺带触发一次无关的寻路（用户实测的"也触发寻路了"）。
+    if (out.task && out.task.target) return;
     // 因对话改道：只接受合法目标（已知区域 / wander / rest），其余忽略（不臆造去处）
     const raw = String(out.goalType || '').trim().toLowerCase();
     const gt = (raw === 'wander' || raw === 'rest') ? raw : (ZONE_TYPE_IDS.has(raw) ? raw : null);
@@ -1216,10 +1248,23 @@ export function createNpcWorld(opts) {
       || students.find((x) => x.name && (x.name.indexOf(q) >= 0 || q.indexOf(x.name) >= 0))
       || null;
   }
+  // "找你自己 / 找你 / 找自己" 这类说法指的是**被搭话的那个学生本人**：
+  // ⚠ 不能让它去建任务、更不能因此触发寻路（用户实测："我让他找他自己也触发寻路了"）。
+  const SELF_WORDS = /^(你|你自己|您|您自己|自己|我|我自己|本人|你本人|你自己本人|你的名字|你自己吧)$/;
   function startQuest(s, targetName, question, fromId, fromName) {
-    const t = resolveStudentByName(targetName);
-    if (!t || t === s) {
-      broadcast({ t: 'npc_say', id: s.id, say: '你说的「' + String(targetName || '').slice(0, 8) + '」，我这儿对不上人呀。' });
+    const raw = String(targetName || '').trim();
+    if (SELF_WORDS.test(raw)) {
+      broadcast({ t: 'npc_say', id: s.id, say: '我就是' + s.name + '呀，你要问什么直接问我就行。' });
+      return;
+    }
+    const t = resolveStudentByName(raw);
+    if (!t) {
+      broadcast({ t: 'npc_say', id: s.id, say: '你说的「' + raw.slice(0, 8) + '」，我这儿对不上人呀。' });
+      return;
+    }
+    if (t === s) {
+      // 名字解析出来就是它自己（"去找顾星桥"而它就叫顾星桥）——同一个道理：就地回答，别跑。
+      broadcast({ t: 'npc_say', id: s.id, say: '嗨，我就是' + s.name + '呀，你直接问我就行。' });
       return;
     }
     const now = Date.now();
@@ -1584,7 +1629,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0 };
   }
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
@@ -1667,5 +1712,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, setHeights, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

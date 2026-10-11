@@ -7749,6 +7749,14 @@ export class Game {
       if (this.students) {
         this.students.update(dt);
         this._updateTalkTab();
+        // 每 ~1.5s 把学生**脚底高度**回报服务端：让它在 2D 障碍表之外知道"谁正站在台面/楼顶上"，
+        // 从而不对这类人做二维寻路/脱困（否则会下发乱七八糟的绕行点 ⇒ "在碰撞体上方时寻路有问题"）。
+        this._npcHT = (this._npcHT || 0) + dt;
+        if (this._npcHT >= 1.5) {
+          this._npcHT = 0;
+          const hs = this.students.heights();
+          if (hs.length && this.network) this.network.sendNpcHeights(hs);
+        }
       }
       this._updatePickups(dt);
       // 商人小满：靠近显隐「找小满买东西」按钮

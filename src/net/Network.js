@@ -352,6 +352,18 @@ export class Network {
   }
 
   // 跟学生 NPC 说话：服务端带人设/记忆调 GLM，回话走 npc_reply（旁人也能听见 npc_say 广播）
+  // 上报学生 NPC 的**脚底高度**：服务端据此判断"人是否站在台面/楼顶之上"，
+  // 从而不对这类人做二维寻路与脱困推出（2D 障碍表分不清"站楼顶"和"困在楼里"）。
+  sendNpcHeights(list) {
+    if (!Array.isArray(list) || !list.length) return;
+    const out = [];
+    for (const x of list.slice(0, 32)) {
+      if (!x || !x.id) continue;
+      out.push({ id: String(x.id).slice(0, 24), y: Number(x.y) || 0 });
+    }
+    if (out.length) this.send({ t: 'npc_h', list: out });
+  }
+
   sendStudentTalk(id, text) {
     if (!id || !text) return;
     this.send({ t: 'npc_talk', id: String(id).slice(0, 24), text: String(text).slice(0, 200) });

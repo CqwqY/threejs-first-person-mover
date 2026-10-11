@@ -374,8 +374,19 @@ export function createStudents(opts) {
               if (!sphereWorldMTV(cs, px, probeY, pz, STUDENT_RADIUS)) { nx = cx; nz = cz; found = true; break; }
             }
           }
-          // 前方 9 个方向全被挡 → 起跳试试（越过矮挡 / 上台阶），别死顶在墙上
-          if (!found && (ux || uz)) _npcInput._jump = true;
+          // 前方 9 个方向全被挡 → 看看是不是"矮挡"（脚踝高度被挡、抬到 ~0.85m 就通了）：
+          // 只有矮挡才值得跳（跨过去 / 踩上去）。⚠ 两条硬约束：
+          //   ① **必须在地面**才跳 —— 人在空中还乱跳，会在台面边缘 / 墙边每帧弹一下，
+          //      表现为"走出碰撞体顶部边缘时跳起又被拉回去、一直走不动"；
+          //   ② **高墙不跳** —— 楼体那种挡，跳也上不去，只会顶在墙边来回弹。
+          if (!found && (ux || uz) && s.pstate.onGround) {
+            const footY = s.pstate.y - STUDENT_HEIGHT;
+            const px1 = s.pstate.x + ux * WALK_PROBE;
+            const pz1 = s.pstate.z + uz * WALK_PROBE;
+            const lowBlocked = !!sphereWorldMTV(cs, px1, footY + 0.15, pz1, STUDENT_RADIUS);
+            const highFree = !sphereWorldMTV(cs, px1, footY + 0.85, pz1, STUDENT_RADIUS);
+            if (lowBlocked && highFree) _npcInput._jump = true;
+          }
           // cameraYaw 让玩家模型朝 (-sin yaw, -cos yaw)；要朝 (nx,nz) 走 ⇒ yaw = atan2(-nx,-nz)
           const yaw = Math.atan2(-nx, -nz);
           _npcInput._f = 1;
@@ -427,6 +438,21 @@ export function createStudents(opts) {
 
   function setVisible(v) { root.visible = !!v; }
 
+  // 上报每个学生**脚底高度**给服务端。
+  // 为什么要它：服务端的障碍表是**二维**的（没有高度），它在 2D 里分不清"站在楼顶上"和"困在楼里"，
+  // 于是会对着楼顶上的学生狂按"脱困推出"⇒ 下发一堆莫名其妙的绕行点（用户实测："在碰撞体上方时寻路有问题"）。
+  // 有了高度，服务端就能判定"人在台面之上"⇒ 不做二维寻路/脱困，交给客户端真实的三维碰撞。
+  // ⚠ 只有**已落地**才上报：空中（跳跃/坠落）的高度会让服务端误判层级。
+  function heights() {
+    const out = [];
+    for (const s of byId.values()) {
+      const y = s.pstate.onGround ? s.pstate.y - STUDENT_HEIGHT : (s._lastFootY || 0);
+      if (s.pstate.onGround) s._lastFootY = y;
+      if (Number.isFinite(y)) out.push({ id: s.id, y: Math.round(y * 100) / 100 });
+    }
+    return out;
+  }
+
   // 场地边界变化（编辑器改了边界 / 进出对战）时，同步给所有学生（含之后新建的）
   function setBoundary(b) {
     bound = b || null;
@@ -445,5 +471,5 @@ export function createStudents(opts) {
     order = [];
   }
 
-  return { setRoster, applyList, onSay, nearest, update, setVisible, setBoundary, dispose, TALK_RANGE, get size() { return byId.size; } };
+  return { setRoster, applyList, onSay, nearest, update, setVisible, setBoundary, heights, dispose, TALK_RANGE, get size() { return byId.size; } };
 }

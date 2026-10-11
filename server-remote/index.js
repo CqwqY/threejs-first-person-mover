@@ -1553,6 +1553,17 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    // 学生 NPC 的**脚底高度**回报（客户端每 ~1.5s 发一次，只报已落地的值）。
+    // 用途：服务端障碍表是二维的，分不清"站在楼顶/台面上"和"困在楼里"；有了高度就能
+    // 对"人在台面之上"的情况**不做二维寻路/脱困**（改由客户端真实三维碰撞决定走位）。
+    if (msg.t === 'npc_h') {
+      if (npcWorld && npcWorld.setHeights) {
+        const list = Array.isArray(msg.list) ? msg.list.slice(0, 32) : [];
+        npcWorld.setHeights(list);
+      }
+      return;
+    }
+
     // 匹配：请求进入对战房间（mode 指定玩法：'meteor' 躲避陨石混战 / 'grapple' 疯狂抓钩）
     if (msg.t === 'match') {
       const mode = String(msg.mode || 'meteor');

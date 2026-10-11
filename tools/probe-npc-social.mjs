@@ -24,6 +24,13 @@ function freshDir(name) {
 function writeScene(dir) {
   fs.writeFileSync(path.join(dir, 'editor-scene.json'), JSON.stringify({ scenery: [], placed: [] }));
 }
+// 放一栋带真实占地的楼（服务端绕障用 fw/fd；rotY 是**弧度**，与 EditorApp 的写法一致）
+function writeSceneWithBuilding(dir, x, z, w, d) {
+  fs.writeFileSync(path.join(dir, 'editor-scene.json'), JSON.stringify({
+    scenery: [],
+    placed: [{ id: 'b1', x, y: 0, z, rotY: 0, scale: { x: 1, y: 1, z: 1 }, fw: w, fd: d }],
+  }));
+}
 function writeStudents(dir, mood) {
   const list = [];
   for (let i = 0; i < 8; i++) {
@@ -407,6 +414,67 @@ console.log('[11] 委托：真的走到**远处的玩家**身边复命');
   ok(says.some((x) => /等于2/.test(String(x.say))), '把答案说出来复命', JSON.stringify(says));
   ok(st && Math.hypot(st.x - PX, st.z - PZ) < 3.5, '复命时人已经**走到玩家身边**（<3.5m）', st && ('d=' + Math.hypot(st.x - PX, st.z - PZ).toFixed(2)));
   ok(st && st.quest === null, '任务完成并清空', st && JSON.stringify(st.quest));
+}
+
+console.log('[12] 站在碰撞体上方：不做二维寻路/脱困（改由客户端三维碰撞裁决）');
+{
+  const dir = freshDir('elevated');
+  // 一栋 8×6 的楼挡在 s1(0,0) → s2(20,0) 的直线之间（中心 10,0）
+  writeSceneWithBuilding(dir, 10, 0, 8, 6);
+  const pos = [[0, 0], [20, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents(pos), null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async () => ({ say: '', think: '', mem: '' }),
+  });
+  w.setPlayerPositions([{ id: 'u1', x: 0, z: 0 }]);
+  await sleep(60);
+  // 地面上的正常情况：楼挡住直线 → 必须生成绕行路点
+  w.debugStartQuest('s1', 's2', '问个事', 'u1');
+  await sleep(120);
+  const ground = w.stateOf('s1');
+  // 客户端回报"人在台面/楼顶之上"（脚底高度 3m）→ 重新指目标
+  w.setHeights([{ id: 's1', y: 3 }]);
+  w.debugStartQuest('s1', 's2', '再问一次', 'u1');
+  await sleep(120);
+  const up0 = w.stateOf('s1');
+  const x0 = up0.x;
+  await sleep(700);
+  const up1 = w.stateOf('s1');
+  w.dispose();
+  ok(ground && ground.path > 0, '地面上：楼挡直线 → 生成 A* 绕行路点（对照）', 'path=' + (ground && ground.path));
+  ok(up0 && up0.y === 3, '服务端已知"人在台面之上"（客户端回报的高度）', 'y=' + (up0 && up0.y));
+  ok(up0 && up0.path === 0, '台面之上：**不生成**二维绕行路点（二维障碍表此时不可信）', 'path=' + (up0 && up0.path));
+  ok(up1 && up1.x > x0 + 0.2, '朝目标直线前进（没被"脱困"顶回去）', 'x ' + x0.toFixed(2) + ' → ' + (up1 && up1.x.toFixed(2)));
+}
+
+console.log('[13] "让他找他自己" → 就地回答，不建任务、不改道、不寻路');
+{
+  const dir = freshDir('selftarget');
+  writeScene(dir);
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents([[0, 0], [2.5, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]]), null, 2));
+  writeZones(dir);
+  const says = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    getDayTime: () => 0.35,
+    askStudent: async (input) => (input.kind === 'talk'
+      // 模型把"你自己"当成了要找的人，还顺手给了个改道意图 —— 两样都必须被拦住
+      ? { say: '好，我去。', think: '', mem: '', task: { target: '你自己', question: '你叫什么' }, mood: '开心', affinity: 0.5, goalType: 'canteen' }
+      : { say: '', think: '', mem: '' }),
+  });
+  w.setPlayerPositions([{ id: 'u1', x: 0, z: 0 }]);
+  await sleep(60);
+  await w.talk('s1', '你去找你自己，问问你叫什么', '小明', null, 'p:u1');
+  await sleep(300);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(st && st.quest === null, '没建委托任务（"你自己" = 本人，不该去建）', JSON.stringify(st && st.quest));
+  ok(says.some((x) => /我就是/.test(String(x.say))), '就地回答"我就是X"（不出门）', JSON.stringify(says));
+  ok(st && st.path === 0, '没有触发寻路（path=0）', 'path=' + (st && st.path));
+  ok(st && st.intent === null, '没被对话里的 goalType 改道（有 task 时走位归任务管）', JSON.stringify(st && st.intent));
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

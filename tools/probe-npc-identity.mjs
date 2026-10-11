@@ -65,5 +65,27 @@ console.log('[3] chat：双方身份与 a/b 归属钉死');
   ok(/【对方】白露/.test(p), 'chat prompt 有【对方】人设段');
 }
 
+console.log('[4] 玩家话里出现"我自己的名字" → 必须给**确定性**提示（不指望模型自己反应过来）');
+{
+  await askStudent({
+    student: { ...base }, memory: [], kind: 'talk', playerName: '小明',
+    playerText: '顾星桥，你去找顾星桥问问他在干嘛',
+  });
+  const p = userTextOf(3);
+  ok(/就是你本人/.test(p), 'talk prompt：命中的名字被说死"就是你本人"', p.slice(-200));
+  ok(/绝对不要.*填 task|不要.*填 task/.test(p), 'talk prompt：明确"这种情况不要填 task"（别跑去找自己）', '');
+  ok(/不要改道/.test(p), 'talk prompt：明确"不要改道去别的地方"（别触发寻路）', '');
+}
+
+console.log('[5] 同学问的问题里出现"我自己的名字" → 也要提示"问的就是你"');
+{
+  await askStudent({
+    student: { ...base }, memory: [], kind: 'ask', askerName: '苏晓棠',
+    question: '顾星桥刚才在和谁聊天？',
+  });
+  const p = userTextOf(4);
+  ok(/就是你本人/.test(p), 'ask prompt：问到你名字时明确"就是你本人"', p.slice(-160));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);
