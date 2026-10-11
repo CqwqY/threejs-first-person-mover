@@ -122,10 +122,6 @@ export async function askStudent(input) {
   // 心情/关系/刚注意到的事（有才拼，没有不硬塞）——让"状态改变"能反映到下一次说话与行动里
   if (st.mood && typeof st.mood === 'object') userParts.push('【你现在的心情】' + moodText(st.mood));
   if (st.rel && typeof st.rel === 'object' && Object.keys(st.rel).length) userParts.push('【你与别人的关系】' + relText(st.rel));
-  if (Array.isArray(st.saw) && st.saw.length) {
-    const saw = st.saw.map((x) => String((x && x.text) || '')).filter(Boolean).join('；');
-    if (saw) userParts.push('【你最近注意到的】' + saw);
-  }
   userParts.push('【你自己的记忆】\n' + memText);
   if (kind === 'talk') {
     userParts.push('【' + String((input && input.playerName) || '同学') + '对你说】' + String((input && input.playerText) || '').slice(0, 200));

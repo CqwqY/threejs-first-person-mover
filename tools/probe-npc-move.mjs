@@ -343,7 +343,9 @@ console.log('[7] 只给"被搭话那一个"的记忆，而且不是整串');
   w.dispose();
   const got = seen[0] || [];
   ok(got.length > 0 && got.length <= 4, '只挑了少数几条（≤4），不是把整串记忆都塞过去', '条数=' + got.length);
-  ok(got.length > 0 && got.every((t) => /^S3-/.test(t)), '全是 s3 自己的记忆，没有别人的（不串台）', got.join(' | '));
+  // "S3-记忆k" = 他自己的被投喂记忆；"我看见…" = 他自己的感知观察。两者都是**他本人的**，
+  // 而 S1-/S2-…（别人的记忆）绝不该出现 —— 这才是不串台。
+  ok(got.length > 0 && got.every((t) => /^S3-/.test(t) || /^我看见/.test(t)), '全是 s3 自己的记忆/观察，没有别人的（不串台）', got.join(' | '));
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

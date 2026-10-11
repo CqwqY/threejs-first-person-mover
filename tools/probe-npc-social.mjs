@@ -168,9 +168,47 @@ console.log('[4] 感知：会注意到身边的人（廉价、不进 mem、不�
   await sleep(420); // 等首个 tick（TICK_MS=200）
   const st = w.stateOf('s1');
   w.dispose();
-  ok(st && Array.isArray(st.saw) && st.saw.length > 0, 's1 注意到了身边的人', st && JSON.stringify(st.saw));
-  ok(st && st.saw.some((x) => /也在这|玩家/.test(String(x.text))), '观察文本合理', st && JSON.stringify(st.saw));
-  ok(st && (!st.mem || st.mem.length === 0), '观察**不进 mem**（不挤占记忆、不触发 LLM 压缩）', st && JSON.stringify(st.mem));
+  ok(st && Array.isArray(st.mem) && st.mem.length > 0, 's1 注意到了身边的人 → 观察写进 mem', st && JSON.stringify(st.mem));
+  ok(st && st.mem.some((m) => /也在这|玩家/.test(String(m.text))), '观察文本确实在 mem 里', st && JSON.stringify(st.mem));
+}
+
+console.log('[5] 成本护栏：观察多到超上限时，先丢观察、**不花 LLM 压缩**');
+{
+  const dir = freshDir('obs-cap');
+  writeScene(dir);
+  // 一个学生的 mem 塞满 25 条"观察"（kind:'obs'）——超 MEM_MAX(20)
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    const mem = [];
+    if (i === 0) for (let k = 0; k < 25; k++) mem.push({ t: k, text: '我看见某人' + k + '也在这', kind: 'obs', from: 's2' });
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: i * 10, z: 0, hx: i * 10, hz: 0, tx: i * 10, tz: 0, wx: i * 10, wz: 0, path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 1e15, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0, perceiveAt: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.5, energy: 0.6, focus: 0.5 }, rel: {}, mem, think: [],
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const kinds = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: () => {},
+    getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      kinds.push(String(input.kind || ''));
+      if (input.kind === 'talk') return { say: '嗯', think: '', mem: '一件正经事', mood: '', affinity: 0, goalType: '' };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  await sleep(60);
+  await w.talk('s1', '你好', '小明', null, 'p:u1'); // 触发一次 mem 写入 → 超上限 → trimMemory
+  await sleep(120);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(!kinds.includes('compress'), '没有调用 LLM 压缩（观察被本地丢弃腾地方）', 'kinds=' + kinds.join(','));
+  ok(st && Number(st.memLen) <= 20, 'mem 已回落到上限以内', st && ('len=' + st.memLen));
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

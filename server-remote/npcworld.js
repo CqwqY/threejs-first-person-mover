@@ -86,13 +86,12 @@ const CHAT_COOLDOWN = 90;      // 同一个学生两次参与闲聊的最小间�
 const CHAT_INTERVAL = 45;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量
 const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
 
-// ---------- P2：感知（廉价，不调 LLM）----------
-// NPC 会"注意到"身边经过的人/玩家 → 写一条**短观察**进 s.saw（独立小缓冲，不进 mem）：
-// 不进 mem 是为了不让观察挤掉重要记忆、也不触发记忆压缩（那是要花 LLM 的）。
-const PERCEIVE_RANGE = 10;      // 感知半径（米）
-const PERCEIVE_CD = 15000;      // 同一个 NPC 两次"观察"的最小间隔（毫秒）——控开销
-const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注意到"
-const SAW_MAX = 4;              // 观察缓冲上限
+// ---------- P2：感知 ----------
+// NPC 会"注意到"身边经过的人/玩家 → 写一条**短观察**进 mem（记忆流，会被检索/喂 prompt）。
+// 开销靠"限流 + 超限先丢观察"控制，不靠另开缓冲：观察进 mem 才真的影响它之后的举止与说话。
+const PERCEIVE_RANGE = 12;      // 感知半径（米）
+const PERCEIVE_CD = 10000;      // 同一个 NPC 两次"观察"的最小间隔（毫秒）
+const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注意到"（免得盯着一个人反复记）
 const CHAT_TEMPLATES = [       // GLM 失败/超预算时的兜底寒暄（零成本，别让"人"僵住）
   ['你今天也在这儿啊？', '嗯，随便转转。'],
   ['刚才那节好困啊。', '可不是嘛，我差点睡着。'],
@@ -496,8 +495,7 @@ export function createNpcWorld(opts) {
           rel: (old && old.rel && typeof old.rel === 'object') ? old.rel : {},
           mem: Array.isArray(old && old.mem) ? old.mem : [],
           think: Array.isArray(old && old.think) ? old.think : [],
-          saw: Array.isArray(old && old.saw) ? old.saw : [], // 感知到的小事（独立缓冲，不进 mem、不触发压缩）
-          perceiveAt: 0,                                     // 上次感知时刻（限流；时间型字段，必须有初值）
+          perceiveAt: 0, // 上次感知时刻（限流；时间字段，必须有初值）
         };
       });
       dirty = true;
@@ -509,7 +507,6 @@ export function createNpcWorld(opts) {
       if (!s.rel || typeof s.rel !== 'object') { s.rel = {}; dirty = true; }
       if (!Array.isArray(s.mem)) { s.mem = []; dirty = true; }
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
-      if (!Array.isArray(s.saw)) { s.saw = []; dirty = true; }
       if (!Number.isFinite(Number(s.perceiveAt))) { s.perceiveAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
@@ -772,7 +769,7 @@ export function createNpcWorld(opts) {
         const h = hourNow();
         const seg = scheduleType(h);
         const out = await askStudent({
-          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), saw: s.saw },
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s) },
           memory: pickMemory(s, null),
           kind: 'plan',
           hour: h,
@@ -944,9 +941,10 @@ export function createNpcWorld(opts) {
     if (now - Number(s._seenAt[key] || 0) < PERCEIVE_REPEAT_MS) return; // 刚注意到过，别重复记
     s.perceiveAt = now;
     s._seenAt[key] = now;
+    // ⚠ 观察**写进 mem**（真正的记忆流）：它会被检索、喂给 prompt，真的影响之后的举止与说话。
     const text = isPlayer ? '我看见玩家从我附近过去了' : ('我看见' + String(best.name || '同学') + '也在这一带');
-    s.saw.push({ t: now, text });
-    if (s.saw.length > SAW_MAX) s.saw.splice(0, s.saw.length - SAW_MAX);
+    s.mem.push({ t: now, text, kind: 'obs', from: isPlayer ? '' : best.id });
+    trimMemory(s); // 超限时先丢观察（不花 LLM），见 trimMemory
   }
 
   // ---------- AI 触发 ----------
@@ -1128,7 +1126,6 @@ export function createNpcWorld(opts) {
           needs: s.needs,
           mood: s.mood,      // 心情（被对话改）→ 这次说话/行动带着情绪
           rel: topRel(s),    // 关系摘要（被对话改）→ 记得跟谁亲、跟谁不对付
-          saw: s.saw,        // 最近注意到的小事（感知）→ 说话时能提到"我刚才看见…"
         },
         // ⚠ 只给**这个学生本人**的记忆，而且是挑出来的几条（不是整串）。
         //   混进别人的记忆 = 几个人的经历串台；一次给太多 = 模型自己搅成一团。
@@ -1167,6 +1164,14 @@ export function createNpcWorld(opts) {
 
   // 记忆超上限：先让 AI 把最老的几条压成一条摘要，失败/仍超就直接丢最老的（粗暴但不会无限膨胀）
   async function trimMemory(s) {
+    if (s.mem.length <= MEM_MAX) return;
+    // ⚡ 先丢"感知类"低价值记忆腾地方（纯本地、**不花 LLM**）：观察量大、价值低，正好先淘汰它。
+    //   只有连观察都丢光了还超限（说明是正经记忆太多）才让 AI 压缩最老的几条。
+    while (s.mem.length > MEM_MAX) {
+      const i = s.mem.findIndex((m) => m && m.kind === 'obs');
+      if (i < 0) break;
+      s.mem.splice(i, 1);
+    }
     if (s.mem.length <= MEM_MAX) return;
     try {
       const oldest = s.mem.splice(0, MEM_COMPRESS).map((m) => String(m.text || ''));
@@ -1305,7 +1310,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, mem: (s.mem || []).slice(-3), saw: (s.saw || []).slice(-3), st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
   }
   // 调试/探针用：手动撮合一段闲聊
   function forceChat(aId, bId) {
