@@ -329,5 +329,85 @@ console.log('[9] 公告栏 → AI 规划时带上公告；广播器 → 轮流�
   ok(got.length >= 1, '广播已**轮流**写进学生记忆（≥1 人听到）', 'got=' + got.join(','));
 }
 
+function distW(w, a, b) {
+  const x = w.stateOf(a), y = w.stateOf(b);
+  if (!x || !y) return NaN;
+  return Math.hypot(x.x - y.x, x.z - y.z);
+}
+
+console.log('[10] NPC 之间离得远 → 主动**相向走近**，凑近了自动开聊');
+{
+  const dir = freshDir('meet');
+  writeScene(dir);
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    const x = i === 0 ? 0 : (i === 1 ? 9 : 300 + i * 30); // 只有 s1/s2 离得"有点远但可及"
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x, z: 0, hx: x, hz: 0, tx: x, tz: 0, wx: x, wz: 0, path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 1e15, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0, perceiveAt: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.5, energy: 0.6, focus: 0.5 }, rel: {}, mem: [], think: [],
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const says = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'chat') return { lines: [{ who: 'a', text: '哎，你也在这儿啊' }, { who: 'b', text: '嗯，刚过来' }], topic: '碰面', memA: '', memB: '', moodA: '开心', moodB: '平静', bond: 0.3 };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  const d0 = distW(w, 's1', 's2');
+  await sleep(4200);
+  const d1 = distW(w, 's1', 's2');
+  const a = w.stateOf('s1'), b = w.stateOf('s2');
+  w.dispose();
+  ok(d0 > 6, '一开始两人离得远（>6m）', 'd0=' + d0.toFixed(2));
+  ok(d1 < d0 - 2, '两人**主动相向走近**了（距离明显缩小）', 'd0=' + d0.toFixed(2) + ' → d1=' + d1.toFixed(2));
+  ok(d1 < 6, '走近到"能聊天"的范围', 'd1=' + d1.toFixed(2));
+  ok(says.length >= 2 && says.some((s) => s.id === 's1') && says.some((s) => s.id === 's2'), '凑近后自动开聊（两人台词都广播出来）', JSON.stringify(says));
+  // 记忆归属：按**实际台词**记，谁说的就是谁说的
+  ok(!!a && a.mem.some((m) => /我说「哎，你也在这儿啊」/.test(String(m.text))), 's1 的记忆是自己的台词（归属正确）', a && JSON.stringify(a.mem));
+  ok(!!b && b.mem.some((m) => /我说「嗯，刚过来」/.test(String(m.text))), 's2 的记忆是对方那句 + 自己那句（归属正确）', b && JSON.stringify(b.mem));
+}
+
+console.log('[11] 委托：真的走到**远处的玩家**身边复命');
+{
+  const dir = freshDir('quest-return');
+  writeScene(dir);
+  const pos = [[0, 0], [2.5, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents(pos), null, 2)); // s1/s2 相距 2.5m（<3 → 立刻"找到"）
+  writeZones(dir);
+  const says = [];
+  const w = createNpcWorld({
+    dataDir: dir,
+    broadcast: (m) => { if (m.t === 'npc_say') says.push({ id: m.id, say: m.say }); },
+    getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'talk') return { say: '好，我这就去', think: '', mem: '', task: { target: '学生2号', question: '1+1等于几' } };
+      if (input.kind === 'ask') return { say: '等于2', think: '', mem: '' };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  const PX = 7, PZ = 0; // 玩家在 7m 外：NPC 必须走过去才算复命
+  w.setPlayerPositions([{ id: 'u1', x: PX, z: PZ }]);
+  await sleep(60);
+  await w.talk('s1', '帮我找学生2号问他1+1等于几再回来', '小明', null, 'p:u1');
+  await sleep(1500);
+  const mid = w.stateOf('s1');
+  await sleep(4200);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(mid && mid.x > 0.5, '问完之后**朝玩家那边走**（x 变大，不是原地喊）', 'mid.x=' + (mid && mid.x.toFixed(2)));
+  ok(says.some((x) => /等于2/.test(String(x.say))), '把答案说出来复命', JSON.stringify(says));
+  ok(st && Math.hypot(st.x - PX, st.z - PZ) < 3.5, '复命时人已经**走到玩家身边**（<3.5m）', st && ('d=' + Math.hypot(st.x - PX, st.z - PZ).toFixed(2)));
+  ok(st && st.quest === null, '任务完成并清空', st && JSON.stringify(st.quest));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

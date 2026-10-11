@@ -90,6 +90,9 @@ const ACT_STEP_MAX = 15000;    // 最大间隔
 const ACT_STEP_DIST_MIN = 1.2; // 挪步距离范围（米）
 const ACT_STEP_DIST_MAX = 3.0;
 const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
+const CHAT_SEEK_RANGE = 45;    // 「想聊天但离得远」时最远会**主动走近**的距离（米）——再远就不追了
+const MEET_INTERVAL = 25;      // 全局两次「撮合一对走近」的最小间隔（秒）——别让 8 个人同时乱窜
+const PERSON_SEEK_TIMEOUT_MS = 90000; // 「去找某人」最多找这么久（追不上就回去干自己的事，别永远在外面晃）
 
 // ---------- P2：感知 ----------
 // NPC 会"注意到"身边经过的人/玩家 → 写一条**短观察**进 mem（记忆流，会被检索/喂 prompt）。
@@ -102,6 +105,8 @@ const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注�
 const QUEST_TIMEOUT_MS = 180000; // 任务总超时（3 分钟没办成就放弃并回报，绝不静默卡住）
 const QUEST_REPATH_MS = 2500;    // 目标会动：每隔这么久重新指向目标（开销极小：setTarget 有直线预判）
 const QUEST_MEET_DIST = 3.0;     // 多近算"找到 TA 了"（米）
+const QUEST_CLOSE_ENOUGH = 12;   // "够近了"：复命追太久还贴不到 3m（玩家在楼里/卡住）就到这个距离就地汇报
+const QUEST_SOFT_MS = 30000;     // 进入"返回复命"阶段多久后，开始接受"够近就算到"（别让委托永远悬着）
 
 // ---------- D/E：校园广播器 + 公告栏 ----------
 const BOARD_POS = { x: -22, z: 17 }; // 公告栏世界坐标（与客户端摆的那块板子一致）
@@ -1065,35 +1070,60 @@ export function createNpcWorld(opts) {
     else { const z = pickOne(zonesOfType(gt)); if (!z) return; goZone(s, Date.now(), z); }
     s.intent = { goalType: gt, goalText: note, activity: '', plan: '', since: Date.now() };
   }
-  // 给 LLM 的关系摘要：只挑好感/反感最强的几条（别把整张关系表塞进 prompt）
+  // 关系 key（'p:xxx' 玩家 / 学生 id）→ 人话名字。
+  // ⚠ 以前直接把 's3' 这种**内部 id** 喂给模型，模型根本不知道那是谁，还容易把自己（s1）和对方搞混
+  //   （"模糊自己和对方"就是这么来的）。统一解析成人名再进 prompt。
+  function relNameOf(key) {
+    const k = String(key || '');
+    if (k.startsWith('p:')) return '玩家';
+    const o = students.find((x) => x.id === k);
+    return o ? o.name : '';
+  }
+  // 给 LLM 的关系摘要：只挑好感/反感最强的几条（别把整张关系表塞进 prompt），且**一定给人名**
   function topRel(s) {
     const r = s.rel || {};
-    const items = Object.entries(r).map(([k, v]) => ({ k, t: Number(v && v.trust) || 0 }))
-      .filter((x) => Math.abs(x.t) > 0.05).sort((a, b) => Math.abs(b.t) - Math.abs(a.t)).slice(0, 3);
-    const out = {};
-    for (const it of items) out[it.k] = Math.round(it.t * 100) / 100;
-    return out;
+    return Object.entries(r)
+      .map(([k, v]) => ({ name: relNameOf(k), trust: Number(v && v.trust) || 0 }))
+      .filter((x) => x.name && Math.abs(x.trust) > 0.05)
+      .sort((a, b) => Math.abs(b.trust) - Math.abs(a.trust)).slice(0, 3)
+      .map((x) => ({ name: x.name, trust: Math.round(x.trust * 100) / 100 }));
   }
 
   // ---------- P1：NPC↔NPC 闲聊（同学之间"活起来"）----------
   // 一次 LLM 出一段 2~4 句脚本 → 双方各写记忆（含对方）、改心情、改彼此关系；台词逐句广播（玩家能偷听）。
   // 全局限流（CHAT_INTERVAL）+ 个人冷却（CHAT_COOLDOWN）+ 模板兜底 = 不刷爆 GLM、也绝不静默卡住。
-  function pickChatPair(now) {
-    let best = null, bd = CHAT_RANGE * CHAT_RANGE;
+  // 这个学生此刻能不能参与闲聊（"有任务在身 / 正要去见某人 / 刚聊过"都排除）
+  function chatIdle(x, now) {
+    if (x._chatting || x.quest) return false;
+    if (x.intent && x.intent.goalType === 'person') return false; // 已经在去见某人的路上，别重复派
+    if (now < Number(x.talkingUntil || 0)) return false;
+    if (now - Number(x.chatAt || 0) < CHAT_COOLDOWN * 1000) return false;
+    return x.st === 'idle' || x.st === 'act';
+  }
+  // 找一对"两人都闲着、可以聊"的学生（返回 maxRange 米内最近的一对）
+  function pickPair(now, maxRange) {
+    let best = null, bd = maxRange * maxRange;
     for (let i = 0; i < students.length; i++) {
       const a = students[i];
-      if (a._chatting || a.quest || now < Number(a.talkingUntil || 0) || now - Number(a.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
-      if (a.st !== 'idle' && a.st !== 'act') continue;
+      if (!chatIdle(a, now)) continue;
       for (let j = i + 1; j < students.length; j++) {
         const b = students[j];
-        if (b._chatting || b.quest || now < Number(b.talkingUntil || 0) || now - Number(b.chatAt || 0) < CHAT_COOLDOWN * 1000) continue;
-        if (b.st !== 'idle' && b.st !== 'act') continue;
+        if (!chatIdle(b, now)) continue;
         const dx = Number(a.x) - Number(b.x), dz = Number(a.z) - Number(b.z);
         const d = dx * dx + dz * dz;
         if (d < bd) { bd = d; best = [a, b]; }
       }
     }
     return best;
+  }
+  // 想聊但离得远 → 两人**相向走近**（纯走位、不花 LLM）；靠近后由 pickPair(CHAT_RANGE) 接手开聊。
+  // 这一步治"AI 之间各站各的、永远凑不到一起"。
+  function startMeet(a, b, now) {
+    a.intent = { goalType: 'person', goalText: '去找' + b.name + '聊聊', activity: '', plan: '', seekId: b.id, since: now };
+    b.intent = { goalType: 'person', goalText: '去找' + a.name + '聊聊', activity: '', plan: '', seekId: a.id, since: now };
+    setTarget(a, Number(b.x), Number(b.z)); a.st = 'walk'; a.walkUntil = now + WALK_TIMEOUT * 1000; a.stuck = 0;
+    setTarget(b, Number(a.x), Number(a.z)); b.st = 'walk'; b.walkUntil = now + WALK_TIMEOUT * 1000; b.stuck = 0;
+    console.info('[npc] ' + a.name + ' ↔ ' + b.name + ' 想聊两句，正相向走近');
   }
   // GLM 失败/空脚本时的兜底寒暄（零成本，别让"人"僵住）
   function templateChat(a, b) {
@@ -1140,9 +1170,22 @@ export function createNpcWorld(opts) {
       const chatEnd = t0 + lines.length * CHAT_LINE_GAP_MS + 1500;
       a.stayUntil = Math.max(Number(a.stayUntil || 0), chatEnd);
       b.stayUntil = Math.max(Number(b.stayUntil || 0), chatEnd);
-      // 记忆（各自记）+ 心情 + 彼此关系（双向）
-      if (out.memA) a.mem.push({ t: t0, text: clampText(out.memA, LEN_MEM), kind: 'chat', from: b.id });
-      if (out.memB) b.mem.push({ t: t0, text: clampText(out.memB, LEN_MEM), kind: 'chat', from: a.id });
+      // 记忆（各自记）：**按实际台词结构化归属** —— 谁说的就是谁说的。
+      // ⚠ 以前直接信模型给的 memA/memB：一次调用同时写两个人的记忆，模型很容易把"我说/他说"写反、
+      //   或者把对方的经历写进自己的记忆（"记忆也不对"就是这儿）。这里用真实台词兜底，保证归属正确。
+      const aSaid = lines.filter((l) => l.who === 'a').map((l) => clampText(l.text, 20)).filter(Boolean);
+      const bSaid = lines.filter((l) => l.who === 'b').map((l) => clampText(l.text, 20)).filter(Boolean);
+      const topic = clampText(out.topic, 12);
+      const headA = '我和' + b.name + (topic ? '聊到' + topic : '聊了两句');
+      const headB = '我和' + a.name + (topic ? '聊到' + topic : '聊了两句');
+      const tailA = aSaid.length ? ('：我说「' + aSaid[0] + '」，' + b.name + '说「' + (bSaid[0] || '') + '」') : '';
+      const tailB = bSaid.length ? ('：' + a.name + '说「' + (aSaid[0] || '') + '」，我说「' + bSaid[0] + '」') : '';
+      a.mem.push({ t: t0, text: clampText(headA + tailA, LEN_MEM), kind: 'chat', from: b.id });
+      b.mem.push({ t: t0, text: clampText(headB + tailB, LEN_MEM), kind: 'chat', from: a.id });
+      // 模型给的"聊完记住的点"只进内心活动（不进记忆流，避免它把归属写乱）
+      if (out.memA) a.think.push({ t: t0, text: clampText(out.memA, LEN_THINK) });
+      if (out.memB) b.think.push({ t: t0, text: clampText(out.memB, LEN_THINK) });
+      for (const x of [a, b]) if (x.think.length > MEM_MAX) x.think.splice(0, x.think.length - MEM_MAX);
       applyMoodWord(a, out.moodA);
       applyMoodWord(b, out.moodB);
       if (Number.isFinite(Number(out.bond))) { bumpRel(a, b.id, Number(out.bond) * 0.5); bumpRel(b, a.id, Number(out.bond) * 0.5); }
@@ -1156,6 +1199,8 @@ export function createNpcWorld(opts) {
       a._chatting = false; b._chatting = false;
       const until = Date.now() + CHAT_COOLDOWN * 1000;
       a.talkingUntil = until; b.talkingUntil = until;
+      // 见完面了：清掉"去找某人"的意图（否则会一直占着，导致他俩再也不能被撮合）
+      for (const x of [a, b]) if (x.intent && x.intent.goalType === 'person') x.intent = null;
       chatBusy = false;
     }
   }
@@ -1185,6 +1230,9 @@ export function createNpcWorld(opts) {
       answer: '', createdAt: now, repathAt: 0,
     };
     s.intent = { goalType: 'quest', goalText: '去找' + t.name, activity: '', plan: '', since: now };
+    // 立刻起步（不等下一拍），真的朝目标人走过去
+    setTarget(s, Number(t.x), Number(t.z));
+    s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
     broadcast({ t: 'npc_say', id: s.id, say: '好，我去找' + t.name + '问问。' });
     console.info('[npc] ' + s.name + ' 接下委托：找 ' + t.name + ' 问「' + s.quest.question + '」');
   }
@@ -1195,30 +1243,41 @@ export function createNpcWorld(opts) {
     if (had) broadcast({ t: 'npc_say', id: s.id, say: '（' + String(why || '这事没办成') + '，回头再跟你说）' });
     console.warn('[npc] ' + s.id + ' 任务中断：' + why);
   }
+  // 任务当前该走向哪：goto → 目标同学；return → **委托你的那个玩家**（找不到就退回"最近的玩家"，
+  // 免得玩家中途重连换了连接 id 就让 NPC 举着委托原地发呆）。
+  function questGoalPoint(s, q) {
+    if (!q) return null;
+    if (q.stage === 'goto') {
+      const t = students.find((x) => x.id === q.targetId);
+      return t ? { x: Number(t.x), z: Number(t.z) } : null;
+    }
+    if (q.stage === 'return') {
+      const p = playerById(q.fromId) || nearestPlayer(s);
+      return p ? { x: Number(p.x), z: Number(p.z) } : null;
+    }
+    return null;
+  }
   function updateQuest(s, now) {
     const q = s.quest;
     if (!q) return;
     if (now - Number(q.createdAt || 0) > QUEST_TIMEOUT_MS) { failQuest(s, '时间太久'); return; }
-    if (q.stage === 'goto') {
-      const t = students.find((x) => x.id === q.targetId);
-      if (!t) { failQuest(s, '找不到' + q.targetName); return; }
-      if (Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) < QUEST_MEET_DIST) { askQuest(s, t); return; }
-      if (now - Number(q.repathAt || 0) > QUEST_REPATH_MS) { // 目标会动 → 定期重指
-        q.repathAt = now; setTarget(s, Number(t.x), Number(t.z));
-        s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
-      }
+    if (q.stage === 'asking') return; // 等 LLM 回话
+    const goal = questGoalPoint(s, q);
+    if (!goal) { failQuest(s, q.stage === 'goto' ? ('找不到' + q.targetName) : '找不到你了'); return; }
+    const d = Math.hypot(goal.x - Number(s.x), goal.z - Number(s.z));
+    if (d < QUEST_MEET_DIST) {
+      if (q.stage === 'goto') {
+        const t = students.find((x) => x.id === q.targetId);
+        if (!t) { failQuest(s, '找不到' + q.targetName); return; }
+        askQuest(s, t);
+      } else reportQuest(s);
       return;
     }
-    if (q.stage === 'asking') return; // 等 LLM 回话
-    if (q.stage === 'return') {
-      const p = playerById(q.fromId);
-      if (!p) { failQuest(s, '没找到你'); return; }
-      if (Math.hypot(Number(p.x) - Number(s.x), Number(p.z) - Number(s.z)) < QUEST_MEET_DIST) { reportQuest(s); return; }
-      if (now - Number(q.repathAt || 0) > QUEST_REPATH_MS) { // 玩家也在动
-        q.repathAt = now; setTarget(s, Number(p.x), Number(p.z));
-        s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
-      }
-      return;
+    // 追了很久还贴不到 3m（玩家在楼里/被挡住）→ 够近(12m)就**就地汇报**，别让委托永远悬着
+    if (q.stage === 'return' && d < QUEST_CLOSE_ENOUGH && now - Number(q.returnAt || 0) > QUEST_SOFT_MS) { reportQuest(s); return; }
+    if (now - Number(q.repathAt || 0) > QUEST_REPATH_MS) { // 目标会动 → 定期重指
+      q.repathAt = now; setTarget(s, goal.x, goal.z);
+      s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
     }
   }
   async function askQuest(s, t) {
@@ -1241,7 +1300,10 @@ export function createNpcWorld(opts) {
       t.mem.push({ t: ts, text: s.name + '问我「' + q.question + '」', kind: 'quest', from: s.id });
       broadcast({ t: 'npc_say', id: t.id, say: q.answer });
       trimMemory(s); trimMemory(t); saveStudents(students);
-      q.stage = 'return'; q.repathAt = 0;
+      // 问到了 → 立刻掉头**走向委托你的玩家**复命（不是"附近有人就算到"）
+      q.stage = 'return'; q.repathAt = 0; q.returnAt = Date.now();
+      const back = playerById(q.fromId) || nearestPlayer(s);
+      if (back) { setTarget(s, Number(back.x), Number(back.z)); s.st = 'walk'; s.walkUntil = Date.now() + WALK_TIMEOUT * 1000; s.stuck = 0; }
     } catch (e) {
       console.warn('[npc] 任务提问失败：' + ((e && e.message) || e));
       failQuest(s, '话没问成');
@@ -1294,7 +1356,8 @@ export function createNpcWorld(opts) {
         if (s.think.length > MEM_MAX) s.think.splice(0, s.think.length - MEM_MAX);
       }
       if (mem) {
-        s.mem.push({ t: now, text: mem });
+        // 归属：这条记忆是"谁带来的"（玩家= p:<id>，或同学 id）——存档里带上，别再让记忆悬空
+        s.mem.push({ t: now, text: mem, kind: kind === 'talk' ? 'say' : '', from: (extra && extra.who) || '' });
         await trimMemory(s);
       }
       // 对话的"影响"：改心情 / 改关系 / 必要时改道（只对 talk/chat 生效）
@@ -1352,6 +1415,7 @@ export function createNpcWorld(opts) {
   let lastHint = 0;      // 上一次打"没标功能区"提示的时间（累加型字段，必须有初值）
   let lastObstacle = Date.now(); // 上一次重载障碍表的时间
   let lastChatStart = 0;         // 上一次"新开闲聊"的时刻（累加型字段，必须有初值）
+  let lastMeetStart = 0;         // 上一次"撮合一对相向走近"的时刻（累加型字段，必须有初值）
   const timer = setInterval(() => {
     const now = Date.now();
     const dt = Math.min(1.5, (now - lastTick) / 1000);
@@ -1396,11 +1460,23 @@ export function createNpcWorld(opts) {
         trimMemory(s);
       }
       if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
-      // 「去找某人」：定期朝那个人重指（人也在动）；到了就清掉意图 → 交给闲聊系统自然发起对话
+      // 「去找某人」：定期朝那个人**当前位置**重指（两边都在动 → 会在中间碰头）；
+      //   ⚠ 到人跟前必须**站住**：以前只是清掉意图，人还按着对方**旧坐标**继续走 ⇒ 两人擦肩而过、
+      //   越走越远，永远开不了口。现在到 5m 内就停住等闲聊系统接手。
       if (!s.quest && s.intent && s.intent.goalType === 'person' && s.intent.seekId) {
         const t = students.find((x) => x.id === s.intent.seekId);
-        if (!t || Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) < CHAT_RANGE) { s.intent = null; }
-        else if (now - Number(s._seekAt || 0) > 2500) {
+        const tooLong = now - Number(s.intent.since || 0) > PERSON_SEEK_TIMEOUT_MS;
+        const d = t ? Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) : Infinity;
+        if (d < CHAT_RANGE) {
+          s.intent = null;
+          s.tx = Number(s.x); s.tz = Number(s.z); s.wx = s.tx; s.wz = s.tz; s.path = null; s.pathIdx = 0;
+          s.st = 'act';
+          s.stayUntil = Math.max(Number(s.stayUntil || 0), now + (CHAT_INTERVAL + 15) * 1000);
+          s.actStepAt = Number(s.stayUntil); // 等对方开口的这段时间别乱挪步
+        } else if (!t || tooLong) {
+          s.intent = null;
+          s.decideAt = now; // 找不到人 / 追太久：立刻回日常规划，别在外面永远晃
+        } else if (now - Number(s._seekAt || 0) > 2500) {
           s._seekAt = now; setTarget(s, Number(t.x), Number(t.z));
           s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
         }
@@ -1444,6 +1520,10 @@ export function createNpcWorld(opts) {
             //   调用量刷到设计值（4 次/分）的十几倍 ⇒ 服务端/额度开销飙升。规则大脑兜底足够，且不花 LLM。
             if (Number(s.actResume || 0) > now) {
               s.st = 'act'; s.stayUntil = s.actResume; s.actResume = 0; s.actStepAt = now + rand(ACT_STEP_MIN, ACT_STEP_MAX); s.stuck = 0;
+            } else if (s.quest) {
+              // 有委托在身：**绝不放弃**（目标会动：玩家在走 / 同学在走）。
+              //   把 repathAt 清零 → 下一拍 updateQuest 立刻按任务目标重新指路，不会"走一半就杵住"。
+              s.st = 'walk'; s.stuck = 0; s.walkUntil = now + WALK_TIMEOUT * 1000; s.quest.repathAt = 0;
             } else if (Number(s.pathTries || 0) < 2 && nav) {
               s.pathTries = Number(s.pathTries || 0) + 1;
               setTarget(s, Number(s.tx), Number(s.tz));
@@ -1463,10 +1543,15 @@ export function createNpcWorld(opts) {
       }
     }
     pumpAnnounce(now); // 广播器：轮流让一个学生"听到"（一个个来，不并发打爆 GLM）
-    // NPC↔NPC 闲聊：凑近 + 都闲着 → 开一段短对话（全局 CHAT_INTERVAL 限流，防刷 GLM）
+    // NPC↔NPC 社交：① 已经凑得近 → 直接开聊；② 离得远 → 撮合一对**相向走近**（纯走位、不花 LLM），
+    //   走到一起了下一拍就走 ① 开聊。以前只认"已经凑到 5m 内"，而他们各忙各的很少凑近 ⇒ 几乎从不说话。
     if (!chatBusy && now - lastChatStart > CHAT_INTERVAL * 1000) {
-      const pair = pickChatPair(now);
-      if (pair) { lastChatStart = now; converse(pair[0], pair[1]); }
+      const near = pickPair(now, CHAT_RANGE);
+      if (near) { lastChatStart = now; converse(near[0], near[1]); }
+      else if (now - lastMeetStart > MEET_INTERVAL * 1000) {
+        const far = pickPair(now, CHAT_SEEK_RANGE);
+        if (far) { lastMeetStart = now; startMeet(far[0], far[1], now); }
+      }
     }
     // ⚠ 无论有没有区域都要广播：以前没区域时直接 return，客户端连一次更新都收不到（表现为"人都定住了"）
     if (now - lastBroadcast >= BROADCAST_MS) {

@@ -8,4 +8,5 @@ if (which === 'students') await import('./tools/probe-students.mjs');
 else if (which === 'npc') await import('./tools/probe-npc-move.mjs');
 else if (which === 'plan') await import('./tools/probe-npc-plan.mjs');
 else if (which === 'social') await import('./tools/probe-npc-social.mjs');
-else console.error('usage: run-probe.mjs students|npc|plan|social');
+else if (which === 'identity') await import('./tools/probe-npc-identity.mjs');
+else console.error('usage: run-probe.mjs students|npc|plan|social|identity');
