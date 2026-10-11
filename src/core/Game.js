@@ -7749,13 +7749,14 @@ export class Game {
       if (this.students) {
         this.students.update(dt);
         this._updateTalkTab();
-        // 每 ~1.5s 把学生**脚底高度**回报服务端：让它在 2D 障碍表之外知道"谁正站在台面/楼顶上"，
-        // 从而不对这类人做二维寻路/脱困（否则会下发乱七八糟的绕行点 ⇒ "在碰撞体上方时寻路有问题"）。
+        // 每 ~1.5s 把学生的**真实状态**（脚底高度 + 实际坐标 + 是否卡住）回报服务端：
+        // ① 让它在 2D 障碍表之外知道"谁正站在台面/楼顶上"（否则对这类人做二维寻路/脱困 ⇒ 绕行点全是乱的）；
+        // ② 用真实坐标校正服务端幽灵位置；③ 卡住时让它重算路径（治"莫名其妙卡住"）。
         this._npcHT = (this._npcHT || 0) + dt;
         if (this._npcHT >= 1.5) {
           this._npcHT = 0;
-          const hs = this.students.heights();
-          if (hs.length && this.network) this.network.sendNpcHeights(hs);
+          const cs = this.students.clientState();
+          if (cs.length && this.network) this.network.sendNpcState(cs);
         }
       }
       this._updatePickups(dt);

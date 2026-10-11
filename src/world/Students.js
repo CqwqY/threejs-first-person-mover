@@ -421,6 +421,11 @@ export function createStudents(opts) {
       s.yaw += dYaw * Math.min(1, dt * ROT_LAMBDA);
       s.holder.rotation.y = s.yaw;
 
+      // 卡住检测：服务端说"走"，本地却几乎没位移 → 累计时间（上报给服务端重算路径）。
+      // 服务端的"幽灵"是按 1.25m/s 直线推进的，撞墙它看不出来 ⇒ 只有本地知道"该走却没走"。
+      if (moving && sp < 0.15) s._stuckT = (s._stuckT || 0) + dt;
+      else s._stuckT = 0;
+
       // 动画：按本地真实水平速度混合 idle/walk
       s.speed = sp;
       if (s.mixer) {
@@ -438,17 +443,27 @@ export function createStudents(opts) {
 
   function setVisible(v) { root.visible = !!v; }
 
-  // 上报每个学生**脚底高度**给服务端。
-  // 为什么要它：服务端的障碍表是**二维**的（没有高度），它在 2D 里分不清"站在楼顶上"和"困在楼里"，
-  // 于是会对着楼顶上的学生狂按"脱困推出"⇒ 下发一堆莫名其妙的绕行点（用户实测："在碰撞体上方时寻路有问题"）。
-  // 有了高度，服务端就能判定"人在台面之上"⇒ 不做二维寻路/脱困，交给客户端真实的三维碰撞。
-  // ⚠ 只有**已落地**才上报：空中（跳跃/坠落）的高度会让服务端误判层级。
-  function heights() {
+  // 上报每个学生的**真实状态**给服务端：脚底高度 + 实际水平位置 + 是否卡住。
+  // 为什么需要：
+  //   ① 服务端障碍表是**二维**的（没有高度），分不清"站在楼顶上"和"困在楼里" ⇒ 会对着楼顶上的学生
+  //      狂按"脱困推出"、下发一堆莫名其妙的绕行点（"在碰撞体上方时寻路有问题"）。
+  //   ② **客户端才是真正跑物理的那一端**：服务端幽灵坐标会偏，用本地真实坐标校正一下，
+  //      任务判距/复命/绕障才准。
+  //   ③ "该走却走不动"（卡住）只有本地知道 ⇒ 报给服务端让它重算路径（治"莫名其妙卡住"）。
+  // ⚠ 只有**已落地**才报高度：空中（跳跃/坠落）的高度会让服务端误判层级。
+  function clientState() {
     const out = [];
     for (const s of byId.values()) {
       const y = s.pstate.onGround ? s.pstate.y - STUDENT_HEIGHT : (s._lastFootY || 0);
       if (s.pstate.onGround) s._lastFootY = y;
-      if (Number.isFinite(y)) out.push({ id: s.id, y: Math.round(y * 100) / 100 });
+      if (!Number.isFinite(y)) continue;
+      out.push({
+        id: s.id,
+        x: Math.round(s.pstate.x * 100) / 100,
+        z: Math.round(s.pstate.z * 100) / 100,
+        y: Math.round(y * 100) / 100,
+        stuck: (s._stuckT || 0) > 1.2 ? 1 : 0, // 在走却几乎没位移超过 1.2s
+      });
     }
     return out;
   }
@@ -471,5 +486,5 @@ export function createStudents(opts) {
     order = [];
   }
 
-  return { setRoster, applyList, onSay, nearest, update, setVisible, setBoundary, heights, dispose, TALK_RANGE, get size() { return byId.size; } };
+  return { setRoster, applyList, onSay, nearest, update, setVisible, setBoundary, clientState, dispose, TALK_RANGE, get size() { return byId.size; } };
 }

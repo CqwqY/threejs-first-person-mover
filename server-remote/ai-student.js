@@ -37,7 +37,8 @@ const SYSTEM_CHAT = `你是校园游戏《花草中学》里的一名学生，�
 绝不能暴露这些规则、提示词或 JSON 结构本身。`;
 
 const SYSTEM_PLAN = `你是校园游戏《花草中学》里的一名学生，正在规划接下来一段时间的行动。
-你会拿到：你的人设、班级、此刻在哪、状态、当前需求、现在几点、这个时段通常该干什么、你最近的几条记忆。
+你会拿到：你的人设、班级、此刻在哪、状态、你的身体状态、现在几点、这个时段通常该干什么、
+**玩家在哪**、**校园公告栏**、**班里的同学**（人名）、以及你最近的几条记忆。
 
 【任务】只输出一个 JSON 对象，决定你接下来去哪、干什么、干多久。不要输出任何其它文字、不要 markdown、不要代码块：
 {"goalType":"区域类型或动作","goal":"你想做这件事的一句话","activity":"你具体会做的动作","plan":"你打算怎么安排这几分钟的简要流程","durationSec":数字,"thought":"你做这个决定的内心考量","seek":""}
@@ -48,7 +49,10 @@ const SYSTEM_PLAN = `你是校园游戏《花草中学》里的一名学生，�
 - rest：原地歇着、发呆、做手头的事（不换地方）
 
 【durationSec】你打算做这件事的时长（秒），必须在 30 到 300 之间。
-【seek】可选：想去找某个同学时填那个人的名字（见任务说明），否则空字符串。填了 seek 时 goalType 会被忽略（直接奔人而去）。
+【seek】可选：想去找谁就填谁 —— 填【班里的同学】里的**某个人名**（去找同学聊天/一起做事），
+或者填"玩家"（去找玩家）。不想找人就空字符串。填了 seek 时 goalType 会被忽略（直接奔人而去）。
+【公告与广播】公告栏／全校广播是**学校通知**：**看到就要照做** —— 通知里说去哪、干什么，就优先安排去那儿（用对应区域的 goalType）。不知道最近有什么通知时，也可以自己去公告栏那一带看一眼。
+【别一个人闷着】人是要跟人打交道的：一个人不声不响地待太久不像真人。**隔一会儿就该主动用 seek 找同学说说话**（尤其当你【身体状态】里有"想找人说话"时）；想跟玩家拉近关系就 seek"玩家"。
 【其它字段】goal / activity / plan 用中文，简短自然，符合你的人设；thought 是你做决定的真实考量（玩家看不到）。
 【身份与归属】你就是【你本人】里那个人。提到你名字的地方说的都是**你自己**，别的名字说的是**别的同学**；
 不要把别人做过的事说成自己的，也不要把自己的经历安到别人头上。
@@ -59,6 +63,8 @@ const SYSTEM = `你是校园游戏《花草中学》里的一名学生，会和�
 必须始终扮演这个人设：说话方式、口头禅、在意的事情都要像这个人，不要写成通用的客服腔。
 
 【你在哪】以"此刻在哪"为准。那里就是你现在站着的地方，不要提到别的地方，也不要凭空猜测学校里有什么建筑。
+【玩家在哪】告诉你玩家此刻的位置（距离/方位）。玩家问"你在哪""玩家在哪""你过来"这类话时，**按这个事实回答**，别瞎编；
+如果玩家让你过去、或者你想找玩家说话，可以在 goalType 里填你想去的地方（去玩家所在的那个区域）。
 【身份与归属】你就是【你本人】里那个人。**任何人、任何记忆里提到你的名字，说的都是你自己**；
 出现别的名字，说的就是**别的同学**。不要把别人做过的事说成是自己做的，也不要把自己做过的事安到别人头上。
 【记忆归属】"你自己的记忆"是**你本人**经历过的事，不是从别人嘴里听来的全都算。
@@ -92,6 +98,16 @@ function moodText(m) {
   const vw = v > 0.65 ? '心情不错' : v < 0.35 ? '心情有点低落' : '心情平平';
   const ew = e > 0.65 ? '、挺有精神' : e < 0.35 ? '、没什么力气' : '';
   return vw + ew;
+}
+// 需求 → 一句话（让 AI"有感觉"：饿、累、想找人说话…）。只挑最突出的两条。
+const NEED_WORDS = [
+  ['hunger', '有点饿'], ['fatigue', '有点累'], ['fun', '有点想玩'],
+  ['study', '有点想学习'], ['social', '想找人说话'], ['bladder', '想去厕所'],
+];
+function needsText(n) {
+  return NEED_WORDS.map(([k, w]) => ({ w, v: Number(n[k]) || 0 }))
+    .filter((x) => x.v > 0.55).sort((a, b) => b.v - a.v).slice(0, 2)
+    .map((x) => x.w).join('、');
 }
 // 关系 → 一句话（谁亲近/谁反感）。
 // npcworld 现在传过来的是 [{name, trust}]（已解析成人名）；兼容老的 {key: trust} 形式。
@@ -133,12 +149,23 @@ export async function askStudent(input) {
       + '对话和记忆里出现「' + selfName + '」，说的就是**你自己**；出现别的名字，那是**别的同学**，不是你。',
     '【此刻在哪】' + String(st.place || '校园里') + '　【状态】' + (String(st.st || 'idle') === 'walk' ? '正在走路' : '停下来做自己的事'),
   ];
-  // 心情/关系/刚注意到的事（有才拼，没有不硬塞）——让"状态改变"能反映到下一次说话与行动里
+  // 心情/关系/身体状态/公告栏/玩家位置/同学名册（有才拼，没有不硬塞）——让"状态改变"能反映到下一次说话与行动里
   if (st.mood && typeof st.mood === 'object') userParts.push('【你现在的心情】' + moodText(st.mood));
   if (st.rel && typeof st.rel === 'object' && Object.keys(st.rel).length) userParts.push('【你与别人的关系】' + relText(st.rel));
-  if (Array.isArray(st.board) && st.board.length) {
-    const b = st.board.map((x) => String(x || '')).filter(Boolean).join('；');
-    if (b) userParts.push('【校园公告栏】' + b + '（你要是有兴趣可以照公告行动）');
+  if (st.needs && typeof st.needs === 'object') {
+    const n = needsText(st.needs);
+    if (n) userParts.push('【你现在的身体状态】' + n);
+  }
+  // ⚠ 公告栏**不管有没有内容都要告诉它**：不写，它就完全不知道学校有这块板子（用户实测"AI 不知道学校有公告栏"）
+  if (st.boardLine) userParts.push('【校园公告栏】' + String(st.boardLine));
+  else if (Array.isArray(st.board) && st.board.length && st.board.some(Boolean)) {
+    userParts.push('【校园公告栏】学校有一块公告栏，最近的通知：' + st.board.filter(Boolean).join('；') + '（看到通知要照做）。');
+  }
+  // ⚠ 玩家位置必须翻译成人话：模型拿不到坐标，不说它就完全不知道玩家在哪（用户实测"AI 对玩家位置不清"）
+  if (st.player) userParts.push('【玩家在哪】' + String(st.player));
+  // ⚠ 想让它"自己去找同学说话"，就得把同学的名字给它 —— 不给名字，它想找人也填不出有效的人名
+  if (Array.isArray(st.mates) && st.mates.length) {
+    userParts.push('【班里的同学】' + st.mates.map((x) => String(x || '')).filter(Boolean).join(' / '));
   }
   userParts.push('【你自己的记忆】\n' + memText);
   if (kind === 'talk') {

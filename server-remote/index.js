@@ -1553,13 +1553,13 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // 学生 NPC 的**脚底高度**回报（客户端每 ~1.5s 发一次，只报已落地的值）。
-    // 用途：服务端障碍表是二维的，分不清"站在楼顶/台面上"和"困在楼里"；有了高度就能
-    // 对"人在台面之上"的情况**不做二维寻路/脱困**（改由客户端真实三维碰撞决定走位）。
-    if (msg.t === 'npc_h') {
-      if (npcWorld && npcWorld.setHeights) {
+    // 学生 NPC 的**真实状态**回报（客户端每 ~1.5s 发一次）：脚底高度 + 实际水平位置 + 是否卡住。
+    // 用途：①服务端障碍表是二维的，靠高度才能分清"站在台面/楼顶之上"与"困在楼里"（不做误判的寻路/脱困）；
+    //      ②客户端才是真正跑物理的那一端，用它的坐标校正幽灵位置、并在"该走却没走"时重算路径。
+    if (msg.t === 'npc_state') {
+      if (npcWorld && npcWorld.applyClientState) {
         const list = Array.isArray(msg.list) ? msg.list.slice(0, 32) : [];
-        npcWorld.setHeights(list);
+        npcWorld.applyClientState(list);
       }
       return;
     }

@@ -83,7 +83,7 @@ const PLAN_DUR_MAX = 300;        // 单次活动最长时长（秒）
 // ---------- P1：NPC↔NPC 闲聊 ----------
 const CHAT_RANGE = 5.0;        // 多近算"凑到一起聊天"（米）
 const CHAT_COOLDOWN = 90;      // 同一个学生两次参与闲聊的最小间隔（秒）
-const CHAT_INTERVAL = 30;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量（略降以增加互动）
+const CHAT_INTERVAL = 20;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量（再降一点：用户要"AI 之间有对话的欲望"）
 // "做活动"时别站桩：隔一会儿在附近挪两步（减少"我要学习然后就一动不动"的无实物表演）
 const ACT_STEP_MIN = 7000;     // 两次"挪步"的最小间隔（毫秒）
 const ACT_STEP_MAX = 15000;    // 最大间隔
@@ -91,7 +91,7 @@ const ACT_STEP_DIST_MIN = 1.2; // 挪步距离范围（米）
 const ACT_STEP_DIST_MAX = 3.0;
 const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
 const CHAT_SEEK_RANGE = 45;    // 「想聊天但离得远」时最远会**主动走近**的距离（米）——再远就不追了
-const MEET_INTERVAL = 25;      // 全局两次「撮合一对走近」的最小间隔（秒）——别让 8 个人同时乱窜
+const MEET_INTERVAL = 12;      // 全局两次「撮合一对走近」的最小间隔（秒）——别让 8 个人同时乱窜
 const PERSON_SEEK_TIMEOUT_MS = 90000; // 「去找某人」最多找这么久（追不上就回去干自己的事，别永远在外面晃）
 
 // ---------- P2：感知 ----------
@@ -108,12 +108,39 @@ const QUEST_MEET_DIST = 3.0;     // 多近算"找到 TA 了"（米）
 const QUEST_CLOSE_ENOUGH = 12;   // "够近了"：复命追太久还贴不到 3m（玩家在楼里/卡住）就到这个距离就地汇报
 const QUEST_SOFT_MS = 30000;     // 进入"返回复命"阶段多久后，开始接受"够近就算到"（别让委托永远悬着）
 
+// ---------- 公告/广播"照做"（AI 要真的听）----------
+// 通知文本里提到去哪，就把闲着的人派过去 —— 光把通知塞进 prompt 是"知道"，派过去才是"听"。
+const OBEY_MAX = 3;              // 同一条通知最多让几个人照做（别全班一窝蜂）
+const OBEY_CD = 90000;           // 同一个学生两次"照通知行动"的最小间隔（毫秒）
+const NOTICE_ZONE_WORDS = [
+  [/操场|球场|跑步|运动|集合|体测|比赛|体育/, 'playground'],
+  [/饭堂|食堂|吃饭|午餐|晚餐|开饭|打饭/, 'canteen'],
+  [/图书馆|自习|看书|借书|阅览/, 'library'],
+  [/教室|上课|早读/, 'classroom'],
+  [/宿舍|寝室|睡觉|休息|回屋/, 'dorm'],
+  [/小卖部|商店|买东西|超市/, 'shop'],
+  [/厕所|洗手间|卫生间/, 'toilet'],
+  [/校门|门口|大门|集合出发/, 'gate'],
+  [/喷泉/, 'fountain'],
+];
+function noticeZoneType(text) {
+  const t = String(text || '');
+  for (const [re, z] of NOTICE_ZONE_WORDS) if (re.test(t)) return z;
+  return null;
+}
+// 方位词（8 向）：+x = 东，-z = 北（与玩家的 fwd = (-sinYaw, -cosYaw) 直觉一致即可）
+const DIR8 = ['北', '东北', '东', '东南', '南', '西南', '西', '西北'];
+function bearingName(dx, dz) {
+  const a = Math.atan2(dx, -dz);
+  return DIR8[Math.round(((a + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8];
+}
+
 // ---------- "人在台面/楼顶之上" ----------
 // 障碍表是**二维**的（只有占地，没有高度），所以它在 2D 里分不清两种完全不同的情况：
 //   ① 出生点正好落在楼里 → 真·被困住，要"脱困推出"；
 //   ② 人站在**楼顶/台面之上**（合法的）→ 却被当成"困在楼里"，于是每拍把它往外推、
 //      下发的绕行点也全在楼里 ⇒ 表现为"在碰撞体上方时寻路有问题 / 站着打转"。
-// 客户端每 ~1.5s 回报每个学生的**脚底高度**（`setHeights`），据此判定属于②：
+// 客户端每 ~1.5s 回报每个学生的**真实状态**（`applyClientState`：脚底高度 + 实际坐标 + 是否卡住），据此判定属于②：
 // 高于一层台阶就认为"在台面之上" ⇒ 关掉二维寻路与脱困，改由客户端真实的三维碰撞决定走位。
 const HIGH_LEVEL_CLEAR = 0.6;
 
@@ -210,16 +237,39 @@ export function createNpcWorld(opts) {
   // 玩家坐标（由 index.js 每收到玩家 state 就喂一次），供 playerNear 特征用
   let playerPositions = [];
   function setPlayerPositions(list) { playerPositions = Array.isArray(list) ? list : []; }
-  // 客户端回报的学生"脚底高度"（只报已落地的值）：见 HIGH_LEVEL_CLEAR 那段说明。
-  function setHeights(list) {
+  // 客户端回报的学生**真实状态**（脚底高度 + 实际水平位置 + 是否卡住）。
+  // ⚠ 客户端才是真正跑物理的那一端：它的坐标比服务端"幽灵"可信。
+  function applyClientState(list) {
     if (!Array.isArray(list)) return;
+    const now = Date.now();
     for (const it of list) {
       if (!it) continue;
       const s = students.find((x) => x.id === String(it.id || ''));
       if (!s) continue;
       const y = Number(it.y);
       if (Number.isFinite(y) && y >= -8 && y <= 300) s.y = y;
+      // 水平位置：只采纳"相差不大"的修正 —— 万一某个客户端卡顿/不同步，也别把幽灵坐标整块拽飞
+      const cx = Number(it.x), cz = Number(it.z);
+      if (Number.isFinite(cx) && Number.isFinite(cz) &&
+          Math.hypot(cx - Number(s.x), cz - Number(s.z)) < 5) { s.x = cx; s.z = cz; }
+      if (it.stuck) reportStuck(s, now); // 客户端说"该走却走不动" → 立刻重算路径
     }
+  }
+  // 客户端报告"卡住了"（在走却没位移）：这不花 LLM，只是重算一条路，正是治"莫名其妙卡住"的手段。
+  function reportStuck(s, now) {
+    if (now - Number(s._stuckRep || 0) < 2000) return; // 限流：别每 1.5s 都重算
+    s._stuckRep = now;
+    s.pathTries = 0;
+    if (s.quest) { s.quest.repathAt = 0; s.stuck = 0; return; } // 任务中：下一拍按任务目标重指
+    s._stuckN = Number(s._stuckN || 0) + 1;
+    if (s._stuckN >= 3) {
+      // 同一个地方反复卡（≥3 次 ≈ 6s）：别再死磕这个目标，交给规则大脑重新挑地方
+      s._stuckN = 0; s.intent = null; s.stuck = 0; s.st = 'idle'; s.decideAt = now;
+      console.info('[npc] ' + s.name + ' 反复卡住，放弃当前目标重新决策');
+      return;
+    }
+    s.stuck = 0;
+    setTarget(s, Number(s.tx), Number(s.tz)); // 用**客户端回报的位置**重新算一条路
   }
   // 这个学生是不是"站在台面/楼顶之上"（二维障碍表此时不可信）
   function elevated(s) { return Number(s.y) > HIGH_LEVEL_CLEAR; }
@@ -685,16 +735,42 @@ export function createNpcWorld(opts) {
     }
     return null;
   }
-  // 给 AI 的"我在哪"：区域名 + 类型标签。都不在就老实说"校园里"，绝不臆造地点。
-  function placeOf(s) {
-    const zn = zoneAt(Number(s.x), Number(s.z)) || zoneById(s.zoneId);
+  // 任意坐标 → 人话地名（"图书馆" / "学生饭堂（饭堂）" / "校园里"）
+  function placeNameAt(x, z, zoneId) {
+    const zn = zoneAt(Number(x), Number(z)) || zoneById(zoneId);
     if (!zn) return '校园里';
-    const t = ZONE_TYPES.find((x) => x.id === zn.type);
+    const t = ZONE_TYPES.find((x2) => x2.id === zn.type);
     const label = (t && t.label) || '';
     const nm = String(zn.name || '');
     if (!label) return nm || '校园里';
     if (nm && nm.indexOf(label) >= 0) return nm; // 名字里已经带类型（"图书馆"）就不重复
     return nm ? nm + '（' + label + '）' : label;
+  }
+  // 给 AI 的"我在哪"：区域名 + 类型标签。都不在就老实说"校园里"，绝不臆造地点。
+  function placeOf(s) { return placeNameAt(s.x, s.z, s.zoneId); }
+  // 给 AI 的"玩家在哪"：说人话（距离 + 方位 + 地点）。
+  // ⚠ 模型拿不到坐标，不把位置翻译成人话，它就只能瞎猜（用户实测："AI 对玩家位置不清"）。
+  function playerWhere(s) {
+    const p = nearestPlayer(s);
+    if (!p) return '';
+    const dx = Number(p.x) - Number(s.x), dz = Number(p.z) - Number(s.z);
+    const d = Math.round(Math.hypot(dx, dz));
+    const at = placeNameAt(Number(p.x), Number(p.z), '');
+    if (d <= 6) return '玩家就在你跟前（约 ' + d + 'm）';
+    if (d <= 25) return '玩家在' + at + '那边，离你约 ' + d + 'm（你的' + bearingName(dx, dz) + '方向），走几步就到';
+    if (d <= 90) return '玩家离你有点远（约 ' + d + 'm，在你的' + bearingName(dx, dz) + '方向，' + at + '那边）';
+    return '玩家离你很远（约 ' + d + 'm）';
+  }
+  // 给 AI 的"公告栏"：**不管有没有内容都要说**（否则它根本不知道学校有这块板子）
+  function boardWhere() { return placeNameAt(BOARD_POS.x, BOARD_POS.z, ''); }
+  function boardLine() {
+    const at = boardWhere();
+    const where = (at === '校园里' ? '校园里（' : at + '那一带（') + '坐标 ' + BOARD_POS.x + ',' + BOARD_POS.z + '）';
+    if (!boardPosts.length) {
+      return '学校在' + where + '立了一块**公告栏**，玩家和学校会往上贴通知；现在上面还没有新通知（你路过那一带可以看看）。';
+    }
+    return '学校在' + where + '有一块**公告栏**，最近的通知：' + boardPosts.slice(-3).join('；')
+      + '。**看到通知要照做**（通知说去哪/干什么，就优先去那儿）。';
   }
 
   // 选目标：课程表时段优先（70%），否则按需求；都没有区域就原地发呆
@@ -840,7 +916,14 @@ export function createNpcWorld(opts) {
         const h = hourNow();
         const seg = scheduleType(h);
         const out = await askStudent({
-          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), board: boardPosts.slice(-3) },
+          student: {
+            name: s.name, cls: s.cls, persona: s.persona, sex: s.sex,
+            place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood,
+            rel: topRel(s), board: boardPosts.slice(-3),
+            boardLine: boardLine(),          // ⚠ 没通知也要告诉它"学校有公告栏"（否则它不知道这块板子存在）
+            player: playerWhere(s),          // 玩家在哪（距离/方位/地点，说人话）
+            mates: students.filter((x) => x !== s).map((x) => x.name), // 班里的同学：给了名字它才"找得到人"
+          },
           memory: pickMemory(s, null),
           kind: 'plan',
           hour: h,
@@ -857,7 +940,20 @@ export function createNpcWorld(opts) {
         const durMs = clampInt(out.durationSec, PLAN_DUR_MIN, PLAN_DUR_MAX, 60) * 1000;
         // 「去找某人」：plan 给了 seek → 直接以那个人为目标（到了就交给闲聊系统，增加 AI 间互动）
         if (out.seek) {
-          const seeker = resolveStudentByName(out.seek);
+          const sq = String(out.seek).trim();
+          // 想找**玩家**：走过去（走到跟前站住，等人开口）—— 这是"AI 对玩家有兴趣"的落点
+          if (sq.indexOf('玩家') >= 0 || sq.indexOf('那个人') >= 0) {
+            const p = nearestPlayer(s);
+            if (p) {
+              s.intent = { goalType: 'person', goalText: '去找玩家', activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekPlayer: true, since: now };
+              setTarget(s, Number(p.x), Number(p.z));
+              s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
+              s.planAt = now + PLAN_INTERVAL_MS; s.decideAt = s.planAt;
+              console.info('[npc] ' + s.name + ' 打算去找玩家');
+              return;
+            }
+          }
+          const seeker = resolveStudentByName(sq);
           if (seeker && seeker !== s) {
             s.intent = { goalType: 'person', goalText: '去找' + seeker.name, activity: clampText(out.activity || '', 120), plan: clampText(out.plan || '', 200), seekId: seeker.id, since: now };
             setTarget(s, Number(seeker.x), Number(seeker.z));
@@ -1125,22 +1221,26 @@ export function createNpcWorld(opts) {
   // 一次 LLM 出一段 2~4 句脚本 → 双方各写记忆（含对方）、改心情、改彼此关系；台词逐句广播（玩家能偷听）。
   // 全局限流（CHAT_INTERVAL）+ 个人冷却（CHAT_COOLDOWN）+ 模板兜底 = 不刷爆 GLM、也绝不静默卡住。
   // 这个学生此刻能不能参与闲聊（"有任务在身 / 正要去见某人 / 刚聊过"都排除）
-  function chatIdle(x, now) {
+  function chatIdle(x, now, allowWalk) {
     if (x._chatting || x.quest) return false;
-    if (x.intent && x.intent.goalType === 'person') return false; // 已经在去见某人的路上，别重复派
+    // 已经在去见某人/办事的路上，别重复派
+    if (x.intent && (x.intent.goalType === 'person' || x.intent.goalType === 'quest')) return false;
     if (now < Number(x.talkingUntil || 0)) return false;
     if (now - Number(x.chatAt || 0) < CHAT_COOLDOWN * 1000) return false;
+    if (allowWalk) return true;
+    // ⚠ 只认 idle/act 时：学生大部分时间在走位 ⇒ 几乎从不闲聊（用户实测"AI 之间没有对话的欲望"）。
+    //   所以"已经凑得很近"时允许边走边停下聊；只有"离得远、要专门绕过去"才要求人闲着。
     return x.st === 'idle' || x.st === 'act';
   }
-  // 找一对"两人都闲着、可以聊"的学生（返回 maxRange 米内最近的一对）
-  function pickPair(now, maxRange) {
+  // 找一对可以聊的学生（返回 maxRange 米内最近的一对）；allowWalk=允许正在走位的人也停下来聊
+  function pickPair(now, maxRange, allowWalk) {
     let best = null, bd = maxRange * maxRange;
     for (let i = 0; i < students.length; i++) {
       const a = students[i];
-      if (!chatIdle(a, now)) continue;
+      if (!chatIdle(a, now, allowWalk)) continue;
       for (let j = i + 1; j < students.length; j++) {
         const b = students[j];
-        if (!chatIdle(b, now)) continue;
+        if (!chatIdle(b, now, allowWalk)) continue;
         const dx = Number(a.x) - Number(b.x), dz = Number(a.z) - Number(b.z);
         const d = dx * dx + dz * dz;
         if (d < bd) { bd = d; best = [a, b]; }
@@ -1181,7 +1281,7 @@ export function createNpcWorld(opts) {
     try {
       const bond = Number((a.rel[b.id] && a.rel[b.id].trust) || 0);
       const out = await askStudent({
-        student: { name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st, needs: a.needs, mood: a.mood, rel: topRel(a) },
+        student: { name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st, needs: a.needs, mood: a.mood, rel: topRel(a), player: playerWhere(a), boardLine: boardLine() },
         partner: { name: b.name, cls: b.cls, persona: b.persona, sex: b.sex },
         memory: pickMemory(a, null),
         kind: 'chat',
@@ -1333,7 +1433,7 @@ export function createNpcWorld(opts) {
     broadcast({ t: 'npc_say', id: s.id, say: t.name + '，' + String(q.question).slice(0, 30) + '？' });
     try {
       const ans = await askStudent({
-        student: { name: t.name, cls: t.cls, persona: t.persona, sex: t.sex, place: placeOf(t), st: t.st, needs: t.needs, mood: t.mood, rel: topRel(t) },
+        student: { name: t.name, cls: t.cls, persona: t.persona, sex: t.sex, place: placeOf(t), st: t.st, needs: t.needs, mood: t.mood, rel: topRel(t), player: playerWhere(t), boardLine: boardLine() },
         memory: pickMemory(t, null),
         kind: 'ask',
         question: q.question,
@@ -1384,6 +1484,8 @@ export function createNpcWorld(opts) {
           needs: s.needs,
           mood: s.mood,      // 心情（被对话改）→ 这次说话/行动带着情绪
           rel: topRel(s),    // 关系摘要（被对话改）→ 记得跟谁亲、跟谁不对付
+          player: playerWhere(s), // 玩家在哪（说人话）→ 别一问"你在哪/玩家在哪"就瞎编
+          boardLine: boardLine(),
         },
         // ⚠ 只给**这个学生本人**的记忆，而且是挑出来的几条（不是整串）。
         //   混进别人的记忆 = 几个人的经历串台；一次给太多 = 模型自己搅成一团。
@@ -1497,32 +1599,40 @@ export function createNpcWorld(opts) {
     for (const s of students) {
       updateNeeds(s, dt, now);
       perceive(s, now); // P2：看身边的人（廉价，限流）
-      // 公告栏：路过就"看一眼"（限流）→ 记进记忆；规划时也会带上公告
-      if (!s.quest && boardPosts.length && now >= Number(s._boardAt || 0) &&
+      // 公告栏：路过就"看一眼"（限流）→ 记进记忆；**并且照做**（通知说了去哪就真去）
+      if (!s.quest && now >= Number(s._boardAt || 0) &&
           Math.hypot(Number(s.x) - BOARD_POS.x, Number(s.z) - BOARD_POS.z) < BOARD_READ_RANGE) {
         s._boardAt = now + BOARD_READ_CD;
-        s.mem.push({ t: now, text: '我在公告栏看到：' + boardPosts[boardPosts.length - 1], kind: 'obs' });
+        const last = boardPosts.length ? boardPosts[boardPosts.length - 1] : '';
+        s.mem.push({
+          t: now,
+          text: last ? ('我在公告栏看到：' + last) : '我去公告栏看了一眼，上面还没有新通知',
+          kind: 'obs',
+        });
         trimMemory(s);
+        if (last) obeyNotice([s], last, now); // 看懂了就去做
       }
       if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
-      // 「去找某人」：定期朝那个人**当前位置**重指（两边都在动 → 会在中间碰头）；
+      // 「去找某人 / 去找玩家」：定期朝目标**当前位置**重指（两边都在动 → 会在中间碰头）；
       //   ⚠ 到人跟前必须**站住**：以前只是清掉意图，人还按着对方**旧坐标**继续走 ⇒ 两人擦肩而过、
       //   越走越远，永远开不了口。现在到 5m 内就停住等闲聊系统接手。
-      if (!s.quest && s.intent && s.intent.goalType === 'person' && s.intent.seekId) {
-        const t = students.find((x) => x.id === s.intent.seekId);
+      if (!s.quest && s.intent && s.intent.goalType === 'person' && (s.intent.seekId || s.intent.seekPlayer)) {
+        let tp = null;
+        if (s.intent.seekPlayer) { const p = nearestPlayer(s); if (p) tp = { x: Number(p.x), z: Number(p.z) }; }
+        else { const t = students.find((x) => x.id === s.intent.seekId); if (t) tp = { x: Number(t.x), z: Number(t.z) }; }
         const tooLong = now - Number(s.intent.since || 0) > PERSON_SEEK_TIMEOUT_MS;
-        const d = t ? Math.hypot(Number(t.x) - Number(s.x), Number(t.z) - Number(s.z)) : Infinity;
+        const d = tp ? Math.hypot(tp.x - Number(s.x), tp.z - Number(s.z)) : Infinity;
         if (d < CHAT_RANGE) {
           s.intent = null;
           s.tx = Number(s.x); s.tz = Number(s.z); s.wx = s.tx; s.wz = s.tz; s.path = null; s.pathIdx = 0;
           s.st = 'act';
           s.stayUntil = Math.max(Number(s.stayUntil || 0), now + (CHAT_INTERVAL + 15) * 1000);
           s.actStepAt = Number(s.stayUntil); // 等对方开口的这段时间别乱挪步
-        } else if (!t || tooLong) {
+        } else if (!tp || tooLong) {
           s.intent = null;
           s.decideAt = now; // 找不到人 / 追太久：立刻回日常规划，别在外面永远晃
         } else if (now - Number(s._seekAt || 0) > 2500) {
-          s._seekAt = now; setTarget(s, Number(t.x), Number(t.z));
+          s._seekAt = now; setTarget(s, tp.x, tp.z);
           s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
         }
       }
@@ -1591,10 +1701,11 @@ export function createNpcWorld(opts) {
     // NPC↔NPC 社交：① 已经凑得近 → 直接开聊；② 离得远 → 撮合一对**相向走近**（纯走位、不花 LLM），
     //   走到一起了下一拍就走 ① 开聊。以前只认"已经凑到 5m 内"，而他们各忙各的很少凑近 ⇒ 几乎从不说话。
     if (!chatBusy && now - lastChatStart > CHAT_INTERVAL * 1000) {
-      const near = pickPair(now, CHAT_RANGE);
+      // ①"已经凑得近"：允许正在走位的人也停下来聊（人味）；②离得远才要求两人闲着再专门绕过去
+      const near = pickPair(now, CHAT_RANGE, true);
       if (near) { lastChatStart = now; converse(near[0], near[1]); }
       else if (now - lastMeetStart > MEET_INTERVAL * 1000) {
-        const far = pickPair(now, CHAT_SEEK_RANGE);
+        const far = pickPair(now, CHAT_SEEK_RANGE, false);
         if (far) { lastMeetStart = now; startMeet(far[0], far[1], now); }
       }
     }
@@ -1634,7 +1745,35 @@ export function createNpcWorld(opts) {
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
   function setBoard(list) {
-    boardPosts = Array.isArray(list) ? list.map((x) => String(x).slice(0, 120)).filter(Boolean).slice(-6) : [];
+    const next = Array.isArray(list) ? list.map((x) => String(x).slice(0, 120)).filter(Boolean).slice(-6) : [];
+    const prevLast = boardPosts.length ? boardPosts[boardPosts.length - 1] : '';
+    const nextLast = next.length ? next[next.length - 1] : '';
+    boardPosts = next;
+    // 新贴的公告 → 让通知**传开**（轮流一个个知道 → 各自照做）。
+    // 走的是广播队列而不是立刻"全班一窝蜂"，既不刷爆 GLM，也不会把已经排好的计划整块冲掉。
+    if (nextLast && nextLast !== prevLast) announceQueue.push({ text: '公告栏新贴了通知：' + nextLast, from: '公告栏' });
+  }
+  // 通知"照做"：文本里提到去哪，就把这几个闲着的人真的派过去（最多 OBEY_MAX 个）。
+  // ⚠ 只把通知塞进 prompt 是"知道"，派过去才算"听"（用户实测："AI 不听公告的"）。
+  function obeyNotice(cands, text, now) {
+    const zt = noticeZoneType(text);
+    if (!zt) return 0;
+    const zone = pickOne(zonesOfType(zt));
+    if (!zone) return 0;
+    const label = (ZONE_TYPES.find((x) => x.id === zt) || {}).label || zt;
+    let n = 0;
+    for (const s of cands) {
+      if (n >= OBEY_MAX) break;
+      if (!s || s.quest || s._chatting) continue;
+      if (now - Number(s._obeyAt || 0) < OBEY_CD) continue; // 同一个学生别被通知连着牵着走
+      s._obeyAt = now;
+      goZone(s, now, zone); // 真的走过去（走位/绕障/碰撞还是本地那套）
+      s.intent = { goalType: zt, goalText: '照通知去' + label, activity: '去看看通知说的事', plan: '', since: now, notice: true };
+      s.mem.push({ t: now, text: '学校通知「' + String(text).slice(0, 40) + '」，我这就去' + label, kind: 'notice' });
+      trimMemory(s);
+      n++;
+    }
+    return n;
   }
   let announceQueue = []; // 待下发的广播
   let announceIdx = 0;    // 轮流游标：下一个该"听到"广播的学生
@@ -1652,6 +1791,7 @@ export function createNpcWorld(opts) {
     const a = announceQueue[0];
     s.mem.push({ t: now, text: '全校广播：「' + a.text + '」', kind: 'announce' });
     trimMemory(s);
+    obeyNotice([s], a.text, now); // 听到了就**照做**（通知说了去哪就真去）
     if (announceIdx % students.length === 0) announceQueue.shift(); // 一轮走完才轮到下一条
   }
 
@@ -1712,5 +1852,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, setHeights, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

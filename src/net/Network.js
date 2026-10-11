@@ -352,16 +352,21 @@ export class Network {
   }
 
   // 跟学生 NPC 说话：服务端带人设/记忆调 GLM，回话走 npc_reply（旁人也能听见 npc_say 广播）
-  // 上报学生 NPC 的**脚底高度**：服务端据此判断"人是否站在台面/楼顶之上"，
-  // 从而不对这类人做二维寻路与脱困推出（2D 障碍表分不清"站楼顶"和"困在楼里"）。
-  sendNpcHeights(list) {
+  // 上报学生 NPC 的**真实状态**（脚底高度 + 实际水平位置 + 是否卡住）。
+  // 服务端靠它：①判断"人是否站在台面/楼顶之上"（2D 障碍表分不清"站楼顶"和"困在楼里"）；
+  //   ②用客户端的真实坐标校正服务端幽灵位置（客户端才是真跑物理的那一端）；③收到 stuck 就重算路径。
+  sendNpcState(list) {
     if (!Array.isArray(list) || !list.length) return;
     const out = [];
     for (const x of list.slice(0, 32)) {
       if (!x || !x.id) continue;
-      out.push({ id: String(x.id).slice(0, 24), y: Number(x.y) || 0 });
+      out.push({
+        id: String(x.id).slice(0, 24),
+        x: Number(x.x) || 0, y: Number(x.y) || 0, z: Number(x.z) || 0,
+        stuck: x.stuck ? 1 : 0,
+      });
     }
-    if (out.length) this.send({ t: 'npc_h', list: out });
+    if (out.length) this.send({ t: 'npc_state', list: out });
   }
 
   sendStudentTalk(id, text) {

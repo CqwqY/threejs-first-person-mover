@@ -24,6 +24,7 @@ function freshDir(name) {
 function writeScene(dir) {
   fs.writeFileSync(path.join(dir, 'editor-scene.json'), JSON.stringify({ scenery: [], placed: [] }));
 }
+function writeZonesCustom(dir, list) { fs.writeFileSync(path.join(dir, 'zones.json'), JSON.stringify(list)); }
 // 放一栋带真实占地的楼（服务端绕障用 fw/fd；rotY 是**弧度**，与 EditorApp 的写法一致）
 function writeSceneWithBuilding(dir, x, z, w, d) {
   fs.writeFileSync(path.join(dir, 'editor-scene.json'), JSON.stringify({
@@ -435,7 +436,7 @@ console.log('[12] 站在碰撞体上方：不做二维寻路/脱困（改由客�
   await sleep(120);
   const ground = w.stateOf('s1');
   // 客户端回报"人在台面/楼顶之上"（脚底高度 3m）→ 重新指目标
-  w.setHeights([{ id: 's1', y: 3 }]);
+  w.applyClientState([{ id: 's1', y: 3 }]);
   w.debugStartQuest('s1', 's2', '再问一次', 'u1');
   await sleep(120);
   const up0 = w.stateOf('s1');
@@ -475,6 +476,102 @@ console.log('[13] "让他找他自己" → 就地回答，不建任务、不改�
   ok(says.some((x) => /我就是/.test(String(x.say))), '就地回答"我就是X"（不出门）', JSON.stringify(says));
   ok(st && st.path === 0, '没有触发寻路（path=0）', 'path=' + (st && st.path));
   ok(st && st.intent === null, '没被对话里的 goalType 改道（有 task 时走位归任务管）', JSON.stringify(st && st.intent));
+}
+
+console.log('[14] plan 的 prompt：公告栏"始终存在" + 玩家在哪（人话）+ 同学名册');
+{
+  const dir = freshDir('ctx');
+  writeScene(dir);
+  const blist = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  for (const s of blist) { s.planAt = 0; s.decideAt = 0; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  writeZones(dir);
+  let cap = null;
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => { if (input.kind === 'plan') { cap = input.student; return null; } return { say: '', think: '', mem: '' }; },
+  });
+  w.setPlayerPositions([{ id: 'u1', x: 60, z: 0 }]);
+  await sleep(400);
+  w.dispose();
+  ok(cap && /公告栏/.test(String(cap.boardLine || '')), '**没有公告**也要告诉它"学校有公告栏"', cap && String(cap.boardLine).slice(0, 70));
+  ok(cap && String(cap.player || '') !== '', '告诉它玩家在哪（人话，不是坐标）', cap && cap.player);
+  ok(cap && /(\d+\s*m|就在|方向)/.test(String(cap.player || '')), '玩家位置带距离/方位', cap && cap.player);
+  // ⚠ cap 会被同一拍里的最后一个学生覆盖 ⇒ 断言只能查"不含**它自己**"，不能写死 '学生1号'
+  ok(cap && Array.isArray(cap.mates) && cap.mates.length === 7 && cap.mates.indexOf(cap.name) < 0,
+    '给出 7 个同学的名字（不含自己）——想找人才填得出有效人名', cap && JSON.stringify(cap.mates));
+}
+
+console.log('[15] 听公告：广播提到操场 → 学生真的往操场走（不是只记一条）');
+{
+  const dir = freshDir('obey');
+  writeScene(dir);
+  writeZonesCustom(dir, [{ id: 'zp', name: '操场', type: 'playground', minX: 40, maxX: 60, minZ: -10, maxZ: 10 }]);
+  const blist = questStudents([[300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0], [440, 0]]);
+  for (const s of blist) { s.planAt = 1e15; s.decideAt = 1e15; s.st = 'idle'; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => ({ say: '', think: '', mem: '' }) });
+  w.setPlayerPositions([]);
+  await sleep(60);
+  w.announce('注意，操场集合');
+  await sleep(4600); // ANNOUNCE_GAP_MS=4000 → 至少一个人"听到"
+  let obey = 0, inZone = 0, mem = 0;
+  for (const sid of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']) {
+    const st = w.stateOf(sid);
+    if (!st) continue;
+    if (st.intent && st.intent.goalType === 'playground') { obey++; if (st.tx >= 40 && st.tx <= 60) inZone++; }
+    if (st.mem.some((m) => /学校通知/.test(String(m.text)))) mem++;
+  }
+  w.dispose();
+  ok(obey >= 1, '听到通知的学生把目标改成"操场"（真的照做，不只是记一条）', 'obey=' + obey);
+  ok(inZone >= 1, '目标点落在操场区域内', 'inZone=' + inZone);
+  ok(mem >= 1, '而且写了一条"学校通知…我这就去"的记忆', 'mem=' + mem);
+}
+
+console.log('[16] 客户端回报"卡住 + 真实坐标" → 服务端采纳坐标并重算路径');
+{
+  const dir = freshDir('stuck');
+  writeSceneWithBuilding(dir, 10, 0, 8, 6);
+  const pos = [[0, 0], [20, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0]];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(questStudents(pos), null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => ({ say: '', think: '', mem: '' }) });
+  w.setPlayerPositions([{ id: 'u1', x: 0, z: 0 }]);
+  await sleep(60);
+  w.debugStartQuest('s1', 's2', '问事', 'u1');
+  await sleep(120);
+  const before = w.stateOf('s1');
+  w.applyClientState([{ id: 's1', x: 1.5, z: 0.2, y: 0, stuck: 1 }]);
+  const after = w.stateOf('s1');
+  w.dispose();
+  ok(before && before.path > 0, '地面 + 楼挡直线 → 生成了绕行路点（对照）', 'path=' + (before && before.path));
+  ok(after && Math.abs(after.x - 1.5) < 0.01 && Math.abs(after.z - 0.2) < 0.01,
+    '采纳客户端回报的真实坐标（服务端幽灵对齐现实 → 判距/绕障才准）', after && (after.x + ',' + after.z));
+}
+
+console.log('[17] 想去找玩家（plan.seek="玩家"）→ 真的朝玩家走');
+{
+  const dir = freshDir('seekplayer');
+  writeScene(dir);
+  const blist = questStudents([[0, 0], [300, 0], [320, 0], [340, 0], [360, 0], [380, 0], [400, 0], [420, 0]]);
+  for (const s of blist) { s.planAt = 0; s.decideAt = 0; }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => (input.kind === 'plan'
+      ? { goalType: 'rest', goal: '去找玩家说说话', activity: '', plan: '', durationSec: 60, thought: '', seek: '玩家' }
+      : { say: '', think: '', mem: '' }),
+  });
+  w.setPlayerPositions([{ id: 'u1', x: 18, z: 0 }]);
+  await sleep(500);
+  const st = w.stateOf('s1');
+  const x0 = st ? st.x : 0;
+  await sleep(800);
+  const st2 = w.stateOf('s1');
+  w.dispose();
+  ok(st && st.intent && st.intent.seekPlayer === true, 'plan 的 seek="玩家" 落地成"去找玩家"', st && JSON.stringify(st.intent));
+  ok(st2 && st2.x > x0 + 0.1, '真的朝玩家（x=18）那边走', 'x ' + x0 + ' → ' + (st2 && st2.x));
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
