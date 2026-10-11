@@ -125,6 +125,17 @@ function clampInt(v, lo, hi, d) {
   if (!Number.isFinite(n)) return d;
   return Math.max(lo, Math.min(hi, n));
 }
+// 心情词 → 三维目标（valence 愉快 / energy 精力 / focus 专注）。模型只会给词，数值由这张表落地。
+const MOOD_TABLE = {
+  '开心': { v: 0.85, e: 0.65, f: 0.55 },
+  '兴奋': { v: 0.9, e: 0.9, f: 0.6 },
+  '平静': { v: 0.6, e: 0.5, f: 0.55 },
+  '好奇': { v: 0.65, e: 0.6, f: 0.7 },
+  '紧张': { v: 0.4, e: 0.55, f: 0.7 },
+  '低落': { v: 0.2, e: 0.35, f: 0.4 },
+  '烦躁': { v: 0.25, e: 0.5, f: 0.35 },
+  '疲惫': { v: 0.4, e: 0.15, f: 0.35 },
+};
 // 把 LLM 给的 goalType 归一化到已知区域类型 / wander / rest；认不出就当 wander（随便走走），绝不静默卡死
 function resolveGoalType(g) {
   const x = String(g || '').trim().toLowerCase();
@@ -457,6 +468,9 @@ export function createNpcWorld(opts) {
           intent: null,  // System2 规划出的意图：{goalType,goalText,activity,plan,since}
           aiAt: 0,
           needs: (old && old.needs) || { hunger: rand(0, 0.5), fun: rand(0, 0.5), study: rand(0, 0.5), fatigue: rand(0, 0.3), social: rand(0, 0.5), bladder: rand(0, 0.3) },
+          // 心情（会被对话改）+ 关系（对某人/某玩家的好感）——「像真人」的两个内在状态
+          mood: (old && old.mood) || { valence: rand(0.4, 0.6), energy: rand(0.5, 0.7), focus: rand(0.4, 0.6) },
+          rel: (old && old.rel && typeof old.rel === 'object') ? old.rel : {},
           mem: Array.isArray(old && old.mem) ? old.mem : [],
           think: Array.isArray(old && old.think) ? old.think : [],
         };
@@ -466,6 +480,8 @@ export function createNpcWorld(opts) {
     // 补齐后加的字段（避免老存档缺字段导致 undefined 参与运算 → NaN 静默失效）
     for (const s of list) {
       if (!s.needs || typeof s.needs !== 'object') { s.needs = { hunger: 0.3, fun: 0.3, study: 0.3, fatigue: 0.2, social: 0.3, bladder: 0.2 }; dirty = true; }
+      if (!s.mood || typeof s.mood !== 'object') { s.mood = { valence: 0.5, energy: 0.6, focus: 0.5 }; dirty = true; }
+      if (!s.rel || typeof s.rel !== 'object') { s.rel = {}; dirty = true; }
       if (!Array.isArray(s.mem)) { s.mem = []; dirty = true; }
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
@@ -589,6 +605,15 @@ export function createNpcWorld(opts) {
     if (policyReady) { applyPolicy(s, now); return; }
     const h = hourNow();
     const seg = scheduleType(h);
+    // 心情偏置：心情差 / 没力气又不上课 → 更想回去歇；心情好又有精力 → 更想去活动（"对话改变它"落到行为）
+    const mood = s.mood || { valence: 0.5, energy: 0.6 };
+    if (!(seg && seg.type === 'classroom')) {
+      if (Number(mood.energy) < 0.35 && Math.random() < 0.5) { const d = pickOne(zonesOfType('dorm')); if (d) { goZone(s, now, d); return; } }
+      if (Number(mood.valence) > 0.72 && Number(mood.energy) > 0.68 && Math.random() < 0.35) {
+        const p = pickOne(zonesOfType('playground')) || pickOne(zonesOfType('fountain'));
+        if (p) { goZone(s, now, p); return; }
+      }
+    }
     let target = null;
     if (seg && Math.random() < 0.7) target = pickOne(zonesOfType(seg.type));
     if (!target) target = pickOne(zonesOfType(needType(s)));
@@ -718,7 +743,7 @@ export function createNpcWorld(opts) {
         const h = hourNow();
         const seg = scheduleType(h);
         const out = await askStudent({
-          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs },
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s) },
           memory: pickMemory(s, null),
           kind: 'plan',
           hour: h,
@@ -857,6 +882,13 @@ export function createNpcWorld(opts) {
         if (k in n) n[k] = clamp01(n[k] - dt * 0.02 * w);
       }
     }
+    // 心情缓慢回归基线（没有新刺激就淡下去；对话/事件把它拉高或拉低）
+    if (s.mood) {
+      const k = dt * 0.01;
+      s.mood.valence = clamp01(Number(s.mood.valence) + (0.5 - Number(s.mood.valence)) * k);
+      s.mood.energy = clamp01(Number(s.mood.energy) + (0.5 - Number(s.mood.energy)) * k);
+      s.mood.focus = clamp01(Number(s.mood.focus) + (0.5 - Number(s.mood.focus)) * k);
+    }
   }
 
   // ---------- AI 触发 ----------
@@ -886,6 +918,50 @@ export function createNpcWorld(opts) {
     scored.sort((a, b) => (b.hit - a.hit) || (b.i - a.i));
     return scored.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
   }
+  // 对话"影响"落地：改心情、改对说话人的关系、必要时**直接改道**（这是"对话能改变它"的核心）。
+  function applyTalkEffect(s, out, who) {
+    if (!out) return;
+    const mood = MOOD_TABLE[String(out.mood || '').replace(/\s/g, '')];
+    if (mood) {
+      const old = s.mood || { valence: 0.5, energy: 0.6, focus: 0.5 };
+      s.mood = {
+        valence: clamp01(Number(old.valence) * 0.5 + mood.v * 0.5),
+        energy: clamp01(Number(old.energy) * 0.5 + mood.e * 0.5),
+        focus: clamp01(Number(old.focus) * 0.5 + mood.f * 0.5),
+      };
+    }
+    const aff = Number(out.affinity);
+    if (Number.isFinite(aff) && who) {
+      const cur = (s.rel[who] && typeof s.rel[who] === 'object') ? s.rel[who] : { trust: 0 };
+      cur.trust = Math.max(-1, Math.min(1, (Number(cur.trust) || 0) + aff * 0.6));
+      cur.last = Date.now();
+      if (out.mem) cur.note = clampText(out.mem, LEN_MEM);
+      s.rel[who] = cur;
+    }
+    // 因对话改道：只接受合法目标（已知区域 / wander / rest），其余忽略（不臆造去处）
+    const raw = String(out.goalType || '').trim().toLowerCase();
+    const gt = (raw === 'wander' || raw === 'rest') ? raw : (ZONE_TYPE_IDS.has(raw) ? raw : null);
+    if (!gt) return;
+    const note = '（受对话影响）' + clampText(out.mem || out.say || '', 40);
+    if (gt === 'rest') {
+      s.st = 'act'; s.stayUntil = Date.now() + 30000;
+      s.intent = { goalType: 'rest', goalText: note, activity: '', plan: '', since: Date.now() };
+      return;
+    }
+    if (gt === 'wander') { wander(s, Date.now()); }
+    else { const z = pickOne(zonesOfType(gt)); if (!z) return; goZone(s, Date.now(), z); }
+    s.intent = { goalType: gt, goalText: note, activity: '', plan: '', since: Date.now() };
+  }
+  // 给 LLM 的关系摘要：只挑好感/反感最强的几条（别把整张关系表塞进 prompt）
+  function topRel(s) {
+    const r = s.rel || {};
+    const items = Object.entries(r).map(([k, v]) => ({ k, t: Number(v && v.trust) || 0 }))
+      .filter((x) => Math.abs(x.t) > 0.05).sort((a, b) => Math.abs(b.t) - Math.abs(a.t)).slice(0, 3);
+    const out = {};
+    for (const it of items) out[it.k] = Math.round(it.t * 100) / 100;
+    return out;
+  }
+
   // 产出 {say, think, mem} 后清洗入库；think 广播给附近玩家看，say 走对话或气泡。
   // ⚠ 冷却：同一个学生 AI_COOLDOWN 秒内只调一次（免费档有限流，8 个学生不能一起刷）。
   let aiBusy = new Set();
@@ -902,6 +978,8 @@ export function createNpcWorld(opts) {
           place: placeOf(s), // 按**坐标**判定，不是按"打算去哪"——以前那样会让他在教室说自己在图书馆
           st: s.st,
           needs: s.needs,
+          mood: s.mood,      // 心情（被对话改）→ 这次说话/行动带着情绪
+          rel: topRel(s),    // 关系摘要（被对话改）→ 记得跟谁亲、跟谁不对付
         },
         // ⚠ 只给**这个学生本人**的记忆，而且是挑出来的几条（不是整串）。
         //   混进别人的记忆 = 几个人的经历串台；一次给太多 = 模型自己搅成一团。
@@ -922,9 +1000,16 @@ export function createNpcWorld(opts) {
         s.mem.push({ t: now, text: mem });
         await trimMemory(s);
       }
+      // 对话的"影响"：改心情 / 改关系 / 必要时改道（只对 talk/chat 生效）
+      if (kind === 'talk' || kind === 'chat') {
+        try { applyTalkEffect(s, out, extra && extra.who); }
+        catch (e) { console.warn('[npc] 对话影响应用失败 ' + s.id + '：' + ((e && e.message) || e)); }
+      }
       saveStudents(students);
       return { say, think };
     } catch (e) {
+      // ⚠ 绝不静默吞异常：AI 挂了必须能在 relay 日志里看见，否则只表现为"他没理我/没气泡"
+      console.warn('[npc] AI 调用失败 ' + s.id + '（' + kind + '）：' + ((e && e.message) || e));
       return null;
     } finally {
       aiBusy.delete(s.id);
@@ -1051,13 +1136,20 @@ export function createNpcWorld(opts) {
   // 玩家搭话：必触发 AI（不受冷却限制），返回 {say, think} 并广播气泡。
   // ⚠ 两端都不再把 think 发给客户端：心理活动是**内部**的（驱动记忆与行为），玩家不该在对话栏看到它。
   // ⚠ except：发起者自己已经收到 npc_reply，广播要跳过他，否则同一句话出现两遍。
-  async function talk(studentId, text, playerName, except) {
+  async function talk(studentId, text, playerName, except, whoId) {
     const s = students.find((x) => x.id === String(studentId));
     if (!s) return null;
-    const out = await triggerAI(s, 'talk', { text: String(text || '').slice(0, 200), name: playerName || '同学' });
+    // whoId：说话人的稳定标识（如 'p:<玩家id>'）→ 关系按人记，换个玩家是另一段交情
+    const out = await triggerAI(s, 'talk', { text: String(text || '').slice(0, 200), name: playerName || '同学', who: whoId ? String(whoId).slice(0, 40) : '' });
     if (!out) return { say: '', think: '' };
     broadcast({ t: 'npc_say', id: s.id, say: out.say }, except);
     return out;
+  }
+  // 调试/探针用：读某个学生的内在状态（心情/关系/意图）
+  function stateOf(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return null;
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
   }
 
   // 给新连上的客户端一份完整名单（名字/班级/初始坐标 + 初始目标点）
@@ -1081,5 +1173,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

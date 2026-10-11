@@ -1458,7 +1458,8 @@ wss.on('connection', (ws, req) => {
       if (!sid || !text) return;
       const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username)) || (states.get(id) && states.get(id).nick) || '同学';
       // 同一个学生同时只处理一句（AI 有冷却，并发多了会撞免费档限流）
-      npcWorld.talk(sid, text, String(nick).slice(0, 16), ws)
+      // 末尾传 'p:<玩家id>'：让 NPC 的关系按**具体玩家**记（换个人是另一段交情）
+      npcWorld.talk(sid, text, String(nick).slice(0, 16), ws, 'p:' + id)
         .then((out) => {
           // ⚠ 只回发起者（其他人由 npcWorld 里的 npc_say 广播拿到），否则发起者会看到两遍
           if (!out || !out.say) return;

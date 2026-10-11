@@ -4606,6 +4606,10 @@ export class Game {
     if (this.aiChat.isOpen() && msg.id === this._talkId) {
       if (msg.say) this.aiChat.addMsg('npc', String(msg.say));
     }
+    // ⚠ 说话者自己**被排除在 npc_say 广播之外**（只收 npc_reply）⇒ 必须在这里补一次气泡，
+    //   否则「自己跟学生说话时，学生头上不冒泡」（旁人能看见、自己看不见，很怪）。
+    //   此刻 _awaitReplyId 还没清空，onSpeak→_onStudentSpeak 会按它跳过，不会把这句话又塞进对话栏。
+    if (this.students && msg.say) this.students.onSay({ id: msg.id, say: msg.say });
     if (this._awaitReplyId === String(msg.id || '')) this._awaitReplyId = '';
   }
 
