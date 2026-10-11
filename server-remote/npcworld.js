@@ -85,6 +85,14 @@ const CHAT_RANGE = 5.0;        // 多近算"凑到一起聊天"（米）
 const CHAT_COOLDOWN = 90;      // 同一个学生两次参与闲聊的最小间隔（秒）
 const CHAT_INTERVAL = 45;      // 全局两次"新开闲聊"的最小间隔（秒）——控 GLM 调用量
 const CHAT_LINE_GAP_MS = 1600; // 台词之间的间隔（气泡一句一句冒，像真在对话）
+
+// ---------- P2：感知（廉价，不调 LLM）----------
+// NPC 会"注意到"身边经过的人/玩家 → 写一条**短观察**进 s.saw（独立小缓冲，不进 mem）：
+// 不进 mem 是为了不让观察挤掉重要记忆、也不触发记忆压缩（那是要花 LLM 的）。
+const PERCEIVE_RANGE = 10;      // 感知半径（米）
+const PERCEIVE_CD = 15000;      // 同一个 NPC 两次"观察"的最小间隔（毫秒）——控开销
+const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注意到"
+const SAW_MAX = 4;              // 观察缓冲上限
 const CHAT_TEMPLATES = [       // GLM 失败/超预算时的兜底寒暄（零成本，别让"人"僵住）
   ['你今天也在这儿啊？', '嗯，随便转转。'],
   ['刚才那节好困啊。', '可不是嘛，我差点睡着。'],
@@ -309,7 +317,7 @@ export function createNpcWorld(opts) {
   // 为什么要它：局部转向（5 方向扇区）撞到建筑**正面**时转不出 90° 去贴墙滑行 ⇒ 卡死（局部最小）。
   // 做法：由障碍表生成规则网格（判据与 blockedBy 同源），A* 出折线并拉直；服务端沿折线推进，
   // 把**当前路点**作为 wx/wz 下发（客户端照它走位），最终目标仍是 tx/tz（到达判定不变）。
-  const NAV_CELL = 2.0;     // 格边长（米）：太细则 A* 慢，太粗则贴不进楼间通道
+  const NAV_CELL = 1.5;     // 格边长（米）：太细则 A* 慢，太粗则贴不进楼间通道、路线也发飘
   const NAV_MARGIN = 12;    // 包围盒外扩（米）
   const NAV_MAX_COLS = 512; // 单边格子上限：超过就不建（防内存爆炸）
   let nav = null;           // { minX, minZ, cols, rows, blocked: Uint8Array }
@@ -425,7 +433,8 @@ export function createNpcWorld(opts) {
   // 设目标 + 立刻算一条路径；wx/wz = 当前路点（没路径就直奔目标）
   function setTarget(s, x, z) {
     s.tx = x; s.tz = z; s.pathTries = 0;
-    s.path = nav ? findPath(Number(s.x), Number(s.z), x, z) : null;
+    // ⚡ 直线可达就不寻路：省掉绝大多数 A*（近距离 wander、无遮挡的目标都不用建/跑网格）。
+    s.path = (nav && !lineFree(Number(s.x), Number(s.z), x, z)) ? findPath(Number(s.x), Number(s.z), x, z) : null;
     s.pathIdx = 0;
     if (s.path && s.path.length) { s.wx = s.path[0].x; s.wz = s.path[0].z; }
     else { s.wx = x; s.wz = z; }
@@ -487,6 +496,8 @@ export function createNpcWorld(opts) {
           rel: (old && old.rel && typeof old.rel === 'object') ? old.rel : {},
           mem: Array.isArray(old && old.mem) ? old.mem : [],
           think: Array.isArray(old && old.think) ? old.think : [],
+          saw: Array.isArray(old && old.saw) ? old.saw : [], // 感知到的小事（独立缓冲，不进 mem、不触发压缩）
+          perceiveAt: 0,                                     // 上次感知时刻（限流；时间型字段，必须有初值）
         };
       });
       dirty = true;
@@ -498,6 +509,8 @@ export function createNpcWorld(opts) {
       if (!s.rel || typeof s.rel !== 'object') { s.rel = {}; dirty = true; }
       if (!Array.isArray(s.mem)) { s.mem = []; dirty = true; }
       if (!Array.isArray(s.think)) { s.think = []; dirty = true; }
+      if (!Array.isArray(s.saw)) { s.saw = []; dirty = true; }
+      if (!Number.isFinite(Number(s.perceiveAt))) { s.perceiveAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
       if (!Number.isFinite(Number(s.decideAt))) { s.decideAt = 0; dirty = true; }
@@ -759,7 +772,7 @@ export function createNpcWorld(opts) {
         const h = hourNow();
         const seg = scheduleType(h);
         const out = await askStudent({
-          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s) },
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), saw: s.saw },
           memory: pickMemory(s, null),
           kind: 'plan',
           hour: h,
@@ -826,7 +839,10 @@ export function createNpcWorld(opts) {
     // 取当前路点；到路点就推进（并用视线拉直，跳过直线可达的更远点）
     let wx = Number(s.wx), wz = Number(s.wz);
     if (!Number.isFinite(wx) || !Number.isFinite(wz)) { wx = Number(s.tx); wz = Number(s.tz); }
-    if (Math.hypot(wx - Number(s.x), wz - Number(s.z)) < Math.max(0.6, stepLen * 1.5)) {
+    const wdist0 = Math.hypot(wx - Number(s.x), wz - Number(s.z));
+    // 路点已在身后（到最终目标比到该路点更近）⇒ 也当作已过，跳过，避免"回头去够"旧路点
+    const behind = fdist < Math.hypot(Number(s.tx) - wx, Number(s.tz) - wz) - 0.3;
+    if (wdist0 < Math.max(0.6, stepLen * 1.5) || behind) {
       if (Array.isArray(s.path) && Number(s.pathIdx) < s.path.length - 1) {
         let k = Number(s.pathIdx) + 1;
         while (k + 1 < s.path.length && lineFree(Number(s.x), Number(s.z), s.path[k + 1].x, s.path[k + 1].z)) k++;
@@ -905,6 +921,32 @@ export function createNpcWorld(opts) {
       s.mood.energy = clamp01(Number(s.mood.energy) + (0.5 - Number(s.mood.energy)) * k);
       s.mood.focus = clamp01(Number(s.mood.focus) + (0.5 - Number(s.mood.focus)) * k);
     }
+  }
+
+  // P2 感知：注意身边经过的人/玩家 → 写一条短观察（进 s.saw 独立缓冲，不进 mem、不调 LLM）
+  function perceive(s, now) {
+    if (now - Number(s.perceiveAt || 0) < PERCEIVE_CD) return;
+    let best = null, bd = PERCEIVE_RANGE * PERCEIVE_RANGE, isPlayer = false;
+    for (const o of students) {
+      if (o === s) continue;
+      const dx = Number(o.x) - Number(s.x), dz = Number(o.z) - Number(s.z);
+      const d = dx * dx + dz * dz;
+      if (d < bd) { bd = d; best = o; isPlayer = false; }
+    }
+    for (const p of playerPositions) {
+      const dx = Number(p.x) - Number(s.x), dz = Number(p.z) - Number(s.z);
+      const d = dx * dx + dz * dz;
+      if (d < bd) { bd = d; best = p; isPlayer = true; }
+    }
+    if (!best) return;
+    const key = isPlayer ? 'player' : best.id;
+    if (!s._seenAt) s._seenAt = {};
+    if (now - Number(s._seenAt[key] || 0) < PERCEIVE_REPEAT_MS) return; // 刚注意到过，别重复记
+    s.perceiveAt = now;
+    s._seenAt[key] = now;
+    const text = isPlayer ? '我看见玩家从我附近过去了' : ('我看见' + String(best.name || '同学') + '也在这一带');
+    s.saw.push({ t: now, text });
+    if (s.saw.length > SAW_MAX) s.saw.splice(0, s.saw.length - SAW_MAX);
   }
 
   // ---------- AI 触发 ----------
@@ -1086,6 +1128,7 @@ export function createNpcWorld(opts) {
           needs: s.needs,
           mood: s.mood,      // 心情（被对话改）→ 这次说话/行动带着情绪
           rel: topRel(s),    // 关系摘要（被对话改）→ 记得跟谁亲、跟谁不对付
+          saw: s.saw,        // 最近注意到的小事（感知）→ 说话时能提到"我刚才看见…"
         },
         // ⚠ 只给**这个学生本人**的记忆，而且是挑出来的几条（不是整串）。
         //   混进别人的记忆 = 几个人的经历串台；一次给太多 = 模型自己搅成一团。
@@ -1183,6 +1226,7 @@ export function createNpcWorld(opts) {
     }
     for (const s of students) {
       updateNeeds(s, dt, now);
+      perceive(s, now); // P2：看身边的人（廉价，限流）
       if (s.st === 'act') {
         if (now >= Number(s.stayUntil || 0)) { s.st = 'idle'; }
       } else if (s.st === 'walk') {
@@ -1261,7 +1305,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, mem: (s.mem || []).slice(-3), st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, mem: (s.mem || []).slice(-3), saw: (s.saw || []).slice(-3), st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
   }
   // 调试/探针用：手动撮合一段闲聊
   function forceChat(aId, bId) {

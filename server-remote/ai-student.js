@@ -118,11 +118,15 @@ export async function askStudent(input) {
     '【你的人设】' + String(st.persona || '一名普通学生'),
     '【班级】' + String(st.cls || '未知班级') + '　【姓名】' + String(st.name || '同学') + '（这是你的名字，别人叫你时才用）',
     '【此刻在哪】' + String(st.place || '校园里') + '　【状态】' + (String(st.st || 'idle') === 'walk' ? '正在走路' : '停下来做自己的事'),
-    '【你自己的记忆】\n' + memText,
   ];
-  // 心情与关系（有才拼，没有不硬塞）——让"对话改变它"能反映到下一次说话里
-  if (st.mood && typeof st.mood === 'object') userParts.splice(3, 0, '【你现在的心情】' + moodText(st.mood));
-  if (st.rel && typeof st.rel === 'object' && Object.keys(st.rel).length) userParts.splice(4, 0, '【你与别人的关系】' + relText(st.rel));
+  // 心情/关系/刚注意到的事（有才拼，没有不硬塞）——让"状态改变"能反映到下一次说话与行动里
+  if (st.mood && typeof st.mood === 'object') userParts.push('【你现在的心情】' + moodText(st.mood));
+  if (st.rel && typeof st.rel === 'object' && Object.keys(st.rel).length) userParts.push('【你与别人的关系】' + relText(st.rel));
+  if (Array.isArray(st.saw) && st.saw.length) {
+    const saw = st.saw.map((x) => String((x && x.text) || '')).filter(Boolean).join('；');
+    if (saw) userParts.push('【你最近注意到的】' + saw);
+  }
+  userParts.push('【你自己的记忆】\n' + memText);
   if (kind === 'talk') {
     userParts.push('【' + String((input && input.playerName) || '同学') + '对你说】' + String((input && input.playerText) || '').slice(0, 200));
   } else if (kind === 'compress') {

@@ -147,5 +147,31 @@ console.log('[3] NPC↔NPC 闲聊：双方都记账/改心情/改关系，台词
   ok(!!a && a.mood.valence > 0.4, '情绪被聊到（moodA 开心 → valence 升）', a && ('valence=' + a.mood.valence.toFixed(3)));
 }
 
+console.log('[4] 感知：会注意到身边的人（廉价、不进 mem、不触发压缩）');
+{
+  const dir = freshDir('perceive');
+  writeScene(dir);
+  // 8m 间距：在感知半径(10m)内、但在闲聊半径(5m)外 → 只感知不聊；planAt/decideAt 拉远 → 站立不动
+  const list = [];
+  for (let i = 0; i < 8; i++) {
+    list.push({
+      id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+      x: i * 8, z: 0, hx: i * 8, hz: 0, tx: i * 8, tz: 0, wx: i * 8, wz: 0, path: null, pathIdx: 0, pathTries: 0,
+      rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 1e15, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0, perceiveAt: 0,
+      needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+      mood: { valence: 0.5, energy: 0.6, focus: 0.5 }, rel: {}, mem: [], think: [], saw: [],
+    });
+  }
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({ dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35, askStudent: async () => ({ say: '', think: '', mem: '' }) });
+  await sleep(420); // 等首个 tick（TICK_MS=200）
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(st && Array.isArray(st.saw) && st.saw.length > 0, 's1 注意到了身边的人', st && JSON.stringify(st.saw));
+  ok(st && st.saw.some((x) => /也在这|玩家/.test(String(x.text))), '观察文本合理', st && JSON.stringify(st.saw));
+  ok(st && (!st.mem || st.mem.length === 0), '观察**不进 mem**（不挤占记忆、不触发 LLM 压缩）', st && JSON.stringify(st.mem));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

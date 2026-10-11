@@ -525,6 +525,8 @@ export class Game {
       scene: this.scene,
       // 与玩家同一份世界碰撞体（含 trimesh 复杂碰撞）：学生吃它，撞墙/踩坡/上台阶都和玩家一致
       colliders: this.colliders,
+      // ⚠ 与玩家**同一份**场地边界：不给的话 PlayerPhysics 会退回 GROUND_* 旧矩形，学生被旧边界困住
+      boundary: this._combat ? null : this.boundary,
       onSpeak: (info) => this._onStudentSpeak(info),
     });
     // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关对话栏
@@ -7423,6 +7425,8 @@ export class Game {
     const b = this.boundary;
     const active = this._combat ? null : b;
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.bound = active;
+    // 学生也要跟玩家用同一条边界（否则被 PlayerPhysics 的 GROUND_* 旧矩形夹住）
+    if (this.students && this.students.setBoundary) this.students.setBoundary(active);
     this._rebuildBoundaryWalls(active);
   }
 

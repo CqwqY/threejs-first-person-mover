@@ -133,6 +133,9 @@ export function createStudents(opts) {
   const onSpeak = opts.onSpeak || (() => {}); // 气泡事件（Game 用它同步到对话栏）
   // 世界碰撞体（与玩家同一份，含 trimesh 复杂碰撞）：Game 传进来的数组引用原地改写，这里直接复用
   const colliders = opts.colliders || null;
+  // ⚠ 场地边界（空气墙）：必须与玩家**同一份**。PlayerPhysics 在未注入 bound 时会自动夹到
+  //   Config.GROUND_* 那块地面矩形（=「旧边界」）⇒ 学生被旧矩形困住、走不到编辑器新划的边界里。
+  let bound = opts.boundary || null;
 
   const root = new THREE.Group();
   root.name = 'students';
@@ -174,6 +177,7 @@ export function createStudents(opts) {
     s.physics.maxJumps = 0;
     s.physics.jumpMult = 0;
     s.physics.speedMult = STUDENT_SPEED / Config.MOVE_SPEED;
+    s.physics.bound = bound; // 与玩家同一份边界（不是 PlayerPhysics 的 GROUND_* 默认矩形）
     root.add(s.holder);
     byId.set(id, s);
     return s;
@@ -348,8 +352,12 @@ export function createStudents(opts) {
         if (moving) {
           // 朝路点走（路点≈0 时退回最终目标方向），再用 STEER_FAN 选一条不被墙挡的路（trimesh/盒都认）
           let ux = 0, uz = 0;
-          if (dist > 1e-3) { ux = dx / dist; uz = dz / dist; }
+          if (dist > 0.35) { ux = dx / dist; uz = dz / dist; }
+          // 到当前路点了：**保持上一帧的方向继续走**，等服务端下发下一个路点 ——
+          // 不要在这里硬拐向最终目标（那会直接切进墙角、卡住）。
+          else if (s._lastUx || s._lastUz) { ux = s._lastUx; uz = s._lastUz; }
           else if (fdist > 1e-3) { ux = fdx / fdist; uz = fdz / fdist; }
+          if (ux || uz) { s._lastUx = ux; s._lastUz = uz; }
           let nx = ux, nz = uz;
           const probeY = s.pstate.y - STUDENT_HEIGHT * 0.5;
           if (ux || uz) {
@@ -414,6 +422,12 @@ export function createStudents(opts) {
 
   function setVisible(v) { root.visible = !!v; }
 
+  // 场地边界变化（编辑器改了边界 / 进出对战）时，同步给所有学生（含之后新建的）
+  function setBoundary(b) {
+    bound = b || null;
+    for (const s of byId.values()) s.physics.bound = bound;
+  }
+
   function dispose() {
     disposed = true;
     // 逐个摘掉再清容器：先清空会留下「父节点还在、子节点没了」的空窗口（见项目记忆第 8 条）
@@ -426,5 +440,5 @@ export function createStudents(opts) {
     order = [];
   }
 
-  return { setRoster, applyList, onSay, nearest, update, setVisible, dispose, TALK_RANGE, get size() { return byId.size; } };
+  return { setRoster, applyList, onSay, nearest, update, setVisible, setBoundary, dispose, TALK_RANGE, get size() { return byId.size; } };
 }
