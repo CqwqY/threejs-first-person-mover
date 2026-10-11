@@ -102,7 +102,7 @@ function makeBubble() {
   return { spr, cv, tex };
 }
 
-function drawBubble(cv, text, isThink) {
+function drawBubble(cv, text, isThink, name) {
   const g = cv.getContext('2d');
   g.clearRect(0, 0, cv.width, cv.height);
   g.fillStyle = isThink ? 'rgba(40,48,60,0.78)' : 'rgba(255,255,255,0.92)';
@@ -115,18 +115,30 @@ function drawBubble(cv, text, isThink) {
   g.arcTo(8, 8, cv.width - 8, 8, r);
   g.closePath();
   g.fill();
-  g.fillStyle = isThink ? '#c8d4e2' : '#16202e';
-  g.font = '34px "Microsoft YaHei", "PingFang SC", sans-serif';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
+  // ★「谈话状态」：气泡顶上加**说话人的名字**，让玩家一眼看出"这是谁在说"。
+  //   有名字时正文整体下移，名字用小一号的强调色（深蓝），排版不挤。
+  const hasName = !!name;
+  let baseY;
+  if (hasName) {
+    g.fillStyle = isThink ? '#8fb0d4' : '#2b6cb0';
+    g.font = 'bold 30px "Microsoft YaHei", "PingFang SC", sans-serif';
+    g.fillText(String(name).slice(0, 10), cv.width / 2, 30);
+    baseY = 100;
+  } else {
+    baseY = 80;
+  }
+  g.fillStyle = isThink ? '#c8d4e2' : '#16202e';
+  g.font = '34px "Microsoft YaHei", "PingFang SC", sans-serif';
   // 长句折行：超过 12 字一行就切两段（气泡宽度有限，写不下就宁可两行）
   const line1 = text.slice(0, 12);
   const line2 = text.slice(12);
   if (line2) {
-    g.fillText(line1, cv.width / 2, 62);
-    g.fillText(line2.slice(0, 12), cv.width / 2, 104);
+    g.fillText(line1, cv.width / 2, baseY - 18);
+    g.fillText(line2.slice(0, 12), cv.width / 2, baseY + 24);
   } else {
-    g.fillText(line1, cv.width / 2, 80);
+    g.fillText(line1, cv.width / 2, baseY);
   }
 }
 
@@ -302,9 +314,9 @@ export function createStudents(opts) {
     }
   }
 
-  function showBubble(s, text, isThink, now) {
+  function showBubble(s, text, isThink, now, name) {
     if (!s.bubble || !text) return;
-    drawBubble(s.bubble.cv, text, !!isThink);
+    drawBubble(s.bubble.cv, text, !!isThink, name);
     s.bubble.tex.needsUpdate = true;
     s.bubble.spr.visible = true;
     s.bubbleUntil = now + BUBBLE_SEC;
@@ -318,7 +330,9 @@ export function createStudents(opts) {
     const say = String(msg.say || '');
     // ⚠ 心理活动（think）是**内部**的：服务端根本不再下发，这里也绝不显示 ——
     //   它只留在角色档案里，用来驱动记忆和接下来的举止。
-    if (say) showBubble(s, say, false, now);
+    // ★「谈话状态」：气泡上带**说话人名字**（服务端随 npc_say 下发 name；老服务端没有就退回本地名单里的名字）。
+    const name = String(msg.name || s.name || '');
+    if (say) showBubble(s, say, false, now, name);
     onSpeak({ id: s.id, name: s.name, say });
   }
 

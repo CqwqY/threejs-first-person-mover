@@ -145,6 +145,15 @@ const PERCEIVE_RANGE = 12;      // 感知半径（米）
 const PERCEIVE_CD = 10000;      // 同一个 NPC 两次"观察"的最小间隔（毫秒）
 const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注意到"（免得盯着一个人反复记）
 
+// ---------- 「谈话状态」：听得到周围在说什么 ----------
+// ★ 用户需求：NPC 能听到**周围 8m 内**别人（其他 NPC / 玩家）的谈话，并知道**是谁说的**。
+// ⚠ 不是"硬编码一个收听功能"：任何一条**真实说出口的话**（闲聊台词 / 搭话回复 / 打听问答 / 代买请求…）
+//   广播出去时，顺带让附近的人把它**听成一条带来源的记忆**（"（顾星桥说）…"）。
+//   ⇒ 这样 NPC 之后的聊天/行为会自然带出"我听谁说过什么"，知识在校园里真的传开。
+const HEAR_RANGE = 8;           // 听得见的距离（米）：站在旁边就能听见别人在说什么
+const HEAR_CD = 1500;           // 同一对"说者→听者"两次收听的最小间隔（毫秒，防同一句话的连播/抖动重复记）
+const HEAR_IMPORTANCE = 0.4;    // 听来的话记忆重要度（比亲身经历略低，但比纯观察高）
+
 // ---------- P3：委托任务（"去找谁、问什么、回来复命"）----------
 const QUEST_TIMEOUT_MS = 180000; // 任务总超时（3 分钟没办成就放弃并回报，绝不静默卡住）
 const QUEST_REPATH_MS = 2500;    // 目标会动：每隔这么久重新指向目标（开销极小：setTarget 有直线预判）
@@ -430,7 +439,7 @@ export function createNpcWorld(opts) {
       createdAt: now, playerId: String(p.id || ''),
     };
     s._wantAt = now;
-    broadcast({ t: 'npc_say', id: s.id, say: '能帮我买一个「' + it.name + '」带回来吗？（约 ¥' + it.price + '）' });
+    speak(s.id, '能帮我买一个「' + it.name + '」带回来吗？（约 ¥' + it.price + '）');
     s.mem.push({ t: now, text: '我请玩家帮我买一个「' + it.name + '」', kind: 'want' });
     trimMemory(s);
     console.info('[npc] ' + s.name + ' 请玩家代买「' + it.name + '」（¥' + it.price + '，报酬 ' + s.want.reward + '）');
@@ -1230,8 +1239,8 @@ export function createNpcWorld(opts) {
       if (!q) return; // 没问出东西就不硬编（避免"无实物表演"）
       const ts = Date.now();
       // 台词逐句广播（附近的玩家能偷听到"同学之间在打听事"）
-      broadcast({ t: 'npc_say', id: s.id, say: t.name + '，' + q });
-      broadcast({ t: 'npc_say', id: t.id, say: a || '（他说不太清楚）' });
+      speak(s.id, t.name + '，' + q);
+      speak(t.id, a || '（他说不太清楚）');
       // 记忆归属按**实际台词**拼，并带上"听谁说的"（src）
       s.mem.push({ t: ts, text: '我问' + t.name + '「' + q + '」，' + (a ? ('他说：' + a) : '他也没说清'), kind: 'chat', src: t.name, imp: 0.5 });
       t.mem.push({ t: ts, text: s.name + '来问我「' + q + '」，我说：' + (a || '…'), kind: 'chat', src: s.name, imp: 0.45 });
@@ -2058,12 +2067,60 @@ export function createNpcWorld(opts) {
     a.st = 'act'; b.st = 'act';
     a.stayUntil = Math.max(Number(a.stayUntil || 0), t0 + 5000);
     b.stayUntil = Math.max(Number(b.stayUntil || 0), t0 + 5000);
-    broadcast({ t: 'npc_say', id: a.id, say: tpl[0] });
-    const tm = setTimeout(() => broadcast({ t: 'npc_say', id: b.id, say: tpl[1] }), CHAT_LINE_GAP_MS);
+    speak(a.id, tpl[0]);
+    const tm = setTimeout(() => speak(b.id, tpl[1]), CHAT_LINE_GAP_MS);
     if (tm.unref) tm.unref();
     a.mem.push({ t: t0, text: '我和' + b.name + '聊了两句：' + tpl[0], kind: 'chat', from: b.id, src: b.name });
     b.mem.push({ t: t0, text: '我和' + a.name + '聊了两句：' + tpl[1], kind: 'chat', from: a.id, src: a.name });
   }
+  // ---------- 「谈话状态」：一条话被说出来 → 周围 8m 内的人都"听到了" ----------
+  // ★ 统称"谈话状态"：不论说话的是谁（闲聊 / 搭话回复 / 打听 / 代买请求 / 公告口播），
+  //   只要是真说出口的一句，附近的人就把它**听成一条带来源的记忆**（"（顾星桥说）…"）。
+  //   ⇒ NPC 之后的聊天与行为能自然带出"我听谁说过什么"，而不是各说各的、听过就忘。
+  // 核心：**在 (x,z) 处有人说了一句话** → 8m 内的 NPC 各自记一条带来源的记忆。
+  //   说者可能是 NPC（byId 有对应）也可能是**玩家**（playerId 是稳定键，不是学生 id）。
+  function hearAt(x, z, speakerId, speakerName, text, now) {
+    const sx = Number(x), sz = Number(z);
+    if (!Number.isFinite(sx) || !Number.isFinite(sz)) return 0; // 不知道说话人在哪就别乱发（不臆造距离）
+    const say = clampText(String(text || '').replace(/\s+/g, ' ').trim(), 60);
+    if (!say) return 0;
+    const name = String(speakerName || '有人');
+    const t = Number(now) || Date.now();
+    const key = String(speakerId || name);
+    let n = 0;
+    for (const o of students) {
+      // ⚠ 说话人自己不该"听见自己"（NPC 用 id 排除；玩家的键不是学生 id，自然不会被误排）
+      if (!o || o.id === key) continue;
+      const dx = Number(o.x) - sx, dz = Number(o.z) - sz;
+      if (!Number.isFinite(dx) || !Number.isFinite(dz)) continue;
+      if (Math.hypot(dx, dz) > HEAR_RANGE) continue;
+      // 限流：同一对（说者→听者）短时间内不重复记（连播/抖动不该灌多条记忆）
+      o._hearAt = o._hearAt || {};
+      if (t - Number(o._hearAt[key] || 0) < HEAR_CD) continue;
+      o._hearAt[key] = t;
+      o.mem.push({ t, text: clampText('（' + name + '说）' + say, LEN_MEM), kind: 'chat', src: name, from: key, imp: HEAR_IMPORTANCE });
+      trimMemory(o);
+      n++;
+    }
+    return n;
+  }
+  // NPC 说了一句话：用它的服务端 ghost 坐标广播给周围（probe 可预测）
+  function hearLine(speakerId, speakerName, text, now) {
+    const sp = students.find((x) => x.id === String(speakerId));
+    return hearAt(sp && sp.x, sp && sp.z, speakerId, speakerName || (sp && sp.name), text, now);
+  }
+  // 说一句话：广播气泡 + 让附近的人听到（**所有 NPC 发言都走这里**，谈话状态才统一）。
+  //   except：可选的"排除某个客户端"（玩家自己发起的那次，服务端单独回 npc_reply，别重复广播）。
+  //   ⚠ 把"广播"和"被听到"绑在一起，是为了**不可能漏掉任何一句** —— 以后新增说话点只要调它就行。
+  function speak(speakerId, text, except) {
+    const say = String(text || '');
+    if (!say) return;
+    const sp = students.find((x) => x.id === String(speakerId));
+    broadcast({ t: 'npc_say', id: String(speakerId), name: sp ? sp.name : '', say }, except);
+    try { hearLine(speakerId, sp && sp.name, say, Date.now()); }
+    catch (e) { console.warn('[npc] 谈话收听失败 ' + speakerId + '：' + ((e && e.message) || e)); }
+  }
+
   let chatBusy = false; // 同一时刻只跑一段闲聊（控并发 / 额度）
   // 一段完整闲聊：**多轮往返** + 知识分享。
   // ⚠ 为什么拆成循环而不是"一次出一整段脚本"：一次 LLM 出的脚本是**单轮快照**，说完就散；
@@ -2119,8 +2176,10 @@ export function createNpcWorld(opts) {
           if (!say) return;
           transcript.push({ speaker: who.name, who: ln.who === 'b' ? 'b' : 'a', text: say });
           const delay = i * CHAT_LINE_GAP_MS;
-          if (delay === 0) broadcast({ t: 'npc_say', id: who.id, say });
-          else { const tm = setTimeout(() => broadcast({ t: 'npc_say', id: who.id, say }), delay); if (tm.unref) tm.unref(); }
+          // ⚠ 走 speak()：广播气泡 + 让 8m 内的人听见（"谈话状态"）。延迟句用 setTimeout 包一层。
+          const emit = () => speak(who.id, say);
+          if (delay === 0) emit();
+          else { const tm = setTimeout(emit, delay); if (tm.unref) tm.unref(); }
         });
         // 站着聊：把停留时间顺延到这段说完之后（别聊到一半人走了）
         a.st = 'act'; b.st = 'act';
@@ -2210,17 +2269,17 @@ export function createNpcWorld(opts) {
   function startQuest(s, targetName, question, fromId, fromName) {
     const raw = String(targetName || '').trim();
     if (SELF_WORDS.test(raw)) {
-      broadcast({ t: 'npc_say', id: s.id, say: '我就是' + s.name + '呀，你要问什么直接问我就行。' });
+      speak(s.id, '我就是' + s.name + '呀，你要问什么直接问我就行。');
       return;
     }
     const t = resolveStudentByName(raw);
     if (!t) {
-      broadcast({ t: 'npc_say', id: s.id, say: '你说的「' + raw.slice(0, 8) + '」，我这儿对不上人呀。' });
+      speak(s.id, '你说的「' + raw.slice(0, 8) + '」，我这儿对不上人呀。');
       return;
     }
     if (t === s) {
       // 名字解析出来就是它自己（"去找顾星桥"而它就叫顾星桥）——同一个道理：就地回答，别跑。
-      broadcast({ t: 'npc_say', id: s.id, say: '嗨，我就是' + s.name + '呀，你直接问我就行。' });
+      speak(s.id, '嗨，我就是' + s.name + '呀，你直接问我就行。');
       return;
     }
     const now = Date.now();
@@ -2234,14 +2293,14 @@ export function createNpcWorld(opts) {
     // 立刻起步（不等下一拍），真的朝目标人走过去
     setTarget(s, Number(t.x), Number(t.z));
     s.st = 'walk'; s.walkUntil = now + WALK_TIMEOUT * 1000; s.stuck = 0;
-    broadcast({ t: 'npc_say', id: s.id, say: '好，我去找' + t.name + '问问。' });
+    speak(s.id, '好，我去找' + t.name + '问问。');
     console.info('[npc] ' + s.name + ' 接下委托：找 ' + t.name + ' 问「' + s.quest.question + '」');
   }
   function failQuest(s, why) {
     const had = !!s.quest;
     s.quest = null;
     s.intent = null;
-    if (had) broadcast({ t: 'npc_say', id: s.id, say: '（' + String(why || '这事没办成') + '，回头再跟你说）' });
+    if (had) speak(s.id, '（' + String(why || '这事没办成') + '，回头再跟你说）');
     console.warn('[npc] ' + s.id + ' 任务中断：' + why);
   }
   // 任务当前该走向哪：goto → 目标同学；return → **委托你的那个玩家**（找不到就退回"最近的玩家"，
@@ -2288,7 +2347,7 @@ export function createNpcWorld(opts) {
     if (!q) return;
     q.stage = 'asking';
     s.st = 'act'; s.stayUntil = Date.now() + 6000;
-    broadcast({ t: 'npc_say', id: s.id, say: t.name + '，' + String(q.question).slice(0, 30) + '？' });
+    speak(s.id, t.name + '，' + String(q.question).slice(0, 30) + '？');
     try {
       const ans = await askStudent({
         student: { name: t.name, cls: t.cls, persona: t.persona, sex: t.sex, place: placeOf(t), st: t.st, needs: t.needs, mood: t.mood, rel: topRel(t), player: playerWhere(t), boardLine: boardLine() },
@@ -2308,7 +2367,7 @@ export function createNpcWorld(opts) {
       }
       s.mem.push({ t: ts, text: '我问' + t.name + '「' + q.question + '」，他答：' + q.answer, kind: 'quest', from: t.id, src: t.name });
       t.mem.push({ t: ts, text: s.name + '问我「' + q.question + '」', kind: 'quest', from: s.id, src: s.name });
-      broadcast({ t: 'npc_say', id: t.id, say: q.answer });
+      speak(t.id, q.answer);
       trimMemory(s); trimMemory(t); saveStudents(students);
       // 问到了 → 立刻掉头**走向委托你的玩家**复命（不是"附近有人就算到"）
       q.stage = 'return'; q.repathAt = 0; q.returnAt = Date.now();
@@ -2323,7 +2382,7 @@ export function createNpcWorld(opts) {
     const q = s.quest;
     if (!q) return;
     const line = q.targetName + '说：' + q.answer;
-    broadcast({ t: 'npc_say', id: s.id, say: '问到了 —— ' + line });
+    speak(s.id, '问到了 —— ' + line);
     s.st = 'act'; s.stayUntil = Date.now() + 5000;
     s.mem.push({ t: Date.now(), text: '我把' + q.targetName + '的话回报给了玩家', kind: 'quest' });
     console.info('[npc] ' + s.name + ' 完成委托：' + line);
@@ -2422,7 +2481,7 @@ export function createNpcWorld(opts) {
           s._wantAt = now;
           // say 里没说清楚就把请求补一句（玩家得看得懂"要什么"才能去买）
           if (String(say).indexOf(it.name) < 0) {
-            broadcast({ t: 'npc_say', id: s.id, say: '顺便——能帮我买一个「' + it.name + '」带回来吗？（约 ¥' + it.price + '）' });
+            speak(s.id, '顺便——能帮我买一个「' + it.name + '」带回来吗？（约 ¥' + it.price + '）');
           }
           console.info('[npc] ' + s.name + ' 请玩家代买「' + it.name + '」（对话触发）');
         }
@@ -2830,13 +2889,22 @@ export function createNpcWorld(opts) {
     if (!s) return null;
     // whoId：说话人的稳定标识（如 'p:<玩家id>'）→ 关系按人记、对话历史也按人分，换个玩家是另一段交情
     const who = whoId ? String(whoId).slice(0, 40) : '';
-    const out = await triggerAI(s, 'talk', { text: String(text || '').slice(0, 200), name: playerName || '同学', who });
+    const said = String(text || '').slice(0, 200);
+    const pname = playerName || '同学';
+    // ★「谈话状态」：**玩家说的话**也要能被附近 NPC 听到（不只是 NPC 的回复）。
+    //   ⚠ 位置用玩家的实时坐标；拿不到就退回"被搭话那个同学的位置"（玩家正站在它跟前，距离等价）。
+    const ppos = (who && playerByOwner(who)) || null;
+    const px = ppos ? ppos.x : s.x, pz = ppos ? ppos.z : s.z;
+    try { hearAt(px, pz, who || ('player:' + pname), pname, said, Date.now()); }
+    catch (e) { console.warn('[npc] 玩家发言收听失败：' + ((e && e.message) || e)); }
+    const out = await triggerAI(s, 'talk', { text: said, name: pname, who });
     // ⚠ 无论成功与否，都把这轮**玩家说的话**记进对话历史 —— 下一句它才接得上（"我刚才说的那事…"）
-    pushChat(s, who, 'p', text);
+    pushChat(s, who, 'p', said);
     if (!out) return { say: '', think: '' };
     if (out.say) pushChat(s, who, 'n', out.say);
     saveStudents(students);
-    broadcast({ t: 'npc_say', id: s.id, say: out.say }, except);
+    // ⚠ 玩家搭话的回复也走 speak()：旁边 8m 内的同学能"听到"这场谈话（谈话状态共享给 NPC）。
+    speak(s.id, out.say, except);
     return out;
   }
   // 调试/探针用：读某个学生的内在状态（心情/关系/意图）
@@ -2965,7 +3033,7 @@ export function createNpcWorld(opts) {
         }
         trimMemory(s);
         applyMoodWord(s, '开心');
-        broadcast({ t: 'npc_say', id: s.id, say: '贴好啦，大家看公告栏。' });
+        speak(s.id, '贴好啦，大家看公告栏。');
         console.info('[npc] ' + s.name + ' 在公告栏贴了通知：' + txt);
         return true;
       }

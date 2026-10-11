@@ -1308,5 +1308,60 @@ console.log('[39] 分享知道的事：双方各自的记忆进 prompt + 讲的�
   ok(!!before, '（读状态没崩）', '');
 }
 
+console.log('[40] 谈话状态：8m 内的 NPC 能听到别人说什么（带"是谁说的"来源），8m 外听不到');
+{
+  const dir = freshDir('hear');
+  writeScene(dir);
+  // s1 在 (0,0)；s2 在 (5,0)（5m < 8m，听得见）；s3 在 (30,0)（30m > 8m，听不见）
+  const mk = (i, x, z) => ({
+    id: 's' + (i + 1), name: '学生' + (i + 1) + '号', sex: 'm', cls: '高二(1)班', persona: '普通学生',
+    x, z, hx: x, hz: z, tx: x, tz: z, wx: x, wz: z, path: null, pathIdx: 0, pathTries: 0,
+    rot: 0, st: 'idle', zoneId: '', stayUntil: 0, decideAt: 1e15, planAt: 1e15, intent: null, aiAt: 0, walkUntil: 0, stuck: 0, chatAt: 0, talkingUntil: 0,
+    needs: { hunger: 0.4, fatigue: 0.3, fun: 0.4, study: 0.5, social: 0.3, bladder: 0.2 },
+    mood: { valence: 0.4, energy: 0.5, focus: 0.5 }, rel: {}, mem: [], think: [],
+  });
+  const list = [];
+  for (let i = 0; i < 8; i++) list.push(i === 0 ? mk(0, 0, 0) : i === 1 ? mk(1, 5, 0) : mk(i, 30 + i * 10, 0));
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  writeZones(dir);
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      if (input.kind === 'talk') return { say: '嗯嗯，我知道了。', think: '', mem: '' };
+      if (input.kind !== 'chat') return null;
+      return {
+        lines: [{ who: 'a', text: '我跟你说个事' }, { who: 'b', text: '你说' }],
+        topic: '闲聊', memA: '', memB: '', moodA: '', moodB: '', bond: 0, share: { from: '', what: '' }, continue: false,
+      };
+    },
+  });
+  await sleep(50);
+  // s1 和 s2 互相说话（5m，s3 在 30m 外）
+  await w.forceChat('s1', 's2');
+  await sleep(250);
+  const s2 = w.stateOf('s2'), s3 = w.stateOf('s3');
+  // 手动让 s2 说一句话，检查 s1（5m）能听到、s3 听不到
+  // （用 talk 入口最能验"NPC 的回复 + 附近的人听到"这条链路，借助 mock 直接产出回复）
+  await w.talk('s2', '你好呀', '测试玩家', null, 'anon:X');
+  await sleep(250);
+  const s1b = w.stateOf('s1'), s2b = w.stateOf('s2'), s3b = w.stateOf('s3');
+  w.dispose();
+  // ① 8m 内的 s2 听到了 s1 说的话（s1 是 a，先开口"我跟你说个事"）
+  const s2mem = (s2.mem || []).map((m) => String(m.text)).join('\n');
+  ok(/我跟你说个事/.test(s2mem), '8m 内的 NPC 听到了旁边的人说什么（谈话状态）', s2mem);
+  ok(/学生1号说/.test(s2mem), '听到的内容**注明是谁说的**（"（学生1号说）…"）', s2mem);
+  const s2heardSrc = (s2.mem || []).some((m) => m && m.src === '学生1号号' || m && m.src === '学生1号');
+  ok(s2heardSrc, '听来的记忆带**来源字段 src**（传播链）', JSON.stringify((s2.mem || []).map((m) => m.src)));
+  // ② 8m 外的 s3 听不到
+  const s3mem = (s3.mem || []).map((m) => String(m.text)).join('\n');
+  ok(!/我跟你说个事/.test(s3mem), '8m **外**的 NPC 听不到（不会满校园都听见）', s3mem || '（空）');
+  // ③ NPC 的回复（s2 被玩家搭话后说的）也被 8m 内的 s1 听到，且注明是 s2 说的
+  const s1mem = (s1b.mem || []).map((m) => String(m.text)).join('\n');
+  ok(/学生2号说/.test(s1mem), 'NPC 的回复也被附近的人听到、且注明说话人（"（学生2号说）…"）', s1mem);
+  // ④ 说话人自己不重复记自己刚说的话
+  const s2self = (s2b.mem || []).map((m) => String(m.text)).join('\n');
+  ok(!/（学生2号说）/.test(s2self), '说话人**不会**把自己说的话听成"（自己说）"（不重复记）', s2self);
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

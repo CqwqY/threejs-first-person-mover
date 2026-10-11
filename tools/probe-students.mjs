@@ -130,7 +130,13 @@ console.log('[9] 走路/朝向/地点的契约（这几条错了都是"零报错
 }
 
 console.log('[10] 心理活动不外泄 + 对话不重复');
-ok(/t: 'npc_say', id: s\.id, say: out\.say \}/.test(SRC.world), '广播的 npc_say 只有 say、不带 think');
+// ⚠ 广播统一走 speak()（它内部 broadcast 出的 npc_say 只有 id/name/say，**从不带 think**）。
+//    以前这里钉死的是"行内字面量 broadcast({t:'npc_say',id:s.id,say:out.say})"；改成 speak() 后
+//    形状变了但**意图不变**：say 发出去、think 只入库。断言语义（不是代码长相）才对。
+ok(/function speak\(/.test(SRC.world) && /t: 'npc_say', id: String\(speakerId\), name:/.test(SRC.world),
+  '广播统一走 speak()（气泡只带 id/name/say）');
+ok(/if \(out\.say\) pushChat\(s, who, 'n', out\.say\)/.test(SRC.world) && /speak\(s\.id, out\.say, except\)/.test(SRC.world),
+  'talk 的回复走 speak()（say 广播出去；think 只入库不外泄）');
 ok(!/think: out\.think/.test(SRC.world), 'talk 不再把 think 广播出去');
 ok(/, ws\)/.test(SRC.index) || /talk\(sid, text, String\(nick\)\.slice\(0, 16\), ws\)/.test(SRC.index),
   '搭话时把发起者传进去，广播跳过他（否则同一句话出现两遍）');
