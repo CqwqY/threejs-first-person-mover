@@ -11,6 +11,8 @@ import { fullscreenSupported, isFullscreen, toggleFullscreen, onFullscreenChange
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
 import { createNpcChat } from '../ui/NpcChat.js';
 import { createNpcCard } from '../ui/NpcCard.js';
+import { createAnnouncePanel } from '../ui/AnnouncePanel.js';
+import { createBulletinBoard } from '../world/BulletinBoard.js';
 import { createChatBox } from '../ui/ChatBox.js';
 import { createStudents } from '../world/Students.js';
 import { createVehicle } from '../world/Vehicle.js';
@@ -525,6 +527,9 @@ export class Game {
     // 校卡：对话面板右上角的「校卡」按钮 → 拉服务端资料（性格/心情/目标/关系/记忆）并弹出
     this.npcCard = createNpcCard();
     this.aiChat.setOnCard(() => this._openNpcCard());
+    // 公告栏（世界坐标 -22,17）+ 发布面板（广播器/公告栏共用）
+    this._announce = createAnnouncePanel();
+    this._board = createBulletinBoard(this.scene, { x: -22, z: 17 });
     this.students = createStudents({
       scene: this.scene,
       // 与玩家同一份世界碰撞体（含 trimesh 复杂碰撞）：学生吃它，撞墙/踩坡/上台阶都和玩家一致
@@ -535,7 +540,10 @@ export class Game {
     });
     // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关对话栏
     this._createChatTab();
+    this._createBoardTab();
     this._bindStudentTalk();
+    // 公告栏初值：拉一次服务端已有公告画到板子上（之后靠 ws 的 board 消息实时更新）
+    fetch(this._relayBase() + '/api/board').then((r) => r.json()).then((d) => { if (d && d.ok && this._board) this._board.setPosts(d.posts || []); }).catch(() => {});
 
     // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
     this.vehicle = createVehicle(this.scene);
@@ -1749,6 +1757,16 @@ export class Game {
       }
       case 'npc_zones': {
         // 编辑器改了功能区：本地不直接用（位置以服务端为准），只提示一下
+        break;
+      }
+      case 'board': {
+        // 公告栏有新公告（别人贴的 / 我刚贴的）：实时重画到板子上
+        if (this._board) this._board.setPosts(msg.posts || []);
+        break;
+      }
+      case 'announce': {
+        // 校园广播：所有客户端弹一条横幅
+        this._toast('📢 ' + String(msg.text || ''));
         break;
       }
       case 'chat': {
@@ -4211,15 +4229,42 @@ export class Game {
     this._chatTab = el;
   }
 
-  // 每帧刷新搭话选项卡：靠近谁就写谁的名字，离开就藏起来
+  // 公告栏选项卡：靠近 (-22,17) 那块板子时显示
+  _createBoardTab() {
+    const el = document.createElement('div');
+    el.className = 'board-tab kui-btn kui-btn--primary';
+    el.textContent = '按 F 看公告栏';
+    el.style.cssText =
+      'position:fixed;right:26%;top:calc(50% + 52px);z-index:9500;cursor:pointer;display:none;' +
+      'padding:9px 12px;user-select:none;text-align:center;';
+    el.addEventListener('click', () => this._openBoardPanel());
+    document.body.appendChild(el);
+    this._boardTab = el;
+  }
+  _nearBoard() {
+    if (!this.localState) return false;
+    return Math.hypot(Number(this.localState.x) - -22, Number(this.localState.z) - 17) < 6.5;
+  }
+
+  // 每帧刷新搭话/公告栏选项卡：靠近谁就写谁的名字；没人但靠近公告栏就显示公告栏
   _updateTalkTab() {
     if (!this._chatTab || !this.students || !this.localState) return;
-    if (this.aiChat && this.aiChat.isOpen()) { this._chatTab.style.display = 'none'; return; }
+    const busy = (this.aiChat && this.aiChat.isOpen()) || (this._announce && this._announce.isOpen());
+    if (busy) {
+      this._chatTab.style.display = 'none';
+      if (this._boardTab) this._boardTab.style.display = 'none';
+      return;
+    }
     const s = this.students.nearest(this.localState.x, this.localState.z);
-    if (!s) { this._chatTab.style.display = 'none'; return; }
-    const text = '按 F 与' + s.name + '对话';
-    if (this._chatTab.textContent !== text) this._chatTab.textContent = text;
-    this._chatTab.style.display = '';
+    if (s) {
+      const text = '按 F 与' + s.name + '对话';
+      if (this._chatTab.textContent !== text) this._chatTab.textContent = text;
+      this._chatTab.style.display = '';
+      if (this._boardTab) this._boardTab.style.display = 'none';
+      return;
+    }
+    this._chatTab.style.display = 'none';
+    if (this._boardTab) this._boardTab.style.display = this._nearBoard() ? '' : 'none';
   }
 
   // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
@@ -4573,7 +4618,58 @@ export class Game {
       const el = document.activeElement;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
       if (this.aiChat && this.aiChat.isOpen()) return;
+      if (this._announce && this._announce.isOpen()) return;
+      // 附近没人、但人站在公告栏边 → 开公告栏（同一个 F 键）
+      const s = (this.students && this.localState) ? this.students.nearest(this.localState.x, this.localState.z) : null;
+      if (!s && this._nearBoard()) { this._openBoardPanel(); return; }
       this._talkToNearest();
+    });
+  }
+
+  // 服务端 HTTP 基址（ws → http）
+  _relayBase() { return Config.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:'); }
+  _myNick() { return (this._profile && (this._profile.nickname || this._profile.username)) || '玩家'; }
+
+  // 校园广播器：输入一句话 → 服务端轮流下发给所有 AI
+  _openBroadcast() {
+    if (!this._announce) return;
+    this._announce.open({
+      title: '校园广播器',
+      placeholder: '一句话广播给全校学生（他们会轮流收到并记下）…',
+      onSubmit: async (text) => {
+        try {
+          const r = await fetch(this._relayBase() + '/api/npc/broadcast', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, from: this._myNick() }),
+          });
+          const d = await r.json().catch(() => null);
+          if (!d || !d.ok) return { ok: false, reason: (d && d.error) || '广播失败' };
+          this._toast('已广播：' + text);
+          return { ok: true };
+        } catch (e) { return { ok: false, reason: '网络不通' }; }
+      },
+    });
+  }
+
+  // 公告栏：看已有公告 + 贴一张（全校 AI 决策时会看到）
+  _openBoardPanel() {
+    if (!this._announce) return;
+    const post = async (text) => {
+      try {
+        const r = await fetch(this._relayBase() + '/api/board', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, from: this._myNick() }),
+        });
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) return { ok: false, reason: (d && d.error) || '发布失败' };
+        this._toast('已贴上公告栏');
+        return { ok: true };
+      } catch (e) { return { ok: false, reason: '网络不通' }; }
+    };
+    fetch(this._relayBase() + '/api/board').then((r) => r.json()).then((d) => {
+      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告（全校 AI 决策时会看到）…', posts: (d && d.posts) || [], onSubmit: post });
+    }).catch(() => {
+      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告…', onSubmit: post });
     });
   }
 
@@ -5073,6 +5169,12 @@ export class Game {
           // 会弹面板挑人，所以别让技能槽那 800ms 防连点挡着（真正的冷却在 _useInviteTp 里自己控）
           noCd: true,
           run: () => this._useInviteTp(),
+        };
+      case 'broadcast':
+        return {
+          label: '广播',
+          noCd: true, // 会弹输入面板，别被技能槽防连点挡着（真冷却在服务端按 IP 控）
+          run: () => this._openBroadcast(),
         };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（后端已钳制）；可选 onHit = 范围效果

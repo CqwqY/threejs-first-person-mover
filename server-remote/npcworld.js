@@ -102,6 +102,12 @@ const PERCEIVE_REPEAT_MS = 120000; // 同一个对象 2 分钟内不重复"注�
 const QUEST_TIMEOUT_MS = 180000; // 任务总超时（3 分钟没办成就放弃并回报，绝不静默卡住）
 const QUEST_REPATH_MS = 2500;    // 目标会动：每隔这么久重新指向目标（开销极小：setTarget 有直线预判）
 const QUEST_MEET_DIST = 3.0;     // 多近算"找到 TA 了"（米）
+
+// ---------- D/E：校园广播器 + 公告栏 ----------
+const BOARD_POS = { x: -22, z: 17 }; // 公告栏世界坐标（与客户端摆的那块板子一致）
+const BOARD_READ_RANGE = 6;          // 离公告栏多近算"看见公告"（米）
+const BOARD_READ_CD = 300000;        // 同一 NPC 两次读公告的最小间隔（5 分钟）
+const ANNOUNCE_GAP_MS = 4000;        // 广播轮流下发给 AI 的间隔（一个个来，不并发打爆 GLM）
 const CHAT_TEMPLATES = [       // GLM 失败/超预算时的兜底寒暄（零成本，别让"人"僵住）
   ['你今天也在这儿啊？', '嗯，随便转转。'],
   ['刚才那节好困啊。', '可不是嘛，我差点睡着。'],
@@ -803,7 +809,7 @@ export function createNpcWorld(opts) {
         const h = hourNow();
         const seg = scheduleType(h);
         const out = await askStudent({
-          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s) },
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), board: boardPosts.slice(-3) },
           memory: pickMemory(s, null),
           kind: 'plan',
           hour: h,
@@ -1382,6 +1388,13 @@ export function createNpcWorld(opts) {
     for (const s of students) {
       updateNeeds(s, dt, now);
       perceive(s, now); // P2：看身边的人（廉价，限流）
+      // 公告栏：路过就"看一眼"（限流）→ 记进记忆；规划时也会带上公告
+      if (!s.quest && boardPosts.length && now >= Number(s._boardAt || 0) &&
+          Math.hypot(Number(s.x) - BOARD_POS.x, Number(s.z) - BOARD_POS.z) < BOARD_READ_RANGE) {
+        s._boardAt = now + BOARD_READ_CD;
+        s.mem.push({ t: now, text: '我在公告栏看到：' + boardPosts[boardPosts.length - 1], kind: 'obs' });
+        trimMemory(s);
+      }
       if (s.quest) updateQuest(s, now); // P3：有委托任务就先办任务（驱动走位/问话/复命）
       // 「去找某人」：定期朝那个人重指（人也在动）；到了就清掉意图 → 交给闲聊系统自然发起对话
       if (!s.quest && s.intent && s.intent.goalType === 'person' && s.intent.seekId) {
@@ -1449,6 +1462,7 @@ export function createNpcWorld(opts) {
         if (hasZones) decide(s, now); else wander(s, now);
       }
     }
+    pumpAnnounce(now); // 广播器：轮流让一个学生"听到"（一个个来，不并发打爆 GLM）
     // NPC↔NPC 闲聊：凑近 + 都闲着 → 开一段短对话（全局 CHAT_INTERVAL 限流，防刷 GLM）
     if (!chatBusy && now - lastChatStart > CHAT_INTERVAL * 1000) {
       const pair = pickChatPair(now);
@@ -1487,6 +1501,30 @@ export function createNpcWorld(opts) {
     if (!s) return null;
     return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, st: s.st, x: s.x, z: s.z, tx: s.tx, tz: s.tz };
   }
+  // ---------- 公告栏 + 广播器 ----------
+  let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
+  function setBoard(list) {
+    boardPosts = Array.isArray(list) ? list.map((x) => String(x).slice(0, 120)).filter(Boolean).slice(-6) : [];
+  }
+  let announceQueue = []; // 待下发的广播
+  let announceIdx = 0;    // 轮流游标：下一个该"听到"广播的学生
+  let announceAt = 0;     // 下次下发的时刻（时间字段，必须有初值）
+  function announce(text, from) {
+    const t = String(text || '').trim().slice(0, 120);
+    if (t) announceQueue.push({ text: t, from: String(from || '广播').slice(0, 16) });
+  }
+  // 主循环每拍调：每隔 ANNOUNCE_GAP_MS 让**一个**学生"听到"广播（轮流，不并发）
+  function pumpAnnounce(now) {
+    if (!announceQueue.length || !students.length || now < announceAt) return;
+    announceAt = now + ANNOUNCE_GAP_MS;
+    const s = students[announceIdx % students.length];
+    announceIdx++;
+    const a = announceQueue[0];
+    s.mem.push({ t: now, text: '全校广播：「' + a.text + '」', kind: 'announce' });
+    trimMemory(s);
+    if (announceIdx % students.length === 0) announceQueue.shift(); // 一轮走完才轮到下一条
+  }
+
   // 「校卡」：给玩家看的角色资料（性格 + 心情 + 当前目标 + 关系 + 近期记忆）
   function card(id) {
     const s = students.find((x) => x.id === String(id));
@@ -1544,5 +1582,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

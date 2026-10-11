@@ -302,5 +302,32 @@ console.log('[8] 校卡：card() 返回性格/心情/目标/关系（人名）/�
   ok(c && Array.isArray(c.rel) && c.rel.some((r) => r.who === '玩家'), '关系已解析成人名（玩家）', c && JSON.stringify(c.rel));
 }
 
+console.log('[9] 公告栏 → AI 规划时带上公告；广播器 → 轮流写进学生记忆');
+{
+  const dir = freshDir('board');
+  writeScene(dir);
+  const blist = questStudents([]);
+  for (const s of blist) { s.planAt = 0; s.decideAt = 0; } // 要让首个 tick 真的触发一次 plan
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(blist, null, 2));
+  writeZones(dir);
+  let planBoard = null;
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => { if (input.kind === 'plan') { planBoard = input.student && input.student.board; return null; } return { say: '', think: '', mem: '' }; },
+  });
+  w.setBoard(['操场下午有活动']);
+  await sleep(400);
+  w.announce('注意，操场集合');
+  await sleep(4600); // 等广播轮流下发（ANNOUNCE_GAP_MS=4000）
+  const got = [];
+  for (const sid of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']) {
+    const st = w.stateOf(sid);
+    if (st && st.mem && st.mem.some((m) => /全校广播/.test(String(m.text)))) got.push(sid);
+  }
+  w.dispose();
+  ok(planBoard && JSON.stringify(planBoard).includes('操场下午有活动'), 'plan 的 prompt 带上了公告栏内容（AI 决策时会看公告）', JSON.stringify(planBoard));
+  ok(got.length >= 1, '广播已**轮流**写进学生记忆（≥1 人听到）', 'got=' + got.join(','));
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

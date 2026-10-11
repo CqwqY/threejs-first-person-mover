@@ -550,6 +550,41 @@ function sanitizeCombo(c) {
   return out;
 }
 function saveShop(items) { fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2)); }
+
+// ---- 公告栏（世界坐标 -22,17 那块板子）+ 校园广播器共用这份"公告"存储 ----
+const BOARD_FILE = path.join(DATA_DIR, 'board.json');
+const BOARD_MAX = 20;   // 只留最近 20 条
+let BOARD = (() => {
+  try { const d = JSON.parse(fs.readFileSync(BOARD_FILE, 'utf8')); return Array.isArray(d && d.posts) ? d.posts : []; }
+  catch (e) { return []; }
+})();
+function saveBoard() { try { fs.writeFileSync(BOARD_FILE, JSON.stringify({ posts: BOARD }, null, 2)); } catch (e) { /* 写不了就内存里留存 */ } }
+// 发布一条公告：落盘 + 推给 AI（npcWorld.setBoard，AI 决策时会"看公告"）+ 广播给所有客户端
+function pushBoard(text, from) {
+  const t = String(text == null ? '' : text).trim().slice(0, 120);
+  if (!t) return null;
+  const rec = { text: t, at: Date.now(), from: String(from || '玩家').slice(0, 16) };
+  BOARD.push(rec);
+  if (BOARD.length > BOARD_MAX) BOARD.splice(0, BOARD.length - BOARD_MAX);
+  saveBoard();
+  if (npcWorld && npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6));
+  broadcastAll({ t: 'board', posts: BOARD.slice(-8) });
+  return rec;
+}
+// 简易限流：按 客户端 ip 限制频率（公告栏 5s / 广播 60s）
+const _lastPostAt = new Map();
+const _lastCastAt = new Map();
+function ipOf(req) {
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+function rateOk(map, ip, ms) {
+  const now = Date.now();
+  if (now - (map.get(ip) || 0) < ms) return false;
+  map.set(ip, now);
+  if (map.size > 2000) map.clear(); // 防无限增长
+  return true;
+}
 function loadBuildings() {
   try { return JSON.parse(fs.readFileSync(BUILD_FILE, 'utf8')); } catch { return []; }
 }
@@ -894,6 +929,45 @@ const httpServer = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     const sid = String(url.searchParams.get('id') || '');
     res.end(JSON.stringify({ ok: true, card: npcWorld ? npcWorld.card(sid) : null }));
+    return;
+  }
+
+  // ---- 公告栏（-22,17 那块板子）：读公开 / 写限流 ----
+  if (req.method === 'GET' && url.pathname === '/api/board') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, posts: BOARD.slice(-8) }));
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/board') {
+    let body = '';
+    req.on('data', (c) => { if ((body += c).length > 8e3) req.destroy(); });
+    req.on('end', () => {
+      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
+      let data; try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
+      if (!rateOk(_lastPostAt, ipOf(req), 5000)) return deny('发得太快了，歇会儿再发', 429);
+      const rec = pushBoard(data.text, data.from);
+      if (!rec) return deny('内容不能为空');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, post: rec }));
+    });
+    return;
+  }
+  // ---- 校园广播器：把一句话**轮流**下发给了所有 AI（不并发打爆 GLM）；同时给所有客户端一条横幅 ----
+  if (req.method === 'POST' && url.pathname === '/api/npc/broadcast') {
+    let body = '';
+    req.on('data', (c) => { if ((body += c).length > 8e3) req.destroy(); });
+    req.on('end', () => {
+      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
+      let data; try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
+      const text = String(data.text || '').trim().slice(0, 120);
+      if (!text) return deny('内容不能为空');
+      if (!rateOk(_lastCastAt, ipOf(req), 60000)) return deny('广播太频繁了，一分钟一次', 429);
+      const from = String(data.from || '广播').slice(0, 16);
+      if (npcWorld && npcWorld.announce) npcWorld.announce(text, from);
+      broadcastAll({ t: 'announce', text, from }); // 所有客户端显示一条广播横幅
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
     return;
   }
 
@@ -2094,6 +2168,7 @@ if (createNpcWorld) {
     askStudent: askStudent || undefined, // 没加载到就交给 npcworld 的空实现（学生照走，不对话）
   });
   console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个；对话 ' + (askStudent ? '开' : '关'));
+  if (npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6)); // 现有公告喂给 AI
 }
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);
