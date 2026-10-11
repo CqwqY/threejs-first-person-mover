@@ -1,0 +1,3 @@
+# 让 shell 脚本在 Windows 检出时也是 LF —— CRLF 的 .sh 在 Git Bash 里会报
+# "syntax error near unexpected token `$'\r''"，整个脚本跑不起来。
+*.sh text eol=lf
