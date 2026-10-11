@@ -873,7 +873,9 @@ process.on('uncaughtException', (e) => console.warn('[relay] 未捕获异常:', 
 
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // ⚠ 必须含 DELETE：撤回公告走 DELETE + JSON body ⇒ 触发 CORS 预检（OPTIONS）。
+  //   漏掉 DELETE ⇒ 预检不过 ⇒ 浏览器拒发真正的 DELETE ⇒ 前端 fetch 抛错 → 报"网络不通"。
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-filename, Authorization');
 
   const url = new URL(req.url, `http://${req.headers.host}`);

@@ -50,7 +50,7 @@ process.on('uncaughtException', (e) => console.warn('[relay] 未捕获异常:', 
 
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-filename, Authorization');
 
   const url = new URL(req.url, `http://${req.headers.host}`);
