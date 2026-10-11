@@ -1084,7 +1084,7 @@ export function createNpcWorld(opts) {
       if (o === s) continue;
       const dx = Number(o.x) - Number(s.x), dz = Number(o.z) - Number(s.z);
       const d = Math.hypot(dx, dz);
-      if (d <= maxDist) out.push({ id: o.id, name: String(o.name || '同学'), dist: d, dir: bearingName(dx, dz), doing: doingWord(o) });
+      if (d <= maxDist) out.push({ id: o.id, name: String(o.name || '同学'), dist: d, dir: bearingName(dx, dz), doing: doingWord(o), raw: o });
     }
     for (const p of playerPositions) {
       const dx = Number(p.x) - Number(s.x), dz = Number(p.z) - Number(s.z);
@@ -1109,7 +1109,10 @@ export function createNpcWorld(opts) {
     // 公告栏是"特殊地标"（不在 zones 里，但全校都认它）
     const bx = BOARD_POS.x - Number(s.x), bz = BOARD_POS.z - Number(s.z);
     const bd = Math.hypot(bx, bz);
-    if (bd <= SCENE_RANGE) lm.push({ id: '__board', name: '公告栏', type: 'board', dist: bd, dir: bearingName(bx, bz), posts: boardPosts.length });
+    if (bd <= SCENE_RANGE) {
+      const firstPost = boardPosts.length ? String(boardPosts[boardPosts.length - 1]) : '';
+      lm.push({ id: '__board', name: '公告栏', type: 'board', dist: bd, dir: bearingName(bx, bz), posts: boardPosts.length, first: firstPost });
+    }
     lm.sort((a, b) => a.dist - b.dist);
     return {
       place: placeOf(s),
@@ -1157,13 +1160,26 @@ export function createNpcWorld(opts) {
     const mate = sc.people.find((x) => x.id !== 'player' && x.dist <= OBS_NOTABLE_DIST);
     const board = sc.landmarks.find((l) => l.id === '__board' && l.posts > 0 && l.dist <= OBS_NOTABLE_DIST);
     // 优先级：玩家 > 新通知 > 第一次到的区域 > 同学
+    // ★ 具体化（用户要求）：每条观察都要带**地点 + 具体对象/内容**，不许写"我看见有人"这种没信息量的话。
+    const hereName = placeOf(s) || '校园里';
     let text = '';
     let notable = false;
-    if (p) { text = '我看见玩家就在我附近（' + p.dir + '约 ' + Math.round(p.dist) + 'm）'; notable = true; }
-    else if (board) { text = '我路过公告栏，上面贴着 ' + board.posts + ' 条通知'; notable = true; }
+    if (p) { text = '在' + hereName + '，玩家就在我附近（' + p.dir + '约 ' + Math.round(p.dist) + 'm）'; notable = true; }
+    else if (board) {
+      const firstPost = String(board.first || '').slice(0, 24);
+      text = '我路过' + hereName + '的公告栏，上面贴着 ' + board.posts + ' 条通知'
+        + (firstPost ? ('，最新一条是「' + firstPost + '」') : ''); notable = true;
+    }
     else if (here && !(Array.isArray(s.seenZones) ? s.seenZones : []).includes(here.id)) {
-      text = '我第一次到' + placeOf(s) + (sc.landmarks.length ? ('，旁边就是' + sc.landmarks.slice(0, 2).map((l) => l.name).join('、')) : '');
-    } else if (mate) { text = '我看见' + mate.name + mate.doing + '（' + mate.dir + '约 ' + Math.round(mate.dist) + 'm）'; }
+      text = '我第一次到' + hereName + (sc.landmarks.length ? ('，旁边就是' + sc.landmarks.slice(0, 2).map((l) => l.name).join('、')) : '');
+    } else if (mate) {
+      // 同学在做什么：优先引用他刚说过的话（最具体），否则写他当下的动作
+      const lastSay = (Array.isArray(mate.raw && mate.raw.mem) && mate.raw.mem.length)
+        ? String((mate.raw.mem[mate.raw.mem.length - 1] || {}).text || '') : '';
+      text = lastSay && lastSay.length >= 6
+        ? ('我在' + hereName + '听见' + mate.name + '说「' + clampText(lastSay.replace(/^（[^）]*）/, ''), 18) + '」')
+        : ('我在' + hereName + '看见' + mate.name + mate.doing);
+    }
     if (!text) return;
     if (String(s._obsSeen || '') === text) return; // 同一条别反复记
     s._obsAt = now;
@@ -1232,6 +1248,8 @@ export function createNpcWorld(opts) {
         other: { name: t.name, cls: t.cls, persona: t.persona },
         memory: pickMemory(s, null),
         thinks: recentThinks(s),
+        focus: currentFocus(s),               // ★ 带着一个具体的疑问去问（"周三到底考不考"），不是空打听
+        gap: knowledgeGap(t, s, 2).map((m) => String(m.text || '')), // ★ 对方可能知道、我这边没有的
         kind: 'inquire',
       });
       const q = clampText(out && out.question, 60);
@@ -1789,8 +1807,23 @@ export function createNpcWorld(opts) {
     s.perceiveAt = now;
     s._seenAt[key] = now;
     // ⚠ 观察**写进 mem**（真正的记忆流）：它会被检索、喂给 prompt，真的影响之后的举止与说话。
-    const text = isPlayer ? '我看见玩家从我附近过去了' : ('我看见' + String(best.name || '同学') + '也在这一带');
-    s.mem.push({ t: now, text, kind: 'obs', from: isPlayer ? '' : best.id, src: isPlayer ? '亲眼看到' : ('亲眼看到' + String(best.name || '')) });
+    // ★ 具体化：不要记"我看见X也在这一带"这种没信息量的（用户：要"听到顾星桥说周三考试"那种具体事）。
+    //   要带上**在哪、对方在做什么/说什么**，让它成为一条"可讲给别人听"的见闻。
+    const where = placeOf(s) || '校园里';
+    let text;
+    if (isPlayer) {
+      text = '我在' + where + '看见玩家从附近过去';
+    } else {
+      const on = String(best.name || '同学');
+      // 对方此刻的"具体动作"：优先用他最近说过的话（有原话最具体），其次状态
+      const lastSay = (Array.isArray(best.mem) && best.mem.length)
+        ? String((best.mem[best.mem.length - 1] || {}).text || '') : '';
+      const doing = String(best.st) === 'walk' ? '正往别处走' : '停在那儿';
+      text = lastSay && lastSay.length >= 6
+        ? ('我在' + where + '听见' + on + '说「' + clampText(lastSay.replace(/^（[^）]*）/, ''), 18) + '」')
+        : ('我在' + where + '看见' + on + doing);
+    }
+    s.mem.push({ t: now, text, kind: 'obs', from: isPlayer ? '' : best.id, src: isPlayer ? '亲眼看到的' : ('我在' + where + '亲眼看到的') });
     trimMemory(s); // 超限时先丢观察（不花 LLM），见 trimMemory
   }
 
@@ -1882,6 +1915,92 @@ export function createNpcWorld(opts) {
     scored.sort((a, b) => (b.score - a.score) || (b.i - a.i));
     return scored.slice(0, MEM_CTX).sort((a, b) => a.i - b.i).map((x) => x.m);
   }
+  // ---------- ★ 具体化三件套：关注点 / 信息差 / 具体记忆 ----------
+  // 用户的核心判断：**"AI 社交泛，是因为它们没有具体的事可聊。记忆太泛、没有信息差、没有关注点、对话没目的。"**
+  //   ① 记忆要具体（"今天在食堂听到顾星桥说周三有数学测验"，不是"今天在食堂吃了饭"）；
+  //   ② 制造信息差（我知道的事，对方不一定知道 —— 对话就是把信息从一人传给另一人）；
+  //   ③ 给一个"当前关注点"（想打听什么 / 想告诉他什么 / 想约谁做什么），它驱动对话。
+  // 三件事**全部由记忆流派生**（不新增硬编码剧情），符合铁律 1：代码只给结构，内容仍归记忆/LLM。
+
+  // ① 具体性打分：一条记忆"够不够具体"（能不能拿来讲）。
+  //    判据：含**具体线索**——引述（「」""说）、数字/时间、专名（人名/地点）。
+  //    "今天在食堂吃了饭" → 无引述无数字无专名 ⇒ 0.2（太泛，不许当话题）
+  //    "听到顾星桥说周三有数学测验" → 「」/说 + 周三 + 顾星桥 ⇒ 0.9
+  const MEM_SPECIFIC_HINTS = /[「『"'']|说道|告诉|听说|问|答|考|试|测验|作业|比赛|约|集合|几点|周[一二三四五六日天]|明天|后天|昨天|今天.*(说|听|看|见)|[0-9]|班|老师|校长|捡|丢|丢[了失]|找|忘|借|还|答应|邀请|通知|广播|公告/;
+  const MEM_VAGUE_HINTS = /^(我|今天)?(在)?(食堂|饭堂|教室|操场|宿舍|图书馆)?(吃|喝|走|待|坐|睡|上)(了)?(饭|东西|一会儿|一觉|课)?[。.]?$/;
+  function memSpecificity(m) {
+    const t = String((m && m.text) || '');
+    if (!t) return 0;
+    if (t.length < 8) return 0.15;                       // 太短的一般是碎片
+    if (MEM_VAGUE_HINTS.test(t)) return 0.15;            // 纯泛化模板：直接判"泛"
+    let v = 0.35;
+    if (MEM_SPECIFIC_HINTS.test(t)) v += 0.3;            // 有引述/时间/事件词
+    if (/\d|周[一二三四五六日天]|明天|后天|昨天|今天|下周|下周[一二三四五六日天]/.test(t)) v += 0.2; // 具体到时间
+    if (String(m && m.src || '').trim()) v += 0.15;      // 带来源（听谁说的）更具体
+    return clamp01(v);
+  }
+  // ② "可讲的知识"：从记忆流里挑出**具体**的条目，按 具体性 + 新近度 + 重要度 排序。
+  //    这就是"我有什么可告诉别人的" —— 信息差的来源。
+  function shareableMemories(s, n) {
+    const all = Array.isArray(s.mem) ? s.mem : [];
+    const now = Date.now();
+    const scored = [];
+    for (let i = 0; i < all.length; i++) {
+      const m = all[i];
+      if (!m || m.kind === 'reflect') continue;          // 反思是抽象结论，不是"事"
+      const spec = memSpecificity(m);
+      if (spec < 0.5) continue;                          // 不够具体 ⇒ 没资格当话题（治"泛"）
+      const ageMin = Math.max(0, (now - Number(m.t || 0)) / 60000);
+      const rec = Math.pow(0.5, ageMin / MEM_RECENCY_HL);
+      scored.push({ m, i, score: spec * 1.4 + rec * 0.6 + memImportance(m) * 0.5 });
+    }
+    scored.sort((a, b) => (b.score - a.score) || (b.i - a.i));
+    return scored.slice(0, Math.max(1, n || 3)).map((x) => x.m);
+  }
+  // ③ 信息差：我知道、而**对方大概率不知道**的事。
+  //    判据（保守，宁缺毋滥）：这条记忆带 src（"听X说的"/"我亲眼看到Y"）且**对方名字不在条目里**
+  //    ⇒ 对方没参与、很可能没听过 ⇒ 值得讲给他听（"我告诉你一件事"）。
+  //    同源记忆（同一件 what 的事）如果对方记忆里已有 ⇒ 排除（避免把对方已知道的当新闻）。
+  function knowledgeGap(s, partner, n) {
+    const mine = shareableMemories(s, 8);
+    const ptxt = (Array.isArray(partner && partner.mem) ? partner.mem : [])
+      .map((m) => String((m && m.text) || '')).join('\n');
+    const out = [];
+    for (const m of mine) {
+      const t = String(m.text || '');
+      const pname = String((partner && partner.name) || '');
+      if (pname && t.indexOf(pname) >= 0) continue;      // 涉及对方的，他大概知道/在场
+      // 对方记忆里有高度重合的片段（同一件事）⇒ 跳过：他知道的不用再讲
+      const key = t.replace(/^（[^）]*）/, '').slice(0, 6);
+      if (key && ptxt.indexOf(key) >= 0) continue;
+      out.push(m);
+      if (out.length >= Math.max(1, n || 2)) break;
+    }
+    return out;
+  }
+  // ④ 当前关注点：它现在**心里挂着的一件事** —— 想打听、想确认、想告诉他、想约他。
+  //    由记忆流 + 未完成意图派生（不硬编码剧情）。返回一句具体的话。
+  function currentFocus(s) {
+    const all = Array.isArray(s.mem) ? s.mem : [];
+    const now = Date.now();
+    // a) 最高优先：带疑问色彩的具体记忆（考不考/几点/是不是）—— 它想"确认"
+    const doubt = all.filter((m) => m && /\?|？|考|测验|作业|点名|交|集合|几号|几点|是不是|到底|听说是/.test(String(m.text || '')))
+      .sort((x, y) => Number(y.t || 0) - Number(x.t || 0));
+    if (doubt.length && now - Number(doubt[0].t || 0) < 2 * 3600e3) {
+      return '我想弄清楚：' + clampText(String(doubt[0].text).replace(/^（[^）]*）/, ''), 40);
+    }
+    // b) 次优先：最近'具体'的见闻 —— 它想"讲给别人听"
+    const shareable = shareableMemories(s, 1);
+    if (shareable.length) return '有件事想找人说说：' + clampText(shareable[0].text, 40);
+    // c) 再次：未完成的委托/意图 —— 它想"约/托人"
+    if (s.quest && s.quest.goalText) return '我还惦记着：' + clampText(String(s.quest.goalText), 40);
+    if (s.intent && s.intent.goalText) return '我正打算：' + clampText(String(s.intent.goalText), 40);
+    // d) 兜底：需求驱动的模糊念头（也尽量具体）
+    const nb = needsBrief(s);
+    if (nb) return '我现在' + nb + '，想找点事做';
+    return '';
+  }
+
   // ---------- 对话上下文（多轮）----------
   // 每个学生按「说话人」分别留一份最近的对话原话。为什么要按人分：同一个学生可能先跟 A 聊、
   // 再跟 B 聊，混在一起会把两个话题接串（"你刚才说"指的是谁说的都乱了）。
@@ -2152,9 +2271,15 @@ export function createNpcWorld(opts) {
           },
           partner: { name: b.name, cls: b.cls, persona: b.persona, sex: b.sex },
           // ★ 知识分享的关键：**两边各自**的记忆 + 见闻都喂进去，LLM 自然会把"我知道的事"讲出来。
+          //   ★★ 具体化三件套：只挑**具体**的记忆当素材（治"今天吃了饭"式泛化）；
+          //      再给"我知道而对方大概率不知道的事"（信息差 ⇒ "我告诉你一件事"）；
+          //      最后给它一个**当前关注点**（想打听/想说/想约）当对话的由头。
           memory: pickMemory(a, null),
           partnerMemory: pickMemory(b, null),   // 对方知道的（问它"你知道吗"时能对得上）
           partnerHeard: heardLine(b, t0),        // 对方最近听到的通知
+          focus: currentFocus(a),                // ★ 我此刻挂心的一件事（驱动这轮对话）
+          shareable: shareableMemories(a, 3).map((m) => String(m.text || '')),  // ★ 我这边的"具体素材"
+          gap: knowledgeGap(a, b, 2).map((m) => String(m.text || '')),          // ★ 我知道、他大概不知道的
           // 已经聊过的上文（旧→新）——第二轮起才有，这就是"接着聊"的依据
           chat: transcript.slice(),
           kind: 'chat',
