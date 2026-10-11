@@ -75,6 +75,9 @@ const REFLECT_MIN_NEW = 4;     // 至少攒了这么多条新记忆才值得想�
 const REFLECT_CD = 8 * 60000;  // 同一个学生两次反思的最小间隔（8 分钟）
 const DAYPLAN_CD = 12 * 60000; // 日计划兜底重生成间隔（跨天时立刻重生成）
 const MEM_COMPRESS = 5;
+// ---- 结构化自我档案（DeepSeek 架构「自我状态改造」）：固定分层 + 固定顺序 ⇒ 抑制身份漂移 / 状态混乱 ----
+const NARRATIVE_MAX = 3;      // 自我叙事层：保留最近几条"我对自己的认识"（反思产物，累积而非覆盖）
+const REFLECT_IMP_SUM = 2.2;  // 反思的第二个触发条件：新记忆**重要度累积** ≥ 此值也能触发（关键事件能沉淀）
 // 单条文本长度上限（入库前截断）。think 是**内部**独白（玩家看不到），写宽一点才有内容，
 // 它决定这个角色"脑子里在想什么"，进而影响记忆与后续举止。
 const LEN_SAY = 60;
@@ -290,6 +293,38 @@ function resolveGoalType(g) {
 }
 // 这两个是"抽象动作"（不是具体功能区），走位目标由代码现挑（见 exploreTarget / startInquire）
 const ABSTRACT_GOALS = new Set(['wander', 'rest', 'explore', 'inquire']);
+
+// 价值观：同一角色**每次完全一致**（按名字稳定派生、并落盘 s.values）——给行为一个恒定的锚点。
+// DeepSeek 架构要求"身份/价值观每次措辞顺序都不变"，所以不是随机、不是每轮重编，而是**认准一个就不改**。
+const VALUES_TABLE = [
+  '做人讲义气，答应的事一定办到',
+  '踏实一点，把该做的事做好比什么都强',
+  '开心最重要，别把日子过得太拧巴',
+  '待人善良，能帮一把就帮一把',
+  '不服输，认定的事就做到最好',
+  '安静守规矩，不给别人添麻烦',
+];
+// 本地"解释器"（DeepSeek「解释器」的落地，**不是编译器**）：把一句自然语言意图里提到的地方读出来。
+// 只在 LLM 给的 goalType 认不出（已归一成 wander）时兜底 —— 不额外调 LLM（Flash 是螺丝刀，别当手术刀用）。
+const ZONE_WORD_HINTS = {
+  canteen: ['食堂', '饭堂', '吃饭', '打饭', '干饭'],
+  playground: ['操场', '打球', '跑步', '踢球', '运动', '锻炼', '篮球'],
+  library: ['图书馆', '看书', '借书', '自习', '复习'],
+  classroom: ['教室', '上课', '写作业', '做题'],
+  shop: ['商店', '小卖部', '杂货铺', '买东西', '买点'],
+  dorm: ['宿舍', '回宿舍', '睡觉', '午休'],
+  toilet: ['厕所', '洗手间', '卫生间'],
+  gate: ['校门', '大门', '门口', '出校'],
+  fountain: ['喷泉', '水池'],
+};
+function inferZoneFromText(text) {
+  const t = String(text || '');
+  if (!t) return null;
+  for (const [type, words] of Object.entries(ZONE_WORD_HINTS)) {
+    if (words.some((w) => t.indexOf(w) >= 0)) return type;
+  }
+  return null;
+}
 
 export function createNpcWorld(opts) {
   const dataDir = opts.dataDir;
@@ -752,6 +787,10 @@ export function createNpcWorld(opts) {
           _inquireAt: 0,     // 上次主动去问人的时刻（限流；时间字段，必须有初值）
           _exploreAt: 0,     // 上次去学校某处看看的时刻（限流；时间字段，必须有初值）
           seenZones: [],     // 去过/看过的区域 id（"看看学校"优先挑没去过的；数组，必须有初值）
+          // ---- 结构化自我档案（DeepSeek 架构）----
+          values: (old && typeof old.values === 'string') ? old.values : '',        // 价值观（"我是谁"要累积、措辞不变）
+          narrative: (old && Array.isArray(old.narrative)) ? old.narrative : [],   // 自我叙事层（反思产物，累积非覆盖）
+          _impAtReflect: (old && Number.isFinite(Number(old._impAtReflect))) ? Number(old._impAtReflect) : 0, // 累加型字段，必须有初值
         };
       });
       dirty = true;
@@ -785,6 +824,10 @@ export function createNpcWorld(opts) {
       if (!Number.isFinite(Number(s._inquireAt))) { s._inquireAt = 0; dirty = true; }
       if (!Number.isFinite(Number(s._exploreAt))) { s._exploreAt = 0; dirty = true; }
       if (!Array.isArray(s.seenZones)) { s.seenZones = []; dirty = true; }
+      // 结构化自我档案（老存档没有 ⇒ 不补就是 undefined → 参与运算变 NaN 静默失效）
+      if (typeof s.values !== 'string') { s.values = ''; dirty = true; }
+      if (!Array.isArray(s.narrative)) { s.narrative = []; dirty = true; }
+      if (!Number.isFinite(Number(s._impAtReflect))) { s._impAtReflect = 0; dirty = true; }
       if (!Number.isFinite(Number(s.rot))) { s.rot = 0; dirty = true; }
       if (!Number.isFinite(Number(s.y))) { s.y = 0; dirty = true; }
       if (!Number.isFinite(Number(s.stayUntil))) { s.stayUntil = 0; dirty = true; }
@@ -1110,7 +1153,7 @@ export function createNpcWorld(opts) {
         student: {
           name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: 'act',
           needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s),
-          boardLine: boardLine(), scene: sceneLine(s), places: placesLine(s), heard: heardLine(s, now),
+          boardLine: boardLine(), scene: sceneLine(s), places: placesLine(s), heard: heardLine(s, now), self: selfProfile(s),
         },
         other: { name: t.name, cls: t.cls, persona: t.persona },
         memory: pickMemory(s, null),
@@ -1316,7 +1359,8 @@ export function createNpcWorld(opts) {
         const out = await askStudent({
           student: {
             name: s.name, cls: s.cls, persona: s.persona, sex: s.sex,
-            place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood,
+            place: placeOf(s), self: selfProfile(s), // 结构化自我档案（固定分层，放最前 ⇒ 身份稳、状态准）
+            st: s.st, needs: s.needs, mood: s.mood,
             rel: topRel(s), board: boardPosts.slice(-3),
             boardLine: boardLine(),          // ⚠ 没通知也要告诉它"学校有公告栏"（否则它不知道这块板子存在）
             player: playerWhere(s),          // 玩家在哪（距离/方位/地点，说人话）
@@ -1338,7 +1382,17 @@ export function createNpcWorld(opts) {
           decide(s, now);
           return;
         }
-        const goalType = resolveGoalType(out.goalType);
+        let goalType = resolveGoalType(out.goalType);
+        // 本地"解释器"兜底：LLM 给的意图认不出（已归一成 wander）但它其实在话里说了"去哪" ⇒ 从自然语言里读出来。
+        // 只在"它给了东西、但代码不认识"这一种情况兜底，且**不调 LLM**（省额度）；仍读不出就放手让它 wander。
+        if (goalType === 'wander') {
+          const rawGt = String(out.goalType || '').trim().toLowerCase();
+          const looksWander = !rawGt || ['wander', 'walk', 'roam', 'stroll', '游荡', '散步', '溜达', '随便走走'].includes(rawGt);
+          if (!looksWander) {
+            const guess = inferZoneFromText(String(out.goal || '') + ' ' + String(out.activity || ''));
+            if (guess) { goalType = guess; console.info('[npc] ' + s.name + ' 意图解释器：从「' + clampText(out.goal, 20) + '」读出去 ' + guess); }
+          }
+        }
         const durMs = clampInt(out.durationSec, PLAN_DUR_MIN, PLAN_DUR_MAX, 60) * 1000;
         // 事件驱动：AI 觉得"这事得告诉全校"（比如约人去操场、捡到东西找失主）→ 先走去公告栏贴出来。
         // 走位交给 System1；到板子前才真正让 AI 写定稿并发布（见 publishPost）。
@@ -1564,6 +1618,49 @@ export function createNpcWorld(opts) {
     }
     return out;
   }
+  // ---------- 结构化自我档案（DeepSeek 架构「自我状态改造」）----------
+  // 为什么不是把一堆字段平铺给模型：平铺 = 无优先级、无叙事锚点 ⇒ 身份漂移、状态混乱、记忆断裂。
+  // 改成**固定分层 + 固定顺序**的一段：
+  //   ① 我是谁（永恒：姓名/性别/性格/价值观）—— 每次完全一致，措辞顺序不变，**永不覆盖**
+  //   ② 我的近况（当前：位置/状态/心情/身体/今日主线）—— 每轮**覆盖更新**，并以它为准
+  //   ③ 我对自己的认识（自我叙事）—— 反思产物累积，让"自我"能随时间长出来
+  // 关系与长期记忆不塞进来（各自有独立段，记忆另有三分检索），避免重复占上下文。
+  function ensureValues(s) {
+    if (s.values) return s.values;
+    let h = 0;
+    const nm = String(s.name || s.id || '');
+    for (let i = 0; i < nm.length; i++) h = (h * 31 + nm.charCodeAt(i)) >>> 0;
+    s.values = VALUES_TABLE[h % VALUES_TABLE.length];
+    return s.values;
+  }
+  function moodBrief(s) {
+    const m = s.mood || {};
+    const v = Number(m.valence) || 0.5, e = Number(m.energy) || 0.5;
+    return (v > 0.65 ? '心情不错' : v < 0.35 ? '心情有点低落' : '心情平平') + (e > 0.65 ? '、挺有精神' : e < 0.35 ? '、没什么力气' : '');
+  }
+  function needsBrief(s) {
+    const n = s.needs || {};
+    const items = [['hunger', '有点饿'], ['fatigue', '有点累'], ['fun', '想玩'], ['study', '想学习'], ['social', '想找人说话'], ['bladder', '想去厕所']];
+    return items.map(([k, w]) => ({ w, v: Number(n[k]) || 0 })).filter((x) => x.v > 0.6)
+      .sort((a, b) => b.v - a.v).slice(0, 2).map((x) => x.w).join('、');
+  }
+  function selfProfile(s) {
+    const sex = s.sex === 'f' ? '女' : s.sex === 'm' ? '男' : '';
+    const who = '我叫' + String(s.name || '同学') + (sex ? ('，' + sex + '生') : '')
+      + '，' + String(s.cls || '这个班') + '的学生。我的性格是「' + String(s.persona || '普通学生') + '」，'
+      + '我最看重的是「' + ensureValues(s) + '」。这是我一直以来的样子，不会变。';
+    const nb = needsBrief(s);
+    const nowLine = '我此刻在' + placeOf(s) + '，' + (String(s.st) === 'walk' ? '正在往别处走' : '停下来做自己的事')
+      + '；' + moodBrief(s) + (nb ? ('；' + nb) : '')
+      + (s.dayPlan && s.dayPlan.text ? ('。今天我原本打算' + String(s.dayPlan.text)) : '')
+      + '。这是**当下**的我。';
+    const nar = (Array.isArray(s.narrative) ? s.narrative : [])
+      .map((x) => String((x && x.text) || '').trim()).filter(Boolean);
+    const narLine = nar.length
+      ? '我最近想明白了几件事：' + nar.slice(-2).join('；') + '。'
+      : '（我还没认真想过自己最近的样子。）';
+    return '· 我是谁（永不变）：' + who + '\n· 我的近况（会更新，以这里为准）：' + nowLine + '\n· 我对自己的认识：' + narLine;
+  }
   // 一条记忆有多重要（0~1）。有 imp 就用它，否则按类型 + 线索词现算（确定性，便于断言）。
   function memImportance(m) {
     if (!m) return 0.3;
@@ -1580,7 +1677,9 @@ export function createNpcWorld(opts) {
     const all = Array.isArray(s.mem) ? s.mem : [];
     if (all.length <= MEM_CTX) return all.slice();
     const now = Date.now();
-    const kws = memKeywords(placeOf(s) + ' ' + String((extra && extra.text) || ''));
+    // query = 当前情境（我在哪）+ 对方这句话 + **我正打算做什么**（DeepSeek：用"当前情境 + 正在做的事"检索）
+    const intentText = s.intent ? (String(s.intent.goalText || '') + ' ' + String(s.intent.activity || '')) : '';
+    const kws = memKeywords(placeOf(s) + ' ' + String((extra && extra.text) || '') + ' ' + intentText);
     const scored = all.map((m, i) => {
       const txt = String((m && m.text) || '');
       let hit = 0;
@@ -1768,7 +1867,7 @@ export function createNpcWorld(opts) {
     try {
       const bond = Number((a.rel[b.id] && a.rel[b.id].trust) || 0);
       const out = await askStudent({
-        student: { name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st, needs: a.needs, mood: a.mood, rel: topRel(a), player: playerWhere(a), boardLine: boardLine() },
+        student: { name: a.name, cls: a.cls, persona: a.persona, sex: a.sex, place: placeOf(a), st: a.st, needs: a.needs, mood: a.mood, rel: topRel(a), player: playerWhere(a), boardLine: boardLine(), self: selfProfile(a) },
         partner: { name: b.name, cls: b.cls, persona: b.persona, sex: b.sex },
         memory: pickMemory(a, null),
         kind: 'chat',
@@ -1976,6 +2075,7 @@ export function createNpcWorld(opts) {
         student: {
           name: s.name, cls: s.cls, persona: s.persona, sex: s.sex,
           place: placeOf(s), // 按**坐标**判定，不是按"打算去哪"——以前那样会让他在教室说自己在图书馆
+          self: selfProfile(s), // 结构化自我档案（固定分层，放最前 ⇒ 身份稳、状态准）
           st: s.st,
           needs: s.needs,
           mood: s.mood,      // 心情（被对话改）→ 这次说话/行动带着情绪
@@ -2101,17 +2201,24 @@ export function createNpcWorld(opts) {
   function maybeReflect(s, now) {
     if (reflectBusy || s._reflecting) return false;
     if (now - Number(s.reflectAt || 0) < REFLECT_CD) return false;
-    if ((s.mem || []).length - Number(s._memAtReflect || 0) < REFLECT_MIN_NEW) return false;
+    // 触发条件（DeepSeek：重要的经历会把"想"顶起来）：攒够**条数** 或 攒够**重要度累加** —— 二者其一即可。
+    //   关键事件能沉淀 = 哪怕只发生一两件大事（重要度高），也值得停下来想一想；
+    //   反之天天一堆琐碎观察（重要度低）不该老触发（条数够才触发）。
+    const newCount = (s.mem || []).length - Number(s._memAtReflect || 0);
+    const curImp = (s.mem || []).reduce((acc, m) => acc + memImportance(m), 0);
+    const newImp = curImp - Number(s._impAtReflect || 0);
+    if (newCount < REFLECT_MIN_NEW && newImp < REFLECT_IMP_SUM) return false;
     s._reflecting = true; reflectBusy = true;
     s.reflectAt = now;
     s._memAtReflect = (s.mem || []).length;
+    s._impAtReflect = curImp;
     (async () => {
       try {
         // 喂"最近 + 最重要"的几条：让它想值得想的事，而不是刚路过的观察
         const recent = (s.mem || []).slice(-10)
           .slice().sort((a, b) => memImportance(b) - memImportance(a)).slice(0, 6);
         const out = await askStudent({
-          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s) },
+          student: { name: s.name, cls: s.cls, persona: s.persona, sex: s.sex, place: placeOf(s), st: s.st, needs: s.needs, mood: s.mood, rel: topRel(s), player: playerWhere(s), self: selfProfile(s) },
           memory: recent,
           kind: 'reflect',
         });
@@ -2121,6 +2228,12 @@ export function createNpcWorld(opts) {
           const txt = clampText(t, LEN_MEM);
           if (!txt) continue;
           s.mem.push({ t: now, text: txt, kind: 'reflect', imp: 0.95 }); // 重要度拉满：反思最该被记住
+          // 同时写进**自我叙事层**（累积）：它让"我是谁"随时间长出来，喂回 prompt 的最前面。
+          if (!Array.isArray(s.narrative)) s.narrative = [];
+          if (!s.narrative.some((x) => x && x.text === txt)) {
+            s.narrative.push({ t: now, text: txt });
+            if (s.narrative.length > NARRATIVE_MAX) s.narrative.splice(0, s.narrative.length - NARRATIVE_MAX);
+          }
           n++;
         }
         if (n) { await trimMemory(s); saveStudents(students); console.info('[npc] ' + s.name + ' 反思：' + clampText(list[0], 40)); }
@@ -2426,7 +2539,7 @@ export function createNpcWorld(opts) {
   function stateOf(id) {
     const s = students.find((x) => x.id === String(id));
     if (!s) return null;
-    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, think: (s.think || []).slice(-3), heard: s.heard ? { ...s.heard } : null, noticed: String(s.noticed || ''), seenZones: (s.seenZones || []).slice(), st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
+    return { mood: { ...s.mood }, rel: { ...(s.rel || {}) }, intent: s.intent ? { ...s.intent } : null, quest: s.quest ? { ...s.quest } : null, want: s.want ? { ...s.want } : null, dayPlan: s.dayPlan || null, postPending: !!s.postPending, postIdea: s.postIdea || '', mem: (s.mem || []).slice(-3), memLen: (s.mem || []).length, think: (s.think || []).slice(-3), heard: s.heard ? { ...s.heard } : null, noticed: String(s.noticed || ''), seenZones: (s.seenZones || []).slice(), narrative: (s.narrative || []).slice(), values: String(s.values || ''), st: s.st, x: s.x, y: s.y, z: s.z, tx: s.tx, tz: s.tz, path: Array.isArray(s.path) ? s.path.length : 0, stayUntil: Number(s.stayUntil || 0), decideAt: Number(s.decideAt || 0), planAt: Number(s.planAt || 0) };
   }
   // ---------- 公告栏 + 广播器 ----------
   let boardPosts = []; // 最近几条公告文本（AI 决策时会"看到"）
@@ -2601,6 +2714,12 @@ export function createNpcWorld(opts) {
     planNext(s, Date.now());
     return true;
   }
+  // 调试/探针用：结构化自我档案（固定分层，放 prompt 最前 —— 身份稳 / 状态准）
+  function debugSelf(id) {
+    const s = students.find((x) => x.id === String(id));
+    if (!s) return null;
+    return { self: selfProfile(s), values: ensureValues(s), narrative: (s.narrative || []).slice() };
+  }
   // 调试/探针用：场景识别（附近地标/人 + 学校有哪些地方）的可见化
   function debugScene(id) {
     const s = students.find((x) => x.id === String(id));
@@ -2671,5 +2790,5 @@ export function createNpcWorld(opts) {
 
   function dispose() { clearInterval(timer); }
 
-  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, boardPosts: () => boardPosts.slice(), memImportance, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
+  return { roster, talk, setZones, getZones, dispose, triggerAI, stateOf, card, setBoard, announce, forceChat, debugStartQuest, refreshObstacles: reloadObstacles, setPlayerPositions, applyClientState, setShopCatalog, deliver, debugReflect, debugDayPlan, debugPickMemory, debugPlan, debugPost, debugScene, debugExplore, debugInquire, debugObserve, boardPosts: () => boardPosts.slice(), memImportance, debugSelf, inferZone: inferZoneFromText, loadPolicyStatus: () => ({ ready: policyReady, meta: policy.meta || {}, reason: policy.reason }), feedStats: () => ({ sft: feedSftRows, pref: feedPrefRows, dir: FEED_DIR }), ZONE_TYPES };
 }

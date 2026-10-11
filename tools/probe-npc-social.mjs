@@ -371,8 +371,10 @@ console.log('[10] NPC 之间离得远 → 主动**相向走近**，凑近了自�
     },
   });
   const d0 = distW(w, 's1', 's2');
-  // 闲聊现在是**事件驱动**：靠得近就按概率开口（最多 CHAT_NEAR_MAX=4s 必开口），不再等 20s 的定时
-  await sleep(7500);
+  // 闲聊现在是**事件驱动**：靠得近就按概率开口（最多 CHAT_NEAR_MAX=4s 必开口），不再等 20s 的定时。
+  // ⚠ 取样窗口要一次盖住「走近(几秒) + 开口(≤CHAT_NEAR_MAX=4s) + 第二句延时(CHAT_LINE_GAP_MS=1.6s)」，
+  //   否则固定时刻取样会只抓到第一句 ⇒ 假性抖动（实测 7500ms 偶发失败）。断言不变，只把窗口给足。
+  await sleep(11000);
   const d1 = distW(w, 's1', 's2');
   const a = w.stateOf('s1'), b = w.stateOf('s2');
   w.dispose();
@@ -1015,6 +1017,94 @@ console.log('[32] 公告可剔除：按 id 精确删 + 删完重新喂给 AI（�
   const body = src.slice(i, i + 900);
   ok(/setBoard/.test(body), '★★ 删完把最新公告重新喂给 AI ⇒ 删了它就不再照做', '');
   ok(/broadcastAll/.test(body), '删完广播刷新所有客户端的公告栏', '');
+}
+
+console.log('[33] 反思阈值：关键事件（少但重要）也能触发"想"，产物进自我叙事层');
+{
+  const dir = freshDir('reflectimp');
+  writeScene(dir);
+  writeZones(dir);
+  const list = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  // 只有 3 条新记忆（< REFLECT_MIN_NEW=4）⇒ 走"条数"那条路不够；但都是大事（重要度 0.8×3=2.4 ≥ 2.2）
+  //   ⇒ 必须走 **重要度累积** 那条路触发（DeepSeek：关键事件能沉淀）。
+  const now = Date.now();
+  list[0].mem = [
+    { t: now - 60000, text: '玩家帮我买来了一摞书，人挺靠谱', kind: 'trade', imp: 0.8 },
+    { t: now - 50000, text: '我答应帮顾星桥带话', kind: 'quest', imp: 0.8 },
+    { t: now - 40000, text: '我请玩家帮我带个毯子', kind: 'want', imp: 0.8 },
+  ];
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const kinds = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      kinds.push(String(input.kind || ''));
+      if (input.kind === 'reflect') return { insights: ['我最近老麻烦别人，其实我挺在意朋友怎么看我的'] };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  await sleep(400);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(kinds.includes('reflect'), '只有 3 条新记忆（不够条数）但都是大事 ⇒ 仍触发反思（重要度累积阈值）', 'kinds=' + kinds.join(','));
+  ok(!!st && Array.isArray(st.narrative) && st.narrative.some((x) => /朋友怎么看/.test(String(x.text))),
+    '反思产物写进**自我叙事层**（自我能随时间长出来）', st && JSON.stringify(st.narrative));
+}
+
+console.log('[34] 本地解释器：goalType 认不出，但话里说了"去哪" → 读出来落地（零 LLM）');
+{
+  const dir = freshDir('interp');
+  writeScene(dir);
+  writeZonesCustom(dir, [
+    { id: 'zc', name: '第一食堂', type: 'canteen', minX: 40, maxX: 60, minZ: 40, maxZ: 60 },
+  ]);
+  const list = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  list[0].planAt = 0;
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const kinds = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => {
+      kinds.push(String(input.kind || ''));
+      if (input.kind === 'plan') return { goalType: '去吃饭', goal: '想去食堂吃点东西', activity: '打饭', durationSec: 120, thought: '有点饿' };
+      return { say: '', think: '', mem: '' };
+    },
+  });
+  await sleep(400);
+  const st = w.stateOf('s1');
+  w.dispose();
+  ok(!!st && st.intent && st.intent.goalType === 'canteen',
+    '解释器把「想去食堂…」（goalType 认不出）读成 canteen 并落地', st && JSON.stringify(st.intent));
+  ok(kinds.filter((k) => k === 'plan').length === 1, '解释是**本地**做的，没有为它多花一次 LLM 调用', 'kinds=' + kinds.join(','));
+}
+
+console.log('[35] 结构化自我档案：npcworld 把固定分层的"自我"注入 plan prompt，身份锚在前、叙事在后');
+{
+  const dir = freshDir('self');
+  writeScene(dir);
+  writeZones(dir);
+  const list = questStudents([[0, 0], [8, 0], [16, 0], [24, 0], [32, 0], [40, 0], [48, 0], [56, 0]]);
+  for (const s of list) { s.planAt = 1e15; s.decideAt = 1e15; s.chatAt = 1e15; }
+  list[0].narrative = [{ t: Date.now(), text: '我发现我其实挺喜欢一个人待着' }];
+  list[0].planAt = 0;
+  fs.writeFileSync(path.join(dir, 'students.json'), JSON.stringify(list, null, 2));
+  const plans = [];
+  const w = createNpcWorld({
+    dataDir: dir, broadcast: () => {}, getDayTime: () => 0.35,
+    askStudent: async (input) => { if (input.kind === 'plan') plans.push(input.student); return null; },
+  });
+  await sleep(400);
+  const dbg = w.debugSelf('s1');
+  w.dispose();
+  const p0 = plans[0];
+  const selfText = String((p0 && p0.self) || '');
+  ok(/我是谁（永不变）/.test(selfText) && /我的近况/.test(selfText) && /我对自己的认识/.test(selfText),
+    'plan 的 prompt 带上了结构化【自我档案】三层', selfText.slice(0, 90));
+  ok(selfText.indexOf('我是谁') < selfText.indexOf('我的近况'), '分层顺序固定：身份 → 近况 → 叙事（不漂移）', '');
+  ok(/挺喜欢一个人待着/.test(selfText), '自我叙事层进了档案（反思越多越"有自己"）', '');
+  ok(!!dbg && typeof dbg.values === 'string' && dbg.values.length > 0, '价值观已稳定派生（"我是谁"要措辞不变）', dbg && dbg.values);
 }
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');

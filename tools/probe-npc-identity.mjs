@@ -172,5 +172,36 @@ console.log('[9] 场景识别 / 记忆来源 / 四处问人：都进了 prompt')
   ok(/第一人称/.test(sys3), 'SYSTEM_INQUIRE 要求第一人称（不许把自己写成第三人称）', '');
 }
 
+console.log('[10] 结构化自我档案：固定分层（我是谁/我的近况/我对自己的认识）且放最前');
+{
+  await askStudent({
+    student: {
+      ...base,
+      self: '· 我是谁（永不变）：我叫顾星桥，男生，高二(3)班的学生。我的性格是「话痨…」，我最看重的是「待人善良…」。\n'
+        + '· 我的近况（会更新，以这里为准）：我此刻在操场，停下来做自己的事；心情平平。\n'
+        + '· 我对自己的认识：我最近想明白了几件事：我更想找人打球。',
+    },
+    memory: [], kind: 'talk', playerName: '小明', playerText: '你好',
+  });
+  const p = userTextOf(captured.length - 1);
+  ok(/【你的自我档案】/.test(p), 'talk prompt 有【你的自我档案】段', p.slice(0, 80));
+  ok(/我是谁（永不变）/.test(p) && /我的近况/.test(p) && /我对自己的认识/.test(p),
+    '自我档案三层齐全（身份 / 近况 / 叙事）', '');
+  const iSelf = p.indexOf('【你的自我档案】');
+  const iPersona = p.indexOf('【你的人设】');
+  ok(iSelf >= 0 && iPersona > iSelf, '自我档案排在【你的人设】之前（身份/叙事在前 ⇒ 当锚点）', 'self=' + iSelf + ' persona=' + iPersona);
+}
+
+console.log('[11] 冲突裁决规则：行为与性格冲突→按性格；记忆与当下冲突→以当下为准');
+{
+  await askStudent({ student: { ...base }, memory: [], kind: 'talk', playerName: '小明', playerText: '你好' });
+  const sys = systemTextOf(captured.length - 1);
+  ok(/按性格来/.test(sys), 'SYSTEM：一时冲动与性格冲突 → 按性格来', '');
+  ok(/以当下为准/.test(sys), 'SYSTEM：记忆/旧印象与当下冲突 → 以当下为准', '');
+  await askStudent({ student: { ...base }, memory: [], kind: 'plan', hour: 10, schedule: '上课' });
+  const sysP = systemTextOf(captured.length - 1);
+  ok(/按性格来/.test(sysP) && /以当下为准/.test(sysP), 'SYSTEM_PLAN 同样有这两条裁决规则', '');
+}
+
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);
