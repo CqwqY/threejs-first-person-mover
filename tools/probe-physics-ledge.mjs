@@ -89,18 +89,7 @@ function walkOffConvex(hx, hy, hz, label) {
   ok(r.state.x > 4.5, '[convex 3.0m 高] 水平走远了（没被吸回台面）', 'x=' + r.state.x.toFixed(2));
 }
 
-// ---- 静态断言：客户端「起跳」的两条硬约束（Students.js 要 DOM，跑不了，只能查源码）----
-// ⚠ 断言里写多行字面量必须先 CRLF→LF 归一化（Windows 检出是 CRLF）。
-// ⚠ 只断言"这一段里"的内容，别用 indexOf 扫到文件末尾（记忆里的探针坑）。
-{
-  const lines = fs.readFileSync(new URL('../src/world/Students.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n').split('\n');
-  const idx = lines.map((l, i) => (/^_npcInput\._jump\s*=\s*true/.test(l.trim()) || /_npcInput\._jump\s*=\s*true/.test(l) ? i : -1)).filter((i) => i >= 0);
-  ok(idx.length === 1, 'Students.js 只有一处置起跳标志（好审计）', 'count=' + idx.length);
-  // 起跳那一句本身可能只是个内层 if；把它的上下文（含外层条件）一起看
-  const ctx = idx.length ? lines.slice(Math.max(0, idx[0] - 6), idx[0] + 1).join('\n') : '';
-  ok(/onGround/.test(ctx), '起跳必须要求"在地面"（空中乱跳会在台面边缘/墙边来回弹）', ctx.replace(/\n/g, ' ⏎ ').slice(-200));
-  ok(/lowBlocked\s*&&\s*highFree/.test(ctx), '起跳必须限定"矮挡"（脚踝被挡、抬到 ~0.85m 就通）', '');
-}
+// ---- （原「Students.js 起跳两条硬约束」静态断言已随 NPC 系统移除：2026-10-16）----
 
 console.log(fails ? '\n✗ ' + fails + ' 条断言失败' : '\n✓ 全部通过');
 process.exit(fails ? 1 : 0);

@@ -11,7 +11,7 @@ import { ensureTheme } from './theme.js';
 // 动作 → 键位。键名对应 public/ui/keys 下的文件名（无扩展名）。
 //
 // ⚠⚠ 这份表**必须和 src/config.js 的真实绑定对齐**，别凭记忆写：
-//   NPC_KEY / VEHICLE_KEY 都是 'KeyF'（一个键两用：靠近阿花是对话，靠近车是上下车）
+//   VEHICLE_KEY='KeyF'（靠近车是上下车）
 //   PICKUP_KEY='KeyE'（拾取掉落物，不是对话！）· BOSS_SHIELD_KEY='KeyQ'
 //   SOUL_KEY='KeyP'（灵魂出窍）· DROP_MODIFIER_KEY='KeyY'（+数字键丢指定槽位）
 //   F5 切人称在 Game 构造里硬编码（不是 config）

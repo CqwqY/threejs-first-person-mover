@@ -9,12 +9,7 @@ import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
 import { fullscreenSupported, isFullscreen, toggleFullscreen, onFullscreenChange } from '../ui/fullscreen.js';
 import { createPlayerHUD } from '../ui/PlayerHUD.js';
-import { createNpcChat } from '../ui/NpcChat.js';
-import { createNpcCard } from '../ui/NpcCard.js';
-import { createAnnouncePanel } from '../ui/AnnouncePanel.js';
-import { createBulletinBoard } from '../world/BulletinBoard.js';
 import { createChatBox } from '../ui/ChatBox.js';
-import { createStudents } from '../world/Students.js';
 import { createVehicle } from '../world/Vehicle.js';
 import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
@@ -510,42 +505,6 @@ export class Game {
     // 顶部校卡两侧：左侧「背包」、右侧「设置」
     this._createTopButtons();
 
-    // ---- 学生 NPC：校园里的 8 名同学，位置由服务端权威跑，靠近按 F 或点选项卡打开对话栏 ----
-    // 对话面板沿用原来的 NPC 聊天框（原商人 NPC 已下架，给物品的能力并入商店）。
-    this.aiChat = createNpcChat();
-    this.aiChat.setOnSend((text) => this._studentSend(text));
-    // 和学生说话也要打字：同样把手机控件整组藏掉，免得边聊边走
-    this.aiChat.setOnOpen(() => {
-      this._setChatLock(true);
-      if (this.mobileControls) this.mobileControls.setHidden(true);
-    });
-    this.aiChat.setOnClose(() => {
-      this._setChatLock(false);
-      if (this.mobileControls) this.mobileControls.setHidden(false);
-      this._talkId = ''; // 关掉面板就结束这次对话，下次靠近重新开始
-    });
-    // 校卡：对话面板右上角的「校卡」按钮 → 拉服务端资料（性格/心情/目标/关系/记忆）并弹出
-    this.npcCard = createNpcCard();
-    this.aiChat.setOnCard(() => this._openNpcCard());
-    // 公告栏（世界坐标 -22,17）+ 发布面板（广播器/公告栏共用）
-    this._announce = createAnnouncePanel();
-    this._board = createBulletinBoard(this.scene, { x: -22, z: 17 });
-    this.students = createStudents({
-      scene: this.scene,
-      // 与玩家同一份世界碰撞体（含 trimesh 复杂碰撞）：学生吃它，撞墙/踩坡/上台阶都和玩家一致
-      colliders: this.colliders,
-      // ⚠ 与玩家**同一份**场地边界：不给的话 PlayerPhysics 会退回 GROUND_* 旧矩形，学生被旧边界困住
-      boundary: this._combat ? null : this.boundary,
-      onSpeak: (info) => this._onStudentSpeak(info),
-    });
-    // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关对话栏
-    this._createChatTab();
-    this._createBoardTab();
-    this._createDeliverTab();
-    this._bindStudentTalk();
-    // 公告栏初值：拉一次服务端已有公告画到板子上（之后靠 ws 的 board 消息实时更新）
-    fetch(this._relayBase() + '/api/board').then((r) => r.json()).then((d) => { if (d && d.ok && this._board) this._board.setPosts(d.posts || []); }).catch(() => {});
-
     // ---- 电动车：双人载具，停在出生点旁的 (-7, 144) ----
     this.vehicle = createVehicle(this.scene);
     // 载具是动态物体：开第 1 层让太阳实时照它（createVehicle 内部异步加载的模型也会在加载后补开）。
@@ -558,7 +517,6 @@ export class Game {
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.VEHICLE_KEY) return;
       if (isEditableTarget(document.activeElement)) return;
-      if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
       this._toggleVehicle();
     });
 
@@ -662,7 +620,6 @@ export class Game {
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.PICKUP_KEY) return;
       if (isEditableTarget(document.activeElement)) return;
-      if (this.aiChat && this.aiChat.isOpen()) return; // 对话中不响应
       if (!this._pickupTarget) return;
       e.preventDefault();
       this._pickupNearest();
@@ -773,7 +730,6 @@ export class Game {
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.BOSS_SHIELD_KEY) return;
       if (isEditableTarget(document.activeElement)) return;
-      if (this.aiChat && this.aiChat.isOpen()) return;
       this._activateShield();
     });
 
@@ -781,7 +737,6 @@ export class Game {
     window.addEventListener('keydown', (e) => {
       if (e.code !== Config.SOUL_KEY) return;
       if (isEditableTarget(document.activeElement)) return;
-      if (this.aiChat && this.aiChat.isOpen()) return;
       this._toggleSoul();
     });
 
@@ -1736,51 +1691,6 @@ export class Game {
         if (this._buildTool) this._buildTool.handleBuild(msg);
         break;
       }
-      case 'npc_roster': {
-        // 学生名单：连上就发一份（姓名/班级/性别/当前位置）
-        if (this.students) this.students.setRoster(msg.list);
-        break;
-      }
-      case 'npc': {
-        // 学生位置广播（5Hz）：只更新目标点，实际位移在 students.update 里缓动
-        if (this.students) this.students.applyList(msg.list);
-        break;
-      }
-      case 'npc_say': {
-        // 学生说话/心理活动（所有人都能看到气泡）
-        if (this.students) this.students.onSay(msg);
-        break;
-      }
-      case 'npc_reply': {
-        // 只回给发起对话的那个玩家：填进对话栏
-        this._onStudentReply(msg);
-        break;
-      }
-      case 'npc_zones': {
-        // 编辑器改了功能区：本地不直接用（位置以服务端为准），只提示一下
-        break;
-      }
-      case 'npc_deliver': {
-        // 反向委托的结算回执：成功就给跑腿费（服务端算好的额度），失败说明原因
-        if (msg.ok) {
-          const r = Math.max(0, Math.floor(Number(msg.reward) || 0));
-          if (r > 0) { addCoins(this._profile, r); this._refreshCoins(); }
-          this._toast('✅ 交付成功' + (r > 0 ? '，拿到跑腿费 ¥' + r : ''));
-        } else if (msg.reason) {
-          this._toast('交付失败：' + String(msg.reason));
-        }
-        break;
-      }
-      case 'board': {
-        // 公告栏有新公告（别人贴的 / 我刚贴的）：实时重画到板子上
-        if (this._board) this._board.setPosts(msg.posts || []);
-        break;
-      }
-      case 'announce': {
-        // 校园广播：所有客户端弹一条横幅
-        this._toast('📢 ' + String(msg.text || ''));
-        break;
-      }
       case 'chat': {
         // 别人的发言（同房间 / 同大厅）：昵称与颜色取服务端下发的那份，文本按纯文本显示
         if (this.chat) {
@@ -2002,12 +1912,6 @@ export class Game {
     }
   }
 
-  // 打开对话栏：退出指针锁定并锁定操控（对话期间移动键不响应）
-  _openChat() {
-    if (this.aiChat.isOpen()) return;
-    document.exitPointerLock && document.exitPointerLock();
-    this.aiChat.open();
-  }
   _setChatLock(locked) {
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.controlLock = !!locked;
   }
@@ -2139,8 +2043,7 @@ export class Game {
     this.localPlayer.resetRideLook(); // 骑行自由视角回正（否则下车后镜头还歪着）
     const phys = this.localPlayer.physics;
     phys.canJump = true;
-    // 别把对话栏的操控锁一起解掉
-    phys.controlLock = !!(this.aiChat && this.aiChat.isOpen());
+    phys.controlLock = false;
     phys.speedMult = 1;
     phys.speedMode = 'walk';
     this._bossUiKey = null; // 强制重算：恢复主世界的攻击键/传送门提示显隐
@@ -2408,7 +2311,6 @@ export class Game {
   _updateAimUI() {
     // 打开任何需要鼠标/键盘的面板时收起准星（这时候屏幕上有光标，画个准星是误导）
     const panel =
-      (this.aiChat && this.aiChat.isOpen()) ||
       (this.chat && typeof this.chat.isOpen === 'function' && this.chat.isOpen()) ||
       (this.shop && typeof this.shop.isOpen === 'function' && this.shop.isOpen());
     const vis = !this._dead && !this._soul && !panel &&
@@ -4224,100 +4126,6 @@ export class Game {
     }
   }
 
-  // 屏幕中心右侧的「按 F 与 TA 对话」选项卡：仅在靠近某个学生时显示，点击开/关底部对话栏；位置略往中间收
-  _createChatTab() {
-    const el = document.createElement('div');
-    el.className = 'chat-tab kui-btn kui-btn--primary'; // 保留 chat-tab 供手机端「按键布局调整」定位与检查
-    el.textContent = '按 F 对话';
-    el.style.cssText =
-      'position:fixed;right:26%;top:50%;transform:translateY(-50%);z-index:9500;cursor:pointer;display:none;' +
-      'padding:9px 12px;user-select:none;text-align:center;';
-    el.addEventListener('click', () => {
-      // 已开着就关；没开就找最近的人开（直接 toggle 会在没对话对象时开出空面板）
-      if (this.aiChat && this.aiChat.isOpen()) this.aiChat.close();
-      else this._talkToNearest();
-    });
-    document.body.appendChild(el);
-    this._chatTab = el;
-  }
-
-  // 公告栏选项卡：靠近 (-22,17) 那块板子时显示
-  _createBoardTab() {
-    const el = document.createElement('div');
-    el.className = 'board-tab kui-btn kui-btn--primary';
-    el.textContent = '按 F 看公告栏';
-    el.style.cssText =
-      'position:fixed;right:26%;top:calc(50% + 52px);z-index:9500;cursor:pointer;display:none;' +
-      'padding:9px 12px;user-select:none;text-align:center;';
-    el.addEventListener('click', () => this._openBoardPanel());
-    document.body.appendChild(el);
-    this._boardTab = el;
-  }
-
-  // 「把 X 交给 TA」：NPC 反过来请你代买东西时出现的按钮（背包里确实有那件东西才显示）。
-  // 点击 → 本地从背包扣掉 → 发 npc_deliver 让服务端校验并结算跑腿费。做成按钮是为了手机也能用。
-  _createDeliverTab() {
-    const el = document.createElement('div');
-    el.className = 'deliver-tab kui-btn';
-    el.textContent = '交给 TA';
-    el.style.cssText =
-      'position:fixed;right:26%;top:calc(50% + 104px);z-index:9501;cursor:pointer;display:none;' +
-      'padding:9px 12px;user-select:none;text-align:center;';
-    el.addEventListener('click', () => this._deliverToNearest());
-    document.body.appendChild(el);
-    this._deliverTab = el;
-  }
-
-  // 交付：背包里有那件东西才允许（本地记账），服务端再校验物品名是否就是它要的
-  _deliverToNearest() {
-    if (!this.students || !this.localState) return;
-    const s = this.students.nearest(this.localState.x, this.localState.z);
-    if (!s || !s.want) return;
-    const key = getBagKey(this._profile);
-    const name = String(s.want);
-    const bag = loadBag(key);
-    if (!Number(bag[name] || 0)) { this._toast('背包里没有「' + name + '」，先去小满杂货铺买一个'); return; }
-    removeFromBag(key, name, 1); // 先从背包扣掉（服务端不信前端，只校验名字并给奖励）
-    this.network.sendNpcDeliver(s.id, name);
-    this._toast('把「' + name + '」交给了' + s.name + '…');
-    if (this.shop && this.shop.isOpen()) this.shop.render();
-  }
-  _nearBoard() {
-    if (!this.localState) return false;
-    return Math.hypot(Number(this.localState.x) - -22, Number(this.localState.z) - 17) < 6.5;
-  }
-
-  // 每帧刷新搭话/公告栏选项卡：靠近谁就写谁的名字；没人但靠近公告栏就显示公告栏
-  _updateTalkTab() {
-    if (!this._chatTab || !this.students || !this.localState) return;
-    const hideDeliver = () => { if (this._deliverTab) this._deliverTab.style.display = 'none'; };
-    const busy = (this.aiChat && this.aiChat.isOpen()) || (this._announce && this._announce.isOpen());
-    if (busy) {
-      this._chatTab.style.display = 'none';
-      if (this._boardTab) this._boardTab.style.display = 'none';
-      hideDeliver();
-      return;
-    }
-    const s = this.students.nearest(this.localState.x, this.localState.z);
-    if (s) {
-      const text = '按 F 与' + s.name + '对话';
-      if (this._chatTab.textContent !== text) this._chatTab.textContent = text;
-      this._chatTab.style.display = '';
-      if (this._boardTab) this._boardTab.style.display = 'none';
-      // 反向委托：它请你带了东西、而且你背包里确实有 → 亮出「交给 TA」
-      const bag = s.want ? loadBag(getBagKey(this._profile)) : null;
-      if (this._deliverTab && s.want && bag && Number(bag[String(s.want)] || 0) > 0) {
-        const t2 = '交给' + s.name + '「' + s.want + '」';
-        if (this._deliverTab.textContent !== t2) this._deliverTab.textContent = t2;
-        this._deliverTab.style.display = '';
-      } else hideDeliver();
-      return;
-    }
-    this._chatTab.style.display = 'none';
-    hideDeliver();
-    if (this._boardTab) this._boardTab.style.display = this._nearBoard() ? '' : 'none';
-  }
-
   // 顶部按钮：PC 上贴着校卡左右两侧；手机端校卡贴最左，这三个按钮在它右边排成一行
   //
   // 结构（2026-10-04 按用户要求改）：**按钮里只放图标，文字放在按钮外面**。
@@ -4652,154 +4460,6 @@ export class Game {
       cardBody.appendChild(btnRow);
       card.appendChild(cardBody);
       grid.appendChild(card);
-    }
-  }
-
-  // ---------- 学生 NPC：靠近搭话 / 服务端带记忆回话 ----------
-  // F 键：找最近的学生开聊。位置是服务端权威的，这里只判断"谁离我最近"。
-  _bindStudentTalk() {
-    this._talkId = '';        // 当前正在对话的学生 id（空 = 没在聊）
-    this._talkName = '';
-    this._sayTimer = null;    // 回复超时兜底的定时器
-    this._pendingSayAt = 0;   // 发出这句话的时间戳（超时判定用，必须初始化，否则 NaN）
-    this._awaitReplyId = '';  // 正在等哪位学生的回复（用于跳过自己发起的那次广播，避免同一句显示两遍）
-    window.addEventListener('keydown', (e) => {
-      if (e.code !== Config.NPC_KEY) return;
-      // 有输入框在打字或已开面板时不重复触发，交给面板自身管理
-      const el = document.activeElement;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
-      if (this.aiChat && this.aiChat.isOpen()) return;
-      if (this._announce && this._announce.isOpen()) return;
-      // 附近没人、但人站在公告栏边 → 开公告栏（同一个 F 键）
-      const s = (this.students && this.localState) ? this.students.nearest(this.localState.x, this.localState.z) : null;
-      if (!s && this._nearBoard()) { this._openBoardPanel(); return; }
-      this._talkToNearest();
-    });
-  }
-
-  // 服务端 HTTP 基址（ws → http）
-  _relayBase() { return Config.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:'); }
-  // ⚠ 这里原来还定义了第二个 _myNick（重复类成员，后者覆盖前者）——已删掉重复的那份（唯一的见文件后段），
-  //   否则 esbuild 会报 duplicate-class-member，行为上也是"最后一个赢"、前面那份纯属死代码。
-
-  // 校园广播器：输入一句话 → 服务端轮流下发给所有 AI
-  _openBroadcast() {
-    if (!this._announce) return;
-    this._announce.open({
-      title: '校园广播器',
-      placeholder: '一句话广播给全校学生（他们会轮流收到并记下）…',
-      onSubmit: async (text) => {
-        try {
-          const r = await fetch(this._relayBase() + '/api/npc/broadcast', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, from: this._myNick() }),
-          });
-          const d = await r.json().catch(() => null);
-          if (!d || !d.ok) return { ok: false, reason: (d && d.error) || '广播失败' };
-          this._toast('已广播：' + text);
-          return { ok: true };
-        } catch (e) { return { ok: false, reason: '网络不通' }; }
-      },
-    });
-  }
-
-  // 公告栏：看已有公告 + 贴一张（全校 AI 决策时会看到）+ 撤回自己的公告
-  _openBoardPanel() {
-    if (!this._announce) return;
-    const post = async (text) => {
-      try {
-        const r = await fetch(this._relayBase() + '/api/board', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, from: this._myNick() }),
-        });
-        const d = await r.json().catch(() => null);
-        if (!d || !d.ok) return { ok: false, reason: (d && d.error) || '发布失败' };
-        this._toast('已贴上公告栏');
-        return { ok: true };
-      } catch (e) { return { ok: false, reason: '网络不通' }; }
-    };
-    // 撤回：删掉后服务端会把它从 AI 的视野里移除（AI 不再照它行动），并广播刷新公告栏贴图
-    const del = async (id) => {
-      try {
-        const r = await fetch(this._relayBase() + '/api/board', {
-          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, from: this._myNick() }),
-        });
-        const d = await r.json().catch(() => null);
-        if (!d || !d.ok) return { ok: false, reason: (d && d.error) || '撤回失败' };
-        this._toast('已撤回这条公告');
-        if (Array.isArray(d.posts) && this._board) this._board.setPosts(d.posts);
-        return { ok: true, posts: d.posts || [] };
-      } catch (e) { return { ok: false, reason: '网络不通' }; }
-    };
-    fetch(this._relayBase() + '/api/board').then((r) => r.json()).then((d) => {
-      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告（全校 AI 决策时会看到）…', posts: (d && d.posts) || [], onSubmit: post, onDelete: del });
-    }).catch(() => {
-      this._announce.open({ title: '校园公告栏', placeholder: '贴一张公告…', onSubmit: post, onDelete: del });
-    });
-  }
-
-  // 靠近谁就跟谁聊：周围没人时明确提示（不要静默什么都不发生）
-  _talkToNearest() {
-    if (!this.students || !this.localState) return;
-    const s = this.students.nearest(this.localState.x, this.localState.z);
-    if (!s) { this._toast('走近一点才能搭话'); return; }
-    this._talkId = s.id;
-    this._talkName = s.name;
-    this.aiChat.setTitle(s.name + ' · ' + s.cls);
-    this._openChat();
-  }
-
-  // 把玩家的话发给服务端（服务端带人设/记忆调 GLM），回复走 npc_reply
-  _studentSend(text) {
-    if (!this._talkId) { this.aiChat.addMsg('busy', '（没有对话对象）'); return; }
-    if (!this.network) return;
-    this.aiChat.addMsg('busy', (this._talkName || '同学') + '正在想…');
-    this._pendingSayAt = Date.now();
-    this._awaitReplyId = this._talkId; // 接下来会同时收到一次广播，靠它跳过重复的那份
-    this.network.sendStudentTalk(this._talkId, text);
-    // 兜底：20 秒还没回就出声，别让「正在想…」一直挂着（AI 失败/限流时会走到这条）
-    if (this._sayTimer) clearTimeout(this._sayTimer);
-    this._sayTimer = setTimeout(() => {
-      if (this._awaitReplyId) this._awaitReplyId = ''; // 超时了就别再拦广播（否则漏看别人的话）
-      if (this.aiChat && this.aiChat.isOpen()) this.aiChat.addMsg('npc', '（他好像没听见，等会儿再说吧）');
-    }, 20500);
-  }
-
-  // 服务端回的对话内容：只有 say（嘴上说的话）。
-  // ⚠ think（心理活动）是内部数据，服务端不再下发、这里也绝不显示。
-  _onStudentReply(msg) {
-    if (!this.aiChat || !msg) return;
-    if (this._sayTimer) { clearTimeout(this._sayTimer); this._sayTimer = null; }
-    if (this.aiChat.isOpen() && msg.id === this._talkId) {
-      if (msg.say) this.aiChat.addMsg('npc', String(msg.say));
-    }
-    // ⚠ 说话者自己**被排除在 npc_say 广播之外**（只收 npc_reply）⇒ 必须在这里补一次气泡，
-    //   否则「自己跟学生说话时，学生头上不冒泡」（旁人能看见、自己看不见，很怪）。
-    //   此刻 _awaitReplyId 还没清空，onSpeak→_onStudentSpeak 会按它跳过，不会把这句话又塞进对话栏。
-    if (this.students && msg.say) this.students.onSay({ id: msg.id, say: msg.say });
-    if (this._awaitReplyId === String(msg.id || '')) this._awaitReplyId = '';
-  }
-
-  // 校卡：拉某个学生的资料并弹出（性格 / 心情 / 当前目标 / 关系 / 近期记忆）
-  _openNpcCard() {
-    const id = this._talkId;
-    if (!id || !this.npcCard) return;
-    const base = Config.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
-    fetch(base + '/api/npc/card?id=' + encodeURIComponent(id))
-      .then((r) => r.json())
-      .then((d) => { this.npcCard.show(d && d.card); this.npcCard.open(); })
-      .catch(() => { this.npcCard.show(null); this.npcCard.open(); });
-  }
-
-  // 别人跟同一个学生说话时，自己这边也能在对话栏里看到（气泡由 Students 自己显示）
-  _onStudentSpeak(info) {
-    if (!info) return;
-    // ⚠ 自己发起的那次服务端会单独回 npc_reply，这里必须跳过广播的那一份 —— 否则同一句话出现两遍。
-    //   用"正在等谁回复"判定，才不会误伤别人跟同一个学生说的话。
-    if (info.id === this._awaitReplyId) return;
-    if (this.aiChat && this.aiChat.isOpen() && info.id === this._talkId) {
-      if (info.say) this.aiChat.addMsg('npc', String(info.say));
     }
   }
 
@@ -5235,12 +4895,6 @@ export class Game {
           // 会弹面板挑人，所以别让技能槽那 800ms 防连点挡着（真正的冷却在 _useInviteTp 里自己控）
           noCd: true,
           run: () => this._useInviteTp(),
-        };
-      case 'broadcast':
-        return {
-          label: '广播',
-          noCd: true, // 会弹输入面板，别被技能槽防连点挡着（真冷却在服务端按 IP 控）
-          run: () => this._openBroadcast(),
         };
       case 'throw': {
         // 投掷物：v = 伤害，r = 爆炸半径（后端已钳制）；可选 onHit = 范围效果
@@ -6213,10 +5867,9 @@ export class Game {
     // 跑圈 HUD 与赛道可视化（路面 + 门框）会一路留到竞技场里。
     if (this._race) this._exitRace(null);
 
-    // 隐藏主世界景物与城市 NPC；碰撞体先快照再原地替换为竞技场
+    // 隐藏主世界景物；碰撞体先快照再原地替换为竞技场
     if (this._cityRoots) for (const r of this._cityRoots) r.visible = false;
     setEditorSceneVisible(false); // 编辑器建筑不在 roots 里，单独整组隐藏
-    if (this.students) this.students.setVisible(false);
     if (this.merchant) this.merchant.group.visible = false;
     if (this.vehicle) this.vehicle.group.visible = false;
     // 狂飙的池子车也一起藏（竞技场里不该出现它们；退出对战后由 _updateVehicle 按需重新露出来）
@@ -6228,9 +5881,6 @@ export class Game {
     if (this._portalHint) this._portalHint.style.display = 'none';
     if (this._merchantHint) this._merchantHint.style.display = 'none';
     if (this._vehHint) this._vehHint.style.display = 'none';
-    if (this._chatTab) this._chatTab.style.display = 'none';
-    if (this._deliverTab) this._deliverTab.style.display = 'none';
-    if (this._boardTab) this._boardTab.style.display = 'none';
 
     this._mainColliders = this.colliders.slice(); // 快照主世界碰撞体内容（退出时还原）
     // 按模式换场景：陨石混战 = 平地竞技场；疯狂抓钩 = 柱子林 + 底部岩浆
@@ -6286,10 +5936,9 @@ export class Game {
     if (this._arena) { this._arena.dispose(); this._arena = null; }
     this._beacons = null; // 光点随竞技场一起销毁，别在下一场景里继续高亮
 
-    // 还原城市景物与 NPC
+    // 还原城市景物
     if (this._cityRoots) for (const r of this._cityRoots) r.visible = true;
     setEditorSceneVisible(true);
-    if (this.students) this.students.setVisible(true);
     if (this.merchant) this.merchant.group.visible = true;
     if (this.vehicle) this.vehicle.group.visible = true;
     if (this.boss && this.boss.group) this.boss.group.visible = true;
@@ -7610,8 +7259,6 @@ export class Game {
     const b = this.boundary;
     const active = this._combat ? null : b;
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.bound = active;
-    // 学生也要跟玩家用同一条边界（否则被 PlayerPhysics 的 GROUND_* 旧矩形夹住）
-    if (this.students && this.students.setBoundary) this.students.setBoundary(active);
     this._rebuildBoundaryWalls(active);
   }
 
@@ -7808,25 +7455,11 @@ export class Game {
     // 骨骼动画：本机 + 远端所有玩家模型的待机/走/跑（内部按帧间位移算速度、不可见的跳过）
     tickPlayerModels(dt);
 
-    // 主世界（城市）专属系统：对战中整组跳过，避免城市 NPC/Boss/载具与竞技场互串
+    // 主世界（城市）专属系统：对战中整组跳过，避免城市景物/Boss/载具与竞技场互串
     if (!this._combat) {
       // 电动车：摆放车体、钉住后座、刷新上下车提示（必须在玩家更新之后）
       this._updateVehicle(dt);
       this._updateRace(); // 校园狂飙：按顺序过门计圈（不在对战中才跑）
-      // 学生 NPC：位置缓动 + 走停动画 + 选项卡「按 F 与 XX 对话」的显隐
-      if (this.students) {
-        this.students.update(dt);
-        this._updateTalkTab();
-        // 每 ~1.5s 把学生的**真实状态**（脚底高度 + 实际坐标 + 是否卡住）回报服务端：
-        // ① 让它在 2D 障碍表之外知道"谁正站在台面/楼顶上"（否则对这类人做二维寻路/脱困 ⇒ 绕行点全是乱的）；
-        // ② 用真实坐标校正服务端幽灵位置；③ 卡住时让它重算路径（治"莫名其妙卡住"）。
-        this._npcHT = (this._npcHT || 0) + dt;
-        if (this._npcHT >= 1.5) {
-          this._npcHT = 0;
-          const cs = this.students.clientState();
-          if (cs.length && this.network) this.network.sendNpcState(cs);
-        }
-      }
       this._updatePickups(dt);
       // 商人小满：靠近显隐「找小满买东西」按钮
       this._updateMerchant(dt);

@@ -25,7 +25,6 @@ export const LAYOUT_ITEMS = [
   { key: 'view', sel: '.mc-view', label: '人称切换', showAs: 'flex' },
   { key: 'skill', sel: '.sk-box', label: '技能槽', showAs: 'flex' },
   { key: 'health', sel: '.hp-box', label: '血条', showAs: 'block' },
-  { key: 'chat', sel: '.chat-tab', label: '对话选项卡', showAs: 'block' },
 ];
 
 const subs = []; // 重排后的订阅回调

@@ -351,35 +351,6 @@ export class Network {
     this.send({ t: 'build_del', id: String(id).slice(0, 48) });
   }
 
-  // 跟学生 NPC 说话：服务端带人设/记忆调 GLM，回话走 npc_reply（旁人也能听见 npc_say 广播）
-  // 上报学生 NPC 的**真实状态**（脚底高度 + 实际水平位置 + 是否卡住）。
-  // 服务端靠它：①判断"人是否站在台面/楼顶之上"（2D 障碍表分不清"站楼顶"和"困在楼里"）；
-  //   ②用客户端的真实坐标校正服务端幽灵位置（客户端才是真跑物理的那一端）；③收到 stuck 就重算路径。
-  sendNpcState(list) {
-    if (!Array.isArray(list) || !list.length) return;
-    const out = [];
-    for (const x of list.slice(0, 32)) {
-      if (!x || !x.id) continue;
-      out.push({
-        id: String(x.id).slice(0, 24),
-        x: Number(x.x) || 0, y: Number(x.y) || 0, z: Number(x.z) || 0,
-        stuck: x.stuck ? 1 : 0,
-      });
-    }
-    if (out.length) this.send({ t: 'npc_state', list: out });
-  }
-
-  // 反向委托：把 NPC 请你代买的东西交给它（物品的扣除在本地做，服务端只校验名字并结算奖励）
-  sendNpcDeliver(id, item) {
-    if (!id || !item) return;
-    this.send({ t: 'npc_deliver', id: String(id).slice(0, 24), item: String(item).slice(0, 24) });
-  }
-
-  sendStudentTalk(id, text) {
-    if (!id || !text) return;
-    this.send({ t: 'npc_talk', id: String(id).slice(0, 24), text: String(text).slice(0, 200) });
-  }
-
   // sendBuildMove 发 {id, x,y,z,rotY,scale}：仅能移动自己摆的家具（服务端校验 owner）
   sendBuildMove(info) {
     if (!info || !info.id) return;

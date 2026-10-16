@@ -2,21 +2,39 @@
 
 > **本文件是本项目所有任务的最高优先规范。在此项目下的任何任务，都必须先读本文件再动手。**
 > 本文件只放「必须每次遵守的硬约束 + 项目一句话背景」；专题细节见文末引用。
-> 最后更新：2026-10-11
+> 最后更新：2026-10-16
+
+---
+
+## ⚠️ 重大变更：校园 AI（学生 NPC）已整体移除（2026-10-16）
+
+**所有 LLM 驱动的学生 NPC 系统已从仓库删除**，本文件第 1 / 3 / 8 / 9 节的 NPC 内容**已失效**，
+仅作历史记录保留；需要恢复请用 `git branch backup/pre-npc-removal`。
+
+| 已删除 | 说明 |
+|---|---|
+| `server-remote/npcworld.js` `ai-student.js` `policy.js` `ai.js` | NPC 世界 / 大脑 / 策略网络 / LLM 封装 |
+| `src/world/Students.js` `src/ui/NpcCard.js` `NpcChat.js` `world/BulletinBoard.js` `ui/AnnouncePanel.js` | 学生实体 / 对话 / 校卡 / 公告栏 |
+| `tools/probe-npc-*.mjs` `probe-students.mjs` `probe-policy.mjs` `tools/npc-policy/` | NPC 探针 + 策略训练脚本 |
+
+**保留**：`server-remote/ai.key.js`（密钥）、`auth.js`（鉴权）、`index.js`（玩家 relay，已摘除 NPC 挂载）、
+全部数据（`data/students.json`、`data/feed/`）与调研文档（`E:/玩法/*.md`）。
 
 ---
 
 ## 0. 项目一句话
 
-**一个跑在浏览器里的 3D 校园第一人称沙盒：玩家自由走动 + 8 个由 LLM 驱动、有记忆会反思会社交的 AI 学生，在一个"玩家不在时也继续运转"的校园里过日子。**
+**一个跑在浏览器里的 3D 校园第一人称沙盒：多人联机自由走动 + 建造 + 对战（陨石混战 / 疯狂抓钩）+ 校园狂飙 + 老师 Boss。**
+（原「LLM 驱动、有记忆会社交的 AI 学生」部分已于 2026-10-16 移除。）
 
-- 技术底色：**浏览器 Three.js 前端 + 常驻 Node relay 服务端 + 云端 GLM 大模型**，三者分工明确。
-- 主线不是"做更好的游戏"，而是"**让一群 NPC 看起来像人**"，玩法只是承载它们的舞台。
+- 技术底色：**浏览器 Three.js 前端 + 常驻 Node relay 服务端**（玩家同步 / 建造 / 商店 / 账号）。
 - 详细背景/现状见 `E:/玩法/项目背景与现状.md`。
 
 ---
 
 ## 1. ⚠⚠ 五条团队铁律（违反 = 做错方向，必须回滚）
+
+> ⚠ 以下五条铁律全部是 **NPC 大脑**的约束；NPC 已于 2026-10-16 移除 ⇒ 本节仅作历史保留。
 
 ### 铁律 1：代码只给旋钮，内容归 LLM
 > 用户原话：「**我们不能让代码写好功能，而是让 LLM 自己写底层的逻辑才对！**」
@@ -71,26 +89,11 @@
 
 ---
 
-## 3. NPC 大脑：当前架构（改 NPC 必读）
+## 3. NPC 大脑：当前架构（⚠ 已移除，仅存历史）
 
-```
-快环（每帧）  System1：A* 寻路 + 客户端三维物理碰撞 + 微动作（原地活动/挪步/起跳/走台面）
-慢环（低频）  System2：GLM 规划 → 反思 → 日计划 → 事件（公告/广播/委托）
-```
-
-- **双系统分工**：LLM（System2，灵魂）低频定意图/计划；本地代码（System1，本能）每帧执行走位/碰撞/动画。
-- **定案频率：每 2 分钟、8 个 NPC 轮流**各调一次 GLM（`PLAN_INTERVAL_MS=120000`、`PLAN_STAGGER_MS=15000`）。
-- **守卫式接入**：有模型且契约一致才用策略网络决策，否则**自动回退规则大脑**（零回归风险）。
-- ⚠ **两个节拍别混**：`planAt`=LLM 规划节拍（贵，2min）；`decideAt`=规则大脑节拍（免费）。
-  想让 NPC"别停下来"只能提前 `decideAt`——**一旦提前 `planAt`，LLM 调用量 ×8**。
-- ⚠ **统一决策入口 `kind:'act'`**：LLM 直接输出 `{action,type,target,params,think,mem}`，服务端用 `translateIntent` 映射成既有 goalType。
-- ⚠ **区域不给 AI 看名字**：`zoneAiName(z)` = `desc`(用途) 优先，**绝不用 `name`**。
-- ⚠ **所有 NPC 发言必须走 `speak(id,text,except)`**（= 广播气泡 + 触发 8m 内听到）。**别再直接 `broadcast({t:'npc_say',...})`** —— 否则这句话没人听到。
-- ⚠ **记忆归属要结构化**：一次调用写两人记忆极易写反，按**实际台词**拼（谁说的写谁）；模型的洞察存 `think` 而非 `mem`。
-- ⚠ **prompt 里"提到我的名字=我本人"必须明写**；关系/人物一律给**人名**，绝不喂 `s3` 这种内部 id。
-- 契约唯一真源：`tools/npc-policy/state_schema.json`（`train.py` 与 `policy.js` 必须逐字一致）。
-
-专题细节 → `E:/玩法/.workbuddy/memory/MEMORY-npc.md`
+> **2026-10-16 起，NPC 世界 / 大脑 / 策略网络 / 前端学生实体已整体删除**（见文首说明）。
+> 本节及第 1 节的全部内容仅作历史记录；恢复请用 `git branch backup/pre-npc-removal`。
+> 历史铁律详见 `E:/玩法/.workbuddy/memory/MEMORY-npc.md`。
 
 ---
 
@@ -107,7 +110,6 @@ node tools/probe-<相关>.mjs
 npx vite build --outDir "$TEMP/_vite_xxx"
 ```
 
-- NPC 相关探针：`probe-npc-social` / `probe-npc-identity` / `probe-npc-move` / `probe-npc-plan` / `probe-students` / `probe-policy`。
 - ⚠ **探针临时目录 `rmSync` 会被沙箱"批量删除守卫"拦截**（>50 次删除/轮）⇒ 症状是进程**无声卡死/exit 非 0**。
   绕法：`env -u CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR -u CODEBUDDY_TOOL_CALL_ID node ...` + `dangerouslyDisableSandbox:true`，且**一次命令只跑一个探针**。
 - ⚠ **写静态断言查"语义"不查"代码字面形状"**：否则每次合理重构都假红，且假红会掩盖真问题。
@@ -170,19 +172,18 @@ rm -f /tmp/gc; unset CF U P
 
 ```
 E:/玩法/first-person-mover/
-├── src/                 前端（96 文件 / 3.4 万行，Three.js 0.170 + Vite）
+├── src/                 前端（Three.js 0.170 + Vite）
 │   ├── core/            Game.js 主循环、设置、昼夜
-│   ├── world/           Students.js(NPC 渲染) / World / Props / SkyBox / Lod …
+│   ├── world/           World / Props / SkyBox / Lod / CombatArena / GrappleArena / TeacherBoss …
 │   ├── player/          PlayerPhysics / 技能槽
 │   ├── net/             Network.js（WebSocket 客户端）
 │   └── editor/          编辑器
-├── server-remote/       服务端（7 文件 / 7 千行，Node + pm2 fp-relay）
-│   ├── npcworld.js      3166 行 = NPC 世界与大脑（核心）
-│   ├── index.js         2263 行 = WS 路由 + 业务（商店/公告/委托）
-│   ├── ai-student.js    GLM prompt 拼装
-│   ├── policy.js        策略网络推理；auth.js 账号体系
-│   └── data/            students.json / shop.json / feed/（训练集）
-├── tools/               54 个探针 probe-*.mjs + npc-policy/ 训练脚本 + deploy-relay.sh
+├── server-remote/       服务端（Node + pm2 fp-relay）
+│   ├── index.js         WS 路由 + 业务（玩家同步 / 建造 / 商店 / 账号）
+│   ├── auth.js          账号体系
+│   ├── ai.key.js        LLM 密钥（**只保留密钥**；AI 代码已于 2026-10-16 移除）
+│   └── data/            shop.json / accounts.db / assets/（NPC 的 students.json / feed/ 已留档）
+├── tools/               探针 probe-*.mjs + deploy-relay.sh
 ├── .github/workflows/   deploy.yml（Pages 自动部署）
 └── docs/                历史方案文档
 
@@ -195,36 +196,17 @@ E:/玩法/                调研与方案（项目外，但归属本项目）
 
 ---
 
-## 8. 已知缺口 / 下一步（P0 → P2）
+## 8. 已知缺口 / 下一步
 
-| 优先级 | 事项 | 理由 |
-|---|---|---|
-| **P0** | **活动 event 对象** `{id,host,what,place,at,joiners,status}` | 最像斯坦福高光；让传播与涌现第一次真正发生 |
-| **P0** | 作息深化（深夜回宿舍 `sleep` 状态） | 成本极小，"像学生"的强信号 |
-| **P1** | 3 人小群聊（一个发起人 + 两个听众，仍一次调用） | 小组事件聊得起来 |
-| **P1** | 承诺与人情 `promises:[{to,what,at,kept}]` | "说好下午一起去"是"像人"的强信号 |
-| **P2** | 检索语义化（同义表 → 极小 local embedding） | 同义改写能检索到 |
-| **P2** | 地点/物件级知识 | 观察更具体 |
-
-> **判据**：凡是能让"**个体行为传播成集体事件**"的，优先做 —— 那才是"人样"的来源。
+> 原 NPC 相关缺口（活动 event 对象 / 作息深化 / 3 人小群聊 / 承诺与人情 / 检索语义化 / 地点级知识）
+> **随 NPC 系统于 2026-10-16 一同移除**，恢复见 `git branch backup/pre-npc-removal`。当前无 NPC 侧待办。
 
 ---
 
-## 9. 成本护栏（LLM 调用预算）
+## 9. 成本护栏（LLM 调用预算）—— ⚠ 已失效
 
-> 原则：**每个"想"都必须有「触发条件 + 冷却 + 全局串行」三件套。**
-
-| 用途 | 触发 | 频率上限 |
-|---|---|---|
-| `plan` 规划 | 每学生 2 分钟 | 8 人 ≈ 240/h |
-| `chat` NPC↔NPC | 靠近 + 概率 | ≤ 144/h |
-| `dayplan` 日计划 | 每游戏日 1 次 | ≈ 8/游戏日 |
-| `reflect` 反思 | 攒够新记忆 / 重要度达标 | ≤ 60/h（实际远低） |
-| `post` 贴公告 | plan 给出 post | ≤ 24/h |
-| `talk` 玩家搭话 | 玩家 | 玩家决定（不受冷却） |
-
-合计上限 ≈ **470/h ≈ 8 次/分钟**（天花板，实际均值远低）。
-禁止新增"无护栏的 LLM 调用"。
+> NPC 移除后，服务端不再有任何 LLM 调用（`ai.key.js` 只保留密钥，无消费方）。
+> 本节保留仅作历史参考：将来若恢复 NPC，必须重新遵守「**触发条件 + 冷却 + 全局串行**」三件套。
 
 ---
 
@@ -249,7 +231,7 @@ E:/玩法/                调研与方案（项目外，但归属本项目）
 | 文件 | 内容 |
 |---|---|
 | `E:/玩法/.workbuddy/memory/MEMORY.md` | 全局护栏索引 + 静默失效 10 条 + 部署命令 |
-| `E:/玩法/.workbuddy/memory/MEMORY-npc.md` | NPC 大脑全部铁律（本文件第 3 节的详细版） |
+| `E:/玩法/.workbuddy/memory/MEMORY-npc.md` | NPC 大脑全部铁律（**已归档**：NPC 于 2026-10-16 移除） |
 | `E:/玩法/.workbuddy/memory/MEMORY-render.md` | 渲染/性能实测结论 |
 | `E:/玩法/.workbuddy/memory/MEMORY-window.md` | 障眼法窗户 / 墙体挖洞 |
 | `E:/玩法/.workbuddy/memory/MEMORY-data.md` | 网络同步 / 服务端权威 / 编辑器鉴权 |

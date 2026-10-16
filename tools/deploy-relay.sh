@@ -16,7 +16,7 @@ HOST="cai@100.127.187.92"
 DEST="$HOST:/home/cai/fp-relay/"
 # relay 需要的最小文件集（互相 import）：缺一个就可能整个 relay 起不来。
 # ai.key.js 是密钥、auth.js 是鉴权，两个也一起带上，保证服务器与本机一致。
-FILES="index.js npcworld.js policy.js ai-student.js ai.key.js auth.js"
+FILES="index.js ai.key.js auth.js"
 
 echo "[deploy] project = $ROOT"
 echo "[deploy] target  = $DEST"

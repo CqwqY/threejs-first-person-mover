@@ -8,7 +8,7 @@ export const Config = {
   SPRINT_MULTIPLIER: 1.6,
   // 跳跃初速度（向上，正值；米/秒）
   JUMP_VELOCITY: 6,
-  // 喷气背包悬停/上升速度（米/秒）：NPC 给玩家喷气背包后，空中按住空格以此速度持续上升
+  // 喷气背包悬停/上升速度（米/秒）：空中按住空格以此速度持续上升
   JETPACK_LIFT: 5,
   // 重力加速度（向下，负值；米/秒^2）。负号表示方向朝 y 轴负方向。
   GRAVITY: -20,
@@ -127,14 +127,6 @@ export const Config = {
   TELEMETRY_SECONDS: 20,
   // 上报接口路径（拼在 API_BASE 之后）。服务端见 server-remote/index.js 的 /api/telemetry。
   TELEMETRY_PATH: '/api/telemetry',
-
-  // ---- AI 商人 NPC ----
-  // NPC 世界坐标（米）：出生点约 (2,144)，放在旁边的校园喷泉(-2,143)
-  NPC_POS: { x: -2, z: 143 },
-  // 玩家离 NPC 多远内算「可对话」（水平距离，米）
-  NPC_PROXIMITY: 3.2,
-  // 触发对话的键（e.code）
-  NPC_KEY: 'KeyF',
 
   // ---- 血量与战斗 ----
   HEALTH_MAX: 500,        // 血量上限（任何接口都不得超过这个值）

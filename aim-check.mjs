@@ -166,8 +166,8 @@ ok(/classList\.toggle\('mc-atk--hot', hot\)/.test(gameSrc), '瞄中光点 → �
 ok(/this\._attackBtn && this\._attackCoarse\.*\)/.test(gameSrc) || /if \(this\._attackBtn && this\._attackCoarse\)/.test(gameSrc),
   '高亮只作用于手机端圆形攻击键（桌面是长条+鼠标左键）');
 ok(/this\.input && this\.input\.locked/.test(gameSrc), 'PC 上只在指针锁定时显示准星');
-ok(/this\.aiChat\.isOpen\(\)[\s\S]{0,200}?this\.shop\.isOpen\(\)/.test(gameSrc),
-  '打开对话/聊天/商店面板时收起准星');
+ok(/this\.chat\.isOpen\(\)[\s\S]{0,200}?this\.shop\.isOpen\(\)/.test(gameSrc),
+  '打开聊天/商店面板时收起准星');
 
 // 真的调一次 ensureTheme，把注入的 CSS 抓下来验规则（不是读源码字符串）
 let css = '';

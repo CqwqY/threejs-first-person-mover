@@ -9,14 +9,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { initAuth } from './auth.js';
-// ⚠ NPC 世界（npcworld.js → policy.js）与对话（ai-student.js → ai.key.js）**故意用动态 import**（见文件末尾）：
-//   静态 import 一旦其中一个文件缺失/报错，ESM 解析失败会**拖垮整个 relay**（玩家联机/建造/商店全挂）。
-//   动态 import + try/catch ⇒ NPC 侧任何问题都只降级为「没有学生」，其余功能照常。
 
 const PORT = 9000; // 服务监听端口
-// 学生 NPC 世界（服务端权威：位置/需求/记忆都在这里跑，客户端只负责插值显示）。
-// 在文件末尾初始化（要用到 dayTime 等后面才声明的量），这里先声明占位。
-let npcWorld = null;
 const SNAPSHOT_INTERVAL = 50; // 快照广播间隔（毫秒），对应 20Hz
 const HEARTBEAT_INTERVAL = 30000; // 心跳间隔（毫秒），防止连接被中间层断开
 const SPAWN_RADIUS = 4; // 出生点离原点距离（米）
@@ -551,67 +545,8 @@ function sanitizeCombo(c) {
 }
 function saveShop(items) {
   fs.writeFileSync(SHOP_FILE, JSON.stringify(items, null, 2));
-  // 目录变了 → NPC「请玩家代买」的候选池跟着换（否则会开口要一件已经下架的东西）
-  if (npcWorld && npcWorld.setShopCatalog) npcWorld.setShopCatalog(items);
 }
 
-// ---- 公告栏（世界坐标 -22,17 那块板子）+ 校园广播器共用这份"公告"存储 ----
-const BOARD_FILE = path.join(DATA_DIR, 'board.json');
-const BOARD_MAX = 20;   // 只留最近 20 条
-let _boardSeq = 0;
-// 每条公告给个**稳定 id**：撤回时按 id 精确删（按文本删会误伤同内容的另一条）
-function newBoardId() { return 'b' + Date.now().toString(36) + (++_boardSeq).toString(36); }
-let BOARD = (() => {
-  try {
-    const d = JSON.parse(fs.readFileSync(BOARD_FILE, 'utf8'));
-    const list = Array.isArray(d && d.posts) ? d.posts : [];
-    // 老存档没有 id ⇒ 补一个（否则前端撤回按钮没得可用）
-    let fixed = false;
-    for (const p of list) if (p && !p.id) { p.id = newBoardId(); fixed = true; }
-    if (fixed) { try { fs.writeFileSync(BOARD_FILE, JSON.stringify({ posts: list }, null, 2)); } catch (e) { /* 写不了就内存里留存 */ } }
-    return list;
-  } catch (e) { return []; }
-})();
-function saveBoard() { try { fs.writeFileSync(BOARD_FILE, JSON.stringify({ posts: BOARD }, null, 2)); } catch (e) { /* 写不了就内存里留存 */ } }
-// 发布一条公告：落盘 + 推给 AI（npcWorld.setBoard，AI 决策时会"看公告"）+ 广播给所有客户端
-function pushBoard(text, from) {
-  const t = String(text == null ? '' : text).trim().slice(0, 120);
-  if (!t) return null;
-  const rec = { id: newBoardId(), text: t, at: Date.now(), from: String(from || '玩家').slice(0, 16) };
-  BOARD.push(rec);
-  if (BOARD.length > BOARD_MAX) BOARD.splice(0, BOARD.length - BOARD_MAX);
-  saveBoard();
-  if (npcWorld && npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6));
-  broadcastAll({ t: 'board', posts: BOARD.slice(-8) });
-  return rec;
-}
-// 撤回一条公告（贴错了/事过境迁）：从存储里删掉，**重新喂给 AI** ⇒ 删了它就不再照着做；同时广播刷新前端
-function removeBoardPost(id, by) {
-  const key = String(id == null ? '' : id);
-  if (!key) return false;
-  const i = BOARD.findIndex((x) => String((x && x.id) || '') === key);
-  if (i < 0) return false;
-  const gone = BOARD.splice(i, 1)[0];
-  saveBoard();
-  if (npcWorld && npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6));
-  broadcastAll({ t: 'board', posts: BOARD.slice(-8) });
-  console.info('[board] 撤下公告（' + String(by || '玩家') + '）：' + String((gone && gone.text) || '').slice(0, 40));
-  return true;
-}
-// 简易限流：按 客户端 ip 限制频率（公告栏 5s / 广播 60s）
-const _lastPostAt = new Map();
-const _lastCastAt = new Map();
-function ipOf(req) {
-  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
-}
-function rateOk(map, ip, ms) {
-  const now = Date.now();
-  if (now - (map.get(ip) || 0) < ms) return false;
-  map.set(ip, now);
-  if (map.size > 2000) map.clear(); // 防无限增长
-  return true;
-}
 function loadBuildings() {
   try { return JSON.parse(fs.readFileSync(BUILD_FILE, 'utf8')); } catch { return []; }
 }
@@ -838,8 +773,7 @@ function sanitizeTelemetry(raw, ip) {
 }
 
 // 向所有在线客户端广播（建造是全局的，不分房间）
-// except：要跳过的一个连接（同一个学生的话，发起者自己已经收到 npc_reply 了，
-// 再广播一次 npc_say 会让他看到**两遍**同样的内容）。
+// except：要跳过的一个连接（发起者通常已单独收到回执，再广播一次会让他看到**两遍**同样的内容）。
 function broadcastAll(msg, except) {
   const raw = JSON.stringify(msg);
   for (const c of wss.clients) {
@@ -881,139 +815,6 @@ const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-  // 学生 NPC 的功能区标注：读公开（客户端要知道去哪找人），写需要管理员密钥
-  if (url.pathname === '/api/zones') {
-    if (req.method === 'GET') {
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ ok: true, zones: npcWorld ? npcWorld.getZones() : [] }));
-      return;
-    }
-    if (req.method === 'POST') {
-      let body = '';
-      req.on('data', (chunk) => { if ((body += chunk).length > 1e5) req.destroy(); });
-      req.on('end', () => {
-        const deny = (m, code = 400) => {
-          res.writeHead(code, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: m }));
-        };
-        let data;
-        try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
-        // 写接口一律要密钥：和 /api/scene、/api/buildareas 同一套路
-        if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return deny('管理员密钥错误', 403);
-        const zones = npcWorld ? npcWorld.setZones(data.zones) : [];
-        broadcastAll({ t: 'npc_zones', zones }); // 在线客户端即时换目标
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, zones }));
-      });
-      return;
-    }
-  }
-
-  // ---- 学生策略网络：投喂接口（阶段2~5 的人投喂数据 + 训练好的模型上传）----
-  // 投喂数据：把 CSV/JSON 落到 data/feed/（训练在本地跑 train.py，不需要服务器有 Python）。
-  if (req.method === 'POST' && url.pathname === '/api/npc/feed') {
-    let body = '';
-    req.on('data', (chunk) => { if ((body += chunk).length > 2e6) req.destroy(); });
-    req.on('end', () => {
-      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
-      let data;
-      try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
-      if (String(data.token || '') !== SHOP_ADMIN_TOKEN) return deny('管理员密钥错误', 403);
-      const name = String(data.name || 'feed.csv').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40);
-      const text = String(data.text || '');
-      if (!text) return deny('empty');
-      try {
-        fs.mkdirSync(path.join(DATA_DIR, 'feed'), { recursive: true });
-        fs.writeFileSync(path.join(DATA_DIR, 'feed', name), text);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, saved: name }));
-      } catch (e) { deny(String(e && e.message || e), 500); }
-    });
-    return;
-  }
-  // 上传训练好的模型（本地 train.py 产出的 campus_policy.json）；也可直接 scp 到 data/。
-  if (req.method === 'POST' && url.pathname === '/api/npc/policy') {
-    let body = '';
-    req.on('data', (chunk) => { if ((body += chunk).length > 5e6) req.destroy(); });
-    req.on('end', () => {
-      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
-      try {
-        const json = JSON.parse(body || '{}');
-        if (!json || !Array.isArray(json.weights) || !Array.isArray(json.actions)) return deny('bad model');
-        fs.writeFileSync(path.join(DATA_DIR, 'campus_policy.json'), JSON.stringify(json));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, meta: json.meta || {} }));
-      } catch (e) { deny(String(e && e.message || e), 500); }
-    });
-    return;
-  }
-  if (req.method === 'GET' && url.pathname === '/api/npc/policy') {
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ ok: true, status: npcWorld ? npcWorld.loadPolicyStatus() : { ready: false } }));
-    return;
-  }
-  // 校卡：看某个学生的性格/心情/当前目标/关系/近期记忆（只读，公开）
-  if (req.method === 'GET' && url.pathname === '/api/npc/card') {
-    res.setHeader('Content-Type', 'application/json');
-    const sid = String(url.searchParams.get('id') || '');
-    res.end(JSON.stringify({ ok: true, card: npcWorld ? npcWorld.card(sid) : null }));
-    return;
-  }
-
-  // ---- 公告栏（-22,17 那块板子）：读公开 / 写限流 ----
-  if (req.method === 'GET' && url.pathname === '/api/board') {
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ ok: true, posts: BOARD.slice(-8) }));
-    return;
-  }
-  if (req.method === 'POST' && url.pathname === '/api/board') {
-    let body = '';
-    req.on('data', (c) => { if ((body += c).length > 8e3) req.destroy(); });
-    req.on('end', () => {
-      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
-      let data; try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
-      if (!rateOk(_lastPostAt, ipOf(req), 5000)) return deny('发得太快了，歇会儿再发', 429);
-      const rec = pushBoard(data.text, data.from);
-      if (!rec) return deny('内容不能为空');
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, post: rec }));
-    });
-    return;
-  }
-  // ---- 撤回公告：贴错了/过期了 ⇒ 删掉它就**不再进 AI 的视野**（AI 也不再照着它行动）----
-  if (req.method === 'DELETE' && url.pathname === '/api/board') {
-    let body = '';
-    req.on('data', (c) => { if ((body += c).length > 8e3) req.destroy(); });
-    req.on('end', () => {
-      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
-      let data; try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
-      const id = (data && data.id != null) ? data.id : url.searchParams.get('id'); // 支持 body {id} 或 ?id=
-      if (!rateOk(_lastPostAt, ipOf(req), 3000)) return deny('操作太快了，歇会儿', 429);
-      if (!removeBoardPost(id, data && data.from)) return deny('没找到这条公告', 404);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, posts: BOARD.slice(-8) }));
-    });
-    return;
-  }
-  // ---- 校园广播器：把一句话**轮流**下发给了所有 AI（不并发打爆 GLM）；同时给所有客户端一条横幅 ----
-  if (req.method === 'POST' && url.pathname === '/api/npc/broadcast') {
-    let body = '';
-    req.on('data', (c) => { if ((body += c).length > 8e3) req.destroy(); });
-    req.on('end', () => {
-      const deny = (m, code = 400) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: m })); };
-      let data; try { data = JSON.parse(body || '{}'); } catch (e) { return deny('bad json'); }
-      const text = String(data.text || '').trim().slice(0, 120);
-      if (!text) return deny('内容不能为空');
-      if (!rateOk(_lastCastAt, ipOf(req), 60000)) return deny('广播太频繁了，一分钟一次', 429);
-      const from = String(data.from || '广播').slice(0, 16);
-      if (npcWorld && npcWorld.announce) npcWorld.announce(text, from);
-      broadcastAll({ t: 'announce', text, from }); // 所有客户端显示一条广播横幅
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    });
-    return;
-  }
 
   // 账号相关接口（注册/登录/资料/登出）：已处理则返回
   if (await auth.handleRequest(req, res, url)) return;
@@ -1091,8 +892,6 @@ const httpServer = http.createServer(async (req, res) => {
         // 统一写入 data/ 下 JSON（本后端为跨端共用的场景/地图数据源）
         const target = url.pathname === '/api/scene' ? SCENE_FILE : MAP_FILE;
         fs.writeFileSync(target, JSON.stringify(data, null, 2));
-        // 场景刚落盘：立刻重读障碍表，学生的绕障不用等下一轮定时（也不用重启）
-        if (npcWorld && target === SCENE_FILE) npcWorld.refreshObstacles();
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -1388,7 +1187,7 @@ httpServer.listen(PORT);
 const states = new Map();
 // id -> 出生点 {x, z, yaw}
 const spawns = new Map();
-// 连接 id -> 稳定身份键（u:<userId> / anon:<IP>）。NPC 的对话历史与关系按它记 ⇒ 重连不失忆。
+// 连接 id -> 稳定身份键（u:<userId> / anon:<IP>）。玩家的归属/身份按它记 ⇒ 重连不失忆。
 const connOwner = new Map();
 
 let nextId = 1;
@@ -1530,8 +1329,8 @@ wss.on('connection', (ws, req) => {
   const id = newId();
   ws.__id = id; // 记在连接上，便于 hit 广播时按 id 找到目标客户端
   ws.__ip = clientIpOf(req); // 真实 IP（代理后面 socket.remoteAddress 不可用）
-  // 连接 id → **稳定身份键**（u:<userId> / anon:<IP>）。NPC 的对话历史/关系按稳定键记，
-  //   这样玩家刷新/重连不会"失忆"；而实时坐标仍按连接 id 走（playerPositions[].id）。
+  // 连接 id → **稳定身份键**（u:<userId> / anon:<IP>）。玩家的归属/身份按稳定键记，
+  //   这样玩家刷新/重连不会"失忆"；而实时坐标仍按连接 id 走。
   connOwner.set(id, ownerKeyOf(ws));
   const num = allocNum(); // 复用最小空闲编号，避免重连把数字推到几十
   const spawn = spawnForNum(num);
@@ -1543,8 +1342,6 @@ wss.on('connection', (ws, req) => {
   // welcome：告知新客户端自己的 id/序号/出生点，以及当前已有玩家（只列同房间/大厅的人）
   const existing = worldPlayers().filter((p) => p.id !== id && !p.room);
   ws.send(JSON.stringify({ t: 'welcome', id, num, spawn, players: existing }));
-  // 学生 NPC 名单：名字/班级/当前位置。位置之后由 5Hz 的 npc 广播持续更新。
-  if (npcWorld) ws.send(JSON.stringify({ t: 'npc_roster', list: npcWorld.roster() }));
   // 建造归属键：客户端据此判断「这条家具是不是我摆的」（跨设备/清缓存也准，比本地记录可靠）
   ws.send(JSON.stringify({ t: 'build', ev: 'owner', key: ownerKeyOf(ws) }));
   // 有人刚进来 → 丢掉快照 delta 缓存，让下一帧对所有人发一次全量。
@@ -1578,60 +1375,6 @@ wss.on('connection', (ws, req) => {
         states.set(id, { ...cur, nick: pub.nickname || pub.username || ('玩家' + cur.num), color: pub.nicknameColor || '#ffffff' });
         roomBroadcast(ws.__room, { t: 'join', id, state: states.get(id) }, ws); // 只通知同房间的人
       }
-      return;
-    }
-
-    // 和学生说话：服务端带人设/记忆调 GLM，回话同时广播给所有人（旁边的人也能听见）
-    if (msg.t === 'npc_talk') {
-      if (!npcWorld) return;
-      const sid = String(msg.id || '');
-      const text = String(msg.text || '').slice(0, 200);
-      if (!sid || !text) return;
-      const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username)) || (states.get(id) && states.get(id).nick) || '同学';
-      // ⚠⚠ 说话人身份必须用**稳定键**（ownerKeyOf：登录 = u:<userId>，游客 = anon:<IP>）。
-      //   以前用 'p:' + ws.__id（每次连接的随机 id）⇒ 玩家一刷新/重连 id 就变 ⇒ NPC 的对话历史
-      //   按人分桶（chatLog[who]）**整个取不到** ⇒ 每句话都被当成"第一句" ⇒ 只会回"你好，你要干什么"。
-      //   （用户实测："我发'你在做什么'，NPC 似乎并没有收到，而是说你好，你要干什么？"）
-      npcWorld.talk(sid, text, String(nick).slice(0, 16), ws, ownerKeyOf(ws))
-        .then((out) => {
-          // ⚠ 只回发起者（其他人由 npcWorld 里的 npc_say 广播拿到），否则发起者会看到两遍
-          if (!out || !out.say) return;
-          ws.send(JSON.stringify({ t: 'npc_reply', id: sid, say: out.say }));
-        })
-        .catch((e) => {
-          // 绝不静默吞掉（记忆第 1 条）：AI 挂了要能在日志里看见，否则只表现为"他没理我"
-          console.warn('[npc] 搭话失败 ' + sid + '：' + (e && e.message ? e.message : e));
-        });
-      return;
-    }
-
-    // 学生 NPC 的**真实状态**回报（客户端每 ~1.5s 发一次）：脚底高度 + 实际水平位置 + 是否卡住。
-    // 用途：①服务端障碍表是二维的，靠高度才能分清"站在台面/楼顶之上"与"困在楼里"（不做误判的寻路/脱困）；
-    //      ②客户端才是真正跑物理的那一端，用它的坐标校正幽灵位置、并在"该走却没走"时重算路径。
-    if (msg.t === 'npc_state') {
-      if (npcWorld && npcWorld.applyClientState) {
-        const list = Array.isArray(msg.list) ? msg.list.slice(0, 32) : [];
-        npcWorld.applyClientState(list);
-      }
-      return;
-    }
-
-    // 反向委托：玩家把 NPC 要的东西送到它手上。
-    // ⚠ 客户端已从背包扣掉那件东西；服务端**不信前端**：名字对不上就拒绝，对得上才发奖励。
-    if (msg.t === 'npc_deliver') {
-      if (!npcWorld || !npcWorld.deliver) return;
-      const sid = String(msg.id || '').slice(0, 24);
-      const item = String(msg.item || '').slice(0, 24);
-      if (!sid || !item) return;
-      const nick = (ws.__profile && (ws.__profile.nickname || ws.__profile.username))
-        || (states.get(id) && states.get(id).nick) || '同学';
-      let out = null;
-      // 交付人用**稳定键**（ownerKeyOf）⇒ 玩家重连后仍能认出"是同一个人"
-      try { out = npcWorld.deliver(sid, item, String(nick).slice(0, 16), ownerKeyOf(ws)); }
-      catch (e) { console.warn('[npc] 交付结算失败 ' + sid + '：' + ((e && e.message) || e)); }
-      if (!out) return;
-      ws.send(JSON.stringify({ t: 'npc_deliver', id: sid, ok: !!out.ok, item, reason: out.reason || '', reward: out.reward || 0, say: out.say || '' }));
-      if (out.ok) broadcastAll({ t: 'npc_say', id: sid, say: out.say }); // 旁人也听得见这句道谢
       return;
     }
 
@@ -2095,19 +1838,6 @@ wss.on('connection', (ws, req) => {
       color: pub ? (pub.nicknameColor || '#ffffff') : '#ffffff',
     });
 
-    // 把当前所有玩家的坐标喂给 NPC 世界（playerNear 特征用；没有 NPC 世界时跳过）
-    if (npcWorld && npcWorld.setPlayerPositions) {
-      const arr = [];
-      for (const [pid, st] of states.entries()) {
-        // ⚠ 带两个 id：id = 连接 id（实时坐标用）；owner = **稳定身份键**（NPC 按它记关系/历史，
-        //   重连不变 ⇒ 委托复命/跟随不会因为玩家刷新就认不出人）。
-        if (Number.isFinite(Number(st.x)) && Number.isFinite(Number(st.z))) {
-          arr.push({ id: pid, owner: connOwner.get(pid) || ('anon:' + pid), x: Number(st.x), z: Number(st.z) });
-        }
-      }
-      npcWorld.setPlayerPositions(arr);
-    }
-
     if (isFresh) {
       // 新玩家首次上报：把 join（含序号与状态）广播给同房间其他人
       roomBroadcast(ws.__room, { t: 'join', id, state: states.get(id) }, ws);
@@ -2235,30 +1965,5 @@ setInterval(() => {
 
 // 匹配轮询：单人苦等超时也放单人也开（练习场），避免永远卡在队列里
 setInterval(tryMatch, 1000);
-
-// ---- 学生 NPC 世界：在这里初始化（上面的 dayTime 已声明，getDayTime 才能安全取值）----
-// 没标注功能区时学生原地待命（不会乱走穿墙），编辑器「区域」页签标好即自动开跑。
-// ⚠ 两个模块**各自** import + try/catch：谁缺了（如漏传 policy.js / ai.key.js）只降级谁，
-//   绝不因一个文件缺失让整个 relay 起不来（静态 import 会 —— 这正是踩过的坑）。
-let createNpcWorld = null;
-let askStudent = null;
-try { ({ createNpcWorld } = await import('./npcworld.js')); }
-catch (e) { console.error('[relay] 学生 NPC 世界加载失败，已跳过（玩家联机/建造/商店不受影响）：' + ((e && e.stack) || e)); }
-try { ({ askStudent } = await import('./ai-student.js')); }
-catch (e) { console.error('[relay] 学生对话(AI)加载失败，学生将无对话（其余不受影响）：' + ((e && e.stack) || e)); }
-if (createNpcWorld) {
-  npcWorld = createNpcWorld({
-    dataDir: DATA_DIR,
-    broadcast: broadcastAll,
-    getDayTime: () => (typeof dayTime === 'number' ? dayTime : 0.35), // 课程表跟世界时刻走
-    askStudent: askStudent || undefined, // 没加载到就交给 npcworld 的空实现（学生照走，不对话）
-    // 学生自己发的公告：走和玩家同一条路（pushBoard：落盘 + 广播所有客户端 + 喂回 AI 让其他学生看到并照做）
-    onPost: (text, from) => pushBoard(text, from),
-  });
-  console.info('[relay] 学生 NPC：' + npcWorld.roster().length + ' 名，功能区 ' + npcWorld.getZones().length + ' 个；对话 ' + (askStudent ? '开' : '关'));
-  if (npcWorld.setBoard) npcWorld.setBoard(BOARD.map((x) => x.text).slice(-6)); // 现有公告喂给 AI
-  // 商店目录注入给 NPC：它"请玩家代买"的候选池必须来自真实在售商品（否则会开口要一个买不到的东西）
-  if (npcWorld.setShopCatalog) npcWorld.setShopCatalog(SHOP);
-}
 
 console.log(`relay server listening at http://0.0.0.0:${PORT} (ws://<ip>:${PORT}), data dir: ${DATA_DIR}`);
