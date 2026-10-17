@@ -194,7 +194,9 @@ export class Recorder {
   }
 
   // WebCodecs + mp4-muxer 合成 MP4（无需 SharedArrayBuffer，Pages 可用）
-  async exportVideoWebCodecs({ fps, baseName, onProgress, onLog }) {
+  // captureVideo=true 且首帧是 VideoFrame 时，直接消费已抓好的 VideoFrame（零 PNG 往返）；
+  // 否则把 PNG Blob 解码成 VideoFrame 再编码（兜底 / 帧序列路径）。
+  async exportVideoWebCodecs({ fps, baseName, captureVideo = false, onProgress, onLog }) {
     if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
       throw new Error('WebCodecs 不可用');
     }
@@ -202,9 +204,15 @@ export class Recorder {
     if (!Muxer || !ArrayBufferTarget) throw new Error('mp4-muxer 加载失败');
 
     const first = this.frames[0];
-    const probeBmp = await createImageBitmap(first);
-    const w = probeBmp.width, h = probeBmp.height;
-    probeBmp.close();
+    const isVF = captureVideo && (first instanceof VideoFrame);
+    let w, h;
+    if (isVF) {
+      w = first.codedWidth; h = first.codedHeight;
+    } else {
+      const probeBmp = await createImageBitmap(first);
+      w = probeBmp.width; h = probeBmp.height;
+      probeBmp.close();
+    }
 
     const codec = pickAvcCodec(w, h);
     const supported = await VideoEncoder.isConfigSupported({
@@ -227,12 +235,17 @@ export class Recorder {
     const n = this.frames.length;
     const gop = Math.max(1, Math.round(fps * 2));
     for (let i = 0; i < n; i++) {
-      const bmp = await createImageBitmap(this.frames[i]);
-      const vf = new VideoFrame(bmp, {
-        timestamp: Math.round(i * frameDur),
-        duration: Math.round(frameDur),
-      });
-      bmp.close();
+      let vf;
+      if (isVF) {
+        vf = this.frames[i]; // 已是 VideoFrame，直接喂编码器
+      } else {
+        const bmp = await createImageBitmap(this.frames[i]);
+        vf = new VideoFrame(bmp, {
+          timestamp: Math.round(i * frameDur),
+          duration: Math.round(frameDur),
+        });
+        bmp.close();
+      }
       encoder.encode(vf, { keyFrame: i % gop === 0 });
       vf.close();
       if (onProgress) onProgress((i + 1) / n / 2);
@@ -264,14 +277,35 @@ export class Recorder {
     return { method: 'ffmpeg' };
   }
 
+  // 把已抓好的 VideoFrame 转回 PNG Blob（仅 WebCodecs 失败、需要走 ffmpeg / 帧序列兜底时用到）
+  async _videoFramesToPng(onProgress) {
+    const n = this.frames.length;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const vf = this.frames[i];
+      const bmp = await createImageBitmap(vf);
+      const cv = document.createElement('canvas');
+      cv.width = bmp.width; cv.height = bmp.height;
+      cv.getContext('2d').drawImage(bmp, 0, 0);
+      bmp.close();
+      const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+      vf.close();
+      out.push(blob);
+      if (onProgress) onProgress((i + 1) / n / 2);
+    }
+    this.frames = out;
+  }
+
   // 主导出入口：WebCodecs → ffmpeg → 帧序列（文件夹/ZIP）
-  async exportVideo({ fps, baseName = 'frames', onProgress, onLog } = {}) {
+  async exportVideo({ fps, baseName = 'frames', captureVideo = false, onProgress, onLog } = {}) {
     if (this.frames.length === 0) throw new Error('没有帧可导出');
     try {
-      return await this.exportVideoWebCodecs({ fps, baseName, onProgress, onLog });
+      return await this.exportVideoWebCodecs({ fps, baseName, captureVideo, onProgress, onLog });
     } catch (e) {
-      console.warn('[rec] WebCodecs 不可用，试 ffmpeg:', e);
+      console.warn('[rec] WebCodecs 失败，降级:', e);
     }
+    // 若之前抓的是 VideoFrame，降级路径（ffmpeg / 帧序列）需要 PNG，先转回
+    if (captureVideo) await this._videoFramesToPng(onProgress);
     try {
       return await this.exportVideoFFmpeg({ fps, onProgress, onLog });
     } catch (e) {

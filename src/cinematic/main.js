@@ -202,7 +202,9 @@ function startEditLoop() {
 }
 
 // 进入渲染模式并按关键帧插值逐帧抓图，帧存进 recorder.frames。
-async function renderFrames() {
+// captureVideo=true 时直接抓 VideoFrame（跳过 PNG 往返，WebCodecs 合成 MP4 专用，快很多）；
+// 否则抓 PNG Blob（帧序列导出 / 兜底用）。
+async function renderFrames({ captureVideo = false } = {}) {
   if (timeline.keys.length < 2) {
     throw new Error('至少需要 2 个关键帧才能插值渲染。');
   }
@@ -214,25 +216,30 @@ async function renderFrames() {
   syncSettings();
   const fps = timeline.fps;
   const total = Math.max(2, Math.round(fps * timeline.duration));
+  const frameDur = 1_000_000 / fps; // 微秒（VideoFrame 时间戳用）
 
-  // 按所选分辨率设置渲染尺寸（不更新 CSS 显示尺寸，保持全屏缩放）
+  // 导出统一 pixelRatio=1：弱机 / 高分屏下像素量直接砍到 1/4，性能大福提升（导出本就不看屏幕 DPR）。
+  // 按所选分辨率设置渲染尺寸（不更新 CSS 显示尺寸，保持全屏缩放）。
   const [rw, rh] = (setRes.value || '').split('x').map((n) => parseInt(n, 10));
+  renderer.setPixelRatio(1);
   if (rw && rh) {
-    renderer.setPixelRatio(1);
     renderer.setSize(rw, rh, false);
     camera.aspect = rw / rh;
-    camera.updateProjectionMatrix();
+  } else {
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    camera.aspect = window.innerWidth / window.innerHeight;
   }
+  camera.updateProjectionMatrix();
 
   renderPanel.style.display = 'block';
   recorder.frames = [];
 
-  // 关键修复：渲染导出时编辑循环已停，浏览器会因「没有 rAF 消费者」把页面当成空闲，
-  // 从而节流 canvas.toBlob 的 PNG 编码任务（表现为必须移动鼠标才推进）。
-  // 这里挂一个「心跳」rAF，仅用于让合成器保持唤醒；它什么都不渲染，不影响导出内容。
+  // 心跳 rAF：渲染导出时编辑循环已停，浏览器会因「没有 rAF 消费者」把页面当成空闲，
+  // 从而节流任务（PNG 分支表现为必须移动鼠标才推进）。这里只挂心跳保持唤醒，不渲染任何东西。
   let keepAliveId = 0;
   const keepAlive = () => { keepAliveId = requestAnimationFrame(keepAlive); };
   keepAliveId = requestAnimationFrame(keepAlive);
+  const yieldFrame = () => new Promise((r) => requestAnimationFrame(r));
 
   try {
     for (let i = 0; i < total; i++) {
@@ -241,11 +248,20 @@ async function renderFrames() {
       applySample();
       framePreRender();
       renderer.render(scene, camera);
-      const blob = await recorder.grabFrame(); // 画好一帧，抓一帧
-      recorder.frames.push(blob);
+      if (captureVideo) {
+        // 直接把刚渲染好的画布包成 VideoFrame，省掉「编码 PNG → 解码回帧」的双重开销
+        recorder.frames.push(new VideoFrame(canvas, {
+          timestamp: Math.round(i * frameDur),
+          duration: Math.round(frameDur),
+        }));
+      } else {
+        const blob = await recorder.grabFrame(); // 画好一帧，抓一帧
+        recorder.frames.push(blob);
+      }
       const p = Math.round(((i + 1) / total) * 100);
       renderBar.style.width = p + '%';
       renderLabel.textContent = `逐帧渲染 ${p}%  (${i + 1}/${total})`;
+      if (captureVideo) await yieldFrame(); // 让出主线程：更新进度条 + 保持页面唤醒
     }
   } finally {
     if (keepAliveId) cancelAnimationFrame(keepAliveId);
@@ -268,8 +284,10 @@ function restoreViewport() {
 
 // 「渲染并导出」：优先 MP4（WebCodecs→ffmpeg），都不行则降级为帧序列
 async function renderAndExport() {
+  // WebCodecs 可用就直接抓 VideoFrame（跳过 PNG 往返）；否则抓 PNG，后续走 ffmpeg / 帧序列兜底
+  const useVideo = (typeof VideoFrame !== 'undefined' && typeof VideoEncoder !== 'undefined');
   try {
-    await renderFrames();
+    await renderFrames({ captureVideo: useVideo });
   } catch (e) {
     alert(e.message);
     restoreViewport();
@@ -282,6 +300,7 @@ async function renderAndExport() {
     res = await recorder.exportVideo({
       fps: timeline.fps,
       baseName,
+      captureVideo: useVideo,
       onProgress: (p) => {
         const pp = Math.round(p * 100);
         renderBar.style.width = pp + '%';
