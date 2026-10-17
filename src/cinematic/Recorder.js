@@ -222,7 +222,7 @@ export class Recorder {
 
     const muxer = new Muxer({
       target: new ArrayBufferTarget(),
-      video: { codec: 'avc', width: w, height: h },
+      video: { codec: 'avc', width: w, height: h, frameRate: fps },
       fastStart: 'in-memory',
     });
     const encoder = new VideoEncoder({

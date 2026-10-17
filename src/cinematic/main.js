@@ -217,6 +217,7 @@ async function renderFrames({ captureVideo = false } = {}) {
   const fps = timeline.fps;
   const total = Math.max(2, Math.round(fps * timeline.duration));
   const frameDur = 1_000_000 / fps; // 微秒（VideoFrame 时间戳用）
+  const gl = renderer.getContext();  // 用于渲染后 finish，确保抓到的是当帧而非上一帧
 
   // 渲染尺寸：
   //  · 明确选了分辨率（如 1080p）→ 按所选像素精确渲染（pixelRatio=1，输出就是该分辨率，不变形不缩水）。
@@ -253,6 +254,7 @@ async function renderFrames({ captureVideo = false } = {}) {
       framePreRender();
       renderer.render(scene, camera);
       if (captureVideo) {
+        gl.finish(); // 等 GPU 真正画完当帧再抓，避免抓到上一帧 → 导出视频出现重复帧/顿挫
         // 直接把刚渲染好的画布包成 VideoFrame，省掉「编码 PNG → 解码回帧」的双重开销
         recorder.frames.push(new VideoFrame(canvas, {
           timestamp: Math.round(i * frameDur),
