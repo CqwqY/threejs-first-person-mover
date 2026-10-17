@@ -26,8 +26,11 @@ const setName = document.getElementById('setName');
 const btnFrames = document.getElementById('btnFrames');
 
 let renderer, scene, camera, director, timeline, recorder;
+let lights = null;              // buildCampusScene 返回的灯光（含太阳、sunTarget、offset）
+let timeSky = null;             // buildCampusScene 返回的天空（需每帧 update 才显形）
 let editRunning = false;
 let scrubbing = false;          // 用户正在拖动时间轴（覆盖自由飞行，预览插值）
+const CINEMATIC_TIME = 0.5;     // 影片默认时段：正午（白天，最亮、天空盒最清晰）
 const _sampleOut = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), fov: 70 };
 const clock = new THREE.Clock();
 
@@ -48,6 +51,9 @@ async function init() {
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // 阴影：游戏里默认开 PCFSoft，影片要真实光照就必须开
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   director = new DirectorCam(camera, canvas);
   timeline = new Timeline();
@@ -58,11 +64,37 @@ async function init() {
 
   // 加载场景
   loadText.textContent = '正在构建校园场景（含服务器场景）…';
-  await buildCampusScene(scene, renderer);
+  const built = await buildCampusScene(scene, renderer);
+  lights = built.lights;
+  timeSky = built.timeSky;
+  setupLightsAndShadows();
   loadOverlay.style.display = 'none';
   loadText.textContent = '';
 
   startEditLoop();
+}
+
+// 让影片场景拥有与游戏一致的实时光照 + 阴影：
+//   · 太阳方向光默认只照「第 1 层」（游戏用 enableDynamicLighting 把物体挪到层 1 来接光）；
+//     影片里物体都在第 0 层，反向把太阳扩到第 0 层，省去改物体层 + 相机层，效果一致更直接。
+//   · 给所有非天空网格开启投影 / 接收阴影（地面只收、建筑收发都开）。
+function setupLightsAndShadows() {
+  if (lights && lights.sun) lights.sun.layers.enable(0);
+  scene.traverse((o) => {
+    if (o.isMesh && o.material && o.material.side !== THREE.BackSide) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+}
+
+// 每帧渲染前：把阴影太阳跟随相机（让阴影覆盖当前取景区），并刷新天空盒/环境反射。
+function framePreRender() {
+  if (lights && lights.sunTarget) {
+    lights.sunTarget.position.copy(camera.position);
+    lights.sun.position.copy(camera.position).add(lights.offset);
+  }
+  if (timeSky) timeSky.update(CINEMATIC_TIME, camera);
 }
 
 function syncSettings() {
@@ -162,6 +194,7 @@ function startEditLoop() {
     if (!editRunning) return;
     const dt = Math.min(clock.getDelta(), 0.1);
     if (!scrubbing) director.update(dt); // 拖动时间轴时由插值接管
+    framePreRender();
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
   };
@@ -197,6 +230,7 @@ async function renderFrames() {
     const t = i / fps;
     timeline.sampleAt(t, _sampleOut);
     applySample();
+    framePreRender();
     renderer.render(scene, camera);
     const blob = await recorder.grabFrame(); // 画好一帧，抓一帧
     recorder.frames.push(blob);
