@@ -22,6 +22,8 @@ const renderLabel = document.getElementById('renderLabel');
 const setFps = document.getElementById('setFps');
 const setDur = document.getElementById('setDur');
 const setRes = document.getElementById('setRes');
+const setName = document.getElementById('setName');
+const btnFrames = document.getElementById('btnFrames');
 
 let renderer, scene, camera, director, timeline, recorder;
 let editRunning = false;
@@ -93,6 +95,7 @@ function bindUI() {
 
   btnKey.addEventListener('click', addKeyAtCursor);
   btnRender.addEventListener('click', renderAndExport);
+  btnFrames.addEventListener('click', exportFrames);
 }
 
 function addKeyAtCursor() {
@@ -165,10 +168,10 @@ function startEditLoop() {
   requestAnimationFrame(tick);
 }
 
-async function renderAndExport() {
+// 进入渲染模式并按关键帧插值逐帧抓图，帧存进 recorder.frames。
+async function renderFrames() {
   if (timeline.keys.length < 2) {
-    alert('至少需要 2 个关键帧才能插值渲染。');
-    return;
+    throw new Error('至少需要 2 个关键帧才能插值渲染。');
   }
   editRunning = false; // 停编辑循环
   scrubbing = false;
@@ -201,13 +204,38 @@ async function renderAndExport() {
     renderBar.style.width = p + '%';
     renderLabel.textContent = `逐帧渲染 ${p}%  (${i + 1}/${total})`;
   }
+}
 
-  renderLabel.textContent = '合成视频中（首次需下载 ffmpeg.wasm）…';
+// 渲染后把视口 / 模式还原回编辑态，方便继续拍下一段
+function restoreViewport() {
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderPanel.style.display = 'none';
+  renderBar.style.width = '0%';
+  modeBadge.textContent = '编辑模式';
+  hint.style.display = '';
+  scrubbing = false;
+  startEditLoop();
+}
+
+// 「渲染并导出」：优先 MP4（WebCodecs→ffmpeg），都不行则降级为帧序列
+async function renderAndExport() {
+  try {
+    await renderFrames();
+  } catch (e) {
+    alert(e.message);
+    restoreViewport();
+    return;
+  }
+  const baseName = (setName.value || 'campus_tour').trim();
+  renderLabel.textContent = '合成视频中（首次需加载编码器）…';
   let res;
   try {
     res = await recorder.exportVideo({
-      fps,
-      format: 'mp4',
+      fps: timeline.fps,
+      baseName,
       onProgress: (p) => {
         const pp = Math.round(p * 100);
         renderBar.style.width = pp + '%';
@@ -220,9 +248,59 @@ async function renderAndExport() {
     return;
   }
 
-  if (res.fallback === 'png') {
-    renderLabel.textContent = '已降级：逐帧 PNG 已下载（ffmpeg 不可用）。';
-  } else {
+  if (res.method === 'webcodecs') {
+    renderLabel.textContent = `导出完成：${baseName}.mp4 已开始下载（WebCodecs）。`;
+  } else if (res.method === 'ffmpeg') {
     renderLabel.textContent = '导出完成：cinematic.mp4 已开始下载。';
+  } else if (res.method === 'folder') {
+    renderLabel.textContent = `导出完成：帧序列已写入你选择的「${baseName}/」文件夹。`;
+  } else {
+    renderLabel.textContent = `导出完成：${baseName}.zip 已下载（浏览器不支持选文件夹）。`;
   }
+  setTimeout(restoreViewport, 900);
+}
+
+// 「导出帧序列」：先让你选文件夹（用户手势内），再渲染，最后直接写入 / 打包 ZIP
+async function exportFrames() {
+  if (timeline.keys.length < 2) {
+    alert('至少需要 2 个关键帧才能插值渲染。');
+    return;
+  }
+  const baseName = (setName.value || 'campus_tour').trim();
+  // 在用户手势内选文件夹（避免渲染后激活失效）；不支持/取消则降级 ZIP
+  let dirHandle = null;
+  try {
+    dirHandle = await recorder.pickFolder();
+  } catch (_) { dirHandle = null; }
+
+  try {
+    await renderFrames();
+  } catch (e) {
+    alert(e.message);
+    restoreViewport();
+    return;
+  }
+
+  renderLabel.textContent = '写入帧序列中…';
+  try {
+    const res = await recorder.exportFrames({
+      dirHandle,
+      baseName,
+      onProgress: (p) => {
+        const pp = Math.round(p * 100);
+        renderBar.style.width = pp + '%';
+        renderLabel.textContent = `写入帧序列 ${pp}%`;
+      },
+    });
+    if (res.method === 'folder') {
+      renderLabel.textContent = `导出完成：帧序列已写入你选择的「${baseName}/」文件夹。`;
+    } else {
+      renderLabel.textContent = `导出完成：${baseName}.zip 已下载（浏览器不支持选文件夹）。`;
+    }
+  } catch (e) {
+    console.error(e);
+    renderLabel.textContent = '导出失败：' + e.message;
+    return;
+  }
+  setTimeout(restoreViewport, 900);
 }

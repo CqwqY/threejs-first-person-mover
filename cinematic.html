@@ -42,6 +42,7 @@
     #topbar button:active { transform: translateY(1px); }
     #btnKey { background: linear-gradient(90deg, rgba(127,208,255,.85), rgba(96,165,250,.85)); color: #042c53; }
     #btnRender { background: linear-gradient(90deg, #ffcf66, #f0a020); color: #3a2400; }
+    #btnFrames { background: linear-gradient(90deg, #34d399, #10b981); color: #04261a; }
 
     /* 操作提示 */
     #hint {
@@ -114,14 +115,17 @@
         <option value="">自适应屏幕</option>
       </select>
     </label>
+    <label>文件名 <input id="setName" type="text" value="campus_tour" style="width:108px" /></label>
     <span class="sep"></span>
     <button id="btnKey">打关键帧</button>
-    <button id="btnRender">渲染并导出</button>
+    <button id="btnRender">渲染并导出 MP4</button>
+    <button id="btnFrames">导出帧序列（选文件夹）</button>
   </div>
 
   <div id="hint">
     点击画面锁定鼠标看视角 · WASD 飞行 · 空格上升 / Ctrl 下降 · Shift 加速 · ESC 解锁<br />
-    调好机位后点「打关键帧」；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出」
+    调好机位后点「打关键帧」；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出 MP4」或「导出帧序列」<br />
+    MP4 走 WebCodecs（Pages 可用）；若浏览器不支持，帧序列按钮可把 PNG 直接存到你选的文件夹
   </div>
 
   <div id="timelineBar">
