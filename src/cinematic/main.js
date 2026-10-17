@@ -55,7 +55,7 @@ async function init() {
   bindUI();
 
   // 加载场景
-  loadText.textContent = '正在构建校园场景…';
+  loadText.textContent = '正在构建校园场景（含服务器场景）…';
   await buildCampusScene(scene, renderer);
   loadOverlay.style.display = 'none';
   loadText.textContent = '';

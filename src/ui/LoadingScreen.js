@@ -1,5 +1,5 @@
-// 职责：进游戏前的加载过场。等场景里的模型都到位，再把遮罩**渐隐**露出后台已在实时
-// 渲染的校园世界（高画质背景），并显示「点击进入游戏」——由玩家点击才真正进入，
+// 职责：进游戏前的加载过场。等场景里的模型都到位后，转入「点击进入游戏」态（仍保持
+// 静态截图背景，不提前露出后台实时渲染的校园世界），由玩家点击才真正进入，
 // 不再有「跳过」按钮（弱网靠 40s 兜底放行）。
 //
 // 设计要点（对照旧版「干巴巴」面板）：
@@ -13,7 +13,7 @@
 //   const ls = createLoadingScreen({ title: '花草中学' });
 //   ls.setProgress(done, total);     // total=0 表示总量未知
 //   await waitAssets(ls, game);
-//   await ls.markReady();            // 露游戏 + 显示「点击进入」，点击后 resolve
+//   await ls.markReady();            // 显示「点击进入」横条（保持静态截图背景），点击后 resolve
 //
 // 遮罩是全屏且吃触摸的：加载期间点击/拖动不会漏进游戏里（视角乱转、误开背包）。
 import { ensureTheme } from './theme.js';
@@ -25,7 +25,7 @@ function ensureKeyframes() {
   const st = document.createElement('style');
   st.id = KEYFRAMES_ID;
   st.textContent = [
-    '@keyframes fpm-ls-logoIn { 0%{opacity:0;transform:translateY(14px) scale(.92)} 100%{opacity:1;transform:none} }',
+    '@keyframes fpm-ls-logoIn { 0%{opacity:0;transform:translate(-50%,calc(-50% + 14px)) scale(.92)} 100%{opacity:1;transform:translate(-50%,-50%) scale(1)} }',
     '@keyframes fpm-ls-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-9px)} }',
     '@keyframes fpm-ls-shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }',
     '@keyframes fpm-ls-pulse { 0%,100%{opacity:.6;transform:translateX(-50%) scale(1)} 50%{opacity:1;transform:translateX(-50%) scale(1.06)} }',
@@ -80,8 +80,7 @@ export function createLoadingScreen(opts = {}) {
   logo.src = '/favicon-512.png';
   logo.alt = title;
   logo.style.cssText =
-    'width:min(210px,44vw);height:auto;filter:drop-shadow(0 10px 26px rgba(0,0,0,.45));' +
-    'animation:fpm-ls-float 3.4s ease-in-out infinite;';
+    'width:min(210px,44vw);height:auto;filter:drop-shadow(0 10px 26px rgba(0,0,0,.45));';
 
   const titleEl = document.createElement('div');
   titleEl.style.cssText =
@@ -181,13 +180,11 @@ export function createLoadingScreen(opts = {}) {
     if (readyResolve) readyResolve();
   }
 
-  // 资产就绪 → 转入「点击进入」态：遮罩渐隐露出实时游戏世界
+  // 资产就绪 → 转入「点击进入」态：保持静态截图背景，不提前露出后台实时渲染的校园世界。
+  // 玩家点击「点击进入游戏」后，beginEnter() 才把整块遮罩淡出、露出真正的游戏场景。
   function revealGame() {
     root.dataset.phase = 'ready';
-    bgImg.style.opacity = '0';        // 露出后台实时渲染的校园（高画质背景）
-    bgLayer.style.opacity = '0';
-    vignette.style.background =
-      'radial-gradient(120% 90% at 50% 36%,transparent 54%,rgba(5,8,16,.34) 100%)';
+    // ⚠ 不淡出 bgImg/bgLayer/vignette：点击进入前一直显示静态截图，避免「还没点就进场景」。
     logo.style.opacity = '0';
     titleEl.style.opacity = '0';
     status.style.display = 'none';
