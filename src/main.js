@@ -67,19 +67,17 @@ async function main() {
     catch (e) { console.warn('[main] 账号存档同步失败（按本地继续）:', e); }
   }
   // 加载动画：登录完之后才挂遮罩 —— 它是全屏且吃触摸的，挂在登录前会把登录界面整个盖住。
-  // 从这一刻起，模型没到位就不放人进来（点「不等了」可立刻进）。
+  // 从这一刻起，模型没到位就不放人进来。加载完成后不再自动进，而是转入「点击以进入游戏」态，
+  // 把遮罩渐隐、露出后台已在实时渲染的校园世界，等玩家点击才真正进入（没有跳过按钮）。
   const loading = createLoadingScreen({ title: '花草中学' });
   // 性别以本地为准（刚可能已被云端存档覆盖；当场选过则保留本次选择）
   const gender = localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy';
   const game = new Game(auth.token, auth.profile, gender);
   game.start();
   markLoadPhase('gameStart');
-  // 场景/模型加载完成后（或用户点了「不等了」）再撤掉遮罩
-  const assetsReady = (async () => {
-    await waitAssets(loading, game);
-  })();
-  await Promise.race([assetsReady, loading.skipped]);
-  loading.finish();
+  // 等场景/模型都到位（quietFor 安静期 + 40s 兜底），再露出游戏世界并等待点击进入
+  await waitAssets(loading, game);
+  await loading.markReady();   // 遮罩渐隐露游戏 + 显示「点击以进入游戏」，点击后 resolve
   markLoadPhase('enter');
   // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过。
   // 人称切换器只认注入进来的这一对回调，不认识 Game 本身（模块之间靠注入解耦）
