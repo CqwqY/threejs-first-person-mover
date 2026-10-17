@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>花草中学 · 影片导演</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <meta name="theme-color" content="#3b82f6" />
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden;
+      touch-action: none; overscroll-behavior: none; -webkit-text-size-adjust: 100%;
+      font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #05080f; color: #e8eefc; user-select: none;
+    }
+    #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+    /* 顶部工具栏 */
+    #topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 10px 14px; background: rgba(8,12,22,.62); backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(255,255,255,.08); font-size: 13px;
+    }
+    #topbar .title { font-weight: 700; letter-spacing: .06em; color: #fff; }
+    #modeBadge {
+      padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(59,130,246,.25); color: #bcd6ff; border: 1px solid rgba(127,208,255,.35);
+    }
+    #topbar .sep { width: 1px; height: 22px; background: rgba(255,255,255,.12); }
+    #topbar label { color: #cdd6f0; display: inline-flex; align-items: center; gap: 4px; }
+    #topbar select, #topbar input[type=number] {
+      background: rgba(255,255,255,.08); color: #fff; border: 1px solid rgba(255,255,255,.18);
+      border-radius: 6px; padding: 3px 6px; font-size: 12px; outline: none;
+    }
+    #topbar button {
+      background: linear-gradient(90deg, rgba(59,130,246,.9), rgba(37,99,235,.9)); color: #fff;
+      border: none; border-radius: 8px; padding: 6px 14px; font-size: 13px; font-weight: 600;
+      cursor: pointer; letter-spacing: .04em;
+    }
+    #topbar button:active { transform: translateY(1px); }
+    #btnKey { background: linear-gradient(90deg, rgba(127,208,255,.85), rgba(96,165,250,.85)); color: #042c53; }
+    #btnRender { background: linear-gradient(90deg, #ffcf66, #f0a020); color: #3a2400; }
+
+    /* 操作提示 */
+    #hint {
+      position: fixed; left: 50%; bottom: 132px; transform: translateX(-50%); z-index: 15;
+      background: rgba(8,12,22,.6); padding: 8px 16px; border-radius: 10px; font-size: 12px;
+      color: #cdd6f0; border: 1px solid rgba(255,255,255,.08); text-align: center; line-height: 1.6;
+    }
+
+    /* 底部时间轴 */
+    #timelineBar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 18;
+      padding: 12px 16px 14px; background: rgba(8,12,22,.66); backdrop-filter: blur(10px);
+      border-top: 1px solid rgba(255,255,255,.08);
+    }
+    #keyMarks { position: relative; height: 8px; margin: 0 0 2px; }
+    .key-dot {
+      position: absolute; top: 0; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%;
+      background: #ffcf66; box-shadow: 0 0 8px rgba(255,207,102,.7); transform: translateY(-1px);
+    }
+    #timeSlider { width: 100%; margin: 4px 0 8px; accent-color: #7fd0ff; }
+    #timeLabel { font-size: 12px; color: #cdd6f0; }
+    #keyList { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; max-height: 60px; overflow-y: auto; }
+    .key-item {
+      display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.12); border-radius: 7px; padding: 3px 6px; font-size: 12px; color: #e8eefc;
+    }
+    .key-item button {
+      background: rgba(227,75,74,.18); color: #ff9b9b; border: 1px solid rgba(227,75,74,.4);
+      border-radius: 5px; padding: 1px 6px; font-size: 11px; cursor: pointer;
+    }
+    .key-empty { font-size: 12px; color: #7e89a6; }
+
+    /* 渲染进度面板 */
+    #renderPanel {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); z-index: 30;
+      display: none; width: min(440px, 86vw); padding: 20px; border-radius: 14px; text-align: center;
+      background: rgba(10,14,26,.92); border: 1px solid rgba(127,208,255,.25); box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    }
+    #renderPanel .rp-title { font-weight: 700; color: #fff; margin-bottom: 12px; }
+    #renderBarWrap { height: 10px; border-radius: 6px; background: rgba(255,255,255,.12); overflow: hidden; }
+    #renderBar { height: 100%; width: 0%; background: linear-gradient(90deg,#7fd0ff,#ffcf66); transition: width .15s ease; }
+    #renderLabel { margin-top: 10px; font-size: 12px; color: #cdd6f0; min-height: 16px; }
+
+    /* 加载遮罩 */
+    #loadOverlay {
+      position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+      background: radial-gradient(135% 115% at 50% 22%, #39487a 0%, #1b2240 46%, #0a0e1d 100%);
+    }
+    #loadOverlay .box { text-align: center; }
+    #loadOverlay .logo {
+      width: min(180px,40vw); height: auto; filter: drop-shadow(0 10px 26px rgba(0,0,0,.45)); margin-bottom: 14px;
+    }
+    #loadText { color: #cdd6f0; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+
+  <div id="topbar">
+    <span class="title">花草中学 · 影片导演</span>
+    <span id="modeBadge">编辑模式</span>
+    <span class="sep"></span>
+    <label>帧率 <input id="setFps" type="number" min="1" max="60" value="30" style="width:52px" /></label>
+    <label>时长(秒) <input id="setDur" type="number" min="0.5" max="60" step="0.5" value="5" style="width:56px" /></label>
+    <label>分辨率
+      <select id="setRes">
+        <option value="1280x720">720p</option>
+        <option value="1920x1080">1080p</option>
+        <option value="2560x1440">1440p</option>
+        <option value="">自适应屏幕</option>
+      </select>
+    </label>
+    <span class="sep"></span>
+    <button id="btnKey">打关键帧</button>
+    <button id="btnRender">渲染并导出</button>
+  </div>
+
+  <div id="hint">
+    点击画面锁定鼠标看视角 · WASD 飞行 · 空格上升 / Ctrl 下降 · Shift 加速 · ESC 解锁<br />
+    调好机位后点「打关键帧」；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出」
+  </div>
+
+  <div id="timelineBar">
+    <div id="keyMarks"></div>
+    <input id="timeSlider" type="range" min="0" max="5" step="0.0333" value="0" />
+    <div id="timeLabel">t = 0s</div>
+    <div id="keyList"></div>
+  </div>
+
+  <div id="renderPanel">
+    <div class="rp-title">影片渲染中</div>
+    <div id="renderBarWrap"><div id="renderBar"></div></div>
+    <div id="renderLabel"></div>
+  </div>
+
+  <div id="loadOverlay">
+    <div class="box">
+      <img class="logo" src="/favicon-512.png" alt="花草中学" />
+      <div id="loadText">正在构建校园场景…</div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/cinematic/main.js"></script>
+</body>
+</html>
