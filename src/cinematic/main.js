@@ -226,17 +226,29 @@ async function renderFrames() {
 
   renderPanel.style.display = 'block';
   recorder.frames = [];
-  for (let i = 0; i < total; i++) {
-    const t = i / fps;
-    timeline.sampleAt(t, _sampleOut);
-    applySample();
-    framePreRender();
-    renderer.render(scene, camera);
-    const blob = await recorder.grabFrame(); // 画好一帧，抓一帧
-    recorder.frames.push(blob);
-    const p = Math.round(((i + 1) / total) * 100);
-    renderBar.style.width = p + '%';
-    renderLabel.textContent = `逐帧渲染 ${p}%  (${i + 1}/${total})`;
+
+  // 关键修复：渲染导出时编辑循环已停，浏览器会因「没有 rAF 消费者」把页面当成空闲，
+  // 从而节流 canvas.toBlob 的 PNG 编码任务（表现为必须移动鼠标才推进）。
+  // 这里挂一个「心跳」rAF，仅用于让合成器保持唤醒；它什么都不渲染，不影响导出内容。
+  let keepAliveId = 0;
+  const keepAlive = () => { keepAliveId = requestAnimationFrame(keepAlive); };
+  keepAliveId = requestAnimationFrame(keepAlive);
+
+  try {
+    for (let i = 0; i < total; i++) {
+      const t = i / fps;
+      timeline.sampleAt(t, _sampleOut);
+      applySample();
+      framePreRender();
+      renderer.render(scene, camera);
+      const blob = await recorder.grabFrame(); // 画好一帧，抓一帧
+      recorder.frames.push(blob);
+      const p = Math.round(((i + 1) / total) * 100);
+      renderBar.style.width = p + '%';
+      renderLabel.textContent = `逐帧渲染 ${p}%  (${i + 1}/${total})`;
+    }
+  } finally {
+    if (keepAliveId) cancelAnimationFrame(keepAliveId);
   }
 }
 
