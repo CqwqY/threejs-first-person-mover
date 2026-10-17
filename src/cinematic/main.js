@@ -20,7 +20,7 @@ const renderPanel = document.getElementById('renderPanel');
 const renderBar = document.getElementById('renderBar');
 const renderLabel = document.getElementById('renderLabel');
 const setFps = document.getElementById('setFps');
-const setDur = document.getElementById('setDur');
+const setFrames = document.getElementById('setFrames');
 const setRes = document.getElementById('setRes');
 const setName = document.getElementById('setName');
 const btnFrames = document.getElementById('btnFrames');
@@ -98,10 +98,10 @@ function framePreRender() {
 }
 
 function syncSettings() {
-  timeline.fps = parseInt(setFps.value, 10) || 30;
-  timeline.duration = parseFloat(setDur.value) || 5;
-  timeSlider.max = String(timeline.duration);
-  timeSlider.step = (1 / timeline.fps).toFixed(4);
+  timeline.fps = parseInt(setFps.value, 10) || 30;       // 输出视频帧率（播放速度）
+  timeline.totalFrames = Math.max(2, parseInt(setFrames.value, 10) || 100); // 渲染总张数
+  timeSlider.max = String(timeline.totalFrames - 1);
+  timeSlider.step = '1';
 }
 
 function bindUI() {
@@ -114,14 +114,14 @@ function bindUI() {
   });
 
   setFps.addEventListener('change', syncSettings);
-  setDur.addEventListener('change', () => { syncSettings(); refreshKeyMarks(); });
+  setFrames.addEventListener('change', () => { syncSettings(); refreshKeyMarks(); });
 
   // 时间轴：拖动时预览插值位姿（覆盖自由飞行），松开后恢复自由控制
   timeSlider.addEventListener('input', () => {
     scrubbing = true;
-    timeLabel.textContent = `t = ${timeSlider.value}s`;
-    const t = parseFloat(timeSlider.value);
-    if (timeline.sampleAt(t, _sampleOut)) applySample();
+    const frame = parseInt(timeSlider.value, 10);
+    timeLabel.textContent = `帧 ${frame} / ${timeline.totalFrames - 1}`;
+    if (timeline.sampleAtFrame(frame, _sampleOut)) applySample();
   });
   timeSlider.addEventListener('change', () => { scrubbing = false; });
 
@@ -131,8 +131,8 @@ function bindUI() {
 }
 
 function addKeyAtCursor() {
-  const t = parseFloat(timeSlider.value);
-  timeline.setKey(t, director.getState());
+  const frame = parseInt(timeSlider.value, 10);
+  timeline.setKey(frame, director.getState());
   refreshKeyList();
   refreshKeyMarks();
 }
@@ -159,11 +159,11 @@ function refreshKeyList() {
     const item = document.createElement('div');
     item.className = 'key-item';
     const label = document.createElement('span');
-    label.textContent = `t=${k.t.toFixed(2)}s`;
+    label.textContent = `帧 ${k.frame}`;
     const del = document.createElement('button');
     del.textContent = '删除';
     del.addEventListener('click', () => {
-      timeline.removeKeyAt(k.t);
+      timeline.removeKeyAt(k.frame);
       refreshKeyList();
       refreshKeyMarks();
     });
@@ -177,11 +177,11 @@ function refreshKeyList() {
 function refreshKeyMarks() {
   const marks = document.getElementById('keyMarks');
   marks.innerHTML = '';
-  const max = timeline.duration;
+  const max = timeline.totalFrames - 1;
   timeline.keys.forEach((k) => {
     const dot = document.createElement('div');
     dot.className = 'key-dot';
-    dot.style.left = (k.t / max * 100) + '%';
+    dot.style.left = (k.frame / max * 100) + '%';
     marks.appendChild(dot);
   });
 }
@@ -215,7 +215,7 @@ async function renderFrames({ captureVideo = false } = {}) {
 
   syncSettings();
   const fps = timeline.fps;
-  const total = Math.max(2, Math.round(fps * timeline.duration));
+  const total = Math.max(2, timeline.totalFrames); // 直接就是「要渲染多少张」
   const frameDur = 1_000_000 / fps; // 微秒（VideoFrame 时间戳用）
   const gl = renderer.getContext();  // 用于渲染后 finish，确保抓到的是当帧而非上一帧
 
@@ -248,8 +248,8 @@ async function renderFrames({ captureVideo = false } = {}) {
 
   try {
     for (let i = 0; i < total; i++) {
-      const t = i / fps;
-      timeline.sampleAt(t, _sampleOut);
+      // 第 i 帧：直接用帧号采样相机位姿，再真渲染一次（Blender 式逐帧渲染）
+      timeline.sampleAtFrame(i, _sampleOut);
       applySample();
       framePreRender();
       renderer.render(scene, camera);

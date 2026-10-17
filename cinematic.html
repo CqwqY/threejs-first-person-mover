@@ -106,7 +106,7 @@
     <span id="modeBadge">编辑模式</span>
     <span class="sep"></span>
     <label>帧率 <input id="setFps" type="number" min="1" max="60" value="30" style="width:52px" /></label>
-    <label>时长(秒) <input id="setDur" type="number" min="0.5" max="60" step="0.5" value="5" style="width:56px" /></label>
+    <label>帧数 <input id="setFrames" type="number" min="2" max="2000" step="1" value="100" style="width:64px" /></label>
     <label>分辨率
       <select id="setRes">
         <option value="1280x720">720p</option>
@@ -124,14 +124,14 @@
 
   <div id="hint">
     点击画面锁定鼠标看视角 · WASD 飞行 · 空格上升 / Ctrl 下降 · Shift 加速 · ESC 解锁<br />
-    调好机位后点「打关键帧」；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出 MP4」或「导出帧序列」<br />
-    MP4 走 WebCodecs（Pages 可用）；若浏览器不支持，帧序列按钮可把 PNG 直接存到你选的文件夹
+    调好机位后点「打关键帧」（打在当前帧号上）；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出 MP4」或「导出帧序列」<br />
+    「帧数」= 一共渲染多少张；「帧率」只决定导出视频的播放速度（时长 = 帧数 ÷ 帧率）。MP4 走 WebCodecs（Pages 可用）
   </div>
 
   <div id="timelineBar">
     <div id="keyMarks"></div>
-    <input id="timeSlider" type="range" min="0" max="5" step="0.0333" value="0" />
-    <div id="timeLabel">t = 0s</div>
+    <input id="timeSlider" type="range" min="0" max="99" step="1" value="0" />
+    <div id="timeLabel">帧 0 / 99</div>
     <div id="keyList"></div>
   </div>
 
