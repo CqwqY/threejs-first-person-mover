@@ -218,14 +218,18 @@ async function renderFrames({ captureVideo = false } = {}) {
   const total = Math.max(2, Math.round(fps * timeline.duration));
   const frameDur = 1_000_000 / fps; // 微秒（VideoFrame 时间戳用）
 
-  // 导出统一 pixelRatio=1：弱机 / 高分屏下像素量直接砍到 1/4，性能大福提升（导出本就不看屏幕 DPR）。
-  // 按所选分辨率设置渲染尺寸（不更新 CSS 显示尺寸，保持全屏缩放）。
+  // 渲染尺寸：
+  //  · 明确选了分辨率（如 1080p）→ 按所选像素精确渲染（pixelRatio=1，输出就是该分辨率，不变形不缩水）。
+  //  · 「自适应屏幕」→ 保留设备像素比（不降清晰度，导出产物与屏幕同分辨率）。
+  //  ⚠ 绝不为提速强制降 pixelRatio：那会直接 lowering 导出画质（用户明确要求不降画面）。
+  //    提速度靠的是下面的「直接抓 VideoFrame 跳过 PNG 往返」，而不是砍分辨率。
   const [rw, rh] = (setRes.value || '').split('x').map((n) => parseInt(n, 10));
-  renderer.setPixelRatio(1);
   if (rw && rh) {
+    renderer.setPixelRatio(1);
     renderer.setSize(rw, rh, false);
     camera.aspect = rw / rh;
   } else {
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(window.innerWidth, window.innerHeight, false);
     camera.aspect = window.innerWidth / window.innerHeight;
   }
