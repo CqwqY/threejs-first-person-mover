@@ -105,8 +105,9 @@
     <span class="title">花草中学 · 影片导演</span>
     <span id="modeBadge">编辑模式</span>
     <span class="sep"></span>
-    <label>帧率 <input id="setFps" type="number" min="1" max="60" value="30" style="width:52px" /></label>
-    <label>帧数 <input id="setFrames" type="number" min="2" max="2000" step="1" value="100" style="width:64px" /></label>
+    <label>帧率(每秒张数) <input id="setFps" type="number" min="1" max="60" value="30" style="width:54px" /></label>
+    <label>时长(秒) <input id="setDur" type="number" min="0.1" max="120" step="0.5" value="5" style="width:56px" /></label>
+    <span id="frameCount">总帧数: 150</span>
     <label>分辨率
       <select id="setRes">
         <option value="1280x720">720p</option>
@@ -124,14 +125,14 @@
 
   <div id="hint">
     点击画面锁定鼠标看视角 · WASD 飞行 · 空格上升 / Ctrl 下降 · Shift 加速 · ESC 解锁<br />
-    调好机位后点「打关键帧」（打在当前帧号上）；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出 MP4」或「导出帧序列」<br />
-    「帧数」= 一共渲染多少张；「帧率」只决定导出视频的播放速度（时长 = 帧数 ÷ 帧率）。MP4 走 WebCodecs（Pages 可用）
+    调好机位后点「打关键帧」（打在当前时间点）；拖动下方时间轴预览插值；至少 2 个帧后点「渲染并导出 MP4」或「导出帧序列」<br />
+    「帧率」= 每秒渲染多少张（镜头密度，越高越平滑）；「时长」= 镜头总长；<b>总帧数 = 帧率 × 时长</b>，翻一倍帧率就多渲染一倍张数。MP4 走 WebCodecs（Pages 可用）
   </div>
 
   <div id="timelineBar">
     <div id="keyMarks"></div>
-    <input id="timeSlider" type="range" min="0" max="99" step="1" value="0" />
-    <div id="timeLabel">帧 0 / 99</div>
+    <input id="timeSlider" type="range" min="0" max="5" step="0.0333" value="0" />
+    <div id="timeLabel">t = 0.00s（帧 0）</div>
     <div id="keyList"></div>
   </div>
 

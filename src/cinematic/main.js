@@ -20,7 +20,8 @@ const renderPanel = document.getElementById('renderPanel');
 const renderBar = document.getElementById('renderBar');
 const renderLabel = document.getElementById('renderLabel');
 const setFps = document.getElementById('setFps');
-const setFrames = document.getElementById('setFrames');
+const setDur = document.getElementById('setDur');
+const frameCount = document.getElementById('frameCount');
 const setRes = document.getElementById('setRes');
 const setName = document.getElementById('setName');
 const btnFrames = document.getElementById('btnFrames');
@@ -98,10 +99,18 @@ function framePreRender() {
 }
 
 function syncSettings() {
-  timeline.fps = parseInt(setFps.value, 10) || 30;       // 输出视频帧率（播放速度）
-  timeline.totalFrames = Math.max(2, parseInt(setFrames.value, 10) || 100); // 渲染总张数
-  timeSlider.max = String(timeline.totalFrames - 1);
-  timeSlider.step = '1';
+  timeline.fps = parseInt(setFps.value, 10) || 30;            // 每秒渲染多少帧（密度）
+  timeline.duration = Math.max(0.1, parseFloat(setDur.value) || 5); // 镜头总时长（秒）
+  const total = timeline.totalFrames;                        // = round(fps × 时长)
+  if (timeSlider) {
+    timeSlider.max = timeline.duration.toFixed(4);
+    timeSlider.step = (1 / timeline.fps).toFixed(4);
+  }
+  if (frameCount) {
+    frameCount.textContent = `总帧数: ${total}（${timeline.fps}fps × ${timeline.duration}s）`;
+  }
+  refreshKeyList();
+  refreshKeyMarks();
 }
 
 function bindUI() {
@@ -114,14 +123,15 @@ function bindUI() {
   });
 
   setFps.addEventListener('change', syncSettings);
-  setFrames.addEventListener('change', () => { syncSettings(); refreshKeyMarks(); });
+  setDur.addEventListener('change', syncSettings);
 
   // 时间轴：拖动时预览插值位姿（覆盖自由飞行），松开后恢复自由控制
   timeSlider.addEventListener('input', () => {
     scrubbing = true;
-    const frame = parseInt(timeSlider.value, 10);
-    timeLabel.textContent = `帧 ${frame} / ${timeline.totalFrames - 1}`;
-    if (timeline.sampleAtFrame(frame, _sampleOut)) applySample();
+    const t = parseFloat(timeSlider.value);
+    const frame = Math.round(t * timeline.fps);
+    timeLabel.textContent = `t = ${t.toFixed(2)}s（帧 ${frame}）`;
+    if (timeline.sampleAt(t, _sampleOut)) applySample();
   });
   timeSlider.addEventListener('change', () => { scrubbing = false; });
 
@@ -131,8 +141,8 @@ function bindUI() {
 }
 
 function addKeyAtCursor() {
-  const frame = parseInt(timeSlider.value, 10);
-  timeline.setKey(frame, director.getState());
+  const t = parseFloat(timeSlider.value);
+  timeline.setKey(t, director.getState());
   refreshKeyList();
   refreshKeyMarks();
 }
@@ -159,11 +169,12 @@ function refreshKeyList() {
     const item = document.createElement('div');
     item.className = 'key-item';
     const label = document.createElement('span');
-    label.textContent = `帧 ${k.frame}`;
+    const frame = Math.round(k.t * timeline.fps);
+    label.textContent = `t = ${k.t.toFixed(2)}s（帧 ${frame}）`;
     const del = document.createElement('button');
     del.textContent = '删除';
     del.addEventListener('click', () => {
-      timeline.removeKeyAt(k.frame);
+      timeline.removeKeyAt(k.t);
       refreshKeyList();
       refreshKeyMarks();
     });
@@ -177,11 +188,11 @@ function refreshKeyList() {
 function refreshKeyMarks() {
   const marks = document.getElementById('keyMarks');
   marks.innerHTML = '';
-  const max = timeline.totalFrames - 1;
+  const max = timeline.duration || 1;
   timeline.keys.forEach((k) => {
     const dot = document.createElement('div');
     dot.className = 'key-dot';
-    dot.style.left = (k.frame / max * 100) + '%';
+    dot.style.left = (k.t / max * 100) + '%';
     marks.appendChild(dot);
   });
 }
@@ -215,7 +226,8 @@ async function renderFrames({ captureVideo = false } = {}) {
 
   syncSettings();
   const fps = timeline.fps;
-  const total = Math.max(2, timeline.totalFrames); // 直接就是「要渲染多少张」
+  // 总帧数 = fps × 时长：fps 翻一倍 → 同样时长内渲染的帧数翻倍 → 画面更平滑（这就是「一秒多少帧」）
+  const total = Math.max(2, timeline.totalFrames);
   const frameDur = 1_000_000 / fps; // 微秒（VideoFrame 时间戳用）
   const gl = renderer.getContext();  // 用于渲染后 finish，确保抓到的是当帧而非上一帧
 
@@ -248,8 +260,9 @@ async function renderFrames({ captureVideo = false } = {}) {
 
   try {
     for (let i = 0; i < total; i++) {
-      // 第 i 帧：直接用帧号采样相机位姿，再真渲染一次（Blender 式逐帧渲染）
-      timeline.sampleAtFrame(i, _sampleOut);
+      // 第 i 帧：取 t = i / fps 秒处的相机位姿，再真渲染一次（类似 Blender 逐帧渲染）
+      const t = i / fps;
+      timeline.sampleAt(t, _sampleOut);
       applySample();
       framePreRender();
       renderer.render(scene, camera);
