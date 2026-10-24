@@ -186,6 +186,20 @@ export class Network {
     this.send({ t: 'ctrl', target, on: on ? 1 : 0, x, y, z });
   }
 
+  // 物理可交互物：spawn / hit / state / gone。
+  // 服务器不模拟，只钳数值后房间内转发（与 drop / meteor 同一套契约）。
+  sendProp(ev, info) {
+    if (!ev || !info || !info.id) return;
+    this.send({
+      t: 'prop',
+      ev,
+      id: info.id,
+      kind: info.kind,
+      x: info.x, y: info.y, z: info.z,
+      vx: info.vx, vy: info.vy, vz: info.vz,
+    });
+  }
+
   // 邀请传送：请 target 传送到我这里。带上**我此刻的坐标**（他要落在这儿），
   // 服务器只做转发与钳制 —— 真正瞬移由对方客户端执行。
   sendTpInvite(target, x, y, z) {

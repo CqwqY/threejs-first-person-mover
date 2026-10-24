@@ -28,6 +28,7 @@ import { isCoarsePointer } from '../util/isCoarse.js';
 import { judge, spawnForMode, trainingScore, formatClock, bestKey, parseBest, isBetter, modeRule } from '../game/MatchRules.js';
 import { projectileHitsWorld } from '../world/collision/projectileHit.js';
 import { raycastWorld, moveSphereWorld } from '../world/collision/worldQuery.js';
+import { PhysicsProps } from '../world/physicsProps.js';
 import { Input, isEditableTarget } from '../core/Input.js';
 import { PlayerManager } from '../player/PlayerManager.js';
 import { PlayerState } from '../player/PlayerState.js';
@@ -357,6 +358,23 @@ export class Game {
     this._spdMax = Math.max(10, Math.ceil(Config.VEHICLE_SPEED * 3.6 / 10) * 10);
 
     // ---- 网络连接 ----
+    // ---- 物理可交互物（P0：纸箱/篮球/垃圾桶/课桌/积木/蹦床）----
+    // 布局在 welcome 之后延迟 2s 生成（需要出生点、赛道与碰撞体）；?props=off 可整组关闭。
+    this._propsOff = /(?:^|[?&])props=off(?:&|$)/.test(location.search);
+    this.props = new PhysicsProps(this.scene, this.colliders, this.network);
+    this._propsBuilt = false;
+    this._propsTimer = 0;
+    this._propsView = {
+      x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+      radius: Config.PLAYER_RADIUS, height: Config.PLAYER_HEIGHT, launch: null,
+    };
+    this._propsView.launch = (vy) => {
+      const ph = this.localPlayer && this.localPlayer.physics;
+      if (!ph) return;
+      // 踩蹦床：用一个很短的持续速度覆盖把玩家弹起来（不会一直往上飘）
+      ph.velocityHold = { x: null, y: vy, z: null, t: 0.16 };
+    };
+
     this.network = new Network(Config.RELAY_URL, this._token);
     this.network.onMessage((msg) => this._onNetworkMessage(msg));
     // 连接状态 UI：重连中显示角标，5 次失败显示「网络错误」面板
@@ -747,6 +765,7 @@ export class Game {
       if (document.pointerLockElement !== this.renderer.domElement) return;
       if (this._gatlingOn) { this._gatlingHeld = true; return; }
       if (this._ctrlOn) { this._fireCtrlGun(); return; }
+      if (this._tryKickProp()) return; // 准星对着物理道具时，左键优先踢它
       this._primaryAttack();
     });
     window.addEventListener('mouseup', (e) => {
@@ -1656,6 +1675,7 @@ export class Game {
         this._spawn = msg.spawn; // 记住出生点，死亡重生时用
         this._lobbySpawn = msg.spawn; // 大厅出生点单独记一份，退出对战回主世界时用
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
+        if (this.props) this.props.setLocalId(msg.id);
         this.playerManager.setLocal(msg.id);
         // 本地名牌：登录了用昵称，否则游客样式
         const myNick = this._profile ? (this._profile.nickname || this._profile.username || `玩家${msg.num}`) : `玩家${msg.num}`;
@@ -1748,6 +1768,11 @@ export class Game {
       case 'ctrl': {
         // 控制枪：别人抓住我 / 松开我
         this._applyCtrlMsg(msg);
+        break;
+      }
+      case 'prop': {
+        // 物理可交互物：别人施加的冲量 / 位置校正（服务端只转发，本地复现）
+        if (this.props) this.props.applyRemote(msg.ev, msg);
         break;
       }
       case 'tp_invite': {
@@ -6995,6 +7020,61 @@ export class Game {
     this._pickupShown = false;
   }
 
+  // ---------- 物理可交互物（P0）----------
+  // 每帧：把本地玩家视角打包给 PhysicsProps（推/踩要靠玩家速度与脚底高度）
+  _updateProps(dt) {
+    if (this._propsOff || !this.props) return;
+    if (!this._propsBuilt) { this._maybeBuildProps(dt); return; }
+    const s = this.localState;
+    const ph = this.localPlayer && this.localPlayer.physics;
+    const v = this._propsView;
+    v.x = s.x;
+    v.y = s.y;                       // PlayerState.y 是头顶，physics 里脚底 = y - height
+    v.z = s.z;
+    v.vx = ph ? ph.velocity.x : 0;
+    v.vy = ph ? ph.velocity.y : 0;
+    v.vz = ph ? ph.velocity.z : 0;
+    v.radius = Config.PLAYER_RADIUS * (ph ? ph.sizeScale : 1);
+    v.height = Config.PLAYER_HEIGHT * (ph ? ph.sizeScale : 1);
+    this.props.update(dt, v);
+  }
+
+  // 首次生成布局：等 welcome（出生点）+ 2 秒（让场景碰撞体加载完）再铺
+  _maybeBuildProps(dt) {
+    if (!this._spawn || !this.localState.id) return;
+    this._propsTimer += dt;
+    if (this._propsTimer < 2) return;
+    this._propsBuilt = true;
+    let stats = [];
+    try {
+      stats = this.props.buildLayout({
+        spawn: { x: this._spawn.x, z: this._spawn.z },
+        track: this.track,
+        boundary: this.boundary,
+      }) || [];
+    } catch (e) {
+      // 生成失败不能静默：明确报出来，否则表现为「道具凭空消失」
+      console.warn('[props] 布局生成失败:', e);
+      return;
+    }
+    const detail = stats.map((x) => `${x.zone}:${x.got}/${x.want}`).join(' ');
+    console.log(`[props] ${this.props.count} 体 hash=${this.props.hash()}  ${detail}`);
+  }
+
+  // 准星对着物理道具时，左键改成「踢」；命中才返回 true（否则交给普通攻击）
+  _tryKickProp() {
+    if (this._propsOff || !this.props || !this._propsBuilt) return false;
+    if (!this.props.bodies.length) return false;
+    const s = this.localState;
+    const cp = Math.cos(s.pitch);
+    const dx = -Math.sin(s.yaw) * cp;
+    const dy = Math.sin(s.pitch);
+    const dz = -Math.cos(s.yaw) * cp;
+    // 用本地状态而不是相机：第三人称（F5）下相机是偏移的，会踢偏
+    const ex = s.x, ey = s.y - 0.15, ez = s.z;
+    return this.props.kick(ex, ey, ez, dx, dy, dz);
+  }
+
   // 掉落物物理：重力 → 落地弹跳 → 地面摩擦 → 静止；越界回弹；到寿命自动消失
   _updateDrops(dt) {
     if (!this._drops.length) return;
@@ -7486,6 +7566,8 @@ export class Game {
     this._updateProjectiles(dt);
     // 掉落物（丢弃的物品）：重力/弹跳/摩擦推进
     this._updateDrops(dt);
+    // 物理可交互物：推/滚/连锁 + 蹦床判定 + 状态广播（内部自带 init 延迟与 ?props=off 守卫）
+    this._updateProps(dt);
     // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）
     this._updatePickupHint();
     // 柱顶光点：呼吸 + 瞄准高亮（给「按攻击能飞过去」的反馈）

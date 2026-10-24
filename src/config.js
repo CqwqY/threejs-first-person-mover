@@ -252,6 +252,25 @@ export const Config = {
   DROP_GESTURE_DY: 42,            // 手机长按后上滑：触发丢弃的位移阈值（像素）
   DROP_PICKUP_RANGE: 2.8,         // 离掉落物多少米内出现「拾取」按钮（水平距离）
   DROP_PICKUP_HEIGHT: 2.6,        // 拾取的高度余量：物品比这还高/低就够不到（米）
+
+  // ---- 物理可交互物（P0：推 / 踢 / 踩）----
+  PROP_MAX: 96,                   // 同屏最多动态体（超出移除最远的）
+  PROP_SIM_RANGE: 40,             // 距本地玩家超过这个距离的道具不积分（米）
+  PROP_PUSH_RATIO: 0.55,          // 玩家贴身推动时，把玩家水平速度按这个比例传给道具
+  PROP_PUSH_MIN_SPEED: 1.2,       // 玩家速度低于这个值不推动（避免站着抖动）
+  PROP_KICK_RANGE: 2.6,           // 踢的射线距离（米）
+  PROP_KICK_ARC: 14,              // 踢的判定张角（度，以准星为中轴）
+  PROP_KICK_SPEED: 6.2,           // 踢的基础速度（米/秒，按 sqrt(6/mass) 衰减）
+  PROP_KICK_UP: 2.5,              // 踢附加的向上分量（米/秒）
+  PROP_REST_SPEED: 0.18,          // 着地且水平速度低于此值 → 进入静止（停止积分）
+  PROP_NET_HZ: 10,                // 运动中的道具状态广播频率（Hz）
+  PROP_TRACK_CLEAR: 7,            // 落点离赛道折线的最小距离（米）
+  PROP_SPAWN_CLEAR: 8,            // 落点离出生点的最小距离（米）
+  PROP_EDGE_CLEAR: 3,             // 落点离边界的最小距离（米）
+  PROP_TRAMP_BOOST: 1.9,          // 蹦床：落速的放大倍数
+  PROP_TRAMP_MIN: 7,              // 蹦床：最小弹起速度（米/秒）
+  PROP_TRAMP_MAX: 18,             // 蹦床：最大弹起速度（米/秒）
+
   // 抓钩（技能槽物品「抓钩」，也是「疯狂抓钩」模式的基础移动手段）
   GRAPPLE_RANGE: 92,              // 钩爪最远能抓到的距离（米）——用户要求延长到 2 倍（原 46）
   GRAPPLE_SPEED: 25,              // 被拽过去的速度（米/秒）
