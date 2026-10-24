@@ -133,6 +133,31 @@ ok(sb.count === Config.PROP_BALL_MAX, '场上球数应为上限 ' + Config.PROP_
 ok(sb.bodies.every((x) => String(x.id).startsWith('pb')), 'spawnBall 生成的 id 都应带 pb 前缀');
 console.log('  上限内生成:', sb.count, ' id 前缀 pb ✓');
 
+// 骑乘（仓鼠球）：进入后人被锁在球里，球贴着玩家脚下跟滚
+console.log('=== 骑乘 ===');
+const rb = new PhysicsProps(scene, [], null);
+const ballR = rb._create('ball', 5, 3.6, 5, 'ride1');
+const rider = { x: 5, z: 5, y: 1 + 1.7, vx: 2, vz: 0, height: 1.7 };
+ok(rb.enterBall(ballR) === true, 'enterBall 失败');
+ok(rb.ridingBall === ballR && ballR.ridden, 'ridingBall 状态没建立');
+ok(rb.enterBall(ballR) === false, '已在球里还允许再进入');
+rb.update(1 / 60, rider);
+ok(Math.abs(ballR.x - rider.x) < 1e-6 && Math.abs(ballR.z - rider.z) < 1e-6, '骑乘球没跟着玩家水平位置');
+ok(Math.abs(ballR.y - (rider.y - rider.height + ballR.r)) < 1e-6, '骑乘球高度没贴到玩家脚底+半径');
+ok(Math.abs(ballR.vx - rider.vx) < 1e-6, '骑乘球速度没取玩家速度（远端看不到滚）');
+// 骑乘中的球不能被 aim / kick / 贴身推
+const eyeR = { x: ballR.x, y: ballR.y, z: ballR.z - 4 };
+ok(rb.aimBall(eyeR.x, eyeR.y, eyeR.z, 0, 0, 1) === null, '骑乘中的球不应再被 aim 到');
+const kickRidden = rb.kick(eyeR.x, eyeR.y, eyeR.z, 0, 0, 1);
+ok(kickRidden === false, '骑乘中的球不应被踢');
+ok(rb.exitBall() === true && !ballR.ridden && rb.ridingBall === null, 'exitBall 没清干净');
+// 出来后 aim 命中 / 瞄偏不命中
+const aimHit = rb.aimBall(eyeR.x, eyeR.y, eyeR.z, 0, 0, 1);
+ok(aimHit === ballR, 'aimBall 没命中球心正前方的球');
+const aimMiss = rb.aimBall(eyeR.x, eyeR.y + 6, eyeR.z, 0, 0, 1);
+ok(aimMiss === null, 'aimBall 瞄高处不应命中');
+console.log('  进入/跟随/排除/退出 ✓');
+
 // 静止：跑 3 秒后应全部 resting
 console.log('=== 静止 ===');
 for (let i = 0; i < 180; i++) b.update(1 / 60, null);

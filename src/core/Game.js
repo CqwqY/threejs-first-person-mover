@@ -743,6 +743,8 @@ export class Game {
     this._tpCdUntil = 0;                           // 邀请传送：自己加的冷却（技能槽只有 800ms 防连点）
     this._hideArrow = this._createHideArrow();
     this._hideTxtCache = '';
+    this._ballPad = this._createBallPad(); // 大足球「推 / 进入」按钮（手游端主入口，PC 也能点）
+    this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
@@ -756,6 +758,13 @@ export class Game {
       if (e.code !== Config.SOUL_KEY) return;
       if (isEditableTarget(document.activeElement)) return;
       this._toggleSoul();
+    });
+
+    // 大足球：F 键进/出（手游端用「进入/出来」按钮，同一入口 _toggleBallEnter）
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.BALL_ENTER_KEY) return;
+      if (isEditableTarget(document.activeElement)) return;
+      this._toggleBallEnter();
     });
 
     // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
@@ -7042,6 +7051,7 @@ export class Game {
     v.radius = Config.PLAYER_RADIUS * (ph ? ph.sizeScale : 1);
     v.height = Config.PLAYER_HEIGHT * (ph ? ph.sizeScale : 1);
     this.props.update(dt, v);
+    this._updateBallPad(); // 准星对准大球 → 亮出「推 / 进入」按钮；骑乘中换字「出来」
   }
 
   // 首次生成布局：等 welcome（出生点）+ 2 秒（让场景碰撞体加载完）再铺
@@ -7085,6 +7095,105 @@ export class Game {
     b.vz = dirZ * 3;
     b.resting = false;
     this._toast('充气足球已充气！可以踢它、推它，还能钻进去');
+  }
+
+  // ---------- 大足球交互：推 / 进出（手游按钮 + PC F 键 + 左键推）----------
+  // 本地状态 → 视线方向（与 _tryKickProp 同一套，第三人称下用本地状态而不是相机）
+  _ballAimDir() {
+    const s = this.localState;
+    const cp = Math.cos(s.pitch);
+    return {
+      dx: -Math.sin(s.yaw) * cp,
+      dy: Math.sin(s.pitch),
+      dz: -Math.cos(s.yaw) * cp,
+    };
+  }
+
+  // 「推」按钮：与左键踢同一入口（踢即推，力度按质量衰减）
+  _ballPush() {
+    if (this._propsOff || !this.props || !this._propsBuilt) return;
+    this._tryKickProp();
+  }
+
+  // 「进入 / 出来」：进入后人被锁在球里（球粘着玩家脚下滚），再触发一次就出来
+  _toggleBallEnter() {
+    if (this._propsOff || !this.props || !this._propsBuilt) return;
+    if (this.props.ridingBall) {
+      this.props.exitBall();
+      this._toast('已从足球里出来');
+      return;
+    }
+    const s = this.localState;
+    const d = this._ballAimDir();
+    const target = this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
+    if (!target) { this._toast('先把准星对准大足球（走近一点）'); return; }
+    this.props.enterBall(target);
+    this._toast('进入足球！走动带着球滚，再按一次出来');
+  }
+
+  // 按钮板：准星对着球 → 显示「推 / 进入」；骑乘中 → 显示「推 / 出来」
+  _updateBallPad() {
+    const pad = this._ballPad;
+    if (!pad) return;
+    let show = false;
+    let riding = false;
+    if (!this._propsOff && this.props && this._propsBuilt) {
+      riding = !!this.props.ridingBall;
+      if (riding) {
+        show = true;
+      } else {
+        const s = this.localState;
+        const d = this._ballAimDir();
+        show = !!this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
+        // PC（非粗指针）第一次对准球提示一次按键；按钮本身在 PC 上也可点（未锁指针时）
+        if (show && !this._ballHintShown) {
+          this._ballHintShown = true;
+          this._toast('对准大足球：左键推它，' + (Config.BALL_ENTER_KEY === 'KeyF' ? 'F' : Config.BALL_ENTER_KEY) + ' 进入');
+        }
+      }
+    }
+    pad.style.display = show ? 'flex' : 'none';
+    if (show && this._ballPadEnter) this._ballPadEnter.textContent = riding ? '出来' : '进入';
+  }
+
+  // 两颗圆按钮（推 / 进入）：贴在跳跃键正上方（手游），PC 端未锁指针时同样可点。
+  // 打字界面打开时随 body.mc-hidden 一起藏（与 MobileControls 同一套显隐约定）。
+  _createBallPad() {
+    const style = document.createElement('style');
+    style.textContent = 'body.mc-hidden .ball-pad{visibility:hidden!important;pointer-events:none!important}';
+    document.head.appendChild(style);
+
+    const pad = document.createElement('div');
+    pad.className = 'ball-pad';
+    pad.style.cssText =
+      'position:fixed;z-index:52;display:none;flex-direction:column;gap:12px;align-items:center;' +
+      'right:calc(env(safe-area-inset-right, 0px) + 24px);' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 116px);' +
+      'touch-action:none;user-select:none;-webkit-user-select:none;';
+    const mkBtn = (text) => {
+      const b = document.createElement('div');
+      b.textContent = text;
+      b.style.cssText =
+        'width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;' +
+        'box-sizing:border-box;color:var(--kui-paper, #fff);' +
+        'font:600 15px/1 var(--kui-font, sans-serif);letter-spacing:2px;' +
+        'background:color-mix(in srgb, var(--kui-blue, #4a76c9) 34%, transparent);' +
+        'border:2px solid color-mix(in srgb, var(--kui-blue-soft, #8fb3e6) 75%, transparent);' +
+        'cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none;';
+      b.addEventListener('pointerup', (e) => { e.preventDefault(); });
+      return b;
+    };
+    // pointerdown 直接触发（触屏 click 有 ~300ms 合成延迟）；preventDefault 防滚动，stopPropagation 防漏给视角拖动区
+    const onBtn = (fn) => (e) => { e.preventDefault(); e.stopPropagation(); fn(); };
+    const btnPush = mkBtn('推');
+    btnPush.addEventListener('pointerdown', onBtn(() => this._ballPush()));
+    const btnEnter = mkBtn('进入');
+    btnEnter.addEventListener('pointerdown', onBtn(() => this._toggleBallEnter()));
+    pad.appendChild(btnPush);
+    pad.appendChild(btnEnter);
+    document.body.appendChild(pad);
+    this._ballPadEnter = btnEnter;
+    return pad;
   }
 
   // 准星对着物理道具时，左键改成「踢」；命中才返回 true（否则交给普通攻击）

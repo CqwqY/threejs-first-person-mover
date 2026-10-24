@@ -33,6 +33,7 @@ export class PhysicsProps {
     this._bounds = null;
     this._zonesStat = [];
     this.localId = '';   // 本地玩家 id（由 Game 在 welcome 后注入）
+    this.ridingBall = null; // 本地玩家正「锁在里面」的那颗球（仓鼠球模式）
   }
 
   setLocalId(id) {
@@ -239,8 +240,13 @@ export class PhysicsProps {
 
     for (const b of this.bodies) {
       if (b.pad) continue;
-      if (!b.resting) this._integrate(b, dt);
-      if (b.lerp > 0) {
+      if (b.ridden) {
+        // 仓鼠球：位置完全由玩家驱动（球粘在玩家脚下跟着滚），不做积分/网络校正
+        this._followPlayer(b, player);
+      } else if (!b.resting) {
+        this._integrate(b, dt);
+      }
+      if (!b.ridden && b.lerp > 0) {
         // 网络校正：平滑靠近目标位置，不硬 set（硬 set 会抖）
         b.lerp = Math.max(0, b.lerp - dt * 4);
         b.x += (b.tx - b.x) * Math.min(1, dt * 8);
@@ -282,6 +288,59 @@ export class PhysicsProps {
     }
   }
 
+  // 仓鼠球：被骑乘的球每帧贴到玩家脚下（球底贴地），速度取玩家速度 ——
+  // 这样网格滚动动画与 10Hz 的 owner state 广播都自然成立（远端看到球包着人滚）。
+  _followPlayer(b, player) {
+    if (!player) return;
+    b.x = player.x;
+    b.z = player.z;
+    b.y = player.y - (player.height || Config.PLAYER_HEIGHT) + b.r; // player.y 是头顶
+    b.vx = player.vx || 0;
+    b.vy = 0;
+    b.vz = player.vz || 0;
+    b.resting = false;
+  }
+
+  // 准星是否对着一颗可交互的大球（供「进入」判定与按钮显隐用）。
+  // 只认 ball 且未被骑乘；命中条件与 kick 同构：射线到球心的垂距 ≤ 球面附近。
+  aimBall(ox, oy, oz, dx, dy, dz) {
+    let best = null;
+    let bestT = Infinity;
+    for (const b of this.bodies) {
+      if (b.pad || b.kind !== 'ball' || b.ridden) continue;
+      const cx = b.x - ox, cy = b.y - oy, cz = b.z - oz;
+      const t = cx * dx + cy * dy + cz * dz;
+      if (t <= 0 || t > Config.BALL_ENTER_RANGE + b.r) continue;
+      const px = ox + dx * t, py = oy + dy * t, pz = oz + dz * t;
+      if (Math.hypot(px - b.x, py - b.y, pz - b.z) > b.r * 0.9 + 0.5) continue;
+      if (t < bestT) { best = b; bestT = t; }
+    }
+    return best;
+  }
+
+  // 进入：把自己锁进球里（同一时刻只能骑一颗，换球先下旧球）
+  enterBall(b) {
+    if (!b || b.pad || b.ridden) return false;
+    this.exitBall();
+    b.ridden = true;
+    b.resting = false;
+    b.ownerId = this.localId || '';
+    this.ridingBall = b;
+    return true;
+  }
+
+  // 出来：球停在原地
+  exitBall() {
+    const b = this.ridingBall;
+    if (!b) return false;
+    b.ridden = false;
+    b.vx = 0;
+    b.vy = 0;
+    b.vz = 0;
+    this.ridingBall = null;
+    return true;
+  }
+
   _integrate(b, dt) {
     const def = PROP_KINDS[b.kind];
     moveSphereWorld(this.colliders, b, dt, b.r, {
@@ -312,10 +371,10 @@ export class PhysicsProps {
     const arr = this.bodies;
     for (let i = 0; i < arr.length; i++) {
       const a = arr[i];
-      if (a.pad) continue;
+      if (a.pad || a.ridden) continue; // 被骑乘的球位置由玩家驱动，不参与分离
       for (let j = i + 1; j < arr.length; j++) {
         const b = arr[j];
-        if (b.pad) continue;
+        if (b.pad || b.ridden) continue;
         if (a.resting && b.resting) continue;
         const dx = b.x - a.x;
         const dy = b.y - a.y;
@@ -356,7 +415,7 @@ export class PhysicsProps {
     const sp = Math.hypot(p.vx || 0, p.vz || 0);
     if (sp < Config.PROP_PUSH_MIN_SPEED) return;
     for (const b of this.bodies) {
-      if (b.pad) continue;
+      if (b.pad || b.ridden) continue; // 人已经「在球里」了，贴身推挤会跟骑乘驱动打架
       const dx = b.x - p.x;
       const dz = b.z - p.z;
       const d = Math.hypot(dx, dz);
@@ -406,7 +465,7 @@ export class PhysicsProps {
     let bestT = Infinity;
     const cosArc = Math.cos((Config.PROP_KICK_ARC * Math.PI) / 180);
     for (const b of this.bodies) {
-      if (b.pad) continue;
+      if (b.pad || b.ridden) continue; // 球里有人的时候不许踢（位置由骑手驱动，踢了也会被覆盖）
       const cx = b.x - ox, cy = b.y - oy, cz = b.z - oz;
       const t = cx * dx + cy * dy + cz * dz;
       if (t <= 0 || t > Config.PROP_KICK_RANGE + b.r) continue;
@@ -503,6 +562,7 @@ export class PhysicsProps {
   }
 
   _remove(body) {
+    if (this.ridingBall === body) this.ridingBall = null; // 骑的球没了（gone），状态一起清
     if (body.mesh) this.scene.remove(body.mesh);
     const i = this.bodies.indexOf(body);
     if (i >= 0) this.bodies.splice(i, 1);
