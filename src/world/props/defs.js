@@ -14,11 +14,13 @@ export const PROP_KINDS = {
     shape: 'box', size: [0.62, 0.62, 0.62], color: 0xc0955a, shadow: false,
   },
 
-  // 篮球：高弹，踢一脚会连续弹跳
+  // 足球气球：真·截角二十面体足球几何（12 五边形 + 20 六边形，见 soccerBall.js），
+  // 透明玻璃质感，比原来的篮球大一倍，轻、弹、可踢
   ball: {
-    label: '篮球',
-    r: 0.24, mass: 0.6, rest: 0.78, fric: 0.50,
-    shape: 'sphere', size: [0.48], color: 0xd9722a, shadow: false,
+    label: '足球气球',
+    r: 0.42, mass: 0.5, rest: 0.82, fric: 0.45,
+    shape: 'soccer', size: [0.84], color: 0xffffff, shadow: false,
+    transparent: true, opacity: 0.45,
   },
 
   // 垃圾桶：重、圆、一推就滚很远

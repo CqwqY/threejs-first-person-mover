@@ -3,6 +3,7 @@
 //   ③ 踢的命中与偏移 ④ 多米诺连锁 ⑤ 3 秒内全部静止且不陷地
 // 用法：node tools/probe-props.mjs
 import { PhysicsProps } from '../src/world/physicsProps.js';
+import { buildSoccerBallGeometry } from '../src/world/props/soccerBall.js';
 
 const scene = { add() {}, remove() {} };
 const boundary = { minX: -115, maxX: 117, minZ: -155, maxZ: 175, showWalls: true, wallHeight: 3 };
@@ -28,6 +29,15 @@ const hb = b.hash();
 
 let fail = 0;
 const ok = (cond, msg) => { if (!cond) { console.log('  FAIL: ' + msg); fail++; } };
+
+// 足球几何：截角二十面体必须恰好 12 五边形 + 20 六边形 = 116 个三角形
+{
+  const g = buildSoccerBallGeometry(0.42);
+  const tris = g.getAttribute('position').count / 3;
+  console.log('=== 足球几何 ===');
+  console.log('  三角形数:', tris, '（期望 116）');
+  if (tris !== 116) { console.log('  FAIL: 足球几何面板数不对'); fail++; }
+}
 
 console.log('=== 布局 ===');
 console.log('  统计:', stats.map((s) => `${s.zone}:${s.kind} ${s.got}/${s.want}`).join('  '));

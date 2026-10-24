@@ -12,6 +12,7 @@ import * as THREE from 'three';
 import { Config } from '../config.js';
 import { moveSphereWorld, raycastWorld, sphereWorldMTV } from '../world/collision/worldQuery.js';
 import { PROP_KINDS, resolveKind } from './props/defs.js';
+import { buildSoccerBallGeometry } from './props/soccerBall.js';
 import { P0_ZONES, PROP_SEED, mulberry32, trackDistance } from './props/layout.js';
 
 const GRAVITY = -24;
@@ -154,6 +155,8 @@ export class PhysicsProps {
     if (!geo) {
       if (def.pad || def.shape === 'box') {
         geo = new THREE.BoxGeometry(def.size[0], def.size[1], def.size[2]);
+      } else if (def.shape === 'soccer') {
+        geo = buildSoccerBallGeometry(def.size[0] * 0.5);
       } else if (def.shape === 'sphere') {
         geo = new THREE.SphereGeometry(def.size[0] * 0.5, 14, 10);
       } else {
@@ -163,13 +166,25 @@ export class PhysicsProps {
     }
     let mat = this._mat.get(kind);
     if (!mat) {
-      mat = new THREE.MeshStandardMaterial({
-        color: def.color,
-        roughness: def.pad ? 0.45 : 0.72,
-        metalness: 0.05,
-        emissive: def.pad ? new THREE.Color(def.color) : new THREE.Color(0x000000),
-        emissiveIntensity: def.pad ? 0.25 : 0,
-      });
+      if (def.transparent) {
+        // 玻璃质感：低粗糙 + 高环境反射，配顶点色面板（足球气球的「透明」来自这里）
+        mat = new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          transparent: true,
+          opacity: def.opacity,
+          roughness: 0.16,
+          metalness: 0.05,
+          envMapIntensity: 1.8,
+        });
+      } else {
+        mat = new THREE.MeshStandardMaterial({
+          color: def.color,
+          roughness: def.pad ? 0.45 : 0.72,
+          metalness: 0.05,
+          emissive: def.pad ? new THREE.Color(def.color) : new THREE.Color(0x000000),
+          emissiveIntensity: def.pad ? 0.25 : 0,
+        });
+      }
       this._mat.set(kind, mat);
     }
     return new THREE.Mesh(geo, mat);
