@@ -397,17 +397,19 @@ export class PhysicsProps {
     }
   }
 
-  // 踢：射线命中最近的道具，给一个按质量衰减的冲量
+  // 踢：射线命中最近的道具，给一个按质量衰减的冲量。
+  // 射程按「球面」算（PROP_KICK_RANGE + 半径）：不然巨型足球（r=2.6）站在它旁边
+  // 球心就有 ~3.1m 远，永远够不着。
   kick(ox, oy, oz, dx, dy, dz) {
     if (!this.enabled) return false;
     let best = null;
-    let bestT = Config.PROP_KICK_RANGE;
+    let bestT = Infinity;
     const cosArc = Math.cos((Config.PROP_KICK_ARC * Math.PI) / 180);
     for (const b of this.bodies) {
       if (b.pad) continue;
       const cx = b.x - ox, cy = b.y - oy, cz = b.z - oz;
       const t = cx * dx + cy * dy + cz * dz;
-      if (t <= 0 || t > bestT) continue;
+      if (t <= 0 || t > Config.PROP_KICK_RANGE + b.r) continue;
       const px = ox + dx * t, py = oy + dy * t, pz = oz + dz * t;
       const perp = Math.hypot(px - b.x, py - b.y, pz - b.z);
       if (perp > b.r + 0.25) continue;
@@ -436,6 +438,28 @@ export class PhysicsProps {
       });
     }
     return true;
+  }
+
+  // 商店「充气足球」：在指定位置生成一颗球，本地立即可见 + 广播 spawn 给同房间的其他人。
+  // 世界上限 Config.PROP_BALL_MAX 颗（超了摘掉最早生成的那颗并广播 gone），防止刷屏。
+  spawnBall(x, y, z) {
+    const spawned = this.bodies.filter((b) => !b.pad && String(b.id).startsWith('pb'));
+    if (spawned.length >= Config.PROP_BALL_MAX) {
+      const oldest = spawned[0];
+      if (this.net) {
+        this.net.sendProp('gone', { id: oldest.id, x: oldest.x, y: oldest.y, z: oldest.z });
+      }
+      this._remove(oldest);
+    }
+    // id 前缀 pb + 时间戳：全房间唯一（两端同刻生成也几乎不可能撞）
+    const id = `pb${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+    const b = this._create('ball', x, y, z, id);
+    if (!b) return null;
+    b.ownerId = this.localId || '';
+    if (this.net) {
+      this.net.sendProp('spawn', { id, kind: 'ball', x, y, z, vx: 0, vy: 0, vz: 0 });
+    }
+    return b;
   }
 
   // 网络事件（服务端原样转发别人的动作）

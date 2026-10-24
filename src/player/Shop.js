@@ -124,6 +124,13 @@ export const SHOP_ITEMS = [
     desc: '重力变轻：6 秒内下落变得很慢，从高处跳下来也不怕摔。',
     effect: { k: 'gravity', v: 0.4, s: 6 },
   },
+  {
+    id: 'inflatable_ball',
+    name: '充气足球',
+    price: 120,
+    desc: '对着面前打气，变出一颗直径 5 米的巨型透明足球：可以踢、可以推，人还能直接钻进去。场上最多同时 8 颗。',
+    effect: { k: 'spawnball' },
+  },
   // ---- 家具（可摆放）· Kenney Furniture Kit 2.0（CC0）----
   // url 先留 placeholder（占位方块）；服务端启动时会自动把 url 对位到已上传的同名资源
   // （按「以 <id>.glb 结尾」在 assets 目录里找），所以上传完重启一次即可显示真模型。

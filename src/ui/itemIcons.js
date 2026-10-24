@@ -44,6 +44,11 @@ export const ITEM_ICONS = {
     <path fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" d="M-9 8 L-9 -14 M-17 -6 L-9 -14 L-1 -6"/>
     <path fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" d="M9 -8 L9 14 M1 6 L9 14 L17 6"/>
   ` },
+  // 充气足球：圆 + 五边形斑块（足球意象）
+  spawnball: { viewBox: '-28 -28 56 56', body: `
+    <circle cx="0" cy="0" r="22" fill="none" stroke="currentColor" stroke-width="4"/>
+    <path fill="currentColor" d="M0 -9 L8.6 -2.8 L5.3 7.3 L-5.3 7.3 L-8.6 -2.8 Z"/>
+  ` },
   // 椅子
   chair: { viewBox: '-28 -28 56 56', body: `
     <rect x="-15" y="-24" width="30" height="6" rx="2" fill="currentColor"/>
@@ -114,6 +119,7 @@ export function itemIconKeyFor(item) {
   const byKind = {
     club: 'club', blackhole: 'blackhole', hide: 'hide', gatling: 'gatling',
     control: 'joystick', grapple: 'hook', hammer: 'hammer', invitetp: 'teleport',
+    spawnball: 'spawnball',
   };
   return byKind[k] || 'box';
 }

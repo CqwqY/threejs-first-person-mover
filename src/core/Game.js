@@ -4907,6 +4907,11 @@ export class Game {
           label: '建造锤',
           run: () => { if (this._buildTool) this._buildTool.toggle(); },
         };
+      case 'spawnball':
+        return {
+          label: '充气足球',
+          run: () => this._spawnInflatableBall(),
+        };
       case 'flashlight':
         // 手电筒已下架（用户要求移除，2026-10-07）。老存档/老背包里仍可能留着这个物品 →
         // 给一句明确提示，别让它落到 default 分支显示成「未识别」。
@@ -7059,6 +7064,27 @@ export class Game {
     }
     const detail = stats.map((x) => `${x.zone}:${x.got}/${x.want}`).join(' ');
     console.log(`[props] ${this.props.count} 体 hash=${this.props.hash()}  ${detail}`);
+  }
+
+  // 商店「充气足球」：在面前打气变出一颗巨型透明足球（可踢/可推/人能走进去）。
+  // 生成后给一个沿视线方向的前滚初速，像真的把球推出去了。
+  _spawnInflatableBall() {
+    if (this._propsOff || !this.props || !this._propsBuilt) {
+      this._toast('充气足球还没准备好（场景加载中或不支持当前模式）');
+      return;
+    }
+    const s = this.localState;
+    const dirX = -Math.sin(s.yaw);
+    const dirZ = -Math.cos(s.yaw);
+    const dist = 4.2; // 球半径 2.6 + 玩家半径，放在面前不与自身重叠
+    const px = s.x + dirX * dist;
+    const pz = s.z + dirZ * dist;
+    const b = this.props.spawnBall(px, s.y, pz);
+    if (!b) { this._toast('充气足球生成失败'); return; }
+    b.vx = dirX * 3;
+    b.vz = dirZ * 3;
+    b.resting = false;
+    this._toast('充气足球已充气！可以踢它、推它，还能钻进去');
   }
 
   // 准星对着物理道具时，左键改成「踢」；命中才返回 true（否则交给普通攻击）

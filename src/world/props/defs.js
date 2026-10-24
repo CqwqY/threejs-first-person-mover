@@ -14,12 +14,13 @@ export const PROP_KINDS = {
     shape: 'box', size: [0.62, 0.62, 0.62], color: 0xc0955a, shadow: false,
   },
 
-  // 足球气球：真·截角二十面体足球几何（12 五边形 + 20 六边形，见 soccerBall.js），
-  // 透明玻璃质感，比原来的篮球大一倍，轻、弹、可踢
+  // 巨型充气足球：真·截角二十面体足球几何（12 五边形 + 20 六边形，见 soccerBall.js），
+  // 透明玻璃质感。直径 5.2m ⇒ 人可以直接走进去（道具不与玩家碰撞，走进去只会把它慢慢顶开，
+  // 像推一颗巨型沙滩球）。mass 6：走路推得动但不会飞，一脚能踢出 ~6m/s。
   ball: {
-    label: '足球气球',
-    r: 0.42, mass: 0.5, rest: 0.82, fric: 0.45,
-    shape: 'soccer', size: [0.84], color: 0xffffff, shadow: false,
+    label: '巨型足球气球',
+    r: 2.6, mass: 6, rest: 0.82, fric: 0.45,
+    shape: 'soccer', size: [5.2], color: 0xffffff, shadow: false,
     transparent: true, opacity: 0.45,
   },
 

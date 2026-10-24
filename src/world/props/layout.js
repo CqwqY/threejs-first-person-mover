@@ -10,41 +10,15 @@
 // 所以这里只放「锚点 + 半径 + 数量上限」，具体落点由 PhysicsProps.buildLayout 探测决定。
 // 数量是上限：校验不过就少生成，启动日志会打印 实际/上限。
 
+// 2026-10-25 用户定稿：操场中心只剩一颗巨型透明足球（人可以走进去），其他物理块全部撤掉。
+// 锚点精确钉在操场中心 (35.4, -51.5)（实测 playground 中心），r=0 ⇒ 不采样、就落在锚点上。
+// 已实测：锚点到赛道 30 检查点折线最近距离 42.98m，距出生点 62.5m，距边界远大于内缩要求。
 export const P0_ZONES = [
   {
     id: 'Z1', name: '操场',
-    anchor: [35, -51], r: 38,
+    anchor: [35.4, -51.5], r: 0,
     items: [
-      { kind: 'ball', n: 6 },
-      { kind: 'block', n: 20 },      // 会摆成 4 排多米诺，每排 5 块
-      { kind: 'bin', n: 4 },
-      { kind: 'trampoline', n: 1 },
-    ],
-  },
-  {
-    id: 'Z2', name: '主楼南前庭',
-    anchor: [-19, 138], r: 16,
-    items: [
-      { kind: 'crate', n: 12 },
-      { kind: 'desk', n: 4 },
-      { kind: 'trampoline', n: 1 },
-    ],
-  },
-  {
-    id: 'Z3', name: '体育馆东侧',
-    anchor: [-55, 5], r: 14,
-    items: [
-      { kind: 'desk', n: 2 },
-      { kind: 'bin', n: 3 },
-    ],
-  },
-  {
-    id: 'Z4', name: '中央大道',
-    anchor: [0, 60], r: 18,
-    items: [
-      { kind: 'ball', n: 2 },
-      { kind: 'crate', n: 2 },
-      { kind: 'bin', n: 2 },
+      { kind: 'ball', n: 1 },
     ],
   },
 ];
