@@ -141,10 +141,16 @@ const rider = { x: 5, z: 5, y: 1 + 1.7, vx: 2, vz: 0, height: 1.7 };
 ok(rb.enterBall(ballR) === true, 'enterBall 失败');
 ok(rb.ridingBall === ballR && ballR.ridden, 'ridingBall 状态没建立');
 ok(rb.enterBall(ballR) === false, '已在球里还允许再进入');
-rb.update(1 / 60, rider);
+// 让骑手真的走动（位置推进），球要跟随 + 真实滚动（无滑动）
+const q0 = ballR.mesh.quaternion.clone();
+for (let i = 0; i < 30; i++) {
+  rider.x += rider.vx / 60;
+  rb.update(1 / 60, rider);
+}
 ok(Math.abs(ballR.x - rider.x) < 1e-6 && Math.abs(ballR.z - rider.z) < 1e-6, '骑乘球没跟着玩家水平位置');
 ok(Math.abs(ballR.y - (rider.y - rider.height + ballR.r)) < 1e-6, '骑乘球高度没贴到玩家脚底+半径');
-ok(Math.abs(ballR.vx - rider.vx) < 1e-6, '骑乘球速度没取玩家速度（远端看不到滚）');
+ok(Math.abs(ballR.vx - rider.vx) < 0.05, '骑乘球速度没收敛到玩家速度（远端看不到滚）');
+ok(ballR.mesh.quaternion.angleTo(q0) > 0.05, '骑乘移动时球没真实滚动（无滑动旋转）');
 // 骑乘中的球不能被 aim / kick / 贴身推
 const eyeR = { x: ballR.x, y: ballR.y, z: ballR.z - 4 };
 ok(rb.aimBall(eyeR.x, eyeR.y, eyeR.z, 0, 0, 1) === null, '骑乘中的球不应再被 aim 到');

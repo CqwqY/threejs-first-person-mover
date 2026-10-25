@@ -209,6 +209,18 @@ export class Game {
     // 仍由 _applyQuality 里的一次性 needsUpdate 兜底（最迟 2 帧内会被循环置位）。
     this.renderer.shadowMap.autoUpdate = false;
     this._shadowTick = 0;
+    // 四时段阴影：太阳方向钉死到 4 个相位（不再随昼夜连续漂移 → 阴影不再「慢慢转」），
+    // 主循环只在「相位切换」或「玩家移动超过步长」时重渲一次阴影贴图，其余帧完全冻结。
+    this._shadowPhaseDefs = [
+      { elev: 12, az: 70 },    // 相位0：凌晨/清晨（低斜光）
+      { elev: 38, az: 120 },   // 相位1：上午
+      { elev: 72, az: 180 },   // 相位2：正午（高光）
+      { elev: 30, az: 255 },   // 相位3：下午/黄昏（低斜光、反向）
+    ];
+    this._shadowPhase = -1;
+    this._shadowPhaseDirty = true;
+    this._shadowLastX = 0;
+    this._shadowLastZ = 0;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     // ---- 距离分级材质 LOD（填充率优化，对应文章的 LOD / 削减片元成本思路）----
     // 不透明材质没有 discard（之前修过 early-Z 污染），所以「墙后的房间」已被 early-Z 在深度阶段剔除，
@@ -745,6 +757,7 @@ export class Game {
     this._hideTxtCache = '';
     this._ballPad = this._createBallPad(); // 大足球「推 / 进入」按钮（手游端主入口，PC 也能点）
     this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
+    this._ballPrevThirdPerson = false;     // 进球前的视角，出来时还原
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
@@ -1540,8 +1553,16 @@ export class Game {
 
     const s = Math.sin((t - 0.25) * Math.PI * 2); // -1（午夜）~ 1（正午）
     const sunUp = Math.max(0, s);
-    const off = computeSunOffset(s * 90, this._dayAzDeg);
+    // 四时段阴影：把太阳方向量化到 4 个相位（不再随时刻连续漂移）。
+    // 相位内方向恒定 → 阴影不「慢慢转」；切相位时才跳一次并重渲阴影。
+    const phaseIdx = Math.floor((((t + 0.125) % 1) * 4)) % 4;
+    const pd = this._shadowPhaseDefs[phaseIdx] || this._shadowPhaseDefs[2];
+    const off = computeSunOffset(pd.elev, pd.az);
     this._sunOffset.set(off.x, off.y, off.z);
+    if (phaseIdx !== this._shadowPhase) {
+      this._shadowPhase = phaseIdx;
+      this._shadowPhaseDirty = true;
+    }
     this._sun.intensity = this._dayBaseSun * sunUp;
     this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
     this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
@@ -5360,8 +5381,12 @@ export class Game {
     const sinP = Math.sin(this.localState.pitch);
     // 含俯仰的视线单位方向（与第一人称一致：yaw 水平转向 + pitch 俯仰）
     const viewDir = new THREE.Vector3(-Math.sin(yaw) * cosP, sinP, -Math.cos(yaw) * cosP);
-    const DIST = this.localState.ride ? Config.RIDE_CAM_DIST : 4.0;
-    const LIFT = this.localState.ride ? Config.RIDE_CAM_LIFT : 1.0; // 骑车时相机更近更低，能看见车把
+    // 大足球：球直径 5.2m，相机要拉远抬高才看得到「人站在透明球里」
+    const ridingBall = !!(this.props && this.props.ridingBall);
+    const DIST = ridingBall ? Config.BALL_CAM_DIST
+      : (this.localState.ride ? Config.RIDE_CAM_DIST : 4.0);
+    const LIFT = ridingBall ? Config.BALL_CAM_LIFT
+      : (this.localState.ride ? Config.RIDE_CAM_LIFT : 1.0);
     const camPos = eye.clone().addScaledVector(viewDir, -DIST).add(new THREE.Vector3(0, LIFT, 0));
     if (camPos.y < 0.4) camPos.y = 0.4; // 抬头时相机可能钻到地面以下，夹住下限
     this.camera.position.copy(camPos);
@@ -7120,6 +7145,10 @@ export class Game {
     if (this._propsOff || !this.props || !this._propsBuilt) return;
     if (this.props.ridingBall) {
       this.props.exitBall();
+      // 退出球：还原进球前的视角（原本第一人称就退回第一人称），并恢复模型可见性
+      this.thirdPerson = !!this._ballPrevThirdPerson;
+      this._ballPrevThirdPerson = false;
+      this.playerManager.setLocalVisible(this.thirdPerson);
       this._toast('已从足球里出来');
       return;
     }
@@ -7127,7 +7156,11 @@ export class Game {
     const d = this._ballAimDir();
     const target = this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
     if (!target) { this._toast('先把准星对准大足球（走近一点）'); return; }
+    // 记住进球前的视角，出来时还原；进到球里必须第三人称，才能看见自己站在透明球中
+    this._ballPrevThirdPerson = this.thirdPerson;
     this.props.enterBall(target);
+    this.thirdPerson = true;
+    this.playerManager.setLocalVisible(true);
     this._toast('进入足球！走动带着球滚，再按一次出来');
   }
 
@@ -7792,8 +7825,18 @@ export class Game {
     //   改每 3 帧后只有 1/3 帧付这笔开销，稳态平均帧耗时下降、且仍属填充率红利范畴；
     //   阴影在 20fps 下最多滞后 2 帧（~100ms）、60fps 下 ~20Hz，均不可感知。
     //   阴影总开关关着时压根不置位（shadowMap.enabled=false 时本就不渲染，但省掉一次状态写）。
-    this._shadowTick = (this._shadowTick + 1) % 3;
-    this.renderer.shadowMap.needsUpdate = this._shadowOn && this._shadowTick === 0;
+    // 阴影冻结：只在「时段相位切换」或「玩家移动超过步长(0.75m)」时重渲一次阴影贴图，
+    // 其余帧完全不动 —— 阴影不再逐帧变化/抖动；同时仍正确跟随玩家位置（走远了才更新）。
+    const shadowMoved = Math.hypot(
+      this.localState.x - this._shadowLastX,
+      this.localState.z - this._shadowLastZ
+    );
+    if (this._shadowOn && (this._shadowPhaseDirty || shadowMoved > 0.75)) {
+      this.renderer.shadowMap.needsUpdate = true;
+      this._shadowPhaseDirty = false;
+      this._shadowLastX = this.localState.x;
+      this._shadowLastZ = this.localState.z;
+    }
     const _pt3 = this._perf ? performance.now() : 0;
     // 超分：分辨率被压低时，先渲进低分辨率 RT，再用锐化着色器放大到屏幕
     this._renderFrame();

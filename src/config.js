@@ -258,6 +258,8 @@ export const Config = {
   PROP_BALL_MAX: 8,               // 商店「充气足球」同时最多几颗（超了摘最早那颗）
   BALL_ENTER_RANGE: 4.5,          // 准星对准大球判定距离（加球半径后生效）
   BALL_ENTER_KEY: 'KeyF',         // PC 端进/出大球的按键（手游端用「进入/出来」按钮）
+  BALL_CAM_DIST: 8.0,             // 骑乘大球时第三人称相机后退距离（球直径 5.2m，要拉远才看得到全貌）
+  BALL_CAM_LIFT: 3.0,             // 骑乘大球时相机抬高（看向球心偏上，能看清自己站在球里）
   PROP_SIM_RANGE: 40,             // 距本地玩家超过这个距离的道具不积分（米）
   PROP_PUSH_RATIO: 0.55,          // 玩家贴身推动时，把玩家水平速度按这个比例传给道具
   PROP_PUSH_MIN_SPEED: 1.2,       // 玩家速度低于这个值不推动（避免站着抖动）

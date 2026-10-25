@@ -34,6 +34,7 @@ export class PhysicsProps {
     this._zonesStat = [];
     this.localId = '';   // 本地玩家 id（由 Game 在 welcome 后注入）
     this.ridingBall = null; // 本地玩家正「锁在里面」的那颗球（仓鼠球模式）
+    this._axis = new THREE.Vector3(); // 滚动轴临时向量（避免每帧 new）
   }
 
   setLocalId(id) {
@@ -240,25 +241,23 @@ export class PhysicsProps {
 
     for (const b of this.bodies) {
       if (b.pad) continue;
-      if (b.ridden) {
-        // 仓鼠球：位置完全由玩家驱动（球粘在玩家脚下跟着滚），不做积分/网络校正
-        this._followPlayer(b, player);
+      if (b === this.ridingBall) {
+        // 本地骑乘：位置由玩家驱动 + 无滑动滚动（真实滚球），不做积分/重力/网络校正
+        this._followPlayer(b, player, dt);
+      } else if (b.ridden) {
+        // 远端玩家骑乘的球：绝不能积分（否则会掉到地上），只平滑跟随对方广播的 state
+        if (b.lerp > 0) {
+          b.lerp = Math.max(0, b.lerp - dt * 4);
+          b.x += (b.tx - b.x) * Math.min(1, dt * 8);
+          b.y += (b.ty - b.y) * Math.min(1, dt * 8);
+          b.z += (b.tz - b.z) * Math.min(1, dt * 8);
+        }
+        this._rollMesh(b, dt);
       } else if (!b.resting) {
         this._integrate(b, dt);
-      }
-      if (!b.ridden && b.lerp > 0) {
-        // 网络校正：平滑靠近目标位置，不硬 set（硬 set 会抖）
-        b.lerp = Math.max(0, b.lerp - dt * 4);
-        b.x += (b.tx - b.x) * Math.min(1, dt * 8);
-        b.y += (b.ty - b.y) * Math.min(1, dt * 8);
-        b.z += (b.tz - b.z) * Math.min(1, dt * 8);
+        this._rollMesh(b, dt);
       }
       b.mesh.position.set(b.x, b.y + b.yOff, b.z);
-      if (!b.resting) {
-        const sp = Math.hypot(b.vx, b.vz);
-        b.mesh.rotation.x += sp * dt * 0.7;
-        b.mesh.rotation.z += sp * dt * 0.5;
-      }
     }
 
     this._resolvePairs();
@@ -277,7 +276,9 @@ export class PhysicsProps {
           if (b.pad) continue;
           if (b.ownerId !== this.localId) continue;
           const sp = Math.hypot(b.vx, b.vy, b.vz);
-          if (sp < 0.6) continue;
+          // 骑乘球每周期必播（位置＝玩家位置，慢走/静止也要让远端看到球在哪）；
+          // 自由球才限速门（静止不动没必要占带宽）。
+          if (!b.ridden && sp < 0.6) continue;
           if (now - b.lastNet < period * 0.9) continue;
           b.lastNet = now;
           this.net.sendProp('state', {
@@ -288,17 +289,48 @@ export class PhysicsProps {
     }
   }
 
-  // 仓鼠球：被骑乘的球每帧贴到玩家脚下（球底贴地），速度取玩家速度 ——
-  // 这样网格滚动动画与 10Hz 的 owner state 广播都自然成立（远端看到球包着人滚）。
-  _followPlayer(b, player) {
+  // 仓鼠球：本地玩家骑乘时，球底贴地粘在玩家脚下；按位移做「无滑动滚动」（真实滚球），
+  // 速度带一点惯性（球感），但仍粘住玩家位置以保证碰撞安全（玩家物理已处理撞墙）。
+  _followPlayer(b, player, dt) {
     if (!player) return;
-    b.x = player.x;
-    b.z = player.z;
-    b.y = player.y - (player.height || Config.PLAYER_HEIGHT) + b.r; // player.y 是头顶
-    b.vx = player.vx || 0;
+    const px = player.x;
+    const pz = player.z;
+    const py = player.y - (player.height || Config.PLAYER_HEIGHT) + b.r; // player.y 是头顶
+    const lx = b._px === undefined ? px : b._px;
+    const lz = b._pz === undefined ? pz : b._pz;
+    const dx = px - lx;
+    const dz = pz - lz;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 1e-5) {
+      // 滚动轴 = 上 × 移动方向；转过角 = 弧长 / 半径（无滑动）
+      const ax = dz;
+      const az = -dx;
+      const al = Math.hypot(ax, az) || 1;
+      this._axis.set(ax / al, 0, az / al);
+      b.mesh.rotateOnWorldAxis(this._axis, dist / b.r);
+    }
+    b._px = px;
+    b._pz = pz;
+    // 速度向玩家速度收敛：给一点惯性感（推着球滚），但不脱钩
+    const k = Math.min(1, dt * 12);
+    b.vx += ((player.vx || 0) - b.vx) * k;
+    b.vz += ((player.vz || 0) - b.vz) * k;
     b.vy = 0;
-    b.vz = player.vz || 0;
+    b.x = px;
+    b.z = pz;
+    b.y = py;
     b.resting = false;
+  }
+
+  // 自由球 / 远端骑乘球：按速度方向做无滑动滚动（速度来自积分或网络 state）
+  _rollMesh(b, dt) {
+    const sp = Math.hypot(b.vx, b.vz);
+    if (sp < 1e-4) return;
+    const ax = b.vz;
+    const az = -b.vx;
+    const al = Math.hypot(ax, az) || 1;
+    this._axis.set(ax / al, 0, az / al);
+    b.mesh.rotateOnWorldAxis(this._axis, (sp * dt) / b.r);
   }
 
   // 准星是否对着一颗可交互的大球（供「进入」判定与按钮显隐用）。
@@ -325,7 +357,11 @@ export class PhysicsProps {
     b.ridden = true;
     b.resting = false;
     b.ownerId = this.localId || '';
+    b._px = b.x;   // 重置滚动基线，避免刚进入时按旧位移猛转一下
+    b._pz = b.z;
     this.ridingBall = b;
+    // 广播「被我骑了」：远端收到后标记 ridden，否则它会继续按重力积分 → 球掉地上不同步
+    if (this.net) this.net.sendProp('ride', { id: b.id });
     return true;
   }
 
@@ -337,7 +373,13 @@ export class PhysicsProps {
     b.vx = 0;
     b.vy = 0;
     b.vz = 0;
+    b.resting = true;
+    b._px = b.x;
+    b._pz = b.z;
     this.ridingBall = null;
+    if (this.net) {
+      this.net.sendProp('unride', { id: b.id, x: b.x, y: b.y, z: b.z });
+    }
     return true;
   }
 
@@ -526,6 +568,28 @@ export class PhysicsProps {
     if (!this.enabled || !msg) return;
     const id = String(msg.id || '');
     const body = this.bodies.find((b) => b.id === id);
+    if (ev === 'ride') {
+      if (!body || body.pad) return;
+      body.ridden = true;      // 标记为「别人骑着的球」：update 里跳过积分/重力，只跟 state
+      body.resting = false;
+      body._px = body.x;
+      body._pz = body.z;
+      return;
+    }
+    if (ev === 'unride') {
+      if (!body || body.pad) return;
+      body.ridden = false;
+      body.vx = 0;
+      body.vy = 0;
+      body.vz = 0;
+      body.resting = true;
+      if (msg.x !== undefined) {
+        body.x = Number(msg.x) || body.x;
+        body.y = Number(msg.y) || body.y;
+        body.z = Number(msg.z) || body.z;
+      }
+      return;
+    }
     if (ev === 'hit') {
       if (!body || body.pad) return;
       body.vx = Number(msg.vx) || 0;
