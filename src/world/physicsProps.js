@@ -373,7 +373,8 @@ export class PhysicsProps {
     b.vx = 0;
     b.vy = 0;
     b.vz = 0;
-    b.resting = true;
+    // 不设 resting=true：万一在空中出来，交给重力把它收回地面（设 true 会悬空卡住）
+    b.resting = false;
     b._px = b.x;
     b._pz = b.z;
     this.ridingBall = null;
@@ -582,7 +583,7 @@ export class PhysicsProps {
       body.vx = 0;
       body.vy = 0;
       body.vz = 0;
-      body.resting = true;
+      body.resting = false; // 交给重力落地（对方可能在半空出来）
       if (msg.x !== undefined) {
         body.x = Number(msg.x) || body.x;
         body.y = Number(msg.y) || body.y;
