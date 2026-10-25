@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { Config, API_BASE } from '../config.js';
 import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
-import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting } from '../world/Lights.js';
+import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting, bakeFeatureEnabled } from '../world/Lights.js';
+import { ShadowBaker } from '../world/ShadowBaker.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -15,7 +16,7 @@ import { createTeacherBoss } from '../world/TeacherBoss.js';
 import { createMerchant } from '../world/Merchant.js';
 import { createShopPanel } from '../ui/ShopPanel.js';
 import { loadWallet, buyItem, addCoins, rewardBossKill, redeemCode, SHOP_ITEMS, setCatalog, furnitureNames, migrateFurnitureToBag, itemByName, isOwned } from '../player/Shop.js';
-import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene, syncFakeWindowEnvs } from '../world/EditorBuildings.js';
+import { buildEditorBuildings, buildEditorLights, fetchRemoteScene, setEditorSceneVisible, optimizeEditorScene, syncFakeWindowEnvs, getEditorSceneRoots } from '../world/EditorBuildings.js';
 import { updateLod } from '../world/Lod.js';
 import { initBuildingTool, setBuildAreas } from '../world/BuildingTool.js';
 import { defaultBoundary, normalizeBoundary, boundaryWallSpecs, BOUNDARY_THICKNESS } from '../world/Boundary.js';
@@ -61,6 +62,9 @@ async function _fetchRemoteScene(game, scene, roots, target) {
     buildEditorLights(scene, data); // 远端光源覆盖打包数据；函数内部会先清掉上一次的光源，不会重复叠加
     game._applyBoundary(data.boundary); // 边界（空气墙）：没有该字段时保持默认，行为与改动前一致
     game._applyTrack(data.track);       // 赛道（校园狂飙）：没有该字段时保持默认演示赛道
+    // 场景重建了：旧的四时段烘焙阴影图过期（新建筑不在图里），标记失效稍后自动重焙
+    game._bakedReady = false;
+    game._bakeWait = 0;
   } catch (e) {
     console.warn('[Game] 应用远程场景失败，回退打包数据:', e);
   }
@@ -221,6 +225,12 @@ export class Game {
     this._shadowPhaseDirty = true;
     this._shadowLastX = 0;
     this._shadowLastZ = 0;
+    // 四时段整世界阴影烘焙：场景加载完（props 铺设 = 建筑/碰撞就绪）后一次性把
+    // 4 个相位各渲一张全域阴影图，此后按时段换图、永不重渲（shadow pass 整个跳过）。
+    // ?bake=0（bakeFeatureEnabled）时不烘焙，走「相位切换或移动才重渲」的节流模式。
+    this._shadowBaker = new ShadowBaker();
+    this._bakedReady = false;
+    this._bakeWait = 0;
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     // ---- 距离分级材质 LOD（填充率优化，对应文章的 LOD / 削减片元成本思路）----
     // 不透明材质没有 discard（之前修过 early-Z 污染），所以「墙后的房间」已被 early-Z 在深度阶段剔除，
@@ -482,11 +492,17 @@ export class Game {
             this._sun.shadow.map.dispose();
             this._sun.shadow.map = null;
           }
+          // 烘焙图被 dispose 掉了：标记失效，稍后自动重焙（ShadowBaker 会重建自己的 RT）
+          this._bakedReady = false;
+          this._bakeWait = 0;
         },
         castShadow: (v) => {
           this._shadowOn = !!v;
           this.renderer.shadowMap.enabled = !!v;
           this._sun.castShadow = !!v;
+          // 烘焙状态随之失效：关→开或开→关都走重新烘焙/节流路径，避免新旧贴图混用
+          this._bakedReady = false;
+          this._bakeWait = 0;
           // 关→开：shadowMap.autoUpdate=false，不手动置位的话第一张阴影图要等主循环隔帧才画，
           //   会有一段"开了开关但还没影子"的空窗；这里立刻补一次。
           if (v) this.renderer.shadowMap.needsUpdate = true;
@@ -1521,6 +1537,31 @@ export class Game {
 
   // 昼夜循环推进：0 = 午夜、0.5 = 正午。太阳高度角与强度、环境光/半球光、
   // 天空亮度与夜空贴图都随时间连续变化；关闭时保持编辑器设计的光照。
+  // 四时段整世界阴影烘焙（ShadowBaker）：一次性把 4 个相位各渲一张全域阴影图。
+  // 失败/关闭都静默退回实时阴影路径；成功后主循环只按相位换图，shadow pass 永不再跑。
+  _doShadowBake() {
+    if (this._bakedReady || this._shadowBaker.failed) return;
+    if (!bakeFeatureEnabled() || !this._shadowOn) return;
+    const staticRoots = [...(this._cityRoots || []), ...getEditorSceneRoots()];
+    const ok = this._shadowBaker.bake({
+      renderer: this.renderer,
+      scene: this.scene,
+      camera: this.camera,
+      sun: this._sun,
+      sunTarget: this._sunTarget,
+      phases: this._shadowPhaseDefs,
+      bounds: this.boundary,
+      staticRoots,
+    });
+    if (ok) {
+      this._bakedReady = true;
+      this._shadowPhaseDirty = false;
+      this._shadowBaker.apply(this._sun, Math.max(0, this._shadowPhase));
+      console.log('[bake] 四时段整世界阴影烘焙完成 size=' + this._shadowBaker.size
+        + ' 相位=' + Math.max(0, this._shadowPhase));
+    }
+  }
+
   _updateDayNight(dt) {
     if (!this._dayEnabled) return;
 
@@ -1642,6 +1683,9 @@ export class Game {
         this._sun.shadow.map.dispose();
         this._sun.shadow.map = null; // 强制用新分辨率重建
       }
+      // 烘焙图被 dispose：标记失效稍后自动重焙（与新分辨率/类型保持一致）
+      this._bakedReady = false;
+      this._bakeWait = 0;
     }
     this._qualityDpr = p.dpr;
     this._quality = q; // 供 _autoStartScale 按档取起点
@@ -7825,17 +7869,32 @@ export class Game {
     //   改每 3 帧后只有 1/3 帧付这笔开销，稳态平均帧耗时下降、且仍属填充率红利范畴；
     //   阴影在 20fps 下最多滞后 2 帧（~100ms）、60fps 下 ~20Hz，均不可感知。
     //   阴影总开关关着时压根不置位（shadowMap.enabled=false 时本就不渲染，但省掉一次状态写）。
-    // 阴影冻结：只在「时段相位切换」或「玩家移动超过步长(0.75m)」时重渲一次阴影贴图，
-    // 其余帧完全不动 —— 阴影不再逐帧变化/抖动；同时仍正确跟随玩家位置（走远了才更新）。
-    const shadowMoved = Math.hypot(
-      this.localState.x - this._shadowLastX,
-      this.localState.z - this._shadowLastZ
-    );
-    if (this._shadowOn && (this._shadowPhaseDirty || shadowMoved > 0.75)) {
-      this.renderer.shadowMap.needsUpdate = true;
-      this._shadowPhaseDirty = false;
-      this._shadowLastX = this.localState.x;
-      this._shadowLastZ = this.localState.z;
+    // 阴影两种模式：
+    // ① 已烘焙（默认路径）：按相位换贴图即可，永不重渲 —— shadow pass 整个跳过（填充率大头）。
+    //    烘焙触发：场景就绪（props 铺完 = 建筑基本加载完）后再等 3 秒，一次性执行。
+    // ② 未烘焙（首几秒 / ?bake=0 / 烘焙失败）：退回「相位切换或移动>0.75m 才重渲」的节流模式。
+    if (this._shadowOn && this._bakedReady) {
+      if (this._shadowPhaseDirty) {
+        this._shadowBaker.apply(this._sun, this._shadowPhase);
+        this._shadowPhaseDirty = false;
+      }
+    } else {
+      if (this._shadowOn && !this._bakedReady && !this._shadowBaker.failed
+          && bakeFeatureEnabled() && this._spawn && this.localState.id) {
+        // 等 4 秒：给异步 GLB 建筑留加载时间（太久没加载完的建筑这轮烤不进影子，重进即好）
+        this._bakeWait += dt;
+        if (this._bakeWait > 4) this._doShadowBake();
+      }
+      const shadowMoved = Math.hypot(
+        this.localState.x - this._shadowLastX,
+        this.localState.z - this._shadowLastZ
+      );
+      if (this._shadowOn && (this._shadowPhaseDirty || shadowMoved > 0.75)) {
+        this.renderer.shadowMap.needsUpdate = true;
+        this._shadowPhaseDirty = false;
+        this._shadowLastX = this.localState.x;
+        this._shadowLastZ = this.localState.z;
+      }
     }
     const _pt3 = this._perf ? performance.now() : 0;
     // 超分：分辨率被压低时，先渲进低分辨率 RT，再用锐化着色器放大到屏幕

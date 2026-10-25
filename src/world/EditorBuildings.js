@@ -114,6 +114,12 @@ export function setEditorSceneVisible(visible) {
   for (const h of _addedHolders) h.visible = !!visible;
 }
 
+// 编辑器建筑根列表（直接挂 scene，不在 buildScenery 的 roots 里）。
+// 供阴影烘焙等需要「全部静态根」的系统取用。
+export function getEditorSceneRoots() {
+  return _addedHolders;
+}
+
 // 运行时从远程后端拉取最新编辑器场景（在线同步）；失败返回 null 由调用方回退到打包数据
 export async function fetchRemoteScene() {
   try {
