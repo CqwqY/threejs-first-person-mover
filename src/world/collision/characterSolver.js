@@ -256,5 +256,21 @@ export function resolveMove(state, velocity, trimeshes, dt) {
   if (!(n >= 1)) n = 1;
   if (n > Config.TRIMESH_SUBSTEP_HARD_MAX) n = Config.TRIMESH_SUBSTEP_HARD_MAX;
   const sx = dx / n, sy = dy / n, sz = dz / n;
+
+  // NaN 防线：退化三角形 / 极端穿透会让某一步算出非有限值。坐标一旦 NaN，
+  // 相机也跟着 NaN ⇒ **整个场景被视锥剔除**（症状：走到某处世界整片消失）。
+  // 这里整帧回滚到进入解算前的位置，把故障限制在一帧内。
+  const ox = state.x, oy = state.y, oz = state.z;
+  const ovx = velocity.x, ovy = velocity.y, ovz = velocity.z;
   for (let i = 0; i < n; i++) substep(state, velocity, trimeshes, sx, sy, sz);
+  if (!Number.isFinite(state.x) || !Number.isFinite(state.y) || !Number.isFinite(state.z)) {
+    state.x = ox; state.y = oy; state.z = oz;
+    velocity.x = 0; velocity.y = 0; velocity.z = 0;
+    if (typeof console !== 'undefined' && !resolveMove._warned) {
+      resolveMove._warned = true;
+      console.warn('[solver] trimesh 解算出现 NaN，已回滚本帧位移', { x: ox, y: oy, z: oz });
+    }
+  } else if (!Number.isFinite(velocity.x) || !Number.isFinite(velocity.y) || !Number.isFinite(velocity.z)) {
+    velocity.x = ovx; velocity.y = ovy; velocity.z = ovz;
+  }
 }

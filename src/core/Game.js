@@ -7371,6 +7371,33 @@ export class Game {
     this.camera.rotation.set(s.pitch, s.yaw, 0);
   }
 
+  // 位置 NaN 防线：玩家坐标/视角一旦出现非有限值，相机就会 NaN → **整个场景被视锥剔除**
+  // （表现正是"走到某处整个世界不见了，离开又显示"）。这里退回上一帧安全点并出声，
+  // 同时把出事坐标打到控制台，方便定位是哪块碰撞体算出了脏值。
+  _sanitizeLocalState() {
+    const s = this.localState;
+    if (!s) return;
+    const okPos = Number.isFinite(s.x) && Number.isFinite(s.y) && Number.isFinite(s.z);
+    const okAng = Number.isFinite(s.yaw) && Number.isFinite(s.pitch);
+    if (okPos && okAng) {
+      this._lastGoodPos = { x: s.x, y: s.y, z: s.z };
+      return;
+    }
+    const p = this._lastGoodPos || { x: 0, y: Config.PLAYER_HEIGHT, z: 0 };
+    const bad = { x: s.x, y: s.y, z: s.z };
+    s.x = p.x; s.y = p.y; s.z = p.z;
+    if (!Number.isFinite(s.yaw)) s.yaw = 0;
+    if (!Number.isFinite(s.pitch)) s.pitch = 0;
+    const ph = this.localPlayer && this.localPlayer.physics;
+    if (ph && ph.velocity) ph.velocity.set(0, 0, 0);
+    if (!this._nanWarnAt || performance.now() - this._nanWarnAt > 3000) {
+      this._nanWarnAt = performance.now();
+      // 出事点 + 退回到的位置都打出来：前者定位问题碰撞体，后者确认兜底生效
+      console.warn('[player] 坐标出现 NaN，已退回上一安全点', { bad, restored: p });
+      this._toast('位置异常已自动复位（详情见控制台）');
+    }
+  }
+
   // 准星对着物理道具时，左键改成「踢」；命中才返回 true（否则交给普通攻击）
   _tryKickProp() {
     if (this._propsOff || !this.props || !this._propsBuilt) return false;
@@ -7841,6 +7868,7 @@ export class Game {
       // 挂滑索时跳过常规更新（重力/碰撞会把位置拽走），位置交给 _updateZipline 直接驱动
       if (this._zip) this._updateZipline(dt);
       else this.localPlayer.update(dt);
+      this._sanitizeLocalState(); // NaN 防线：坐标坏了会让相机 NaN → 整个场景消失
     }
     const _pt2 = this._perf ? performance.now() : 0; // 物理（含 trimesh 解算）耗时
     this.playerManager.update(dt);
