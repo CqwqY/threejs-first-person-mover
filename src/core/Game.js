@@ -776,6 +776,10 @@ export class Game {
     this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
     this._ballPrevThirdPerson = false;     // 进球前的视角，出来时还原
     this._zip = null;                      // 挂在滑索上的状态 {A,B,t}
+    // ?dbg=1：左上角显示坐标 + 脚下命中的模型名（定位「某处地面消失」这类问题）
+    this._dbg = /(?:^|[?&])dbg=1(?:&|$)/.test(location.search);
+    this._dbgEl = null;
+    this._dbgAcc = 0;
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
@@ -7398,6 +7402,60 @@ export class Game {
     }
   }
 
+  // ?dbg=1 调试读数：坐标 + 向下射线命中的模型名/距离/颜色 + 地面组可见性。
+  // 用途：症状「走到某处地面/草地消失」时，一眼看出脚下压着的是哪个模型（名字带 import-时间戳）。
+  _updateDbg(dt) {
+    if (!this._dbg) return;
+    this._dbgAcc += dt;
+    if (this._dbgAcc < 0.2) return;
+    this._dbgAcc = 0;
+    if (!this._dbgEl) {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;pointer-events:none;'
+        + 'font:12px/1.5 ui-monospace,monospace;color:#0f0;background:rgba(0,0,0,.6);'
+        + 'padding:6px 8px;border-radius:4px;white-space:pre;';
+      document.body.appendChild(el);
+      this._dbgEl = el;
+    }
+    const s = this.localState;
+    if (!this._dbgRay) this._dbgRay = new THREE.Raycaster();
+    this._dbgRay.set(new THREE.Vector3(s.x, s.y, s.z), new THREE.Vector3(0, -1, 0));
+    this._dbgRay.far = 300;
+    const hits = this._dbgRay.intersectObjects(this.scene.children, true);
+    let floor = 'none';
+    const lm = this.playerManager && this.playerManager.getLocalPlayer && this.playerManager.getLocalPlayer();
+    const lmObj = lm && lm.model;
+    for (const h of hits) {
+      const o = h.object;
+      // 跳过玩家自己的模型（射线会命中自己）
+      let p = o, self = false;
+      while (p) { if (p === lmObj) { self = true; break; } p = p.parent; }
+      if (self) continue;
+      const nm = o.name || '(无名)';
+      const m = Array.isArray(o.material) ? o.material[0] : o.material;
+      const col = m && m.color ? '#' + m.color.getHexString() : '';
+      floor = nm + ' @' + h.distance.toFixed(2) + 'm ' + col + (m ? ' op=' + m.opacity : '');
+      break;
+    }
+    const r0 = this._cityRoots && this._cityRoots[0];
+    // 地皮（如「未命名」）的实时状态：visible / 有几个 mesh 还开着剔除
+    const gp = this.scene.getObjectByName('未命名') || null;
+    let gpInfo = 'absent';
+    if (gp) {
+      let meshes = 0, culled = 0, vis = 0;
+      gp.traverse((o) => {
+        if (o.isMesh) { meshes++; if (o.frustumCulled) culled++; if (o.visible) vis++; }
+      });
+      gpInfo = 'holderVis=' + (gp.visible ? 1 : 0) + ' meshVis=' + vis + '/' + meshes + ' culledOn=' + culled;
+    }
+    this._dbgEl.textContent = 'pos   ' + s.x.toFixed(2) + ', ' + s.y.toFixed(2) + ', ' + s.z.toFixed(2)
+      + '\ncam   y=' + this.camera.position.y.toFixed(2)
+      + '\nfog   ' + (this.scene.fog ? this.scene.fog.constructor.name : 'none')
+      + '\nfloor ' + floor
+      + '\n地皮  ' + gpInfo
+      + '\n地面组 visible=' + (r0 ? r0.visible : '?') + '  combat=' + (this._combat ? 1 : 0);
+  }
+
   // 准星对着物理道具时，左键改成「踢」；命中才返回 true（否则交给普通攻击）
   _tryKickProp() {
     if (this._propsOff || !this.props || !this._propsBuilt) return false;
@@ -7912,6 +7970,8 @@ export class Game {
     this._updateProps(dt);
     // 按钮板（推/进入/抓索）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
     this._updateBallPad();
+    // ?dbg=1：坐标 / 脚下模型读数（定位地面消失类问题）
+    this._updateDbg(dt);
     // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）
     this._updatePickupHint();
     // 柱顶光点：呼吸 + 瞄准高亮（给「按攻击能飞过去」的反馈）

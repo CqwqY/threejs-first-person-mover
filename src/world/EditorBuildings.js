@@ -275,6 +275,13 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     const setupModel = (m) => {
       holder.add(m);
       holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
+      // 巨型地皮（草地/操场地面这类一整片贴地的大模型）关视锥剔除：
+      // 它们几乎任何视角都在画面里，关掉零成本；却能修掉「玩家走近其包围球中心、
+      // 球心落到视锥外时整片地皮被误剔」的 bug —— 症状是草地+道路整块消失、
+      // 露出天空球壳下沿（下沿是灰白贴图），走远又恢复。267×118m 的『未命名』地皮就中过招。
+      if ((it.fw || 0) * (it.fd || 0) >= 8000 && Math.abs(it.y || 0) <= 2.5) {
+        m.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+      }
       const lightmaps = (it.lightmaps && it.lightmaps.length) ? it.lightmaps : null;
       // ⚠ 烘焙过的物体：绝不做跨子网格合并 —— 合并会把网格名改掉，烘焙按「网格名」存的 key 就对不上了。
       //   保留原始网格结构，烘焙结果才能按名套回；同时静态体改走 lightMap（关第 1 层、收实时太阳）。
