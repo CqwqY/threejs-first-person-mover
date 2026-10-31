@@ -429,7 +429,12 @@ console.log('=== 事件与运动器 ===');
     ok(zi > gsrc.indexOf('this._ballAimed()') && zi < gsrc.lastIndexOf('this._toggleVehicle();'),
       'F 分派里选项卡必须排在球互动之后、载具之前');
     ok(!eb.includes('makeZoneTabSprite'), '区域顶上的 sprite 牌子必须删掉（选项卡在互动 UI 里）');
-    ok(eb.includes("m.visible = false; return;"), '三维区域游戏端必须完全隐形（纯逻辑体积）');
+    ok(/builtin:zone[\s\S]{0,120}m\.visible = false/.test(eb), '三维区域游戏端必须完全隐形（纯逻辑体积）');
+    // 交互配置必须搬到区域子组上：getZones() 返回的是 buildZone 造的子组（holder 的孩子），
+    // Game._updateZoneUI 读它自己的 userData —— 配置只留 holder 上 = 选项卡/进/离事件全部静默失配。
+    ok(eb.includes('m.userData.__zoneTab = holder.userData.__zoneTab')
+      && eb.includes('m.userData.__zoneEvents = holder.userData.__zoneEvents'),
+      'zone 分支必须把 __zoneTab/__zoneEvents 从 holder 同步到区域子组 m 上');
     ok(eb.includes("it.enter || ''") && eb.includes("it.leave || ''"), 'EditorBuildings 必须读取区域的 enter/leave 事件配置');
     const ea = norm('../src/editor/EditorApp.js');
     ok(ea.includes('out.movers = mvs.map'), '存档必须写 movers 数组（多运动器）');

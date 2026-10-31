@@ -310,7 +310,15 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       // 三维区域游戏端**完全隐形**（纯逻辑体积，半透明盒/线框只在编辑器里给摆位看）：
       // 直接关整棵子树的 visible。它没有碰撞体、不在批次/阴影链路里，getZones 登记与
       // visible 无关（按 parent 判活），隐藏不影响区域判定与进/离事件。
-      if (it.url === 'builtin:zone') { m.visible = false; return; }
+      if (it.url === 'builtin:zone') {
+        m.visible = false;
+        // ⚠⚠ 交互配置必须搬到区域子组上：getZones() 登记的是 builtins 里 buildZone 造的
+        // 这个子组（holder 的孩子），而 Game._updateZoneUI 读的是「它自己的 userData」——
+        // 配置只留在 holder 上 = 游戏端永远读不到，选项卡/进/离事件全部静默失配。
+        if (holder.userData.__zoneTab) m.userData.__zoneTab = holder.userData.__zoneTab;
+        if (holder.userData.__zoneEvents) m.userData.__zoneEvents = holder.userData.__zoneEvents;
+        return;
+      }
       holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
       // 巨型地皮（草地/操场地面这类一整片贴地的大模型）关视锥剔除：
       // 它们几乎任何视角都在画面里，关掉零成本；却能修掉「玩家走近其包围球中心、
