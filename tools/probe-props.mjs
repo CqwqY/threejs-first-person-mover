@@ -244,5 +244,72 @@ console.log('=== 互动键 ===');
   console.log('  单入口分派 + 退出路径优先 + repeat 守卫 ✓');
 }
 
+// 事件系统 + 运动器 + 三维区域：编辑器「运动/事件」链路的行为验证。
+// 手法与滑索节一致：直接 import 真模块跑真分支（sceneEvents/sceneMovers 都是纯逻辑，node 可跑）。
+console.log('=== 事件与运动器 ===');
+{
+  const ev = await import('../src/world/sceneEvents.js');
+  const mv = await import('../src/world/sceneMovers.js');
+  const bl = await import('../src/world/builtins.js');
+  const hits = [];
+  ev.sceneOn('open_door', () => hits.push('a'));
+  ev.sceneOn('open_door', () => hits.push('b'));
+  ok(ev.sceneFire('open_door') === 2, 'fire 应送达 2 个订阅者');
+  ok(hits.length === 2, '订阅者应被同步调用');
+  ok(ev.sceneFire('nobody') === 0, '无匹配事件应返回 0（调用方据此提示）');
+  // 单个订阅者抛错不拖垮其它订阅者
+  let reached = false;
+  ev.sceneOn('boom', () => { throw new Error('x'); });
+  ev.sceneOn('boom', () => { reached = true; });
+  ev.sceneFire('boom');
+  ok(reached, '一个订阅者抛错不该拦住后面的订阅者');
+  ev.clearSceneEvents();
+
+  // 运动器：事件触发 = toggle（开始/暂停/继续），pingpong 0..dist 往返
+  // 假 holder 要带 position.clone()（registerSceneMover 会快照初始姿态；真 Object3D 有）
+  const mkHolder = () => ({
+    position: { x: 0, y: 0, z: 0, set(x, y, z) { this.x = x; this.y = y; this.z = z; }, clone() { return { x: this.x, y: this.y, z: this.z }; } },
+    rotation: { y: 0 },
+    parent: {},
+  });
+  const holder = mkHolder();
+  const m = mv.registerSceneMover(holder, { type: 'pingpong', axis: 'x', dist: 2, speed: 2, event: 'go' });
+  ok(m !== null, '配置齐全的运动器应注册成功');
+  ok(mv.registerSceneMover(holder, { type: 'pingpong', event: '' }) === null, '没配事件名的运动器不应注册');
+  mv.updateSceneMovers(1 / 60);
+  ok(holder.position.x === 0, '未触发事件时不应运动');
+  ev.sceneFire('go'); // 开始
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60); // 1s * 2m/s = 恰好走满 dist=2 → 应反向
+  ok(Math.abs(holder.position.x - 2) < 0.05, '1 秒后应走到 dist=2 端点，实际 ' + holder.position.x.toFixed(3));
+  ev.sceneFire('go'); // 暂停
+  const paused = holder.position.x;
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60);
+  ok(holder.position.x === paused, '暂停期间位置不应变化');
+  ev.sceneFire('go'); // 继续（暂停发生在端点 2，dir 已是回程方向）
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60); // 1 秒走 2m → 回到起点
+  ok(Math.abs(holder.position.x) < 0.05, '继续 1 秒应回到起点，实际 ' + holder.position.x.toFixed(3));
+  // 大 dt 钳制：切后台回来一帧 5s 不该瞬移（当前 active，从 0 出发）
+  mv.updateSceneMovers(5);
+  ok(Math.abs(holder.position.x) < 0.25, '单帧 dt=5s 应被钳到 0.1s（位移 ≤0.25m），实际 ' + holder.position.x.toFixed(3));
+  // 旋转运动器：往返 -angle..+angle
+  const rh = mkHolder();
+  mv.registerSceneMover(rh, { type: 'rotate', angle: 90, speed: 90, event: 'spin' });
+  ev.sceneFire('spin');
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60);
+  ok(Math.abs(rh.rotation.y - Math.PI / 2) < 0.02, '1 秒 90 度/秒应转到 +90°，实际 ' + (rh.rotation.y * 180 / Math.PI).toFixed(1));
+  mv.clearSceneMovers();
+  ev.sceneFire('go');
+  mv.updateSceneMovers(1 / 60);
+  console.log('  事件订阅/触发/容错 + pingpong 往返 + 暂停继续 + dt 钳制 + 旋转 ✓');
+
+  // 三维区域：局部盒判定（worldToLocal 之后的点）
+  ok(bl.pointInZoneLocal(0, 1, 0) === true, '区域中心点应在区域内');
+  ok(bl.pointInZoneLocal(1.99, 2.9, -1.99) === true, '贴近角落的点应在区域内');
+  ok(bl.pointInZoneLocal(2.1, 1, 0) === false, '超出 ±2 的 X 不应在区域内');
+  ok(bl.pointInZoneLocal(0, 3.1, 0) === false, '高于 3m 的点不应在区域内');
+  ok(bl.pointInZoneLocal(0, -0.1, 0) === false, '低于区域底面的点不应在区域内');
+  console.log('  区域局部盒判定（含边界外一点）✓');
+}
+
 console.log(fail === 0 ? '\n✓ 全部通过' : `\n✗ ${fail} 项失败`);
 process.exit(fail === 0 ? 0 : 1);

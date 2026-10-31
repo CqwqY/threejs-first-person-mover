@@ -20,6 +20,8 @@ import {
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 import { applyBackfaceCulling } from './BackfaceCull.js';
 import { clearBuiltinInstances } from './builtins.js';
+import { registerSceneMover, clearSceneMovers } from './sceneMovers.js';
+import { clearSceneEvents } from './sceneEvents.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
   holeAabbOf, objectTouchesAnyHole,
@@ -45,8 +47,12 @@ function clearHolders(scene) {
   _addedHolders = [];
   windowMeshes = [];
   _holeWins = [];
-  // 内置摆件（滑索）也随之失效：清掉登记，避免旧引用一直堆着
+  // 内置摆件（滑索/三维区域）也随之失效：清掉登记，避免旧引用一直堆着
   clearBuiltinInstances();
+  // 上一份场景的运动器全部注销（事件订阅 + 运动状态），否则旧运动器还挂着已删除的模型
+  clearSceneMovers();
+  // 事件总线一并清空：运动器的订阅随 clearSceneMovers 退订，这里兜底防其它模块漏退
+  clearSceneEvents();
 }
 
 // 把当前 scene.environment 同步到所有障眼法窗户上。
@@ -249,6 +255,21 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     scene.add(holder);
     _addedHolders.push(holder); // 记录以便下次重建时移除
 
+    // ---- 运动器（placed 记录的 mover 字段）：事件触发后开始往返平移/旋转 ----
+    // 没配 event 的运动器不会注册（永远不会动，注册了也是白挂一个订阅）。
+    if (it.mover && it.mover.event) registerSceneMover(holder, it.mover);
+
+    // ---- 三维区域的「选项卡」：区域上方的文字标签 sprite + 交互配置 ----
+    // 可见的标签在这里画（挂在区域盒顶上方）；玩家站进区域时出现的那颗点击按钮
+    // 由 Game 端按 holder.userData.__zoneTab 生成（按钮板第四颗，手机 PC 都能点）。
+    if (it.tab && (it.tab.text || it.tab.event)) {
+      holder.userData.__zoneTab = {
+        text: String(it.tab.text || '互动').slice(0, 12),
+        event: String(it.tab.event || '').trim(),
+      };
+      if (holder.userData.__zoneTab.text) holder.add(makeZoneTabSprite(holder.userData.__zoneTab.text));
+    }
+
     // ---- complex 模式：模型加载完成后，从渲染网格异步烘焙 trimesh（运行时零存储）----
     // 为什么必须在这里烘焙：室内模型常把「一整块合并的大地面 + 多层楼板」放进同一个 mesh，
     // 逐 mesh 求盒/凸包只会得到一个罩住整栋楼的大凸包，完全不可用；trimesh 直接取三角形本身，
@@ -274,6 +295,9 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     // 模型加载完成后的统一处理：合并静态子网格 → 开阴影 → 按需烘焙 trimesh
     const setupModel = (m) => {
       holder.add(m);
+      // 三维区域是纯逻辑体积（basic 材质 + 线框 + 上面已挂的 sprite）：
+      // 跳过合并/阴影/光照那一套 —— 半透明盒不该进任何合并或烘焙流程。
+      if (it.url === 'builtin:zone') return;
       holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
       // 巨型地皮（草地/操场地面这类一整片贴地的大模型）关视锥剔除：
       // 它们几乎任何视角都在画面里，关掉零成本；却能修掉「玩家走近其包围球中心、
@@ -433,6 +457,46 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
 
 function enableShadows(obj) {
   obj.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+}
+
+// 三维区域顶上的「选项卡」标签：canvas 画一块圆角牌子 → Sprite（永远面向相机）。
+// depthTest=false：穿墙也可见 —— 选项卡是"叫玩家过来点"的 UI，被墙挡死就失去意义了。
+// 文字在编辑器里限 12 字，canvas 512x128 足够；贴图用完随场景 dispose（disposeLight 不覆盖 Sprite，
+// 但 Sprite 属于 holder 子树，场景重建时 holder 整体移除，GPU 资源由 three 按材质引用回收）。
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function makeZoneTabSprite(text) {
+  const cnv = document.createElement('canvas');
+  cnv.width = 512;
+  cnv.height = 128;
+  const ctx = cnv.getContext('2d');
+  ctx.fillStyle = 'rgba(18,32,50,0.9)';
+  roundRectPath(ctx, 20, 24, 472, 80, 26);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(143,216,255,0.95)';
+  ctx.lineWidth = 4;
+  roundRectPath(ctx, 20, 24, 472, 80, 26);
+  ctx.stroke();
+  ctx.fillStyle = '#eaf6ff';
+  ctx.font = '600 50px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 256, 66);
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sp.scale.set(3.2, 0.8, 1);
+  sp.position.y = 3.7; // 局部：区域盒顶（y=3）上方 0.7m
+  sp.renderOrder = 5;
+  return sp;
 }
 
 // ---- 编辑器光源（点光源 / 面光源）----

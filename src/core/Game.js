@@ -5,7 +5,9 @@ import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
 import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting, bakeFeatureEnabled } from '../world/Lights.js';
 import { ShadowBaker } from '../world/ShadowBaker.js';
-import { getZiplines, projectOnSegment } from '../world/builtins.js';
+import { getZiplines, getZones, pointInZoneLocal, projectOnSegment } from '../world/builtins.js';
+import { sceneFire } from '../world/sceneEvents.js';
+import { updateSceneMovers } from '../world/sceneMovers.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -7208,7 +7210,9 @@ export class Game {
     if (this._nearestZipline()) { this._toggleZipline(); return; }
     // 5) 准星对着大足球：钻进去
     if (this._ballAimed()) { this._toggleBallEnter(); return; }
-    // 6) 剩下的交给载具（够不到车就静默返回，不弹无谓提示）
+    // 6) 站在带「选项卡」的三维区域里：触发它配的事件（_zoneTabActive 由 _updateBallPad 每帧刷新）
+    if (this._zoneTabActive && this._zoneTabActive.event) { this._fireZoneTab(); return; }
+    // 7) 剩下的交给载具（够不到车就静默返回，不弹无谓提示）
     this._toggleVehicle();
   }
 
@@ -7289,6 +7293,13 @@ export class Game {
       this._ballPadZip.style.display = (zipOn || zipNear) ? '' : 'none';
       this._ballPadZip.textContent = zipOn ? '松手' : '抓索';
     }
+    // 三维区域选项卡：站在带 tab 的区域里才出现，按钮文字 = 配置的选项卡文字
+    const zoneTab = this._zoneTabUnderPlayer();
+    this._zoneTabActive = zoneTab;
+    if (this._ballPadZone) {
+      this._ballPadZone.style.display = zoneTab ? '' : 'none';
+      if (zoneTab) this._ballPadZone.textContent = zoneTab.text || '互动';
+    }
   }
 
   // 两颗圆按钮（推 / 进入）：贴在跳跃键正上方（手游），PC 端未锁指针时同样可点。
@@ -7327,14 +7338,49 @@ export class Game {
     const btnZip = mkBtn('抓索');
     btnZip.style.display = 'none'; // 只有靠近滑索 / 挂在索上时才出现
     btnZip.addEventListener('pointerdown', onBtn(() => this._toggleZipline()));
+    const btnZone = mkBtn('互动');
+    btnZone.style.display = 'none'; // 只有站在带「选项卡」的三维区域里才出现，文字随配置变
+    btnZone.addEventListener('pointerdown', onBtn(() => this._fireZoneTab()));
     pad.appendChild(btnPush);
     pad.appendChild(btnEnter);
     pad.appendChild(btnZip);
+    pad.appendChild(btnZone);
     document.body.appendChild(pad);
     this._ballPadPush = btnPush;
     this._ballPadEnter = btnEnter;
     this._ballPadZip = btnZip;
+    this._ballPadZone = btnZone;
     return pad;
+  }
+
+  // ---------- 三维区域选项卡（编辑器 builtin:zone + tab 配置）----------
+  // 玩家胸口点落在哪个带「选项卡」的区域内（localToWorld 逆变换 → 局部盒判定，天然支持
+  // 旋转/缩放），就返回那份 tab 配置。每帧在 _updateBallPad 里调用（区域数量是个位数）。
+  _zoneTabUnderPlayer() {
+    const zones = getZones();
+    if (!zones.length) return null;
+    const s = this.localState;
+    if (!Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(s.z)) return null;
+    if (!this._zonePt) this._zonePt = new THREE.Vector3();
+    const p = this._zonePt.set(s.x, s.y - 0.9, s.z); // 胸口高度，与滑索抓取同一参考点
+    for (const g of zones) {
+      const tab = g.userData && g.userData.__zoneTab;
+      if (!tab || !tab.event || !g.parent) continue;
+      g.updateWorldMatrix(true, false);
+      const lp = g.worldToLocal(p.clone());
+      if (pointInZoneLocal(lp.x, lp.y, lp.z)) return tab;
+    }
+    return null;
+  }
+
+  // 点「选项卡」按钮：触发区域配置的事件名；没有匹配的触发器也要说出来，别让玩家以为点坏了
+  _fireZoneTab() {
+    const tab = this._zoneTabActive;
+    if (!tab || !tab.event) return;
+    const n = sceneFire(tab.event);
+    this._toast(n > 0
+      ? ('已触发「' + (tab.text || tab.event) + '」')
+      : ('「' + (tab.text || tab.event) + '」没有匹配的触发器'));
   }
 
   // ---------- 滑索（编辑器摆件 builtin:zipline）：F 抓上，W/S 沿索上下，F 松手 ----------
@@ -7392,11 +7438,15 @@ export class Game {
     s.pitch -= md.y * Config.MOUSE_SENSITIVITY;
     const lim = THREE.MathUtils.degToRad(Config.MAX_PITCH_DEG);
     s.pitch = THREE.MathUtils.clamp(s.pitch, -lim, lim);
-    // 沿索推进：W 向 B 端、S 向 A 端；首尾夹住不许滑出索
+    // 沿索推进：W 向 B 端、S 向 A 端；手机虚拟摇杆前推/后拉等价（joyY 前为正，带幅度）。
+    // 首尾夹住不许滑出索。⚠ 摇杆是连续值（0.15 死区滤手抖），键盘是 ±1 —— 两者直接相加。
     const len = Math.max(1e-3, z.A.distanceTo(z.B));
     let dir = 0;
     if (this.input.forwarded()) dir += 1;
     if (this.input.backwarded()) dir -= 1;
+    const jy = Number(this.input.joyY) || 0;
+    if (Math.abs(jy) > 0.15) dir += THREE.MathUtils.clamp(jy, -1, 1);
+    dir = THREE.MathUtils.clamp(dir, -1, 1);
     if (dir) z.t = THREE.MathUtils.clamp(z.t + (dir * Config.ZIPLINE_SPEED * dt) / len, 0, 1);
     s.x = z.A.x + (z.B.x - z.A.x) * z.t;
     s.z = z.A.z + (z.B.z - z.A.z) * z.t;
@@ -8001,7 +8051,9 @@ export class Game {
     this._updateDrops(dt);
     // 物理可交互物：推/滚/连锁 + 蹦床判定 + 状态广播（内部自带 init 延迟与 ?props=off 守卫）
     this._updateProps(dt);
-    // 按钮板（推/进入/抓索）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
+    // 场景运动器（编辑器配的摆件运动）：事件触发后每帧推进（pingpong/rotate）
+    updateSceneMovers(dt);
+    // 按钮板（推/进入/抓索/区域选项卡）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
     this._updateBallPad();
     // ?dbg=1：坐标 / 脚下模型读数（定位地面消失类问题）
     this._updateDbg(dt);

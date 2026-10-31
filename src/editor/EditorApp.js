@@ -104,12 +104,16 @@ function asciiFileName(name) {
 const LIBRARY = [
   // 程序化内置摆件（不是 GLB）：滑索。可滑可爬，玩家在索上能任意上下移动。
   { label: '滑索', url: 'builtin:zipline' },
+  // 程序化内置摆件：三维区域。可挂「选项卡」（玩家站进去出现按钮，点击触发事件），
+  // 给其它摆件配「运动器 + 同名事件」就能做开门/升降/转门这类互动。
+  { label: '三维区域', url: 'builtin:zone' },
   ...[
     'building-small-a.glb', 'building-small-b.glb', 'building-small-c.glb', 'building-small-d.glb',
     'building-garage.glb', 'watertower.glb', 'fountain.glb', 'bench.glb', 'lamp.glb', 'tree.glb', 'bush.glb',
   ].map((f) => ({ label: f.replace('.glb', ''), url: '/assets/' + f })),
 ];
 const ZIPLINE_URL = 'builtin:zipline';
+const ZONE_URL = 'builtin:zone';
 
 // 已导入模型（存进游戏 assets 目录），持久化在 localStorage
 const IMPORT_KEY = 'city.builder.imports.v1';
@@ -337,6 +341,19 @@ export function createEditor() {
     cHz: document.getElementById('cHz'),
     cOy: document.getElementById('cOy'),
     colliderPanel: document.getElementById('colliderPanel'),
+    moverPanel: document.getElementById('moverPanel'),
+    mvType: document.getElementById('mvType'),
+    mvAxis: document.getElementById('mvAxis'),
+    mvAxisRow: document.getElementById('mvAxisRow'),
+    mvDist: document.getElementById('mvDist'),
+    mvDistRow: document.getElementById('mvDistRow'),
+    mvAngle: document.getElementById('mvAngle'),
+    mvAngleRow: document.getElementById('mvAngleRow'),
+    mvSpeed: document.getElementById('mvSpeed'),
+    mvEvent: document.getElementById('mvEvent'),
+    mvTabText: document.getElementById('mvTabText'),
+    mvTabRow: document.getElementById('mvTabRow'),
+    mvInfo: document.getElementById('mvInfo'),
     showColliders: document.getElementById('showColliders'),
     btnBound: document.getElementById('tBound'),
     boundaryPanel: document.getElementById('boundaryPanel'),
@@ -1043,8 +1060,9 @@ export function createEditor() {
     scene.add(obj);
     obj.position.copy(state.ghost.position);
     tagId(item);
-    // 滑索不占碰撞：整条索的包围盒很大，做碰撞会把整片区域变成"走不进去的墙"
-    if (item.url === ZIPLINE_URL && item.collider) item.collider.enabled = false;
+    // 滑索/三维区域不占碰撞：滑索的包围盒很大（会把整片区域变墙）；区域是纯逻辑体积，
+    // 碰撞必须为空否则玩家根本走不进去。两者也都不做 autoFit（它会强制把碰撞体重新打开）。
+    if ((item.url === ZIPLINE_URL || item.url === ZONE_URL) && item.collider) item.collider.enabled = false;
     // 放置即显示默认矩形碰撞体线框，模型异步加载完成后自动贴合实际尺寸
     state.placed.push(item);
     buildColliderVis(item);
@@ -1054,8 +1072,8 @@ export function createEditor() {
     instantiate(state.currentUrl).then((m) => {
       obj.add(m);
       optimizeLoaded(m);
-      // 滑索：不做 autoFit（它会强制把碰撞体打开），只需同步一下窗户洞
-      if (item.url === ZIPLINE_URL) { syncHoles(); return; }
+      // 滑索/三维区域：不做 autoFit（它会强制把碰撞体打开），只需同步一下窗户洞
+      if (item.url === ZIPLINE_URL || item.url === ZONE_URL) { syncHoles(); return; }
       autoFitCollider(item);
       syncHoles();
     }).catch(() => {});
@@ -1799,6 +1817,7 @@ export function createEditor() {
       ['pX', 'pZ', 'pY'].forEach((id) => { document.getElementById(id).value = ''; });
       StepUI.pRot.value = 0; StepUI.pScale.value = 1;
       syncColliderUI(null); // 未选中时收起碰撞体面板并清空碰撞体列表
+      syncMoverUI(null);    // 运动器面板同理收起
       return;
     }
     StepUI.pX.value = Math.round((rec.x ?? rec.obj.position.x) * 100) / 100;
@@ -1807,6 +1826,7 @@ export function createEditor() {
     StepUI.pRot.value = Math.round((rec.rotY ?? 0) * (180 / Math.PI));
     StepUI.pScale.value = normScale(rec.scale).x;
     syncColliderUI(rec);
+    syncMoverUI(rec);
   }
 
   function applyPlTransform(rec) {
@@ -1837,6 +1857,81 @@ export function createEditor() {
   bindProp('pY', (rec, v) => { rec.y = v; });
   bindProp('pRot', (rec, v) => { rec.rotY = v * DEG; });
   bindProp('pScale', (rec, v) => { rec.scale = { x: v, y: v, z: v }; });
+
+  // ---------- 运动 / 事件面板（选中 placed 物件时显示） ----------
+  // 数据落在 placed 记录的两个可选字段上（serialize 只在配置了内容时才写，旧存档零影响）：
+  //   rec.mover = { type:'pingpong'|'rotate', axis, dist, speed, angle, event }
+  //   rec.tab   = { text, event }   —— 仅三维区域（builtin:zone）显示这行
+  function moverOf(rec) {
+    if (!rec.mover) rec.mover = { type: '', axis: 'y', dist: 2, speed: 2, angle: 90, event: '' };
+    return rec.mover;
+  }
+  function tabOf(rec) {
+    if (!rec.tab) rec.tab = { text: '', event: '' };
+    return rec.tab;
+  }
+
+  function syncMoverUI(rec) {
+    const can = !!rec && rec.kind !== 'scenery' && rec.kind !== 'window';
+    if (StepUI.moverPanel) StepUI.moverPanel.style.display = can ? 'block' : 'none';
+    if (!can) return;
+    const m = moverOf(rec);
+    StepUI.mvType.value = m.type || '';
+    StepUI.mvAxis.value = m.axis || 'y';
+    StepUI.mvDist.value = m.dist ?? 2;
+    StepUI.mvSpeed.value = m.speed ?? 2;
+    StepUI.mvAngle.value = m.angle ?? 90;
+    StepUI.mvEvent.value = m.event || '';
+    const isZone = rec.url === 'builtin:zone';
+    StepUI.mvTabRow.style.display = isZone ? 'block' : 'none';
+    if (isZone) StepUI.mvTabText.value = rec.tab ? (rec.tab.text || '') : '';
+    applyMoverRows(m);
+    updateMoverInfo(rec);
+  }
+
+  function applyMoverRows(m) {
+    const rot = m.type === 'rotate';
+    if (StepUI.mvAxisRow) StepUI.mvAxisRow.style.display = rot ? 'none' : 'block';
+    if (StepUI.mvDistRow) StepUI.mvDistRow.style.display = rot ? 'none' : 'block';
+    if (StepUI.mvAngleRow) StepUI.mvAngleRow.style.display = rot ? 'block' : 'none';
+  }
+
+  function updateMoverInfo(rec) {
+    if (!StepUI.mvInfo) return;
+    const m = rec.mover || {};
+    const parts = [];
+    if (m.type) parts.push(m.type === 'rotate' ? '往返旋转' : '往返平移');
+    if (m.event) parts.push('事件「' + m.event + '」');
+    if (rec.tab && rec.tab.text) parts.push('选项卡「' + rec.tab.text + '」');
+    StepUI.mvInfo.textContent = parts.length ? '将保存：' + parts.join(' · ') : '未配置（保存时不写这些字段）';
+  }
+
+  function bindMover(id, fn) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const rec = state.selected;
+      if (!rec || rec.kind === 'scenery' || rec.kind === 'window') return;
+      fn(rec, el);
+      updateMoverInfo(rec);
+      markDirty();
+    });
+    // change：下拉框/失焦后按新值刷新行显隐（选「旋转」要切掉「距离」亮出「摆角」）
+    el.addEventListener('change', () => {
+      const rec = state.selected;
+      if (!rec || rec.kind === 'scenery' || rec.kind === 'window') return;
+      fn(rec, el);
+      syncMoverUI(rec);
+      markDirty();
+    });
+  }
+  bindMover('mvType', (rec, el) => { moverOf(rec).type = el.value; });
+  bindMover('mvAxis', (rec, el) => { moverOf(rec).axis = el.value; });
+  bindMover('mvDist', (rec, el) => { moverOf(rec).dist = parseFloat(el.value) || 2; });
+  bindMover('mvAngle', (rec, el) => { moverOf(rec).angle = parseFloat(el.value) || 90; });
+  bindMover('mvSpeed', (rec, el) => { moverOf(rec).speed = parseFloat(el.value) || 2; });
+  bindMover('mvEvent', (rec, el) => { moverOf(rec).event = el.value.trim(); });
+  bindMover('mvTabText', (rec, el) => { tabOf(rec).text = el.value.trim(); });
 
   // ---------- 碰撞体面板（仅对用户放置对象显示） ----------
   // simple / complex 两种碰撞复杂度（对齐 UE）：simple 用编辑器生成的盒/凸包；complex 由运行时从渲染网格烘焙。
@@ -2594,6 +2689,10 @@ export function createEditor() {
           // 烘焙光照结果：随场景存档进游戏运行时，按 key(meshName) 套回材质。无烘焙则为 undefined（旧行为）。
           lightmaps: (Array.isArray(rec.lightmaps) && rec.lightmaps.length) ? rec.lightmaps.map((l) => ({ ...l })) : undefined,
         };
+        // 运动 / 事件配置：只在真的配了内容时才写 —— 旧存档/没配的摆件字段缺失，
+        // 游戏端按「没有运动器/没有选项卡」处理，行为与从前完全一致。
+        if (rec.mover && rec.mover.type && (rec.mover.event || '').trim()) out.mover = { ...rec.mover };
+        if (rec.tab && ((rec.tab.text || '').trim() || (rec.tab.event || '').trim())) out.tab = { ...rec.tab };
         // 兼容旧的内嵌 data URL 记录
         if (!out.url && rec.data) out.data = rec.data;
         return out;
@@ -2705,6 +2804,9 @@ export function createEditor() {
           ? it.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
         // 烘焙光照结果：数组 [{ key: meshName, dataURL, w, h }]，运行时游戏端按 key 套回材质。
         lightmaps: (Array.isArray(it.lightmaps) && it.lightmaps.length) ? it.lightmaps.map((l) => ({ ...l })) : null,
+        // 运动 / 事件配置：旧存档没有这两个字段 → null，行为与从前一致
+        mover: it.mover ? { ...it.mover } : null,
+        tab: it.tab ? { ...it.tab } : null,
         obj,
       };
       obj.name = nm;

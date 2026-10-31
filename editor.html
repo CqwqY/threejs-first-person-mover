@@ -241,6 +241,33 @@
           <div class="field"><label>旋转 °</label><input id="pRot" type="number" step="1" /></div>
           <div class="field"><label>缩放</label><input id="pScale" type="range" min="0.1" max="6" step="0.05" /></div>
         </div>
+        <div id="moverPanel" style="display:none">
+          <div class="panel-title">运动 / 事件（选中物件）</div>
+          <div id="mvHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
+            运动器：被事件触发后开始往返运动（再触发一次 = 暂停/继续）。
+            三维区域的「选项卡」被点击时，会触发它配置的事件名；事件按名字匹配。
+          </div>
+          <div class="field"><label>运动器</label>
+            <select id="mvType">
+              <option value="">无（不会动）</option>
+              <option value="pingpong">往返平移</option>
+              <option value="rotate">往返旋转</option>
+            </select>
+          </div>
+          <div class="field" id="mvAxisRow"><label>平移轴</label>
+            <select id="mvAxis">
+              <option value="y">Y（升降）</option>
+              <option value="x">X（东西）</option>
+              <option value="z">Z（南北）</option>
+            </select>
+          </div>
+          <div class="field" id="mvDistRow"><label>距离(米)</label><input id="mvDist" type="number" step="0.5" min="0.1" value="2" /></div>
+          <div class="field" id="mvAngleRow" style="display:none"><label>摆角(度)</label><input id="mvAngle" type="number" step="5" min="1" value="90" /></div>
+          <div class="field"><label>速度</label><input id="mvSpeed" type="number" step="0.5" min="0.1" value="2" /></div>
+          <div class="field"><label>触发事件</label><input id="mvEvent" type="text" maxlength="32" placeholder="如 open_door" /></div>
+          <div class="field" id="mvTabRow" style="display:none"><label>选项卡文字</label><input id="mvTabText" type="text" maxlength="12" placeholder="如：开门（留空不显示）" /></div>
+          <div id="mvInfo" style="color:#9fe0a8;font-size:11px;line-height:1.6;margin-top:4px"></div>
+        </div>
         <div id="boundaryPanel" style="display:none">
           <div class="panel-title">场地边界（空气墙）</div>
           <div id="bInfo" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px"></div>

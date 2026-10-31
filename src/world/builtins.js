@@ -1,4 +1,4 @@
-// 内置（非 GLB）摆件的程序化构建：目前只有「滑索」。
+// 内置（非 GLB）摆件的程序化构建：滑索 + 三维区域。
 //
 // 为什么走 builtin: URL：编辑器与游戏端都通过 AssetLoader.instantiate(url) 取模型，
 // 在这里加一个 builtin 分支，编辑器放置/存档/读档、游戏端重建**全部零改动**复用。
@@ -23,7 +23,7 @@ export function getZiplines() {
   }
   return _zips;
 }
-export function clearBuiltinInstances() { _zips.length = 0; }
+export function clearBuiltinInstances() { _zips.length = 0; _zones.length = 0; }
 
 // 两条线段间最近点投影（纯函数，供运行时定位 + 探针单测）。
 // 返回 { t: 0..1, x,y,z 投影点, dist: 玩家到线段距离 }
@@ -96,8 +96,59 @@ function buildZipline() {
   return g;
 }
 
-// 统一入口：kind ∈ {'zipline'}
+// 统一入口：kind ∈ {'zipline','zone'}
 export function createBuiltin(kind) {
   if (kind === 'zipline') return buildZipline();
+  if (kind === 'zone') return buildZone();
   return new THREE.Group();
+}
+
+// ---------------------------------------------------------------------------
+// 三维区域（builtin:zone）：一个 4x3x4 的半透明体积 + 描边，编辑器用 scale 调大小。
+// 可挂「选项卡」（placed 记录的 tab 字段，EditorBuildings 负责画标签 sprite）：
+// 玩家站进区域 → 出现交互按钮 → 点一下 = sceneFire(tab.event) → 配了同名事件的
+// 运动器开始动作。事件匹配规则见 sceneEvents.js。
+//
+// 区域判定在 Game 端做：把玩家坐标用 holder.worldToLocal 转进局部系（天然支持
+// rotY 旋转与 scale 缩放），再和下面的 UNIT 盒比大小 —— 所以这里固定 4x3x4，别处不再重复写尺寸。
+// ---------------------------------------------------------------------------
+export const ZONE_URL = 'builtin:zone';
+// 局部盒半尺寸/高（米）：worldToLocal 之后的判定范围
+export const ZONE_HALF = { x: 2, z: 2, yMin: 0, yMax: 3 };
+
+const _zones = [];
+export function getZones() {
+  for (let i = _zones.length - 1; i >= 0; i--) {
+    if (!_zones[i] || !_zones[i].parent) _zones.splice(i, 1);
+  }
+  return _zones;
+}
+
+function buildZone() {
+  const g = new THREE.Group();
+  g.name = '三维区域';
+
+  const geo = new THREE.BoxGeometry(ZONE_HALF.x * 2, ZONE_HALF.yMax, ZONE_HALF.z * 2);
+  // 半透明淡蓝体积：只是「看得见这是一块区域」，depthWrite 关掉避免透明排序问题
+  const fill = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0x59c2ff, transparent: true, opacity: 0.10, depthWrite: false,
+  }));
+  fill.position.y = ZONE_HALF.yMax / 2;
+  const edge = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0x8fd8ff, transparent: true, opacity: 0.75 }),
+  );
+  edge.position.y = ZONE_HALF.yMax / 2;
+  g.add(fill, edge);
+  // 区域本体不做阴影/不做碰撞（纯逻辑体积；挂进场景后 EditorBuildings 不会再给它生成碰撞）
+
+  g.userData.__zone = { w: ZONE_HALF.x * 2, h: ZONE_HALF.yMax, d: ZONE_HALF.z * 2 };
+  _zones.push(g);
+  return g;
+}
+
+// 点是否在 zone 的局部盒内（p 为 worldToLocal 之后的局部坐标；纯函数供探针单测）
+export function pointInZoneLocal(px, py, pz) {
+  return Math.abs(px) <= ZONE_HALF.x && Math.abs(pz) <= ZONE_HALF.z
+    && py >= ZONE_HALF.yMin && py <= ZONE_HALF.yMax;
 }
