@@ -419,11 +419,17 @@ console.log('=== 事件与运动器 ===');
       '进入/离开区域事件必须在 _updateZoneUI 里触发');
     ok(gsrc.includes('this._zoneTabActive') && gsrc.includes('_fireZoneTab'),
       '选项卡必须走 F 键互动分派（_zoneTabActive → _fireZoneTab）');
-    ok(gsrc.includes('this._ballPadZone'), '手机端必须有选项卡按钮（按钮板，文字=选项卡文字）');
+    // 「电动车标准」：底部一排并列文字按钮，滑索/大球/选项卡全部走它，按钮板整个退役
+    ok(gsrc.includes('_createStdHint') && gsrc.includes('_updateStdHint') && gsrc.includes('_stdActions'),
+      '标准互动必须集中在底部按钮排（_createStdHint/_updateStdHint/_stdActions）');
+    ok(gsrc.includes("text: '推'") && gsrc.includes("text: '进入'") && gsrc.includes("text: '抓索'"),
+      '推/进入/抓索都必须在 _stdActions 的并列列表里');
+    ok(!gsrc.includes('_ballPad'), '按钮板必须整个退役（含 _ballPadPush 等字段）');
     const zi = gsrc.indexOf('this._zoneTabActive && this._zoneTabActive.event');
     ok(zi > gsrc.indexOf('this._ballAimed()') && zi < gsrc.lastIndexOf('this._toggleVehicle();'),
       'F 分派里选项卡必须排在球互动之后、载具之前');
     ok(!eb.includes('makeZoneTabSprite'), '区域顶上的 sprite 牌子必须删掉（选项卡在互动 UI 里）');
+    ok(eb.includes("m.visible = false; return;"), '三维区域游戏端必须完全隐形（纯逻辑体积）');
     ok(eb.includes("it.enter || ''") && eb.includes("it.leave || ''"), 'EditorBuildings 必须读取区域的 enter/leave 事件配置');
     const ea = norm('../src/editor/EditorApp.js');
     ok(ea.includes('out.movers = mvs.map'), '存档必须写 movers 数组（多运动器）');

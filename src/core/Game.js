@@ -776,7 +776,7 @@ export class Game {
     this._tpCdUntil = 0;                           // 邀请传送：自己加的冷却（技能槽只有 800ms 防连点）
     this._hideArrow = this._createHideArrow();
     this._hideTxtCache = '';
-    this._ballPad = this._createBallPad(); // 大足球「推 / 进入」按钮（手游端主入口，PC 也能点）
+    this._createStdHint(); // 「电动车标准」底部互动按钮排（推/进入/出来/抓索/松手/区域选项卡）
     this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
     this._zipHintShown = false;            // PC 端第一次靠近滑索时提示一次按键
     this._ballPrevThirdPerson = false;     // 进球前的视角，出来时还原
@@ -7256,106 +7256,88 @@ export class Game {
     this._toast('进入足球！走动带着球滚，再按一次出来');
   }
 
-  // 按钮板：准星对着球 → 「推 / 进入」；骑乘中 → 「推 / 出来」；靠近滑索 → 「抓索 / 松手」
-  _updateBallPad() {
-    const pad = this._ballPad;
-    if (!pad) return;
-    let ballShow = false;
-    let riding = false;
-    if (!this._propsOff && this.props && this._propsBuilt) {
-      riding = !!this.props.ridingBall;
-      if (riding) {
-        ballShow = true;
-      } else {
-        ballShow = !!this._ballAimed();
-        // PC（非粗指针）第一次对准球提示一次按键；按钮本身在 PC 上也可点（未锁指针时）
-        if (ballShow && !this._ballHintShown) {
-          this._ballHintShown = true;
-          this._toast('对准大足球：左键推它，' + this._keyLabel(Config.BALL_ENTER_KEY) + ' 进入');
-        }
+  // ---- 「电动车标准」互动按钮：底部居中**一排**文字钮（桌面首选项带 (F) 键提示）----
+  // 这是**以后一切场景互动的标准**：凡「靠近/对准才可用」的动作（推球、进出大球、
+  // 抓/松滑索、区域选项卡……）都并列显示在这一排，按 _interactKey 同一套优先级排序。
+  // 上/下车按钮沿用它自己的（同一位置更早存在）；同时可用时本排让位，F 键始终可用。
+  _createStdHint() {
+    const style = document.createElement('style');
+    // 与按钮板同一套显隐约定：打字界面打开（body.mc-hidden）时一起藏
+    style.textContent = 'body.mc-hidden .std-hints{visibility:hidden!important;pointer-events:none!important}';
+    document.head.appendChild(style);
+    const box = document.createElement('div');
+    box.className = 'std-hints';
+    box.style.cssText =
+      'position:fixed;left:50%;transform:translateX(-50%);z-index:62;display:none;gap:10px;align-items:center;' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 17%);user-select:none;-webkit-user-select:none;';
+    document.body.appendChild(box);
+    this._stdHintBox = box;
+    return box;
+  }
+
+  // 当前可用的标准互动列表（空 = 不显示）。顺序 = F 键分派优先级：
+  // 退出路径（松手/出来）在最前，再按空间接近度（抓索 → 推/进入 → 选项卡）。
+  // f:true 的那项是 F 键会触发的（桌面给它带 (F) 提示）。
+  _stdActions() {
+    const out = [];
+    if (this._soul || this._dead) return out;
+    let fTaken = false;
+    const markF = (a) => { if (!fTaken) { a.f = true; fTaken = true; } return a; };
+    if (this._zip) { out.push(markF({ text: '松手', fn: () => this._exitZipline() })); return out; }
+    if (!this._propsOff && this.props && this.props.ridingBall) {
+      out.push(markF({ text: '出来', fn: () => this._toggleBallEnter() }));
+      return out;
+    }
+    if (this._nearestZipline()) out.push(markF({ text: '抓索', fn: () => this._toggleZipline() }));
+    if (!this._propsOff && this.props && this._propsBuilt && this._ballAimed()) {
+      out.push({ text: '推', fn: () => this._ballPush() });
+      out.push(markF({ text: '进入', fn: () => this._toggleBallEnter() }));
+      // PC（非粗指针）第一次对准球提示一次按键
+      if (!this._ballHintShown) {
+        this._ballHintShown = true;
+        this._toast('对准大足球：左键推它，' + this._keyLabel(Config.INTERACT_KEY) + ' 进入');
       }
     }
-    // 滑索独立于道具系统：挂着时一直显示「松手」，否则靠近才显示「抓索」
-    const zipOn = !!this._zip;
-    const zipNear = zipOn || !!this._nearestZipline();
-    // PC 端第一次靠近钢索也提示一次按键（电脑上没这颗按钮，不说就没人知道怎么抓）
-    if (zipNear && !zipOn && !this._zipHintShown) {
+    const tab = this._zoneTabActive;
+    if (tab && tab.event) out.push(markF({ text: tab.text || '互动', fn: () => this._fireZoneTab() }));
+    // PC 端第一次靠近钢索也提示一次按键（电脑上不提示就没人知道怎么抓）
+    if (!this._zip && !this._zipHintShown && this._nearestZipline()) {
       this._zipHintShown = true;
       this._toast('靠近滑索：按 ' + this._keyLabel(Config.INTERACT_KEY) + ' 抓上钢索 · W/S 沿索上下');
     }
-    const show = ballShow || zipOn || zipNear;
-    pad.style.display = show ? 'flex' : 'none';
-    if (this._ballPadPush) this._ballPadPush.style.display = ballShow ? '' : 'none';
-    if (this._ballPadEnter) {
-      this._ballPadEnter.style.display = ballShow ? '' : 'none';
-      this._ballPadEnter.textContent = riding ? '出来' : '进入';
-    }
-    if (this._ballPadZip) {
-      this._ballPadZip.style.display = (zipOn || zipNear) ? '' : 'none';
-      this._ballPadZip.textContent = zipOn ? '松手' : '抓索';
-    }
-    // 三维区域选项卡：站在带 tab 的区域里才出现，按钮文字 = 配置的选项卡文字
-    const zoneTab = this._zoneTabActive;
-    if (this._ballPadZone) {
-      this._ballPadZone.style.display = zoneTab ? '' : 'none';
-      if (zoneTab) this._ballPadZone.textContent = zoneTab.text || '互动';
-    }
+    return out;
   }
 
-  // 两颗圆按钮（推 / 进入）：贴在跳跃键正上方（手游），PC 端未锁指针时同样可点。
-  // 打字界面打开时随 body.mc-hidden 一起藏（与 MobileControls 同一套显隐约定）。
-  _createBallPad() {
-    const style = document.createElement('style');
-    style.textContent = 'body.mc-hidden .ball-pad{visibility:hidden!important;pointer-events:none!important}';
-    document.head.appendChild(style);
-
-    const pad = document.createElement('div');
-    pad.className = 'ball-pad';
-    pad.style.cssText =
-      'position:fixed;z-index:52;display:none;flex-direction:column;gap:12px;align-items:center;' +
-      'right:calc(env(safe-area-inset-right, 0px) + 24px);' +
-      'bottom:calc(env(safe-area-inset-bottom, 0px) + 116px);' +
-      'touch-action:none;user-select:none;-webkit-user-select:none;';
-    const mkBtn = (text) => {
-      const b = document.createElement('div');
-      b.textContent = text;
-      b.style.cssText =
-        'width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;' +
-        'box-sizing:border-box;color:var(--kui-paper, #fff);' +
-        'font:600 15px/1 var(--kui-font, sans-serif);letter-spacing:2px;' +
-        'background:color-mix(in srgb, var(--kui-blue, #4a76c9) 34%, transparent);' +
-        'border:2px solid color-mix(in srgb, var(--kui-blue-soft, #8fb3e6) 75%, transparent);' +
-        'cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none;';
-      b.addEventListener('pointerup', (e) => { e.preventDefault(); });
-      return b;
-    };
-    // pointerdown 直接触发（触屏 click 有 ~300ms 合成延迟）；preventDefault 防滚动，stopPropagation 防漏给视角拖动区
-    const onBtn = (fn) => (e) => { e.preventDefault(); e.stopPropagation(); fn(); };
-    const btnPush = mkBtn('推');
-    btnPush.addEventListener('pointerdown', onBtn(() => this._ballPush()));
-    const btnEnter = mkBtn('进入');
-    btnEnter.addEventListener('pointerdown', onBtn(() => this._toggleBallEnter()));
-    const btnZip = mkBtn('抓索');
-    btnZip.style.display = 'none'; // 只有靠近滑索 / 挂在索上时才出现
-    btnZip.addEventListener('pointerdown', onBtn(() => this._toggleZipline()));
-    const btnZone = mkBtn('互动');
-    btnZone.style.display = 'none'; // 只有站在带「选项卡」的三维区域里才出现，文字随配置变
-    btnZone.addEventListener('pointerdown', onBtn(() => this._fireZoneTab()));
-    pad.appendChild(btnPush);
-    pad.appendChild(btnEnter);
-    pad.appendChild(btnZip);
-    pad.appendChild(btnZone);
-    document.body.appendChild(pad);
-    this._ballPadPush = btnPush;
-    this._ballPadEnter = btnEnter;
-    this._ballPadZip = btnZip;
-    this._ballPadZone = btnZone;
-    return pad;
+  _updateStdHint() {
+    const box = this._stdHintBox;
+    if (!box) return;
+    if (this._soul || this._dead) { box.style.display = 'none'; return; }
+    // 上/下车按钮正显示时让位（同一位置，两排都显示会叠在一起）
+    const vehVisible = this._vehHint && this._vehHint.style.display !== 'none';
+    const acts = vehVisible ? [] : this._stdActions();
+    if (!acts.length) { box.style.display = 'none'; this._stdActsKey = ''; return; }
+    const key = acts.map((a) => a.text + (a.f ? '*' : '')).join('|');
+    if (key !== this._stdActsKey) {
+      this._stdActsKey = key;
+      box.textContent = '';
+      for (const a of acts) {
+        const b = document.createElement('div');
+        b.className = 'kui-btn kui-btn--grey';
+        b.style.cssText =
+          'min-width:clamp(58px,16vmin,92px);box-sizing:border-box;text-align:center;' +
+          'padding:clamp(4px,1.4vmin,6px) clamp(9px,2.6vmin,14px);cursor:pointer;touch-action:none;';
+        b.textContent = a.text + (a.f ? (this._vehKeyHint || '') : '');
+        // 按下即响应：多点触控下（另一只手推摇杆）click 可能不派发
+        b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); a.fn(); });
+        box.appendChild(b);
+      }
+    }
+    box.style.display = 'flex';
   }
 
-  // ---------- 三维区域：选项卡（F 键互动 / 手机按钮板按钮）+ 进/离区域事件 ----------
-  // 选项卡就是 F 键互动 UI 里的那个选项：站进配了选项卡的区域，F 键（手机上是按钮板
-  // 那颗按钮，文字=选项卡文字）触发它配的事件。没有独立面板、没有世界内牌子。
+  // ---------- 三维区域：选项卡（F 键互动 / 底部标准按钮）+ 进/离区域事件 ----------
+  // 选项卡就是 F 键互动 UI 里的那个选项：站进配了选项卡的区域，按 F（手机上是底部
+  // 标准按钮，文字=选项卡文字）触发它配的事件。没有独立面板、没有世界内牌子。
   // 进/离区域事件在这里每帧结算：进区触发 enter、离区触发 leave（自动门/迎宾灯这类）。
   _updateZoneUI() {
     const zones = getZones();
@@ -7388,7 +7370,7 @@ export class Game {
     inside.clear();
     for (const g of now) inside.add(g);
 
-    // 当前所在带选项卡的区域（多个叠加时先到先得）：F 键分派与按钮板都读这份
+    // 当前所在带选项卡的区域（多个叠加时先到先得）：F 键分派与底部标准按钮都读这份
     this._zoneTabActive = null;
     for (const g of now) {
       const t = g.userData && g.userData.__zoneTab;
@@ -7396,7 +7378,7 @@ export class Game {
     }
   }
 
-  // 触发选项卡（F 键 / 按钮板）：没有匹配的触发器也要说出来，别让玩家以为点坏了
+  // 触发选项卡（F 键 / 底部标准按钮）：没有匹配的触发器也要说出来，别让玩家以为点坏了
   _fireZoneTab() {
     const tab = this._zoneTabActive;
     if (!tab || !tab.event) return;
@@ -8079,9 +8061,9 @@ export class Game {
     // 物理可交互物：推/滚/连锁 + 蹦床判定 + 状态广播（内部自带 init 延迟与 ?props=off 守卫）
     this._updateProps(dt);
     // 场景运动器已在玩家物理之前推进（见上面 updateSceneMovers 的注释），此处不再重复调用
-    // 按钮板（推/进入/抓索）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
-    this._updateBallPad();
-    // 三维区域：进/离区域事件结算 + 刷新 _zoneTabActive（选项卡走 F 键 / 按钮板按钮）
+    // 底部标准互动按钮排（推/进入/出来/抓索/松手/选项卡）：独立于道具系统调用，否则 props=off 时不出现
+    this._updateStdHint();
+    // 三维区域：进/离区域事件结算 + 刷新 _zoneTabActive（选项卡走 F 键 / 标准按钮）
     this._updateZoneUI();
     // ?dbg=1：坐标 / 脚下模型读数（定位地面消失类问题）
     this._updateDbg(dt);

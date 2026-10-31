@@ -307,9 +307,10 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     // 模型加载完成后的统一处理：合并静态子网格 → 开阴影 → 按需烘焙 trimesh
     const setupModel = (m) => {
       holder.add(m);
-      // 三维区域是纯逻辑体积（basic 材质 + 线框）：
-      // 跳过合并/阴影/光照那一套 —— 半透明盒不该进任何合并或烘焙流程。
-      if (it.url === 'builtin:zone') return;
+      // 三维区域游戏端**完全隐形**（纯逻辑体积，半透明盒/线框只在编辑器里给摆位看）：
+      // 直接关整棵子树的 visible。它没有碰撞体、不在批次/阴影链路里，getZones 登记与
+      // visible 无关（按 parent 判活），隐藏不影响区域判定与进/离事件。
+      if (it.url === 'builtin:zone') { m.visible = false; return; }
       holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
       // 巨型地皮（草地/操场地面这类一整片贴地的大模型）关视锥剔除：
       // 它们几乎任何视角都在画面里，关掉零成本；却能修掉「玩家走近其包围球中心、
