@@ -302,6 +302,38 @@ console.log('=== 事件与运动器 ===');
   mv.updateSceneMovers(1 / 60);
   console.log('  事件订阅/触发/容错 + pingpong 往返 + 暂停继续 + dt 钳制 + 旋转 ✓');
 
+  // 单向运动器（oneway）：触发后走到头停住；运动中/到头再触发无效（不瞬移回起点）
+  const oh = mkHolder();
+  mv.registerSceneMover(oh, { type: 'oneway', axis: 'y', dist: 2, speed: 2, event: 'up' });
+  ev.sceneFire('up');
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60); // 1s * 2m/s = 走满 2m
+  ok(Math.abs(oh.position.y - 2) < 0.05, '单向 1 秒后应走到 dist=2 并停住，实际 ' + oh.position.y.toFixed(3));
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60);
+  ok(Math.abs(oh.position.y - 2) < 1e-9, '单向到头后应保持不动，实际 ' + oh.position.y.toFixed(6));
+  ev.sceneFire('up'); // 到头后再触发：无效（不能瞬移回起点重放）
+  for (let i = 0; i < 10; i++) mv.updateSceneMovers(1 / 60);
+  ok(Math.abs(oh.position.y - 2) < 1e-9, '单向到头后再次触发不应重放，实际 ' + oh.position.y.toFixed(6));
+  // 单向旋转：转满 angle 停住
+  const orh = mkHolder();
+  mv.registerSceneMover(orh, { type: 'rotate_oneway', angle: 90, speed: 90, event: 'turn' });
+  ev.sceneFire('turn');
+  for (let i = 0; i < 90; i++) mv.updateSceneMovers(1 / 60);
+  ok(Math.abs(orh.rotation.y - Math.PI / 2) < 0.02, '单向旋转 1 秒应转满 +90° 停住，实际 ' + (orh.rotation.y * 180 / Math.PI).toFixed(1));
+  console.log('  单向平移/旋转（到头停住、再触发无效）✓');
+
+  // 多运动器叠加：增量式推进 —— 平移 X + 旋转 各触发后同时生效，互不覆写
+  const mh = mkHolder();
+  mv.registerSceneMover(mh, { type: 'oneway', axis: 'x', dist: 1, speed: 1, event: 'mv_a' });
+  mv.registerSceneMover(mh, { type: 'oneway', axis: 'y', dist: 2, speed: 2, event: 'mv_b' });
+  ev.sceneFire('mv_a');
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60); // X 走 1m
+  ev.sceneFire('mv_b');
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60); // Y 再走 2m（X 必须保持 1m）
+  ok(Math.abs(mh.position.x - 1) < 1e-9, '第二个运动器启动后 X 位移必须保持（增量式叠加），实际 ' + mh.position.x.toFixed(6));
+  ok(Math.abs(mh.position.y - 2) < 0.05, '第二个运动器应走到 2m，实际 ' + mh.position.y.toFixed(3));
+  mv.clearSceneMovers();
+  console.log('  多运动器叠加（增量式，互不覆写）✓');
+
   // 三维区域：局部盒判定（worldToLocal 之后的点）
   ok(bl.pointInZoneLocal(0, 1, 0) === true, '区域中心点应在区域内');
   ok(bl.pointInZoneLocal(1.99, 2.9, -1.99) === true, '贴近角落的点应在区域内');
@@ -382,6 +414,18 @@ console.log('=== 事件与运动器 ===');
     const mi = gsrc.indexOf('updateSceneMovers(dt)');
     const pi = gsrc.indexOf('this.localPlayer.update(dt)');
     ok(mi >= 0 && pi >= 0 && mi < pi, '运动器推进必须排在玩家物理之前，本帧碰撞盒才就位');
+    // 区域三触发 + 玩家 UI：enter/leave 在 _updateZoneUI 里结算；选项卡是 HTML 面板（数字键 1-9）
+    ok(gsrc.includes('sceneFire(ev.enter)') && gsrc.includes('sceneFire(ev.leave)'),
+      '进入/离开区域事件必须在 _updateZoneUI 里触发');
+    ok(/Digit\(\[1-9\]\)/.test(gsrc), 'PC 端必须能用数字键 1-9 触发区域选项卡');
+    ok(!gsrc.includes('_ballPadZone'), '按钮板不该再有区域「互动」按钮（选项卡已是玩家 UI 面板）');
+    ok(!eb.includes('makeZoneTabSprite'), '区域顶上的 sprite 牌子必须删掉（选项卡是玩家 UI）');
+    ok(eb.includes("it.enter || ''") && eb.includes("it.leave || ''"), 'EditorBuildings 必须读取区域的 enter/leave 事件配置');
+    const ea = norm('../src/editor/EditorApp.js');
+    ok(ea.includes('out.movers = mvs.map'), '存档必须写 movers 数组（多运动器）');
+    ok(ea.includes("movers: Array.isArray(it.movers)"), '读档必须迁移 movers 数组（兼容旧单 mover）');
+    ok(ea.includes("rec.enter = el.value.trim()") && ea.includes("rec.leave = el.value.trim()"),
+      '编辑器必须能配置进入/离开区域事件');
   }
   mv.clearSceneMovers();
   console.log('  随动接线点（宽相位常驻 / 碰撞登记 / 阴影排除 / 主循环顺序）✓');

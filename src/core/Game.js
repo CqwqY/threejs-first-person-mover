@@ -777,6 +777,7 @@ export class Game {
     this._hideArrow = this._createHideArrow();
     this._hideTxtCache = '';
     this._ballPad = this._createBallPad(); // 大足球「推 / 进入」按钮（手游端主入口，PC 也能点）
+    this._createZoneUI(); // 三维区域选项卡（玩家 UI 面板）+ 进/离区域事件
     this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
     this._zipHintShown = false;            // PC 端第一次靠近滑索时提示一次按键
     this._ballPrevThirdPerson = false;     // 进球前的视角，出来时还原
@@ -7198,6 +7199,7 @@ export class Game {
   // 优先级按「状态最专一 → 空间最接近」排：
   //   已在索上 → 已在球里 → 已在车上 → 靠近钢索 → 准星对准球 → 载具/其它
   // 前三个是「退出」路径，必须排在最前，否则站在球里/索上会分别去抓索、上车，卡住出不来。
+  // （三维区域的选项卡不走 F：它是玩家 UI 面板，数字键 1-9 或直接点击触发，见 _updateZoneUI）
   _interactKey() {
     if (this._soul || this._dead) return;
     // 1) 挂在索上：这一下是松手
@@ -7210,9 +7212,7 @@ export class Game {
     if (this._nearestZipline()) { this._toggleZipline(); return; }
     // 5) 准星对着大足球：钻进去
     if (this._ballAimed()) { this._toggleBallEnter(); return; }
-    // 6) 站在带「选项卡」的三维区域里：触发它配的事件（_zoneTabActive 由 _updateBallPad 每帧刷新）
-    if (this._zoneTabActive && this._zoneTabActive.event) { this._fireZoneTab(); return; }
-    // 7) 剩下的交给载具（够不到车就静默返回，不弹无谓提示）
+    // 6) 剩下的交给载具（够不到车就静默返回，不弹无谓提示）
     this._toggleVehicle();
   }
 
@@ -7293,13 +7293,6 @@ export class Game {
       this._ballPadZip.style.display = (zipOn || zipNear) ? '' : 'none';
       this._ballPadZip.textContent = zipOn ? '松手' : '抓索';
     }
-    // 三维区域选项卡：站在带 tab 的区域里才出现，按钮文字 = 配置的选项卡文字
-    const zoneTab = this._zoneTabUnderPlayer();
-    this._zoneTabActive = zoneTab;
-    if (this._ballPadZone) {
-      this._ballPadZone.style.display = zoneTab ? '' : 'none';
-      if (zoneTab) this._ballPadZone.textContent = zoneTab.text || '互动';
-    }
   }
 
   // 两颗圆按钮（推 / 进入）：贴在跳跃键正上方（手游），PC 端未锁指针时同样可点。
@@ -7338,49 +7331,117 @@ export class Game {
     const btnZip = mkBtn('抓索');
     btnZip.style.display = 'none'; // 只有靠近滑索 / 挂在索上时才出现
     btnZip.addEventListener('pointerdown', onBtn(() => this._toggleZipline()));
-    const btnZone = mkBtn('互动');
-    btnZone.style.display = 'none'; // 只有站在带「选项卡」的三维区域里才出现，文字随配置变
-    btnZone.addEventListener('pointerdown', onBtn(() => this._fireZoneTab()));
     pad.appendChild(btnPush);
     pad.appendChild(btnEnter);
     pad.appendChild(btnZip);
-    pad.appendChild(btnZone);
     document.body.appendChild(pad);
     this._ballPadPush = btnPush;
     this._ballPadEnter = btnEnter;
     this._ballPadZip = btnZip;
-    this._ballPadZone = btnZone;
     return pad;
   }
 
-  // ---------- 三维区域选项卡（编辑器 builtin:zone + tab 配置）----------
-  // 玩家胸口点落在哪个带「选项卡」的区域内（localToWorld 逆变换 → 局部盒判定，天然支持
-  // 旋转/缩放），就返回那份 tab 配置。每帧在 _updateBallPad 里调用（区域数量是个位数）。
-  _zoneTabUnderPlayer() {
-    const zones = getZones();
-    if (!zones.length) return null;
-    const s = this.localState;
-    if (!Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(s.z)) return null;
-    if (!this._zonePt) this._zonePt = new THREE.Vector3();
-    const p = this._zonePt.set(s.x, s.y - 0.9, s.z); // 胸口高度，与滑索抓取同一参考点
-    for (const g of zones) {
-      const tab = g.userData && g.userData.__zoneTab;
-      if (!tab || !tab.event || !g.parent) continue;
-      g.updateWorldMatrix(true, false);
-      const lp = g.worldToLocal(p.clone());
-      if (pointInZoneLocal(lp.x, lp.y, lp.z)) return tab;
-    }
-    return null;
+  // ---------- 三维区域：玩家 UI（选项卡面板 + 进/离区域事件）----------
+  // 选项卡是**玩家界面**（HTML 面板），不是世界里的牌子：站进配了选项卡的区域，
+  // 屏幕底部浮出一排选项卡按钮，点一下（或按数字键 1-9）触发它配的事件。
+  // 进/离区域事件在这里顺带结算：进区触发 enter、离区触发 leave（自动门/迎宾灯这类）。
+  _createZoneUI() {
+    const style = document.createElement('style');
+    style.textContent =
+      // 与按钮板同一套显隐约定：打字界面打开（body.mc-hidden）时一起藏
+      'body.mc-hidden .zone-tabs{visibility:hidden!important;pointer-events:none!important}' +
+      '.zone-tabs{position:fixed;z-index:53;display:none;gap:8px;align-items:stretch;' +
+      'left:50%;transform:translateX(-50%);' +
+      'bottom:calc(env(safe-area-inset-bottom, 0px) + 18px);user-select:none;-webkit-user-select:none;}';
+    document.head.appendChild(style);
+
+    const box = document.createElement('div');
+    box.className = 'zone-tabs';
+    document.body.appendChild(box);
+    this._zoneBox = box;
+
+    // PC 端数字键 1-9 直接触发对应选项卡（指针锁定时鼠标点不到 UI）
+    window.addEventListener('keydown', (e) => {
+      if (this._soul || this._dead) return;
+      const m = /^Digit([1-9])$/.exec(e.code);
+      if (!m) return;
+      if (isEditableTarget(document.activeElement)) return;
+      const tabs = this._zoneTabsNow;
+      if (!tabs) return;
+      const i = Number(m[1]) - 1;
+      if (i < tabs.length) { e.preventDefault(); this._zoneFireTab(tabs[i]); }
+    });
   }
 
-  // 点「选项卡」按钮：触发区域配置的事件名；没有匹配的触发器也要说出来，别让玩家以为点坏了
-  _fireZoneTab() {
-    const tab = this._zoneTabActive;
-    if (!tab || !tab.event) return;
-    const n = sceneFire(tab.event);
+  // 每帧：算玩家在哪个区域里 → 结算 enter/leave → 刷新选项卡面板
+  _updateZoneUI() {
+    const zones = getZones();
+    const s = this.localState;
+    const inside = this._zoneInside || (this._zoneInside = new Set());
+    const now = new Set();
+    if (zones.length && s && Number.isFinite(s.x) && Number.isFinite(s.y) && Number.isFinite(s.z)) {
+      if (!this._zonePt) this._zonePt = new THREE.Vector3();
+      const p = this._zonePt.set(s.x, s.y - 0.9, s.z); // 胸口高度，与滑索抓取同一参考点
+      for (const g of zones) {
+        const ud = g.userData || {};
+        if ((!ud.__zoneTab || !ud.__zoneTab.event) && !ud.__zoneEvents) continue;
+        if (!g.parent) continue;
+        g.updateWorldMatrix(true, false);
+        const lp = g.worldToLocal(p.clone());
+        if (pointInZoneLocal(lp.x, lp.y, lp.z)) now.add(g);
+      }
+    }
+    // 进/离事件：对每个区域独立结算（两个区域叠着也能各自正确触发）
+    for (const g of now) {
+      if (inside.has(g)) continue;
+      const ev = g.userData.__zoneEvents;
+      if (ev && ev.enter) sceneFire(ev.enter);
+    }
+    for (const g of inside) {
+      if (now.has(g)) continue;
+      const ev = g.userData.__zoneEvents;
+      if (ev && ev.leave) sceneFire(ev.leave);
+    }
+    inside.clear();
+    for (const g of now) inside.add(g);
+
+    // 选项卡面板：取当前所在的第一个带选项卡的区域（多个区域叠加时先到先得）
+    let zone = null;
+    for (const g of now) {
+      const t = g.userData && g.userData.__zoneTab;
+      if (t && t.event) { zone = g; break; }
+    }
+    const tabs = zone ? [zone.userData.__zoneTab] : null;
+    this._zoneTabsNow = tabs;
+    if (!this._zoneBox) return;
+    if (!tabs) { this._zoneBox.style.display = 'none'; return; }
+    // 区域没变就不重建 DOM（每帧重建会闪 + 打断触摸按住）
+    if (this._zoneBoxZone !== zone) {
+      this._zoneBoxZone = zone;
+      this._zoneBox.textContent = '';
+      tabs.forEach((t, i) => {
+        const b = document.createElement('div');
+        b.textContent = t.text || '互动';
+        b.style.cssText =
+          'padding:10px 18px;border-radius:10px;color:var(--kui-paper, #fff);' +
+          'font:600 14px/1 var(--kui-font, sans-serif);letter-spacing:1px;white-space:nowrap;' +
+          'background:color-mix(in srgb, var(--kui-blue, #4a76c9) 55%, rgba(10,18,30,0.72));' +
+          'border:1px solid color-mix(in srgb, var(--kui-blue-soft, #8fb3e6) 70%, transparent);' +
+          'cursor:pointer;touch-action:none;';
+        b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._zoneFireTab(t); });
+        this._zoneBox.appendChild(b);
+      });
+    }
+    this._zoneBox.style.display = 'flex';
+  }
+
+  // 点选项卡（或按数字键）：触发区域配的事件；没有匹配的触发器也要说出来，别让玩家以为点坏了
+  _zoneFireTab(t) {
+    if (!t || !t.event) return;
+    const n = sceneFire(t.event);
     this._toast(n > 0
-      ? ('已触发「' + (tab.text || tab.event) + '」')
-      : ('「' + (tab.text || tab.event) + '」没有匹配的触发器'));
+      ? ('已触发「' + (t.text || t.event) + '」')
+      : ('「' + (t.text || t.event) + '」没有匹配的触发器'));
   }
 
   // ---------- 滑索（编辑器摆件 builtin:zipline）：F 抓上，W/S 沿索上下，F 松手 ----------
@@ -8056,8 +8117,10 @@ export class Game {
     // 物理可交互物：推/滚/连锁 + 蹦床判定 + 状态广播（内部自带 init 延迟与 ?props=off 守卫）
     this._updateProps(dt);
     // 场景运动器已在玩家物理之前推进（见上面 updateSceneMovers 的注释），此处不再重复调用
-    // 按钮板（推/进入/抓索/区域选项卡）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
+    // 按钮板（推/进入/抓索）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
     this._updateBallPad();
+    // 三维区域：选项卡面板显隐 + 进/离区域事件（选项卡是玩家 UI，见 _updateZoneUI）
+    this._updateZoneUI();
     // ?dbg=1：坐标 / 脚下模型读数（定位地面消失类问题）
     this._updateDbg(dt);
     // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）

@@ -342,6 +342,9 @@ export function createEditor() {
     cOy: document.getElementById('cOy'),
     colliderPanel: document.getElementById('colliderPanel'),
     moverPanel: document.getElementById('moverPanel'),
+    mvSel: document.getElementById('mvSel'),
+    mvAdd: document.getElementById('mvAdd'),
+    mvDel: document.getElementById('mvDel'),
     mvType: document.getElementById('mvType'),
     mvAxis: document.getElementById('mvAxis'),
     mvAxisRow: document.getElementById('mvAxisRow'),
@@ -353,6 +356,12 @@ export function createEditor() {
     mvEvent: document.getElementById('mvEvent'),
     mvTabText: document.getElementById('mvTabText'),
     mvTabRow: document.getElementById('mvTabRow'),
+    mvTabEvent: document.getElementById('mvTabEvent'),
+    mvTabEvtRow: document.getElementById('mvTabEvtRow'),
+    mvEnter: document.getElementById('mvEnter'),
+    mvZoneRow: document.getElementById('mvZoneRow'),
+    mvLeave: document.getElementById('mvLeave'),
+    mvLeaveRow: document.getElementById('mvLeaveRow'),
     mvInfo: document.getElementById('mvInfo'),
     showColliders: document.getElementById('showColliders'),
     btnBound: document.getElementById('tBound'),
@@ -1859,23 +1868,47 @@ export function createEditor() {
   bindProp('pScale', (rec, v) => { rec.scale = { x: v, y: v, z: v }; });
 
   // ---------- 运动 / 事件面板（选中 placed 物件时显示） ----------
-  // 数据落在 placed 记录的两个可选字段上（serialize 只在配置了内容时才写，旧存档零影响）：
-  //   rec.mover = { type:'pingpong'|'rotate', axis, dist, speed, angle, event }
-  //   rec.tab   = { text, event }   —— 仅三维区域（builtin:zone）显示这行
-  function moverOf(rec) {
-    if (!rec.mover) rec.mover = { type: '', axis: 'y', dist: 2, speed: 2, angle: 90, event: '' };
-    return rec.mover;
+  // 数据落在 placed 记录的可选字段上（serialize 只在配置了内容时才写，旧存档零影响）：
+  //   rec.movers = [ { type:'pingpong'|'oneway'|'rotate'|'rotate_oneway', axis, dist, speed, angle, event }, ... ]
+  //                —— 一个物件多个运动器；旧存档的单个 rec.mover 读入时迁移进数组
+  //   rec.tab   = { text, event }   —— 仅三维区域：选项卡（玩家 UI，点击触发 event）
+  //   rec.enter / rec.leave          —— 仅三维区域：进/离区域触发的事件名
+  let mvSelIdx = 0; // 当前在编辑的运动器下标
+  function moversOf(rec) {
+    if (!Array.isArray(rec.movers)) {
+      rec.movers = (rec.mover && rec.mover.type) ? [{ ...rec.mover }] : [];
+    }
+    return rec.movers;
   }
-  function tabOf(rec) {
-    if (!rec.tab) rec.tab = { text: '', event: '' };
-    return rec.tab;
-  }
+  const MV_DEFAULT = () => ({ type: '', axis: 'y', dist: 2, speed: 2, angle: 90, event: '' });
+  const MV_LABEL = { pingpong: '往返平移', oneway: '单向平移', rotate: '往返旋转', rotate_oneway: '单向旋转' };
 
   function syncMoverUI(rec) {
     const can = !!rec && rec.kind !== 'scenery' && rec.kind !== 'window';
     if (StepUI.moverPanel) StepUI.moverPanel.style.display = can ? 'block' : 'none';
     if (!can) return;
-    const m = moverOf(rec);
+    const list = moversOf(rec);
+    if (mvSelIdx >= list.length) mvSelIdx = Math.max(0, list.length - 1);
+    // 运动器列表下拉框
+    if (StepUI.mvSel) {
+      StepUI.mvSel.textContent = '';
+      if (!list.length) {
+        const o = document.createElement('option');
+        o.textContent = '（还没有运动器，在下方「类型」里选一个）';
+        StepUI.mvSel.appendChild(o);
+        StepUI.mvSel.disabled = true;
+      } else {
+        StepUI.mvSel.disabled = false;
+        list.forEach((m, i) => {
+          const o = document.createElement('option');
+          o.value = String(i);
+          o.textContent = (i + 1) + '. ' + (MV_LABEL[m.type] || '未设类型') + (m.event ? ' · ' + m.event : '');
+          StepUI.mvSel.appendChild(o);
+        });
+        StepUI.mvSel.value = String(mvSelIdx);
+      }
+    }
+    const m = list[mvSelIdx] || MV_DEFAULT();
     StepUI.mvType.value = m.type || '';
     StepUI.mvAxis.value = m.axis || 'y';
     StepUI.mvDist.value = m.dist ?? 2;
@@ -1884,59 +1917,115 @@ export function createEditor() {
     StepUI.mvEvent.value = m.event || '';
     const isZone = rec.url === 'builtin:zone';
     StepUI.mvTabRow.style.display = isZone ? 'block' : 'none';
-    if (isZone) StepUI.mvTabText.value = rec.tab ? (rec.tab.text || '') : '';
+    StepUI.mvTabEvtRow.style.display = isZone ? 'block' : 'none';
+    StepUI.mvZoneRow.style.display = isZone ? 'block' : 'none';
+    StepUI.mvLeaveRow.style.display = isZone ? 'block' : 'none';
+    if (isZone) {
+      StepUI.mvTabText.value = rec.tab ? (rec.tab.text || '') : '';
+      StepUI.mvTabEvent.value = rec.tab ? (rec.tab.event || '') : '';
+      StepUI.mvEnter.value = rec.enter || '';
+      StepUI.mvLeave.value = rec.leave || '';
+    }
     applyMoverRows(m);
     updateMoverInfo(rec);
   }
 
   function applyMoverRows(m) {
-    const rot = m.type === 'rotate';
-    if (StepUI.mvAxisRow) StepUI.mvAxisRow.style.display = rot ? 'none' : 'block';
-    if (StepUI.mvDistRow) StepUI.mvDistRow.style.display = rot ? 'none' : 'block';
+    const rot = m.type === 'rotate' || m.type === 'rotate_oneway';
+    const none = !m.type;
+    if (StepUI.mvAxisRow) StepUI.mvAxisRow.style.display = (rot || none) ? 'none' : 'block';
+    if (StepUI.mvDistRow) StepUI.mvDistRow.style.display = (rot || none) ? 'none' : 'block';
     if (StepUI.mvAngleRow) StepUI.mvAngleRow.style.display = rot ? 'block' : 'none';
   }
 
   function updateMoverInfo(rec) {
     if (!StepUI.mvInfo) return;
-    const m = rec.mover || {};
+    const list = moversOf(rec);
     const parts = [];
-    if (m.type) parts.push(m.type === 'rotate' ? '往返旋转' : '往返平移');
-    if (m.event) parts.push('事件「' + m.event + '」');
-    if (rec.tab && rec.tab.text) parts.push('选项卡「' + rec.tab.text + '」');
+    for (const m of list) {
+      if (!m.type && !m.event) continue;
+      let s = MV_LABEL[m.type] || '未设类型';
+      if (m.type === 'rotate' || m.type === 'rotate_oneway') s += ' ' + (m.angle ?? 90) + '°';
+      else if (m.type) s += ' ' + (m.axis || 'y') + ' ' + (m.dist ?? 2) + 'm';
+      if (m.event) s += ' ←「' + m.event + '」';
+      parts.push(s);
+    }
+    if (rec.tab && (rec.tab.text || rec.tab.event)) parts.push('选项卡「' + (rec.tab.text || '?') + '」→ ' + (rec.tab.event || '（未配事件）'));
+    if ((rec.enter || '').trim()) parts.push('进入 → ' + rec.enter.trim());
+    if ((rec.leave || '').trim()) parts.push('离开 → ' + rec.leave.trim());
     // 活动物体的碰撞随动是有条件的（complex 复杂碰撞是烘死的三角形汤，不随动）——
     // 这里直说，避免"配完运动器发现人还能穿过门"的困惑。
-    if (m.type && m.event) {
+    if (list.some((m) => m.type && m.event)) {
       parts.push(isComplex(rec) ? '⚠ complex 碰撞不随动' : '碰撞盒随动');
     }
     StepUI.mvInfo.textContent = parts.length ? '将保存：' + parts.join(' · ') : '未配置（保存时不写这些字段）';
   }
 
+  // 运动器字段绑定：fn(rec, mover, el) —— mover 是当前选中的条目，tab/enter/leave 等挂在 rec 上。
+  // input 只刷「将保存」摘要（重设 value 会打断输入光标）；change（失焦/下拉）才整面板重刷。
   function bindMover(id, fn) {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener('input', () => {
+    const handle = () => {
       const rec = state.selected;
       if (!rec || rec.kind === 'scenery' || rec.kind === 'window') return;
-      fn(rec, el);
+      const list = moversOf(rec);
+      if (!list[mvSelIdx]) list[mvSelIdx] = MV_DEFAULT();
+      fn(rec, list[mvSelIdx], el);
       updateMoverInfo(rec);
       markDirty();
-    });
-    // change：下拉框/失焦后按新值刷新行显隐（选「旋转」要切掉「距离」亮出「摆角」）
+    };
+    el.addEventListener('input', handle);
     el.addEventListener('change', () => {
       const rec = state.selected;
       if (!rec || rec.kind === 'scenery' || rec.kind === 'window') return;
-      fn(rec, el);
+      const list = moversOf(rec);
+      if (!list[mvSelIdx]) list[mvSelIdx] = MV_DEFAULT();
+      fn(rec, list[mvSelIdx], el);
       syncMoverUI(rec);
       markDirty();
     });
   }
-  bindMover('mvType', (rec, el) => { moverOf(rec).type = el.value; });
-  bindMover('mvAxis', (rec, el) => { moverOf(rec).axis = el.value; });
-  bindMover('mvDist', (rec, el) => { moverOf(rec).dist = parseFloat(el.value) || 2; });
-  bindMover('mvAngle', (rec, el) => { moverOf(rec).angle = parseFloat(el.value) || 90; });
-  bindMover('mvSpeed', (rec, el) => { moverOf(rec).speed = parseFloat(el.value) || 2; });
-  bindMover('mvEvent', (rec, el) => { moverOf(rec).event = el.value.trim(); });
-  bindMover('mvTabText', (rec, el) => { tabOf(rec).text = el.value.trim(); });
+  bindMover('mvType', (rec, m, el) => { m.type = el.value; });
+  bindMover('mvAxis', (rec, m, el) => { m.axis = el.value; });
+  bindMover('mvDist', (rec, m, el) => { m.dist = parseFloat(el.value) || 2; });
+  bindMover('mvAngle', (rec, m, el) => { m.angle = parseFloat(el.value) || 90; });
+  bindMover('mvSpeed', (rec, m, el) => { m.speed = parseFloat(el.value) || 2; });
+  bindMover('mvEvent', (rec, m, el) => { m.event = el.value.trim(); });
+  // 三维区域专属：选项卡文字/事件、进/离区域事件（挂在 rec 上，不属于任何单个运动器）
+  bindMover('mvTabText', (rec, _m, el) => {
+    if (!rec.tab) rec.tab = { text: '', event: '' };
+    rec.tab.text = el.value.trim();
+  });
+  bindMover('mvTabEvent', (rec, _m, el) => {
+    if (!rec.tab) rec.tab = { text: '', event: '' };
+    rec.tab.event = el.value.trim();
+  });
+  bindMover('mvEnter', (rec, _m, el) => { rec.enter = el.value.trim(); });
+  bindMover('mvLeave', (rec, _m, el) => { rec.leave = el.value.trim(); });
+  // 列表切换 / 增删
+  if (StepUI.mvSel) StepUI.mvSel.addEventListener('change', () => {
+    mvSelIdx = parseInt(StepUI.mvSel.value, 10) || 0;
+    const rec = state.selected;
+    if (rec) syncMoverUI(rec);
+  });
+  if (StepUI.mvAdd) StepUI.mvAdd.addEventListener('click', () => {
+    const rec = state.selected;
+    if (!rec || rec.kind === 'scenery' || rec.kind === 'window') return;
+    moversOf(rec).push(MV_DEFAULT());
+    mvSelIdx = rec.movers.length - 1;
+    syncMoverUI(rec);
+    markDirty();
+  });
+  if (StepUI.mvDel) StepUI.mvDel.addEventListener('click', () => {
+    const rec = state.selected;
+    if (!rec || rec.kind === 'scenery' || rec.kind === 'window') return;
+    const list = moversOf(rec);
+    if (list.length) list.splice(mvSelIdx, 1);
+    mvSelIdx = Math.max(0, mvSelIdx - 1);
+    syncMoverUI(rec);
+    markDirty();
+  });
 
   // ---------- 碰撞体面板（仅对用户放置对象显示） ----------
   // simple / complex 两种碰撞复杂度（对齐 UE）：simple 用编辑器生成的盒/凸包；complex 由运行时从渲染网格烘焙。
@@ -2696,8 +2785,13 @@ export function createEditor() {
         };
         // 运动 / 事件配置：只在真的配了内容时才写 —— 旧存档/没配的摆件字段缺失，
         // 游戏端按「没有运动器/没有选项卡」处理，行为与从前完全一致。
-        if (rec.mover && rec.mover.type && (rec.mover.event || '').trim()) out.mover = { ...rec.mover };
+        // movers：多运动器数组；旧的单个 mover 字段照常兼容（读档时迁移进数组）。
+        const mvs = (Array.isArray(rec.movers) ? rec.movers : (rec.mover && rec.mover.type ? [rec.mover] : []))
+          .filter((m) => m && m.type && (m.event || '').trim());
+        if (mvs.length) out.movers = mvs.map((m) => ({ ...m }));
         if (rec.tab && ((rec.tab.text || '').trim() || (rec.tab.event || '').trim())) out.tab = { ...rec.tab };
+        if ((rec.enter || '').trim()) out.enter = rec.enter.trim();
+        if ((rec.leave || '').trim()) out.leave = rec.leave.trim();
         // 兼容旧的内嵌 data URL 记录
         if (!out.url && rec.data) out.data = rec.data;
         return out;
@@ -2809,9 +2903,12 @@ export function createEditor() {
           ? it.convexParts.map((h) => ({ vertices: h.vertices.slice(), faces: h.faces.slice() })) : null,
         // 烘焙光照结果：数组 [{ key: meshName, dataURL, w, h }]，运行时游戏端按 key 套回材质。
         lightmaps: (Array.isArray(it.lightmaps) && it.lightmaps.length) ? it.lightmaps.map((l) => ({ ...l })) : null,
-        // 运动 / 事件配置：旧存档没有这两个字段 → null，行为与从前一致
+        // 运动 / 事件配置：旧存档只有 mover（单个）→ 读入时统一迁进 movers 数组
         mover: it.mover ? { ...it.mover } : null,
+        movers: Array.isArray(it.movers) && it.movers.length ? it.movers.map((m) => ({ ...m })) : null,
         tab: it.tab ? { ...it.tab } : null,
+        enter: (typeof it.enter === 'string' && it.enter.trim()) || null,
+        leave: (typeof it.leave === 'string' && it.leave.trim()) || null,
         obj,
       };
       obj.name = nm;

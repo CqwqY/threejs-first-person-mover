@@ -255,22 +255,31 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     scene.add(holder);
     _addedHolders.push(holder); // 记录以便下次重建时移除
 
-    // ---- 运动器（placed 记录的 mover 字段）：事件触发后开始往返平移/旋转 ----
-    // 配了运动器 = 活动物体 → 它的盒/凸包碰撞体每帧随动（见文件末尾 registerSceneMover 调用）。
-    // 没配 event 的运动器不会注册（永远不会动，注册了也是白挂一个订阅）。
-    const wantMover = !!(it.mover && it.mover.event);
+    // ---- 运动器（placed 记录的 movers / mover 字段）：事件触发后开始运动 ----
+    // 一个物体可以挂多个运动器（movers 数组）；旧存档的单个 mover 字段照常兼容。
+    // 配了运动器 = 活动物体 → 它的盒/凸包碰撞体每帧随动（见下方 registerSceneMover 调用）。
+    const moverCfgs = (Array.isArray(it.movers) && it.movers.length)
+      ? it.movers
+      : (it.mover && it.mover.event ? [it.mover] : []);
+    const wantMover = moverCfgs.some((c) => c && c.event);
     const wantDyn = wantMover;
     const dynRecs = []; // 需要随动的碰撞体记录（供 syncMoverColliders 每帧重算）
 
-    // ---- 三维区域的「选项卡」：区域上方的文字标签 sprite + 交互配置 ----
-    // 可见的标签在这里画（挂在区域盒顶上方）；玩家站进区域时出现的那颗点击按钮
-    // 由 Game 端按 holder.userData.__zoneTab 生成（按钮板第四颗，手机 PC 都能点）。
+    // ---- 三维区域的交互配置（选项卡 = 玩家 UI，由 Game 端画 HTML 面板）----
+    //   tab   { text, event }  站进区域时玩家界面出现选项卡，点击触发 event
+    //   enter / leave          进入 / 离开区域时各触发一个事件（自动门、迎宾灯这类）
     if (it.tab && (it.tab.text || it.tab.event)) {
       holder.userData.__zoneTab = {
         text: String(it.tab.text || '互动').slice(0, 12),
         event: String(it.tab.event || '').trim(),
       };
-      if (holder.userData.__zoneTab.text) holder.add(makeZoneTabSprite(holder.userData.__zoneTab.text));
+    }
+    const zEnter = String(it.enter || '').trim();
+    const zLeave = String(it.leave || '').trim();
+    if (zEnter || zLeave) {
+      holder.userData.__zoneEvents = {};
+      if (zEnter) holder.userData.__zoneEvents.enter = zEnter;
+      if (zLeave) holder.userData.__zoneEvents.leave = zLeave;
     }
 
     // ---- complex 模式：模型加载完成后，从渲染网格异步烘焙 trimesh（运行时零存储）----
@@ -298,7 +307,7 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     // 模型加载完成后的统一处理：合并静态子网格 → 开阴影 → 按需烘焙 trimesh
     const setupModel = (m) => {
       holder.add(m);
-      // 三维区域是纯逻辑体积（basic 材质 + 线框 + 上面已挂的 sprite）：
+      // 三维区域是纯逻辑体积（basic 材质 + 线框）：
       // 跳过合并/阴影/光照那一套 —— 半透明盒不该进任何合并或烘焙流程。
       if (it.url === 'builtin:zone') return;
       holder.updateMatrixWorld(true); // 合并要用正确的 matrixWorld（相对 root 烘几何）
@@ -484,7 +493,11 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     if (wantMover) {
       // 标记「活动物体」：阴影烘焙靠它把会动的摆件排除在静态阴影图之外（否则留下原位的残影）
       holder.userData.__mover = true;
-      registerSceneMover(holder, it.mover, () => syncMoverColliders(dynRecs, holder));
+      for (const mc of moverCfgs) {
+        if (!mc || !mc.event) continue;
+        // 多个运动器共享同一份 dynRecs：任一动了都把碰撞体重刷到 holder 当前姿态（幂等）
+        registerSceneMover(holder, mc, () => syncMoverColliders(dynRecs, holder));
+      }
       // complex 的碰撞是从渲染网格烘死的三角形汤（整栋楼几十万顶点），每帧重烘不现实 →
       // 明确不支持随动，宁可打警告也不让人以为"配了运动器碰撞就跟着走"。
       if (isComplex) {
@@ -503,45 +516,8 @@ function enableShadows(obj) {
   obj.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
 }
 
-// 三维区域顶上的「选项卡」标签：canvas 画一块圆角牌子 → Sprite（永远面向相机）。
-// depthTest=false：穿墙也可见 —— 选项卡是"叫玩家过来点"的 UI，被墙挡死就失去意义了。
-// 文字在编辑器里限 12 字，canvas 512x128 足够；贴图用完随场景 dispose（disposeLight 不覆盖 Sprite，
-// 但 Sprite 属于 holder 子树，场景重建时 holder 整体移除，GPU 资源由 three 按材质引用回收）。
-function roundRectPath(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-function makeZoneTabSprite(text) {
-  const cnv = document.createElement('canvas');
-  cnv.width = 512;
-  cnv.height = 128;
-  const ctx = cnv.getContext('2d');
-  ctx.fillStyle = 'rgba(18,32,50,0.9)';
-  roundRectPath(ctx, 20, 24, 472, 80, 26);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(143,216,255,0.95)';
-  ctx.lineWidth = 4;
-  roundRectPath(ctx, 20, 24, 472, 80, 26);
-  ctx.stroke();
-  ctx.fillStyle = '#eaf6ff';
-  ctx.font = '600 50px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, 256, 66);
-  const tex = new THREE.CanvasTexture(cnv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  sp.scale.set(3.2, 0.8, 1);
-  sp.position.y = 3.7; // 局部：区域盒顶（y=3）上方 0.7m
-  sp.renderOrder = 5;
-  return sp;
-}
+// （旧版曾在这里画「区域顶上选项卡」的 canvas sprite —— 选项卡已改成玩家 UI
+//   （Game 端 HTML 面板），世界内不再放牌子，这两个函数随之删除。）
 
 // ---- 编辑器光源（点光源 / 面光源）----
 // 数据字段：{ id, type:'point'|'area', x, y, z, color, intensity, distance, decay, width, height, rotY, rotX }

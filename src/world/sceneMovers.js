@@ -1,14 +1,19 @@
 // 场景运动器：给编辑器摆件挂「被事件触发后开始运动」的能力，并让其碰撞体随动。
 //
-// 数据（编辑器 placed 记录上的 mover 字段，EditorBuildings 负责注册）：
-//   { type:'pingpong', axis:'x'|'y'|'z', dist:米, speed:米/秒, event:'触发事件名' }
-//   { type:'rotate',   angle:度,        speed:度/秒,        event:'触发事件名' }
+// 数据（编辑器 placed 记录上的 mover / movers 字段，EditorBuildings 负责注册）：
+//   { type:'pingpong', axis, dist, speed, event }  往返平移（0..dist 来回）
+//   { type:'oneway',   axis, dist, speed, event }  单向平移（触发后走到 dist 停住，不再响应）
+//   { type:'rotate',   angle, speed, event }       往返旋转（-angle..+angle 来回）
+//   { type:'rotate_oneway', angle, speed, event }  单向旋转（转满 angle 停住）
 //
-// 行为约定（和「选项卡 → 事件」配套）：
-//   · 事件触发 = toggle：第一次开始运动，再触发暂停，再触发继续。
-//   · pingpong 在 0..dist 之间线性往返（开门/升降/平移都够用）；
-//     rotate 在 -angle..+angle 之间往返（绕本地 Y 轴，可做转门/闸机）。
+// 行为约定（和「区域选项卡 → 事件」配套）：
+//   · 往返 = toggle：第一次开始运动，再触发暂停，再触发继续。
+//   · 单向 = 触发一次走到头停住；运动中或已到头时再触发无效（不会瞬移回起点重放）。
 //   · 暂停时保持当前姿态，不回弹归位 —— 玩家不会站在门里被门夹回原位。
+//
+// ⚠ 一个物体可以挂多个运动器（rec.movers 数组）：推进改成**增量式**（每帧只加「这一帧的位移
+//   增量」，不再从 base 重设），所以「平移 X + 平移 Y」或「平移 + 旋转」能自然叠加；
+//   但两个运动器写同一条轴仍会互相叠上去 —— 编辑器提示里已说明，别这么配。
 //
 // ⚠ 配了运动器的摆件就是**活动物体**：它的盒 / 凸包碰撞体每帧跟着重算（syncMoverColliders），
 //   玩家撞得到、站得上、被夹住会被推开。两个例外：
@@ -19,38 +24,46 @@
 import { sceneOn, sceneOff } from './sceneEvents.js';
 import * as THREE from 'three';
 
-const _movers = []; // { obj, cfg, base, baseRot, active, t, rot, dir, moved, onMoved, off }
+const _movers = []; // { obj, cfg, active, t, rot, dir, moved, onMoved, off }
 const _v = new THREE.Vector3(); // 随动重算的复用缓冲（不每帧分配）
 
-// 注册一个运动器。obj 是 EditorBuildings 里带好位置/朝向/缩放的 holder，
-// base 记录注册时的姿态 —— 运动永远是「原姿态 + 偏移」，重建场景后从零开始，不会漂移累积。
+// 注册一个运动器。obj 是 EditorBuildings 里带好位置/朝向/缩放的 holder。
+// 运动量是「注册姿态 + 累计偏移」，场景重建后从零开始，不会漂移累积。
 // onMoved（可选）：该物件**这一帧真的动了**之后调用，用于把碰撞体刷到新姿态。
 export function registerSceneMover(obj, cfg, onMoved) {
   if (!obj || !cfg) return null;
-  const type = cfg.type === 'rotate' ? 'rotate' : 'pingpong';
+  const type = String(cfg.type || '');
+  const isRot = type.indexOf('rotate') === 0;
+  const loop = type.indexOf('oneway') >= 0 ? 'oneway' : 'pingpong';
   const ev = String(cfg.event || '').trim();
   if (!ev) return null; // 没配事件名的运动器永远不会动，直接不注册
   const m = {
     obj,
     cfg: {
-      type,
+      kind: isRot ? 'rotate' : 'translate', // 兼容旧 type：'pingpong'=往返平移、'rotate'=往返旋转
+      loop,
       event: ev,
       axis: ['x', 'y', 'z'].includes(cfg.axis) ? cfg.axis : 'y',
       dist: Math.max(0.1, Number(cfg.dist) || 2),
       speed: Math.max(0.1, Number(cfg.speed) || 2),
       angle: Math.max(1, Number(cfg.angle) || 90),
     },
-    base: obj.position.clone(),
-    baseRot: obj.rotation.y,
     active: false, // 等事件触发才开始
-    t: 0,          // pingpong 当前位移（米）
-    rot: 0,        // rotate 当前角度（度）
+    t: 0,          // 平移当前偏移（米）
+    rot: 0,        // 旋转当前角度（度）
     dir: 1,
     moved: false,  // 本帧是否移动过（决定要不要刷新碰撞体）
     onMoved: typeof onMoved === 'function' ? onMoved : null,
     off: null,     // 事件退订函数（clear 时用）
   };
-  m.off = sceneOn(ev, () => { m.active = !m.active; });
+  m.off = sceneOn(ev, () => {
+    if (m.cfg.loop === 'oneway') {
+      // 单向：只在「还没出发」时响应；运动中/已到头再触发无效（不瞬移回起点重放）
+      if (!m.active && (isRot ? m.rot <= 1e-6 : m.t <= 1e-6)) m.active = true;
+      return;
+    }
+    m.active = !m.active; // 往返：toggle 开始/暂停/继续
+  });
   _movers.push(m);
   return m;
 }
@@ -69,17 +82,18 @@ export function updateSceneMovers(dt) {
   for (const m of _movers) {
     if (!m.active || !m.obj.parent) continue;
     const c = m.cfg;
-    if (c.type === 'pingpong') {
+    if (c.kind === 'translate') {
+      const prev = m.t;
       m.t += d * c.speed * m.dir;
-      if (m.t >= c.dist) { m.t = c.dist; m.dir = -1; }
+      if (m.t >= c.dist) { m.t = c.dist; if (c.loop === 'oneway') m.active = false; else m.dir = -1; }
       else if (m.t <= 0) { m.t = 0; m.dir = 1; }
-      m.obj.position.set(m.base.x, m.base.y, m.base.z);
-      m.obj.position[c.axis] += m.t;
+      if (m.t !== prev) m.obj.position[c.axis] += m.t - prev; // 增量式：多运动器叠加不互相覆写
     } else {
+      const prev = m.rot;
       m.rot += d * c.speed * m.dir;
-      if (m.rot >= c.angle) { m.rot = c.angle; m.dir = -1; }
+      if (m.rot >= c.angle) { m.rot = c.angle; if (c.loop === 'oneway') m.active = false; else m.dir = -1; }
       else if (m.rot <= -c.angle) { m.rot = -c.angle; m.dir = 1; }
-      m.obj.rotation.y = m.baseRot + THREE.MathUtils.degToRad(m.rot);
+      if (m.rot !== prev) m.obj.rotation.y += THREE.MathUtils.degToRad(m.rot - prev);
     }
     m.moved = true;
   }
