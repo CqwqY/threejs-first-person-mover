@@ -257,10 +257,12 @@ export const Config = {
   PROP_MAX: 96,                   // 同屏最多动态体（超出移除最远的）
   PROP_BALL_MAX: 8,               // 商店「充气足球」同时最多几颗（超了摘最早那颗）
   BALL_ENTER_RANGE: 4.5,          // 准星对准大球判定距离（加球半径后生效）
-  BALL_ENTER_KEY: 'KeyF',         // PC 端进/出大球的按键（手游端用「进入/出来」按钮）
+  // ⚠⚠ PC 端 F 是**统一互动键**：进/出大球、抓/松滑索、上下车都挂在它上面，
+  //   由 Game._interactKey() 按「当前最贴近的动作」分派（不要再给这些动作各加一个 keydown）。
+  INTERACT_KEY: 'KeyF',           // 电脑端统一互动键（滑索 / 大球 / 上下车共用）
+  BALL_ENTER_KEY: 'KeyF',         // 进/出大球（与 INTERACT_KEY 同键；手游端用「进入/出来」按钮）
   BALL_CAM_DIST: 8.0,             // 骑乘大球时第三人称相机后退距离（球直径 5.2m，要拉远才看得到全貌）
   BALL_CAM_LIFT: 3.0,             // 骑乘大球时相机抬高（看向球心偏上，能看清自己站在球里）
-  ZIPLINE_KEY: 'KeyE',            // 抓/松滑索（编辑器摆的「滑索」摆件）
   ZIPLINE_RANGE: 2.8,             // 离钢索多近才能抓上（米，以胸口高度判；低端刻意压低到 2.2m 便于从地面抓）
   ZIPLINE_SPEED: 7,               // 在索上移动速度（米/秒，W 向远端 / S 向近端）
   PROP_SIM_RANGE: 40,             // 距本地玩家超过这个距离的道具不积分（米）

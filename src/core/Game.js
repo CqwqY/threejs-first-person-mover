@@ -561,10 +561,12 @@ export class Game {
     // 触屏不显示按键提示，桌面端补上 "(F)"（coarsePointer 在上面设置面板前已判好）
     this._vehKeyHint = coarsePointer ? '' : (' (' + Config.VEHICLE_KEY.slice(-1) + ')');
     this._vehHint = this._createVehicleHint();
+    // F 是统一互动键（上下车 / 抓松滑索 / 进出大球），分派逻辑见 _interactKey()
     window.addEventListener('keydown', (e) => {
-      if (e.code !== Config.VEHICLE_KEY) return;
+      if (e.code !== Config.INTERACT_KEY) return;
+      if (e.repeat) return; // 长按自动重复会把「抓上索」立刻变「松手」
       if (isEditableTarget(document.activeElement)) return;
-      this._toggleVehicle();
+      this._interactKey();
     });
 
     // ---- 玩家聊天：PC 按 T 开输入框，手机点左下角的「聊」按钮 ----
@@ -774,6 +776,7 @@ export class Game {
     this._hideTxtCache = '';
     this._ballPad = this._createBallPad(); // 大足球「推 / 进入」按钮（手游端主入口，PC 也能点）
     this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
+    this._zipHintShown = false;            // PC 端第一次靠近滑索时提示一次按键
     this._ballPrevThirdPerson = false;     // 进球前的视角，出来时还原
     this._zip = null;                      // 挂在滑索上的状态 {A,B,t}
     // ?dbg=1：左上角显示坐标 + 脚下命中的模型名（定位「某处地面消失」这类问题）
@@ -795,20 +798,9 @@ export class Game {
       this._toggleSoul();
     });
 
-    // 大足球：F 键进/出（手游端用「进入/出来」按钮，同一入口 _toggleBallEnter）
-    window.addEventListener('keydown', (e) => {
-      if (e.code !== Config.BALL_ENTER_KEY) return;
-      if (isEditableTarget(document.activeElement)) return;
-      this._toggleBallEnter();
-    });
-
-    // 滑索：E 键抓上/松手（手游端用按钮板里的「抓索/松手」）
-    window.addEventListener('keydown', (e) => {
-      if (e.code !== Config.ZIPLINE_KEY) return;
-      if (isEditableTarget(document.activeElement)) return;
-      if (this._soul || this._dead) return;
-      this._toggleZipline();
-    });
+    // 大足球 / 滑索：电脑端都已并入统一互动键 Config.INTERACT_KEY（见 _interactKey 分派），
+    // 这里不再各挂一个 keydown —— 同一物理键挂两个监听会同时触发「抓索」和「进球」。
+    // 手游端仍是按钮板里各自独立的「进入/出来」「抓索/松手」按钮（见 _createBallPad）。
 
     // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
     // 开了加特林就改成「按住持续扫射」
@@ -7198,6 +7190,44 @@ export class Game {
     this._tryKickProp();
   }
 
+  // ---------- 统一互动键（PC 端 F）----------
+  // 一个键要管三件事（滑索 / 大球 / 载具），必须由**一个**入口按情境分派：
+  // 各自挂 keydown 会同时命中（F 既是球也是车），而且「松手/出来/下车」这类反动作会互相打架。
+  // 优先级按「状态最专一 → 空间最接近」排：
+  //   已在索上 → 已在球里 → 已在车上 → 靠近钢索 → 准星对准球 → 载具/其它
+  // 前三个是「退出」路径，必须排在最前，否则站在球里/索上会分别去抓索、上车，卡住出不来。
+  _interactKey() {
+    if (this._soul || this._dead) return;
+    // 1) 挂在索上：这一下是松手
+    if (this._zip) { this._exitZipline(); return; }
+    // 2) 锁在球里：这一下是出来
+    if (!this._propsOff && this.props && this.props.ridingBall) { this._toggleBallEnter(); return; }
+    // 3) 坐在车上（含驾驶/后座）：这一下是下车
+    if (this.localState && this.localState.ride) { this._toggleVehicle(); return; }
+    // 4) 站地上且够得到钢索：抓上去
+    if (this._nearestZipline()) { this._toggleZipline(); return; }
+    // 5) 准星对着大足球：钻进去
+    if (this._ballAimed()) { this._toggleBallEnter(); return; }
+    // 6) 剩下的交给载具（够不到车就静默返回，不弹无谓提示）
+    this._toggleVehicle();
+  }
+
+  // 电脑端键名（toast 里用）：'KeyF' → 'F'，用来代替写死的字母，改绑定时文案自动跟着变
+  _keyLabel(code) {
+    const c = String(code || '');
+    if (c.startsWith('Key')) return c.slice(3);
+    if (c.startsWith('Digit')) return c.slice(5);
+    return c;
+  }
+
+  // 准星是否对着大足球（返回球体对象或 null）。按钮板与 F 键共用同一判定，避免两处口径不一致。
+  _ballAimed() {
+    if (this._propsOff || !this.props || !this._propsBuilt) return null;
+    const s = this.localState;
+    const d = this._ballAimDir();
+    return this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
+  }
+
   // 「进入 / 出来」：进入后人被锁在球里（球粘着玩家脚下滚），再触发一次就出来
   _toggleBallEnter() {
     if (this._propsOff || !this.props || !this._propsBuilt) return;
@@ -7211,8 +7241,7 @@ export class Game {
       return;
     }
     const s = this.localState;
-    const d = this._ballAimDir();
-    const target = this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
+    const target = this._ballAimed();
     if (!target) { this._toast('先把准星对准大足球（走近一点）'); return; }
     // 记住进球前的视角，出来时还原；进到球里必须第三人称，才能看见自己站在透明球中
     this._ballPrevThirdPerson = this.thirdPerson;
@@ -7233,19 +7262,22 @@ export class Game {
       if (riding) {
         ballShow = true;
       } else {
-        const s = this.localState;
-        const d = this._ballAimDir();
-        ballShow = !!this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
+        ballShow = !!this._ballAimed();
         // PC（非粗指针）第一次对准球提示一次按键；按钮本身在 PC 上也可点（未锁指针时）
         if (ballShow && !this._ballHintShown) {
           this._ballHintShown = true;
-          this._toast('对准大足球：左键推它，' + (Config.BALL_ENTER_KEY === 'KeyF' ? 'F' : Config.BALL_ENTER_KEY) + ' 进入');
+          this._toast('对准大足球：左键推它，' + this._keyLabel(Config.BALL_ENTER_KEY) + ' 进入');
         }
       }
     }
     // 滑索独立于道具系统：挂着时一直显示「松手」，否则靠近才显示「抓索」
     const zipOn = !!this._zip;
     const zipNear = zipOn || !!this._nearestZipline();
+    // PC 端第一次靠近钢索也提示一次按键（电脑上没这颗按钮，不说就没人知道怎么抓）
+    if (zipNear && !zipOn && !this._zipHintShown) {
+      this._zipHintShown = true;
+      this._toast('靠近滑索：按 ' + this._keyLabel(Config.INTERACT_KEY) + ' 抓上钢索 · W/S 沿索上下');
+    }
     const show = ballShow || zipOn || zipNear;
     pad.style.display = show ? 'flex' : 'none';
     if (this._ballPadPush) this._ballPadPush.style.display = ballShow ? '' : 'none';
@@ -7305,7 +7337,7 @@ export class Game {
     return pad;
   }
 
-  // ---------- 滑索（编辑器摆件 builtin:zipline）：E 抓上，W/S 沿索上下，E 松手 ----------
+  // ---------- 滑索（编辑器摆件 builtin:zipline）：F 抓上，W/S 沿索上下，F 松手 ----------
   // 找最近的索：以胸口高度取距离（索很细，只按眼睛高度容易判不到）
   _nearestZipline() {
     const zips = getZiplines();
@@ -7334,9 +7366,10 @@ export class Game {
   _toggleZipline() {
     if (this._zip) { this._exitZipline(); return; }
     const near = this._nearestZipline();
-    if (!near) { this._toast('靠近滑索的钢索再按 E 抓上去'); return; }
+    const k = this._keyLabel(Config.INTERACT_KEY);
+    if (!near) { this._toast('靠近滑索的钢索再按 ' + k + ' 抓上去'); return; }
     this._zip = { A: near.A, B: near.B, t: near.t };
-    this._toast('挂上滑索：W/S 沿索上下移动，再按 E 松手');
+    this._toast('挂上滑索：W/S 沿索上下移动，再按 ' + k + ' 松手');
   }
 
   _exitZipline(quiet) {

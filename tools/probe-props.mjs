@@ -188,5 +188,61 @@ ok(zFar.t === 1, '越过远端应夹在 t=1，实际 ' + zFar.t);
 ok(zLen > 15 && zLen < 17, '索长异常: ' + zLen.toFixed(2));
 console.log('  投影/夹取 索长=' + zLen.toFixed(2) + 'm ✓');
 
+// PC 端统一互动键：F 同时管「滑索 / 大足球 / 上下车」，必须只有一个分派入口。
+// 这里做静态断言，防「某天又给滑索单独挂一个 keydown」→ 一次按键同时抓索 + 进球。
+console.log('=== 互动键 ===');
+{
+  const { readFileSync } = await import('node:fs');
+  const norm = (f) => readFileSync(new URL(f, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const game = norm('../src/core/Game.js');
+  const cfg = norm('../src/config.js');
+
+  ok(/INTERACT_KEY:\s*'KeyF'/.test(cfg), 'config 里 INTERACT_KEY 必须是 KeyF');
+  ok(/BALL_ENTER_KEY:\s*'KeyF'/.test(cfg), 'config 里 BALL_ENTER_KEY 必须与 INTERACT_KEY 同键');
+  ok(!/ZIPLINE_KEY/.test(cfg), '滑索不该再有独立按键（已并入 INTERACT_KEY）');
+
+  // 只能有 1 处 keydown 判 INTERACT_KEY。按「判断语句」计数，不要按文件切片数：
+  // 注释和 toast 里也会出现 Config.INTERACT_KEY，切片法必然误判成多个监听。
+  const count = (re) => (game.match(re) || []).length;
+  const listeners = count(/e\.code\s*!==\s*Config\.INTERACT_KEY/g);
+  ok(listeners === 1, '判 INTERACT_KEY 的 keydown 应恰好 1 处，实际 ' + listeners);
+  ok(!game.includes('Config.ZIPLINE_KEY'), 'Game.js 里不该再引用 Config.ZIPLINE_KEY');
+  // 球不能再单独挂 keydown（否则和 F 分派重复触发）
+  const ballKeyListeners = count(/e\.code\s*!==\s*Config\.BALL_ENTER_KEY/g);
+  ok(ballKeyListeners === 0, '大足球不该再单独挂 keydown（并入 _interactKey）');
+
+  // 抽函数体必须花括号配对（src.slice(indexOf) 会扫到文件末尾）
+  const blockAt = (src, marker) => {
+    const i = src.indexOf(marker);
+    if (i < 0) return '';
+    const s = src.indexOf('{', i);
+    let d = 0;
+    for (let k = s; k < src.length; k++) {
+      if (src[k] === '{') d++;
+      else if (src[k] === '}') { d--; if (d === 0) return src.slice(s, k + 1); }
+    }
+    return '';
+  };
+  const body = blockAt(game, '\n  _interactKey() {');
+  ok(body.length > 0, '找不到 _interactKey() 函数体');
+  // 退出路径必须排在进入路径前：索上松手 → 球里出来 → 车上下来 → 才去抓索/进球/上车
+  const iZip = body.indexOf('this._zip)');
+  const iBall = body.indexOf('ridingBall');
+  const iRide = body.indexOf('localState.ride');
+  const iNear = body.indexOf('_nearestZipline()');
+  const iAim = body.indexOf('_ballAimed()');
+  ok(iZip >= 0 && iZip < iBall, '「索上松手」必须排在「球里出来」之前');
+  ok(iBall < iRide, '「球里出来」必须排在「车上下来」之前');
+  ok(iRide < iNear, '「车上下来」必须排在「抓索」之前');
+  ok(iNear < iAim, '「抓索」必须排在「进球」之前');
+  // 长按自动重复会把「抓上」立刻变「松手」
+  // keydown 里是 `if (...) return;` 单行写法（无花括号），不能用 blockAt 配对，
+  // 直接取判断语句后面的 300 字符窗口即可（这一段就是监听器体）
+  const iKey = game.indexOf('e.code !== Config.INTERACT_KEY');
+  const keyDownBlock = iKey >= 0 ? game.slice(iKey, iKey + 300) : '';
+  ok(/e\.repeat/.test(keyDownBlock), 'interact 键的 keydown 必须挡 e.repeat（长按会瞬间抓了又松）');
+  console.log('  单入口分派 + 退出路径优先 + repeat 守卫 ✓');
+}
+
 console.log(fail === 0 ? '\n✓ 全部通过' : `\n✗ ${fail} 项失败`);
 process.exit(fail === 0 ? 0 : 1);

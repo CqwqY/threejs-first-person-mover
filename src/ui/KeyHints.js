@@ -11,7 +11,7 @@ import { ensureTheme } from './theme.js';
 // 动作 → 键位。键名对应 public/ui/keys 下的文件名（无扩展名）。
 //
 // ⚠⚠ 这份表**必须和 src/config.js 的真实绑定对齐**，别凭记忆写：
-//   VEHICLE_KEY='KeyF'（靠近车是上下车）
+//   INTERACT_KEY='KeyF'（统一互动键：抓/松滑索、进/出大足球、上下车，看当前靠近什么）
 //   PICKUP_KEY='KeyE'（拾取掉落物，不是对话！）· BOSS_SHIELD_KEY='KeyQ'
 //   SOUL_KEY='KeyP'（灵魂出窍）· DROP_MODIFIER_KEY='KeyY'（+数字键丢指定槽位）
 //   F5 切人称在 Game 构造里硬编码（不是 config）
@@ -31,7 +31,7 @@ export const KEYBINDS = [
       { keys: ['mouseL'], label: '攻击（鼠标左键；需先点画面锁定鼠标）' },
       { keys: ['f5'], label: '切换第一 / 第三人称' },
       { keys: ['e'], label: '拾取脚下的掉落物' },
-      { keys: ['f'], label: '与阿花对话 / 上下车（看靠近谁）' },
+      { keys: ['f'], label: '互动：抓/松滑索 · 进/出大足球 · 上下车（靠近谁就管谁）' },
     ],
   },
   {
