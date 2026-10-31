@@ -59,8 +59,19 @@ export class ShadowBaker {
       this.size = size;
 
       // ① 静态根打标 → 全场景网格按标记关掉动态体投影（静态体保留各自原有开关）
+      // ⚠ 活动物体（编辑器里配了运动器的摆件）不能烤：它运行时的姿态一直在变，
+      //   烤进去就是一块留在原地的残影。烘焙图一旦生成就不再重渲，所以这里直接把它排除
+      //   （代价是活动物体没有烘焙阴影 —— 无影好过残影）。
+      const isMoverMesh = (m) => {
+        let p = m;
+        while (p) {
+          if (p.userData && p.userData.__mover === true) return true;
+          p = p.parent;
+        }
+        return false;
+      };
       for (const r of o.staticRoots || []) {
-        r.traverse((m) => { if (m.isMesh) m.userData.__staticCaster = true; });
+        r.traverse((m) => { if (m.isMesh && !isMoverMesh(m)) m.userData.__staticCaster = true; });
       }
       const saved = [];
       scene.traverse((m) => {

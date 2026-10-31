@@ -20,7 +20,7 @@ import {
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 import { applyBackfaceCulling } from './BackfaceCull.js';
 import { clearBuiltinInstances } from './builtins.js';
-import { registerSceneMover, clearSceneMovers } from './sceneMovers.js';
+import { registerSceneMover, clearSceneMovers, syncMoverColliders } from './sceneMovers.js';
 import { clearSceneEvents } from './sceneEvents.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
@@ -256,8 +256,11 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
     _addedHolders.push(holder); // 记录以便下次重建时移除
 
     // ---- 运动器（placed 记录的 mover 字段）：事件触发后开始往返平移/旋转 ----
+    // 配了运动器 = 活动物体 → 它的盒/凸包碰撞体每帧随动（见文件末尾 registerSceneMover 调用）。
     // 没配 event 的运动器不会注册（永远不会动，注册了也是白挂一个订阅）。
-    if (it.mover && it.mover.event) registerSceneMover(holder, it.mover);
+    const wantMover = !!(it.mover && it.mover.event);
+    const wantDyn = wantMover;
+    const dynRecs = []; // 需要随动的碰撞体记录（供 syncMoverColliders 每帧重算）
 
     // ---- 三维区域的「选项卡」：区域上方的文字标签 sprite + 交互配置 ----
     // 可见的标签在这里画（挂在区域盒顶上方）；玩家站进区域时出现的那颗点击按钮
@@ -377,11 +380,21 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       }
 
       if (pureY) {
-        colliders.push({ cx, cy, cz, hx: bx, hy: by, hz: bz, rotY });
+        const c = { cx, cy, cz, hx: bx, hy: by, hz: bz, rotY };
+        // 活动物体：记下「盒中心在 holder 局部坐标 + 相对 holder 的朝向偏移」，
+        // 之后每帧用新的 holder 矩阵重算世界中心/朝向（见 syncMoverColliders）。
+        if (wantDyn) {
+          c.dyn = true;
+          dynRecs.push({ kind: 'box', c, ox, oy, oz, rotOff: rotY - (it.rotY ?? 0) });
+        }
+        colliders.push(c);
         return;
       }
 
       // 含非 Y 分量：展开 8 角点为世界凸包（物理侧走凸包 SAT）
+      // local = 盒局部顶点（含盒四元数旋转 + 盒偏移），世界坐标由它经 holder.matrixWorld 变换而来；
+      // 活动物体每帧只需重新跑这一步，不必重算盒定义。
+      const local = new Float64Array(24);
       const verts = new Float64Array(24);
       const _v = new THREE.Vector3();
       for (let i = 0; i < 8; i++) {
@@ -389,18 +402,24 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
         // 先按盒四元数绕盒中心旋转，再加上盒偏移，最后经 holder 矩阵变换到世界
         _v.set(sx * hx, sy * hy, sz * hz);
         if (typeof cb.qw === 'number') _v.applyQuaternion(_q);
-        _corner.set(ox + _v.x, oy + _v.y, oz + _v.z).applyMatrix4(holder.matrixWorld);
-        verts[i * 3] = _corner.x; verts[i * 3 + 1] = _corner.y; verts[i * 3 + 2] = _corner.z;
+        local[i * 3] = ox + _v.x; local[i * 3 + 1] = oy + _v.y; local[i * 3 + 2] = oz + _v.z;
       }
       let minY = Infinity, maxY = -Infinity;
-      for (let i = 1; i < 24; i += 3) { if (verts[i] < minY) minY = verts[i]; if (verts[i] > maxY) maxY = verts[i]; }
-      colliders.push({
+      for (let i = 0; i < 24; i += 3) {
+        _corner.set(local[i], local[i + 1], local[i + 2]).applyMatrix4(holder.matrixWorld);
+        verts[i] = _corner.x; verts[i + 1] = _corner.y; verts[i + 2] = _corner.z;
+        if (_corner.y < minY) minY = _corner.y;
+        if (_corner.y > maxY) maxY = _corner.y;
+      }
+      const c = {
         type: 'convex',
         vertices: Array.from(verts),
         faces: BOX_FACES.slice(),
         minY, maxY,
         cx, cy, cz,
-      });
+      };
+      if (wantDyn) { c.dyn = true; dynRecs.push({ kind: 'convex', c, local }); }
+      colliders.push(c);
     };
     // collisionMode：simple（默认）走逐盒/凸包生成；complex 由运行时从渲染网格烘焙，此处不生成
     if (it.collisionMode !== 'complex') {
@@ -429,13 +448,25 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
         cx += p.x; cy += p.y; cz += p.z;
       }
       const n = sv.length / 3;
-      colliders.push({
+      const c = {
         type: 'convex',
         vertices: Array.from(wv),
         faces: hull.faces.slice(),
         minY, maxY,
         cx: cx / n, cy: cy / n, cz: cz / n, // 世界空间质心，用于解析方向判断
-      });
+      };
+      // 活动物体：凸包顶点保存一份局部副本，每帧按新矩阵重算世界顶点
+      if (wantDyn) {
+        c.dyn = true;
+        dynRecs.push({ kind: 'convex', c, local: Float64Array.from(sv) });
+        // 性能护栏：凸包随动是「每帧逐顶点做一次矩阵变换」。几千顶点无感，
+        // 上万顶点（V-HACD 凸分解的大模型）就值得换成盒碰撞了 —— 只提示一次，不阻断。
+        if (n > 4000) {
+          console.warn('[EditorBuildings] 活动物体「' + (holder.name || it.url) + '」的凸包有 ' + n +
+            ' 个顶点，每帧随动重算会有可见开销（建议改用盒碰撞）');
+        }
+      }
+      colliders.push(c);
     };
     if (Array.isArray(it.convexParts) && it.convexParts.length) {
       if (!isComplex) { // complex：碰撞完全由 trimesh 提供，不再产出凸包（避免与 trimesh 重复/罩住整栋楼）
@@ -446,6 +477,19 @@ export function buildEditorBuildings(scene, roots, dataOverride, outColliders) {
       if (!isComplex) {
         holder.updateMatrixWorld(true);
         pushHull(it.convex, holder.matrixWorld);
+      }
+    }
+
+    // ---- 运动器注册（必须在本物件的碰撞体都生成之后：活动物体的碰撞随动依赖 dynRecs）----
+    if (wantMover) {
+      // 标记「活动物体」：阴影烘焙靠它把会动的摆件排除在静态阴影图之外（否则留下原位的残影）
+      holder.userData.__mover = true;
+      registerSceneMover(holder, it.mover, () => syncMoverColliders(dynRecs, holder));
+      // complex 的碰撞是从渲染网格烘死的三角形汤（整栋楼几十万顶点），每帧重烘不现实 →
+      // 明确不支持随动，宁可打警告也不让人以为"配了运动器碰撞就跟着走"。
+      if (isComplex) {
+        console.warn('[EditorBuildings] 「' + (holder.name || it.url) +
+          '」同时配了运动器与 complex 复杂碰撞：复杂碰撞不会随运动移动（需要随动请改成盒/凸包碰撞）');
       }
     }
   });

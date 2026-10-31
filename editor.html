@@ -245,7 +245,9 @@
           <div class="panel-title">运动 / 事件（选中物件）</div>
           <div id="mvHint" style="color:#9aa4b1;font-size:11px;line-height:1.6;margin-bottom:6px">
             运动器：被事件触发后开始往返运动（再触发一次 = 暂停/继续）。
-            三维区域的「选项卡」被点击时，会触发它配置的事件名；事件按名字匹配。
+            三维区域的「选项卡」被点击时，会触发它配置的事件名；事件按名字匹配。<br />
+            配了运动器 = <b>活动物体</b>：它的盒/凸包碰撞体会跟着动（玩家推得动、站得上）。
+            complex 复杂碰撞不随动，需要随动请用盒/凸包碰撞。
           </div>
           <div class="field"><label>运动器</label>
             <select id="mvType">

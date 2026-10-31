@@ -1903,6 +1903,11 @@ export function createEditor() {
     if (m.type) parts.push(m.type === 'rotate' ? '往返旋转' : '往返平移');
     if (m.event) parts.push('事件「' + m.event + '」');
     if (rec.tab && rec.tab.text) parts.push('选项卡「' + rec.tab.text + '」');
+    // 活动物体的碰撞随动是有条件的（complex 复杂碰撞是烘死的三角形汤，不随动）——
+    // 这里直说，避免"配完运动器发现人还能穿过门"的困惑。
+    if (m.type && m.event) {
+      parts.push(isComplex(rec) ? '⚠ complex 碰撞不随动' : '碰撞盒随动');
+    }
     StepUI.mvInfo.textContent = parts.length ? '将保存：' + parts.join(' · ') : '未配置（保存时不写这些字段）';
   }
 

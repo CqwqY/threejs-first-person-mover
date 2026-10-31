@@ -109,6 +109,10 @@ export class PlayerPhysics {
       const b = colliders[bi];
       if (!b) continue;
       b._bpIdx = bi; // 查询后按它排回原顺序（见 _byOriginalOrder 的注释）
+      // 活动物体（配了运动器）：碰撞盒每帧都在动，格子归属在注册那一刻就过期了 ——
+      // 放进「每次查询都带上」的常驻列表。代价是每帧多几次 AABB 比较（编辑器里这类物件个位数），
+      // 换来的是「门移到哪儿都撞得到」，不会出现「原处还有堵看不见的墙、新位置能穿过去」。
+      if (b.dyn) { this._bpBig.push(b); continue; }
       let hx, hz;
       if (b.type === 'convex') {
         if (!b._cvPrepared) this._prepareConvex(b);

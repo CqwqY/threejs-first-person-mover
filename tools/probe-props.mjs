@@ -309,6 +309,82 @@ console.log('=== 事件与运动器 ===');
   ok(bl.pointInZoneLocal(0, 3.1, 0) === false, '高于 3m 的点不应在区域内');
   ok(bl.pointInZoneLocal(0, -0.1, 0) === false, '低于区域底面的点不应在区域内');
   console.log('  区域局部盒判定（含边界外一点）✓');
+
+  // ---- 活动物体：配了运动器的物件，碰撞盒/凸包随动 ----
+  // 用真 Object3D（syncMoverColliders 要读 holder.matrixWorld），碰撞体用手写的盒记录。
+  const THREE = await import('three');
+  // ⚠ 必须挂到父节点下：updateSceneMovers 会跳过 obj.parent 为空的物件（已从场景摘掉的对象）。
+  const root = new THREE.Object3D();
+  const bg = new THREE.Object3D();
+  root.add(bg);
+  const box = { cx: 0, cy: 1, cz: 0, hx: 1, hy: 1, hz: 1, rotY: 0, __qBox: null, __bbox: null };
+  const brecs = [{ kind: 'box', c: box, ox: 0, oy: 1, oz: 0, rotOff: 0 }];
+  let movedCount = 0;
+  mv.registerSceneMover(bg, { type: 'pingpong', axis: 'x', dist: 3, speed: 3, event: 'slide' },
+    () => { movedCount++; mv.syncMoverColliders(brecs, bg); });
+  for (let i = 0; i < 10; i++) mv.updateSceneMovers(1 / 60);
+  ok(movedCount === 0, '未触发事件时不该刷新碰撞体');
+  ev.sceneFire('slide');
+  for (let i = 0; i < 30; i++) mv.updateSceneMovers(1 / 60); // 0.5s * 3m/s = 1.5m
+  ok(movedCount > 0, '运动后应触发碰撞体刷新');
+  ok(Math.abs(box.cx - 1.5) < 0.06, '盒碰撞中心应随物件走到 1.5，实际 ' + box.cx.toFixed(3));
+  ok(Math.abs(box.cy - 1) < 1e-6, '只动 X 时盒中心的 Y 不该变');
+  ok(box.__qBox === undefined && box.__bbox === undefined,
+    '随动必须同时清掉世界包围盒缓存（worldQuery 的 __qBox 与 projectileHit 的 __bbox）');
+  ev.sceneFire('slide'); // 暂停
+  const frozen = movedCount;
+  for (let i = 0; i < 10; i++) mv.updateSceneMovers(1 / 60);
+  ok(movedCount === frozen, '暂停期间不该再刷新碰撞体（静态物件零开销）');
+
+  // 旋转运动器：盒的 rotY 必须跟着转，否则门转开了玩家还被斜着的旧盒子挡住
+  const rg = new THREE.Object3D();
+  root.add(rg);
+  const rc = { cx: 0, cy: 1, cz: 0, hx: 2, hy: 1, hz: 0.5, rotY: 0 };
+  const rrecs = [{ kind: 'box', c: rc, ox: 0, oy: 1, oz: 0, rotOff: 0 }];
+  mv.registerSceneMover(rg, { type: 'rotate', angle: 90, speed: 90, event: 'spin2' },
+    () => mv.syncMoverColliders(rrecs, rg));
+  ev.sceneFire('spin2');
+  for (let i = 0; i < 60; i++) mv.updateSceneMovers(1 / 60);
+  ok(Math.abs(rc.rotY - Math.PI / 2) < 0.02,
+    '旋转运动器的碰撞体 rotY 应跟到 +90°，实际 ' + (rc.rotY * 180 / Math.PI).toFixed(1));
+  // 盒中心在局部 y=1、物件只绕 Y 转 → 世界位置不该被转跑（rotY 是轴向，位置不动）
+  ok(Math.abs(rc.cx) < 1e-6 && Math.abs(rc.cy - 1) < 1e-6, '绕 Y 旋转不该改变盒中心高度');
+
+  // 凸包随动：世界顶点重算 + SAT 预计算复位
+  const cg = new THREE.Object3D();
+  cg.position.set(10, 0, 0);
+  const cc = {
+    type: 'convex', vertices: [0, 0, 0, 1, 0, 0, 0, 1, 0], faces: [0, 1, 2],
+    cx: 0, cy: 0, cz: 0, minY: 0, maxY: 0, _cvPrepared: true, __qBox: null, __bbox: null,
+  };
+  const lv = Float64Array.from([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  mv.syncMoverColliders([{ kind: 'convex', c: cc, local: lv }], cg);
+  ok(Math.abs(cc.vertices[0] - 10) < 1e-6, '凸包世界顶点应随物件平移（x 0→10），实际 ' + cc.vertices[0].toFixed(3));
+  ok(Math.abs(cc.cx - (10 + 1 / 3)) < 1e-6, '凸包质心应按顶点重算，实际 ' + cc.cx.toFixed(3));
+  ok(cc._cvPrepared === false, '凸包随动必须复位 PlayerPhysics 的 SAT 预计算（否则法线还是旧朝向）');
+  ok(cc.__qBox === undefined && cc.__bbox === undefined, '凸包随动同样要清两处包围盒缓存');
+  console.log('  活动物体碰撞随动（盒平移/盒旋转/凸包顶点 + 三处缓存失效）✓');
+
+  // 静态断言：随动的三个接线点不能掉
+  {
+    const { readFileSync } = await import('node:fs');
+    const norm = (f) => readFileSync(new URL(f, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const gsrc = norm('../src/core/Game.js');
+    const phys = norm('../src/player/PlayerPhysics.js');
+    const eb = norm('../src/world/EditorBuildings.js');
+    const sb = norm('../src/world/ShadowBaker.js');
+    ok(phys.includes('if (b.dyn) { this._bpBig.push(b); continue; }'),
+      '宽相位必须把活动物体放进常驻列表（否则物体移走后原处仍命中、新位置查不到）');
+    ok(eb.includes('syncMoverColliders(dynRecs, holder)'), 'EditorBuildings 注册运动器时必须挂上碰撞随动');
+    ok(eb.includes('dynRecs.push({ kind: \'box\''), '盒碰撞体必须登记随动记录');
+    ok(eb.includes('dynRecs.push({ kind: \'convex\''), '凸包碰撞体必须登记随动记录');
+    ok(sb.includes('__mover === true'), '阴影烘焙必须排除活动物体（否则阴影留在原位）');
+    const mi = gsrc.indexOf('updateSceneMovers(dt)');
+    const pi = gsrc.indexOf('this.localPlayer.update(dt)');
+    ok(mi >= 0 && pi >= 0 && mi < pi, '运动器推进必须排在玩家物理之前，本帧碰撞盒才就位');
+  }
+  mv.clearSceneMovers();
+  console.log('  随动接线点（宽相位常驻 / 碰撞登记 / 阴影排除 / 主循环顺序）✓');
 }
 
 console.log(fail === 0 ? '\n✓ 全部通过' : `\n✗ ${fail} 项失败`);

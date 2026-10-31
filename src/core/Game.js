@@ -8005,6 +8005,10 @@ export class Game {
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     // 灵魂出窍时冻结肉身：跳过本地玩家更新，鼠标/键位交给灵魂相机
     const _pt1 = this._perf ? performance.now() : 0;
+    // 场景运动器（编辑器配的摆件运动）：事件触发后每帧推进（pingpong/rotate）。
+    // ⚠ 必须排在玩家物理**之前**：配了运动器的物件是活动物体，碰撞体随动在这一次调用里刷好，
+    //   玩家本帧解算才能用上「门现在的位置」（放在后面会慢一帧，快速升降/关门时会出现穿模）。
+    updateSceneMovers(dt);
     if (!this._soul) {
       // 挂滑索时跳过常规更新（重力/碰撞会把位置拽走），位置交给 _updateZipline 直接驱动
       if (this._zip) this._updateZipline(dt);
@@ -8051,8 +8055,7 @@ export class Game {
     this._updateDrops(dt);
     // 物理可交互物：推/滚/连锁 + 蹦床判定 + 状态广播（内部自带 init 延迟与 ?props=off 守卫）
     this._updateProps(dt);
-    // 场景运动器（编辑器配的摆件运动）：事件触发后每帧推进（pingpong/rotate）
-    updateSceneMovers(dt);
+    // 场景运动器已在玩家物理之前推进（见上面 updateSceneMovers 的注释），此处不再重复调用
     // 按钮板（推/进入/抓索/区域选项卡）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
     this._updateBallPad();
     // ?dbg=1：坐标 / 脚下模型读数（定位地面消失类问题）
