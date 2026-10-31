@@ -19,6 +19,7 @@ import {
 } from './LightBaker.js';
 import { registerLodTarget, clearLodTargets } from './Lod.js';
 import { applyBackfaceCulling } from './BackfaceCull.js';
+import { clearBuiltinInstances } from './builtins.js';
 import {
   createWindowMesh, setWindowEnv, WINDOW_DEFAULTS, applyWindowHoles,
   holeAabbOf, objectTouchesAnyHole,
@@ -44,6 +45,8 @@ function clearHolders(scene) {
   _addedHolders = [];
   windowMeshes = [];
   _holeWins = [];
+  // 内置摆件（滑索）也随之失效：清掉登记，避免旧引用一直堆着
+  clearBuiltinInstances();
 }
 
 // 把当前 scene.environment 同步到所有障眼法窗户上。

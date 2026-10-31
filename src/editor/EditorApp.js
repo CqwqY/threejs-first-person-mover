@@ -102,9 +102,14 @@ function asciiFileName(name) {
 
 // 素材库：内建素材（文件名来自 /assets），统一为 {label, url} 绝对路径
 const LIBRARY = [
-  'building-small-a.glb', 'building-small-b.glb', 'building-small-c.glb', 'building-small-d.glb',
-  'building-garage.glb', 'watertower.glb', 'fountain.glb', 'bench.glb', 'lamp.glb', 'tree.glb', 'bush.glb',
-].map((f) => ({ label: f.replace('.glb', ''), url: '/assets/' + f }));
+  // 程序化内置摆件（不是 GLB）：滑索。可滑可爬，玩家在索上能任意上下移动。
+  { label: '滑索', url: 'builtin:zipline' },
+  ...[
+    'building-small-a.glb', 'building-small-b.glb', 'building-small-c.glb', 'building-small-d.glb',
+    'building-garage.glb', 'watertower.glb', 'fountain.glb', 'bench.glb', 'lamp.glb', 'tree.glb', 'bush.glb',
+  ].map((f) => ({ label: f.replace('.glb', ''), url: '/assets/' + f })),
+];
+const ZIPLINE_URL = 'builtin:zipline';
 
 // 已导入模型（存进游戏 assets 目录），持久化在 localStorage
 const IMPORT_KEY = 'city.builder.imports.v1';
@@ -1038,13 +1043,22 @@ export function createEditor() {
     scene.add(obj);
     obj.position.copy(state.ghost.position);
     tagId(item);
+    // 滑索不占碰撞：整条索的包围盒很大，做碰撞会把整片区域变成"走不进去的墙"
+    if (item.url === ZIPLINE_URL && item.collider) item.collider.enabled = false;
     // 放置即显示默认矩形碰撞体线框，模型异步加载完成后自动贴合实际尺寸
     state.placed.push(item);
     buildColliderVis(item);
     select(item);
     markDirty();
     outlinerUpdate();
-    instantiate(state.currentUrl).then((m) => { obj.add(m); optimizeLoaded(m); autoFitCollider(item); syncHoles(); }).catch(() => {});
+    instantiate(state.currentUrl).then((m) => {
+      obj.add(m);
+      optimizeLoaded(m);
+      // 滑索：不做 autoFit（它会强制把碰撞体打开），只需同步一下窗户洞
+      if (item.url === ZIPLINE_URL) { syncHoles(); return; }
+      autoFitCollider(item);
+      syncHoles();
+    }).catch(() => {});
   }
 
   // 模型加载完成后的统一优化：

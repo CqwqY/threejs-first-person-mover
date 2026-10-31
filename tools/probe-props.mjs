@@ -173,5 +173,20 @@ console.log('  仍在动:', moving, ' 陷入地面:', sunk, ' / 共', b.bodies.f
 ok(moving === 0, '3 秒后仍有 ' + moving + ' 个在动（静止判定失效）');
 ok(sunk === 0, '有道具陷进地面');
 
+// 滑索：挂索定位的纯数学（Game._nearestZipline / _updateZipline 用它）
+console.log('=== 滑索 ===');
+const { projectOnSegment, cableLength } = await import('../src/world/builtins.js');
+const zLen = cableLength(0, 9, 0, 0, 3.6, 15);
+const zMid = projectOnSegment(0, 6.3, 7.5, 0, 9, 0, 0, 3.6, 15); // 索中点正上方
+ok(Math.abs(zMid.t - 0.5) < 1e-6, '索中点投影 t 应为 0.5，实际 ' + zMid.t);
+ok(Math.abs(zMid.y - (9 + (3.6 - 9) * 0.5)) < 1e-6, '索中点高度不对');
+ok(zMid.dist < 0.05, '中点到索的距离应≈0，实际 ' + zMid.dist);
+const zOut = projectOnSegment(0, 20, -5, 0, 9, 0, 0, 3.6, 15);
+ok(zOut.t === 0, '越过近端应夹在 t=0，实际 ' + zOut.t);
+const zFar = projectOnSegment(0, 0, 40, 0, 9, 0, 0, 3.6, 15);
+ok(zFar.t === 1, '越过远端应夹在 t=1，实际 ' + zFar.t);
+ok(zLen > 15 && zLen < 17, '索长异常: ' + zLen.toFixed(2));
+console.log('  投影/夹取 索长=' + zLen.toFixed(2) + 'm ✓');
+
 console.log(fail === 0 ? '\n✓ 全部通过' : `\n✗ ${fail} 项失败`);
 process.exit(fail === 0 ? 0 : 1);

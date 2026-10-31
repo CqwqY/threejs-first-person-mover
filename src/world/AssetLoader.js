@@ -6,6 +6,7 @@ import { API_BASE } from '../config.js';
 import { track } from './loadTracker.js';
 import { fetchAsset, isCacheable } from './assetCache.js';
 import { mergeStaticMeshes, countMeshes } from './Merge.js';
+import { createBuiltin } from './builtins.js';
 
 let _loader = null;
 
@@ -130,7 +131,12 @@ export function assetCacheStat() {
 
 // 异步返回一个独立副本（克隆共享 geometry/material），供单个道具使用。
 // 失败时 reject，由调用方继续使用占位模型。
+// ⚠ builtin:xxx 是程序化内置摆件（如滑索），不走网络、不能 clone（每次新建一份）。
 export function instantiate(url) {
+  const u = String(url || '');
+  if (u.startsWith('builtin:')) {
+    return Promise.resolve(createBuiltin(u.slice('builtin:'.length)));
+  }
   return loadGLB(url).then((gltf) => gltf.scene.clone(true));
 }
 

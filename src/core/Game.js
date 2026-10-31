@@ -5,6 +5,7 @@ import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
 import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting, bakeFeatureEnabled } from '../world/Lights.js';
 import { ShadowBaker } from '../world/ShadowBaker.js';
+import { getZiplines, projectOnSegment } from '../world/builtins.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -774,6 +775,7 @@ export class Game {
     this._ballPad = this._createBallPad(); // 大足球「推 / 进入」按钮（手游端主入口，PC 也能点）
     this._ballHintShown = false;           // PC 端第一次对准球时提示一次按键
     this._ballPrevThirdPerson = false;     // 进球前的视角，出来时还原
+    this._zip = null;                      // 挂在滑索上的状态 {A,B,t}
 
     // 三阶段按 Q 手动开护盾（手机端用「护盾」按钮）
     window.addEventListener('keydown', (e) => {
@@ -794,6 +796,14 @@ export class Game {
       if (e.code !== Config.BALL_ENTER_KEY) return;
       if (isEditableTarget(document.activeElement)) return;
       this._toggleBallEnter();
+    });
+
+    // 滑索：E 键抓上/松手（手游端用按钮板里的「抓索/松手」）
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== Config.ZIPLINE_KEY) return;
+      if (isEditableTarget(document.activeElement)) return;
+      if (this._soul || this._dead) return;
+      this._toggleZipline();
     });
 
     // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
@@ -1471,6 +1481,7 @@ export class Game {
     if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.noClip = false;
     this._setChatLock(true); // 名字叫「聊天锁」，实际锁的是移动（physics.controlLock）
     if (this._soul) this._soul = null; // 死亡先收回灵魂，避免相机卡在自由飞行
+    if (this._zip) this._exitZipline(true); // 挂在滑索上死掉：先松手（静默），否则复活流程会被挂索状态接管
     const c = this._combat;
     if (c) {
       this._noteLocalDeath(); // 记阵亡时刻 + 广播（含击杀归因）
@@ -7120,7 +7131,6 @@ export class Game {
     v.radius = Config.PLAYER_RADIUS * (ph ? ph.sizeScale : 1);
     v.height = Config.PLAYER_HEIGHT * (ph ? ph.sizeScale : 1);
     this.props.update(dt, v);
-    this._updateBallPad(); // 准星对准大球 → 亮出「推 / 进入」按钮；骑乘中换字「出来」
   }
 
   // 首次生成布局：等 welcome（出生点）+ 2 秒（让场景碰撞体加载完）再铺
@@ -7208,29 +7218,41 @@ export class Game {
     this._toast('进入足球！走动带着球滚，再按一次出来');
   }
 
-  // 按钮板：准星对着球 → 显示「推 / 进入」；骑乘中 → 显示「推 / 出来」
+  // 按钮板：准星对着球 → 「推 / 进入」；骑乘中 → 「推 / 出来」；靠近滑索 → 「抓索 / 松手」
   _updateBallPad() {
     const pad = this._ballPad;
     if (!pad) return;
-    let show = false;
+    let ballShow = false;
     let riding = false;
     if (!this._propsOff && this.props && this._propsBuilt) {
       riding = !!this.props.ridingBall;
       if (riding) {
-        show = true;
+        ballShow = true;
       } else {
         const s = this.localState;
         const d = this._ballAimDir();
-        show = !!this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
+        ballShow = !!this.props.aimBall(s.x, s.y - 0.15, s.z, d.dx, d.dy, d.dz);
         // PC（非粗指针）第一次对准球提示一次按键；按钮本身在 PC 上也可点（未锁指针时）
-        if (show && !this._ballHintShown) {
+        if (ballShow && !this._ballHintShown) {
           this._ballHintShown = true;
           this._toast('对准大足球：左键推它，' + (Config.BALL_ENTER_KEY === 'KeyF' ? 'F' : Config.BALL_ENTER_KEY) + ' 进入');
         }
       }
     }
+    // 滑索独立于道具系统：挂着时一直显示「松手」，否则靠近才显示「抓索」
+    const zipOn = !!this._zip;
+    const zipNear = zipOn || !!this._nearestZipline();
+    const show = ballShow || zipOn || zipNear;
     pad.style.display = show ? 'flex' : 'none';
-    if (show && this._ballPadEnter) this._ballPadEnter.textContent = riding ? '出来' : '进入';
+    if (this._ballPadPush) this._ballPadPush.style.display = ballShow ? '' : 'none';
+    if (this._ballPadEnter) {
+      this._ballPadEnter.style.display = ballShow ? '' : 'none';
+      this._ballPadEnter.textContent = riding ? '出来' : '进入';
+    }
+    if (this._ballPadZip) {
+      this._ballPadZip.style.display = (zipOn || zipNear) ? '' : 'none';
+      this._ballPadZip.textContent = zipOn ? '松手' : '抓索';
+    }
   }
 
   // 两颗圆按钮（推 / 进入）：贴在跳跃键正上方（手游），PC 端未锁指针时同样可点。
@@ -7266,11 +7288,87 @@ export class Game {
     btnPush.addEventListener('pointerdown', onBtn(() => this._ballPush()));
     const btnEnter = mkBtn('进入');
     btnEnter.addEventListener('pointerdown', onBtn(() => this._toggleBallEnter()));
+    const btnZip = mkBtn('抓索');
+    btnZip.style.display = 'none'; // 只有靠近滑索 / 挂在索上时才出现
+    btnZip.addEventListener('pointerdown', onBtn(() => this._toggleZipline()));
     pad.appendChild(btnPush);
     pad.appendChild(btnEnter);
+    pad.appendChild(btnZip);
     document.body.appendChild(pad);
+    this._ballPadPush = btnPush;
     this._ballPadEnter = btnEnter;
+    this._ballPadZip = btnZip;
     return pad;
+  }
+
+  // ---------- 滑索（编辑器摆件 builtin:zipline）：E 抓上，W/S 沿索上下，E 松手 ----------
+  // 找最近的索：以胸口高度取距离（索很细，只按眼睛高度容易判不到）
+  _nearestZipline() {
+    const zips = getZiplines();
+    if (!zips.length) return null;
+    const s = this.localState;
+    const probeY = s.y - 0.9;
+    if (!this._zipA) { this._zipA = new THREE.Vector3(); this._zipB = new THREE.Vector3(); }
+    const A = this._zipA, B = this._zipB;
+    let best = null;
+    let bestD = Config.ZIPLINE_RANGE;
+    for (const g of zips) {
+      const z = g.userData && g.userData.__zipline;
+      if (!z || !g.parent) continue;
+      g.updateWorldMatrix(true, false);
+      A.copy(z.a); g.localToWorld(A);
+      B.copy(z.b); g.localToWorld(B);
+      const pr = projectOnSegment(s.x, probeY, s.z, A.x, A.y, A.z, B.x, B.y, B.z);
+      if (pr.dist < bestD) {
+        bestD = pr.dist;
+        best = { A: A.clone(), B: B.clone(), t: pr.t };
+      }
+    }
+    return best;
+  }
+
+  _toggleZipline() {
+    if (this._zip) { this._exitZipline(); return; }
+    const near = this._nearestZipline();
+    if (!near) { this._toast('靠近滑索的钢索再按 E 抓上去'); return; }
+    this._zip = { A: near.A, B: near.B, t: near.t };
+    this._toast('挂上滑索：W/S 沿索上下移动，再按 E 松手');
+  }
+
+  _exitZipline(quiet) {
+    if (!this._zip) return;
+    this._zip = null;
+    const ph = this.localPlayer && this.localPlayer.physics;
+    if (ph && ph.velocity) ph.velocity.set(0, 0, 0);
+    this.localPlayer.bobEnabled = true;
+    if (!quiet) this._toast('松手');
+  }
+
+  // 挂索期间跳过 localPlayer.update（否则重力/碰撞会把位置拽走），位置由参数 t 直接驱动
+  _updateZipline(dt) {
+    const z = this._zip;
+    if (!z) return;
+    const s = this.localState;
+    // 视角仍归鼠标（跳过 update 后相机没人管，这里照灵魂模式的做法自己转）
+    const md = this.input.takeMouseDelta();
+    s.yaw -= md.x * Config.MOUSE_SENSITIVITY;
+    s.pitch -= md.y * Config.MOUSE_SENSITIVITY;
+    const lim = THREE.MathUtils.degToRad(Config.MAX_PITCH_DEG);
+    s.pitch = THREE.MathUtils.clamp(s.pitch, -lim, lim);
+    // 沿索推进：W 向 B 端、S 向 A 端；首尾夹住不许滑出索
+    const len = Math.max(1e-3, z.A.distanceTo(z.B));
+    let dir = 0;
+    if (this.input.forwarded()) dir += 1;
+    if (this.input.backwarded()) dir -= 1;
+    if (dir) z.t = THREE.MathUtils.clamp(z.t + (dir * Config.ZIPLINE_SPEED * dt) / len, 0, 1);
+    s.x = z.A.x + (z.B.x - z.A.x) * z.t;
+    s.z = z.A.z + (z.B.z - z.A.z) * z.t;
+    s.y = (z.A.y + (z.B.y - z.A.y) * z.t) - 0.35; // 头顶略低于索：人挂在索下，不穿模
+    const ph = this.localPlayer && this.localPlayer.physics;
+    if (ph && ph.velocity) ph.velocity.set(0, 0, 0);
+    this.localPlayer.bobEnabled = false;
+    this.camera.position.set(s.x, s.y, s.z);
+    this.camera.rotation.set(s.pitch, s.yaw, 0);
   }
 
   // 准星对着物理道具时，左键改成「踢」；命中才返回 true（否则交给普通攻击）
@@ -7739,7 +7837,11 @@ export class Game {
     // 更新玩家逻辑（本地玩家 + 远程玩家插值）
     // 灵魂出窍时冻结肉身：跳过本地玩家更新，鼠标/键位交给灵魂相机
     const _pt1 = this._perf ? performance.now() : 0;
-    if (!this._soul) this.localPlayer.update(dt);
+    if (!this._soul) {
+      // 挂滑索时跳过常规更新（重力/碰撞会把位置拽走），位置交给 _updateZipline 直接驱动
+      if (this._zip) this._updateZipline(dt);
+      else this.localPlayer.update(dt);
+    }
     const _pt2 = this._perf ? performance.now() : 0; // 物理（含 trimesh 解算）耗时
     this.playerManager.update(dt);
     // 建造模式：对准高亮 + 编辑中的家具跟随准星（在相机/玩家更新之后跑）
@@ -7780,6 +7882,8 @@ export class Game {
     this._updateDrops(dt);
     // 物理可交互物：推/滚/连锁 + 蹦床判定 + 状态广播（内部自带 init 延迟与 ?props=off 守卫）
     this._updateProps(dt);
+    // 按钮板（推/进入/抓索）：独立于道具系统调用，否则 props=off 时滑索按钮永远不出现
+    this._updateBallPad();
     // 掉落物的「拾取」按钮：靠近才出现（必须放在位置推进之后，用最新坐标判断）
     this._updatePickupHint();
     // 柱顶光点：呼吸 + 瞄准高亮（给「按攻击能飞过去」的反馈）
