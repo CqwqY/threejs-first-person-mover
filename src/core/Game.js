@@ -5463,12 +5463,15 @@ export class Game {
     const y = this.localState.yaw;
     const fx = -Math.sin(y), fz = -Math.cos(y);   // 前向 = (-sin y, -cos y)
     const rx = -fz, rz = fx;                       // 右向 = (-fz, 0, fx)
-    const f = (inp.forwarded && inp.forwarded() ? 1 : 0) - (inp.backwarded && inp.backwarded() ? 1 : 0);
-    const s = (inp.strafeRight && inp.strafeRight() ? 1 : 0) - (inp.strafeLeft && inp.strafeLeft() ? 1 : 0);
+    // 键盘 WASD + 手机端左摇杆（joyX 右正 / joyY 前正）合并为方向意图；桌面端摇杆恒为 0 不影响
+    let f = (inp.forwarded && inp.forwarded() ? 1 : 0) - (inp.backwarded && inp.backwarded() ? 1 : 0) + inp.joyY;
+    let s = (inp.strafeRight && inp.strafeRight() ? 1 : 0) - (inp.strafeLeft && inp.strafeLeft() ? 1 : 0) + inp.joyX;
     let dx = fx * f + rx * s;
     let dz = fz * f + rz * s;
+    // 只在合成方向超过单位向量时归一化（避免摇杆半推被拉成满速），否则保留渐变幅度（半推=半速）
     const dl = Math.hypot(dx, dz);
-    if (dl > 1e-4) { dx /= dl; dz /= dl; } else { dx = 0; dz = 0; }
+    if (dl > 1) { dx /= dl; dz /= dl; }
+    else if (dl < 1e-4) { dx = 0; dz = 0; }
 
     // 3) 驱动球（真实滚动碰撞 + 惯性阻尼），并写回玩家状态为球心
     this.props.driveRidingBall(dt, dx, dz, this.localState);
