@@ -5448,6 +5448,46 @@ export class Game {
     this.camera.rotation.set(this.localState.pitch, yaw, 0);
   }
 
+  // 骑乘大球（球内第一人称载具）：替代 localPlayer.update 驱动玩家 + 相机
+  //   · 鼠标视角照常（updateLook 写 state.yaw/pitch）
+  //   · 不跑常规玩家物理（不走路/重力），玩家就是球心，碰撞由球代劳
+  //   · WASD 按「当前世界水平朝向」给球施加加速度（惯性），松手靠球内阻尼滑行
+  //   · 相机摆在球心，朝向 = 球四元数（随球翻滚）叠加鼠标视角
+  _updateBallRide(dt) {
+    const lp = this.localPlayer;
+    const inp = lp.input;
+    // 1) 视角：复用第一人称鼠标逻辑（state.ride 为假 -> 直接 yaw/pitch，无骑车分层）
+    lp.updateLook(dt);
+
+    // 2) 驾驶方向：以「世界水平前向 / 右向」为基准，不受球翻滚影响 -> 操控始终直观
+    const y = this.localState.yaw;
+    const fx = -Math.sin(y), fz = -Math.cos(y);   // 前向 = (-sin y, -cos y)
+    const rx = -fz, rz = fx;                       // 右向 = (-fz, 0, fx)
+    const f = (inp.forwarded && inp.forwarded() ? 1 : 0) - (inp.backwarded && inp.backwarded() ? 1 : 0);
+    const s = (inp.strafeRight && inp.strafeRight() ? 1 : 0) - (inp.strafeLeft && inp.strafeLeft() ? 1 : 0);
+    let dx = fx * f + rx * s;
+    let dz = fz * f + rz * s;
+    const dl = Math.hypot(dx, dz);
+    if (dl > 1e-4) { dx /= dl; dz /= dl; } else { dx = 0; dz = 0; }
+
+    // 3) 驱动球（真实滚动碰撞 + 惯性阻尼），并写回玩家状态为球心
+    this.props.driveRidingBall(dt, dx, dz, this.localState);
+
+    // 4) 相机：球内第一人称。位置 = 球心；朝向 = 球四元数（随球翻滚）叠鼠标视角
+    const ball = this.props.ridingBall;
+    if (ball) {
+      const e = (this._ballCamE || (this._ballCamE = new THREE.Euler()))
+        .set(this.localState.pitch, this.localState.yaw, 0, 'YXZ');
+      const q = (this._ballCamQ || (this._ballCamQ = new THREE.Quaternion())).setFromEuler(e);
+      if (Config.BALL_RIDE_ROLL_CAM) {
+        this.camera.quaternion.copy(ball.mesh.quaternion).multiply(q);
+      } else {
+        this.camera.quaternion.copy(q);
+      }
+      this.camera.position.set(this.localState.x, this.localState.y, this.localState.z);
+    }
+  }
+
   // 主循环：计算 dt -> 更新玩家 -> 渲染
   // ============ 对战模式：匹配 + 独立竞技场「躲避陨石混战」 ============
 
@@ -7237,10 +7277,15 @@ export class Game {
   _toggleBallEnter() {
     if (this._propsOff || !this.props || !this._propsBuilt) return;
     if (this.props.ridingBall) {
+      const b = this.props.ridingBall;
       this.props.exitBall();
-      // 退出球：还原进球前的视角（原本第一人称就退回第一人称），并恢复模型可见性
+      // 退出球：还原进球前的视角，并把玩家放到球底（脚下贴地），免得出来悬空或被卡进球里
       this.thirdPerson = !!this._ballPrevThirdPerson;
       this._ballPrevThirdPerson = false;
+      this.localState.x = b.x;
+      this.localState.z = b.z;
+      this.localState.y = b.y - b.r + Config.PLAYER_HEIGHT;
+      this.localState.vy = 0;
       this.playerManager.setLocalVisible(this.thirdPerson);
       this._toast('已从足球里出来');
       return;
@@ -7248,12 +7293,13 @@ export class Game {
     const s = this.localState;
     const target = this._ballAimed();
     if (!target) { this._toast('先把准星对准大足球（走近一点）'); return; }
-    // 记住进球前的视角，出来时还原；进到球里必须第三人称，才能看见自己站在透明球中
+    // 记住进球前的视角，出来时还原；进到球里改为「球内第一人称」（相机在球心、随球翻滚，模型藏起）
     this._ballPrevThirdPerson = this.thirdPerson;
     this.props.enterBall(target);
-    this.thirdPerson = true;
-    this.playerManager.setLocalVisible(true);
-    this._toast('进入足球！走动带着球滚，再按一次出来');
+    // 进到球里改「球内第一人称」：相机在球心、随球翻滚；模型藏起来（你在球里看不见自己）
+    this.thirdPerson = false;
+    this.playerManager.setLocalVisible(false);
+    this._toast('进入足球！WASD 驾驶，球会真实翻滚，再按 F 出来');
   }
 
   // ---- 「电动车标准」互动按钮：底部居中**一排**文字钮（桌面首选项带 (F) 键提示）----
@@ -8017,6 +8063,7 @@ export class Game {
     if (!this._soul) {
       // 挂滑索时跳过常规更新（重力/碰撞会把位置拽走），位置交给 _updateZipline 直接驱动
       if (this._zip) this._updateZipline(dt);
+      else if (this.props && this.props.ridingBall) this._updateBallRide(dt);
       else this.localPlayer.update(dt);
       this._sanitizeLocalState(); // NaN 防线：坐标坏了会让相机 NaN → 整个场景消失
     }

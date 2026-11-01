@@ -170,6 +170,7 @@ export class PhysicsProps {
     if (!mat) {
       if (def.transparent) {
         // 玻璃质感：低粗糙 + 高环境反射，配顶点色面板（足球气球的「透明」来自这里）
+        // 双面：玩家进到球里时，从内侧也能看到面板（否则背面被剔除，球内一片空）
         mat = new THREE.MeshStandardMaterial({
           vertexColors: true,
           transparent: true,
@@ -177,6 +178,7 @@ export class PhysicsProps {
           roughness: 0.16,
           metalness: 0.05,
           envMapIntensity: 1.8,
+          side: THREE.DoubleSide,
         });
       } else {
         mat = new THREE.MeshStandardMaterial({
@@ -242,8 +244,10 @@ export class PhysicsProps {
     for (const b of this.bodies) {
       if (b.pad) continue;
       if (b === this.ridingBall) {
-        // 本地骑乘：位置由玩家驱动 + 无滑动滚动（真实滚球），不做积分/重力/网络校正
-        this._followPlayer(b, player, dt);
+        // 本地骑乘：球由 Game._updateBallRide -> driveRidingBall 驱动（真实滚动碰撞 + 惯性）；
+        // 这里只把 mesh 贴到已算好的球心，绝不积分/跟随玩家，避免双重驱动。
+        b.mesh.position.set(b.x, b.y + b.yOff, b.z);
+        continue;
       } else if (b.ridden) {
         // 远端玩家骑乘的球：绝不能积分（否则会掉到地上），只平滑跟随对方广播的 state
         if (b.lerp > 0) {
@@ -252,7 +256,9 @@ export class PhysicsProps {
           b.y += (b.ty - b.y) * Math.min(1, dt * 8);
           b.z += (b.tz - b.z) * Math.min(1, dt * 8);
         }
-        this._rollMesh(b, dt);
+        // 收到网络四元数就直接用（与本地翻滚一致），否则退回速度近似滚动
+        if (!b._qNet) this._rollMesh(b, dt);
+        b._qNet = false;
       } else if (!b.resting) {
         this._integrate(b, dt);
         this._rollMesh(b, dt);
@@ -281,9 +287,12 @@ export class PhysicsProps {
           if (!b.ridden && sp < 0.6) continue;
           if (now - b.lastNet < period * 0.9) continue;
           b.lastNet = now;
-          this.net.sendProp('state', {
-            id: b.id, x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz,
-          });
+          const msg = { id: b.id, x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz };
+          if (b.ridden) {
+            msg.qx = b.mesh.quaternion.x; msg.qy = b.mesh.quaternion.y;
+            msg.qz = b.mesh.quaternion.z; msg.qw = b.mesh.quaternion.w;
+          }
+          this.net.sendProp('state', msg);
         }
       }
     }
@@ -320,6 +329,45 @@ export class PhysicsProps {
     b.z = pz;
     b.y = py;
     b.resting = false;
+  }
+
+  // 骑乘驾驶（球内第一人称载具）：用 moveSphereWorld 做真实滚动碰撞（friction≈1 不被地面摩擦吃掉、
+  // restitution 小不弹飞），输入给水平加速度（惯性加速），松手靠指数阻尼滑行渐停；
+  // 按水平速度做无滑动滚动累积到 mesh.quaternion（球真的在翻）；最后把玩家状态设为球心。
+  driveRidingBall(dt, dirX, dirZ, state) {
+    const b = this.ridingBall;
+    if (!b) return;
+    // 输入加速度（水平，dirX/dirZ 已是单位方向或 0）
+    b.vx += dirX * Config.BALL_RIDE_ACCEL * dt;
+    b.vz += dirZ * Config.BALL_RIDE_ACCEL * dt;
+    // 限速
+    const sp = Math.hypot(b.vx, b.vz);
+    if (sp > Config.BALL_RIDE_MAX_SPEED) {
+      const k = Config.BALL_RIDE_MAX_SPEED / sp;
+      b.vx *= k; b.vz *= k;
+    }
+    // 真实滚动碰撞（重力 + 世界几何 + 隐式地面；friction=1 不泄水平速度）
+    moveSphereWorld(this.colliders, b, dt, b.r, {
+      gravity: GRAVITY,
+      restitution: Config.BALL_RIDE_RESTITUTION,
+      friction: 1.0,
+      floorY: 0,
+    });
+    // 惯性阻尼：指数衰减（松手后滑行渐停）
+    const damp = Math.exp(-Config.BALL_RIDE_DAMP_K * dt);
+    b.vx *= damp; b.vz *= damp;
+    // 无滑动滚动：按水平速度累积到 mesh.quaternion（绕水平法线轴，与 _rollMesh 同向）
+    const vsp = Math.hypot(b.vx, b.vz);
+    if (vsp > 1e-4) {
+      this._axis.set(b.vz, 0, -b.vx);
+      const al = this._axis.length() || 1;
+      this._axis.multiplyScalar(1 / al);
+      b.mesh.rotateOnWorldAxis(this._axis, (vsp * dt) / b.r);
+    }
+    b.resting = false;
+    // 玩家位置 = 球心（state.y 原本是头顶，这里直接当球心用，进出时再换算）；mesh 同步到球心
+    state.x = b.x; state.y = b.y; state.z = b.z;
+    b.mesh.position.set(b.x, b.y + b.yOff, b.z);
   }
 
   // 自由球 / 远端骑乘球：按速度方向做无滑动滚动（速度来自积分或网络 state）
@@ -611,6 +659,14 @@ export class PhysicsProps {
       body.vy = Number(msg.vy) || 0;
       body.vz = Number(msg.vz) || 0;
       body.resting = false;
+      // 骑乘球带四元数：远端直接套用，画面与本地翻滚一致（不再用速度近似滚动）
+      if (msg.qw !== undefined) {
+        body.mesh.quaternion.set(
+          Number(msg.qx) || 0, Number(msg.qy) || 0,
+          Number(msg.qz) || 0, Number(msg.qw) || 1
+        );
+        body._qNet = true;
+      }
       return;
     }
     if (ev === 'spawn') {

@@ -120,6 +120,52 @@ export class LocalPlayer {
 
   // 更新一帧
   update(dt) {
+    this.updateLook(dt);
+
+    // ---- 1.5 驾驶位：接管水平速度（惯性 + 刹车 + 转向）----
+    if (this.state.ride === 1) this._driveVehicle(dt);
+    else { this._vehSpeed = 0; this._vehSteer = 0; }
+
+    // ---- 2. 驱动物理：把 yaw、state 与世界碰撞体一并传入，物理直接写 state 的 x/y/z/onGround ----
+    this.physics.update(dt, this.input, this.state.yaw, this.state, this.colliders);
+
+    // ---- 3. 同步相机位置与旋转（从 state 读取） ----
+    // 水平朝向用 viewYaw（缓动跟上的车头 + 自由视角偏移）：骑车时能左右转头看而不影响行驶方向。
+    if (this.state.ride) {
+      // 骑车第一人称：相机在眼睛基础上再下沉一点，低头就能看见车把（默认相机太高，只看得见前方路）。
+      this.camera.position.set(this.state.x, this.state.y - Config.RIDE_EYE_DROP, this.state.z);
+    } else {
+      this.camera.position.set(this.state.x, this.state.y, this.state.z);
+    }
+    this.camera.rotation.y = this.viewYaw;
+    this.camera.rotation.x = this.state.pitch;
+
+    // ---- 4. 第一人称走路晃动：按本帧实际移动距离推进相位，叠加轻微上下起伏与左右摇摆 ----
+    // 幅度随实际速度缩放，所以贴墙原地推着不会抖；离地或停下时相位归零，避免落地瞬间跳一下。
+    // 骑车时不晃（车本身有速度，再叠走路摆动很怪）。
+    const dx = this.state.x - this._prevX;
+    const dz = this.state.z - this._prevZ;
+    this._prevX = this.state.x;
+    this._prevZ = this.state.z;
+    if (this.bobEnabled && this.state.onGround && !this.state.ride) {
+      const dist = Math.hypot(dx, dz);
+      const v = dt > 0 ? dist / dt : 0;
+      const amp = Math.min(v / Config.MOVE_SPEED, 1) * Config.BOB_AMPLITUDE;
+      this._bobPhase += dist * Config.BOB_SPEED;
+      // 上下起伏：一个步幅一次，所以用 phase * 2
+      this.camera.position.y += Math.sin(this._bobPhase * 2) * amp;
+      // 左右摇摆：沿相机右方向（cos yaw, 0, -sin yaw）偏移，形成自然的重心摆动
+      const sway = Math.cos(this._bobPhase) * amp * 0.6;
+      this.camera.position.x += Math.cos(this.state.yaw) * sway;
+      this.camera.position.z -= Math.sin(this.state.yaw) * sway;
+    } else {
+      this._bobPhase = 0;
+    }
+  }
+
+  // 第一人称鼠标视角（yaw / pitch）更新，写入 state；骑电动车时按 ride 状态分层软跟随。
+  // 球内骑乘（state.ride 为假）走最简单分支：鼠标直接改 yaw / pitch。
+  updateLook(dt) {
     // ---- 1. 从鼠标移动量更新视角（yaw / pitch），写入 state ----
     const { x, y } = this.input.takeMouseDelta();
     // yaw 的符号约定：**yaw 减小 = 向右转**（前方 = (-sin yaw, -cos yaw)，yaw=0 朝 -Z，yaw 减小转向 +X）。
@@ -171,46 +217,6 @@ export class LocalPlayer {
     // 限制俯仰角在 ±80° 内，避免翻转
     const limit = THREE.MathUtils.degToRad(Config.MAX_PITCH_DEG);
     this.state.pitch = THREE.MathUtils.clamp(this.state.pitch, -limit, limit);
-
-    // ---- 1.5 驾驶位：接管水平速度（惯性 + 刹车 + 转向）----
-    if (this.state.ride === 1) this._driveVehicle(dt);
-    else { this._vehSpeed = 0; this._vehSteer = 0; }
-
-    // ---- 2. 驱动物理：把 yaw、state 与世界碰撞体一并传入，物理直接写 state 的 x/y/z/onGround ----
-    this.physics.update(dt, this.input, this.state.yaw, this.state, this.colliders);
-
-    // ---- 3. 同步相机位置与旋转（从 state 读取） ----
-    // 水平朝向用 viewYaw（缓动跟上的车头 + 自由视角偏移）：骑车时能左右转头看而不影响行驶方向。
-    if (this.state.ride) {
-      // 骑车第一人称：相机在眼睛基础上再下沉一点，低头就能看见车把（默认相机太高，只看得见前方路）。
-      this.camera.position.set(this.state.x, this.state.y - Config.RIDE_EYE_DROP, this.state.z);
-    } else {
-      this.camera.position.set(this.state.x, this.state.y, this.state.z);
-    }
-    this.camera.rotation.y = this.viewYaw;
-    this.camera.rotation.x = this.state.pitch;
-
-    // ---- 4. 第一人称走路晃动：按本帧实际移动距离推进相位，叠加轻微上下起伏与左右摇摆 ----
-    // 幅度随实际速度缩放，所以贴墙原地推着不会抖；离地或停下时相位归零，避免落地瞬间跳一下。
-    // 骑车时不晃（车本身有速度，再叠走路摆动很怪）。
-    const dx = this.state.x - this._prevX;
-    const dz = this.state.z - this._prevZ;
-    this._prevX = this.state.x;
-    this._prevZ = this.state.z;
-    if (this.bobEnabled && this.state.onGround && !this.state.ride) {
-      const dist = Math.hypot(dx, dz);
-      const v = dt > 0 ? dist / dt : 0;
-      const amp = Math.min(v / Config.MOVE_SPEED, 1) * Config.BOB_AMPLITUDE;
-      this._bobPhase += dist * Config.BOB_SPEED;
-      // 上下起伏：一个步幅一次，所以用 phase * 2
-      this.camera.position.y += Math.sin(this._bobPhase * 2) * amp;
-      // 左右摇摆：沿相机右方向（cos yaw, 0, -sin yaw）偏移，形成自然的重心摆动
-      const sway = Math.cos(this._bobPhase) * amp * 0.6;
-      this.camera.position.x += Math.cos(this.state.yaw) * sway;
-      this.camera.position.z -= Math.sin(this.state.yaw) * sway;
-    } else {
-      this._bobPhase = 0;
-    }
   }
 
   // 返回本地玩家的可序列化状态，供网络层读取

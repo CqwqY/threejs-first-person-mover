@@ -262,7 +262,13 @@ export const Config = {
   INTERACT_KEY: 'KeyF',           // 电脑端统一互动键（滑索 / 大球 / 上下车共用）
   BALL_ENTER_KEY: 'KeyF',         // 进/出大球（与 INTERACT_KEY 同键；手游端用「进入/出来」按钮）
   BALL_CAM_DIST: 8.0,             // 骑乘大球时第三人称相机后退距离（球直径 5.2m，要拉远才看得到全貌）
-  BALL_CAM_LIFT: 3.0,             // 骑乘大球时相机抬高（看向球心偏上，能看清自己站在球里）
+  BALL_CAM_LIFT: 3.0,
+  // 骑乘球（球内第一人称载具）驾驶参数
+  BALL_RIDE_ACCEL: 16,          // 输入给球的水平加速度（米/秒^2），越大起步越猛
+  BALL_RIDE_MAX_SPEED: 14,      // 骑乘球最大水平速度（米/秒）
+  BALL_RIDE_DAMP_K: 0.9,        // 惯性阻尼系数（指数衰减，越大停得越快；松手后滑行渐停）
+  BALL_RIDE_RESTITUTION: 0.15,  // 骑乘球撞墙/落地恢复系数（小 = 软碰，不弹飞）
+  BALL_RIDE_ROLL_CAM: 1,        // 1 = 相机随球翻滚；0 = 相机保持直立（只球在滚，画面不晃）             // 骑乘大球时相机抬高（看向球心偏上，能看清自己站在球里）
   ZIPLINE_RANGE: 2.8,             // 离钢索多近才能抓上（米，以胸口高度判；低端刻意压低到 2.2m 便于从地面抓）
   ZIPLINE_SPEED: 7,               // 在索上移动速度（米/秒，W 向远端 / S 向近端）
   PROP_SIM_RANGE: 40,             // 距本地玩家超过这个距离的道具不积分（米）

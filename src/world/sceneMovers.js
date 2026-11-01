@@ -8,7 +8,7 @@
 //
 // 行为约定（和「区域选项卡 → 事件」配套）：
 //   · 往返 = toggle：第一次开始运动，再触发暂停，再触发继续。
-//   · 单向 = 触发一次走到头停住；运动中或已到头时再触发无效（不会瞬移回起点重放）。
+//   · 单向(oneway) = 闩锁式往返：每次触发切换一次运动方向 —— 起点->去终点、终点->回起点、途中->反向；
 //   · 暂停时保持当前姿态，不回弹归位 —— 玩家不会站在门里被门夹回原位。
 //
 // ⚠ 一个物体可以挂多个运动器（rec.movers 数组）：推进改成**增量式**（每帧只加「这一帧的位移
@@ -58,8 +58,11 @@ export function registerSceneMover(obj, cfg, onMoved) {
   };
   m.off = sceneOn(ev, () => {
     if (m.cfg.loop === 'oneway') {
-      // 单向：只在「还没出发」时响应；运动中/已到头再触发无效（不瞬移回起点重放）
-      if (!m.active && (isRot ? m.rot <= 1e-6 : m.t <= 1e-6)) m.active = true;
+      if (m.active) {
+        m.dir = -m.dir;   // 闩锁式：运动中触发 -> 反向并继续运动
+      } else {
+        m.active = true;  // 暂停中触发 -> 端点时 dir 已翻向出发点，直接启程；途中则恢复
+      }
       return;
     }
     m.active = !m.active; // 往返：toggle 开始/暂停/继续
@@ -85,14 +88,14 @@ export function updateSceneMovers(dt) {
     if (c.kind === 'translate') {
       const prev = m.t;
       m.t += d * c.speed * m.dir;
-      if (m.t >= c.dist) { m.t = c.dist; if (c.loop === 'oneway') m.active = false; else m.dir = -1; }
-      else if (m.t <= 0) { m.t = 0; m.dir = 1; }
+      if (m.t >= c.dist) { m.t = c.dist; if (c.loop === 'oneway') { m.dir = -1; m.active = false; } else m.dir = -1; }
+      else if (m.t <= 0) { m.t = 0; if (c.loop === 'oneway') { m.dir = 1; m.active = false; } else m.dir = 1; }
       if (m.t !== prev) m.obj.position[c.axis] += m.t - prev; // 增量式：多运动器叠加不互相覆写
     } else {
       const prev = m.rot;
       m.rot += d * c.speed * m.dir;
-      if (m.rot >= c.angle) { m.rot = c.angle; if (c.loop === 'oneway') m.active = false; else m.dir = -1; }
-      else if (m.rot <= -c.angle) { m.rot = -c.angle; m.dir = 1; }
+      if (m.rot >= c.angle) { m.rot = c.angle; if (c.loop === 'oneway') { m.dir = -1; m.active = false; } else m.dir = -1; }
+      else if (m.rot <= -c.angle) { m.rot = -c.angle; if (c.loop === 'oneway') { m.dir = 1; m.active = false; } else m.dir = 1; }
       if (m.rot !== prev) m.obj.rotation.y += THREE.MathUtils.degToRad(m.rot - prev);
     }
     m.moved = true;
