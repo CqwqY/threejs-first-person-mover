@@ -5,6 +5,8 @@
 //   { type:'oneway',   axis, dist, speed, event }  单向平移（触发后走到 dist 停住，不再响应）
 //   { type:'rotate',   angle, speed, event }       往返旋转（-angle..+angle 来回）
 //   { type:'rotate_oneway', angle, speed, event }  单向旋转（转满 angle 停住）
+//   旋转运动器可选 pivot:{x,y,z}（局部偏移，相对物体原点，单位米）：配了就让旋转绕该点转，
+//   而不是绕物体默认原点 —— 例：门绕端点开合（pivot 设在门轴那侧），避免绕脚底/边角甩飞。
 //
 // 行为约定（和「区域选项卡 → 事件」配套）：
 //   · 往返 = toggle：第一次开始运动，再触发暂停，再触发继续。
@@ -47,6 +49,11 @@ export function registerSceneMover(obj, cfg, onMoved) {
       dist: Math.max(0.1, Number(cfg.dist) || 2),
       speed: Math.max(0.1, Number(cfg.speed) || 2),
       angle: Math.max(1, Number(cfg.angle) || 90),
+      // 旋转原点（局部偏移，相对物体原点，米）：配了就让旋转绕该点转（而非物体默认原点）。
+      // 典型用途：门绕端点开合（pivot 设在门轴那侧），而不是绕脚底/边角甩飞。
+      pivot: (cfg.pivot && (cfg.pivot.x || cfg.pivot.y || cfg.pivot.z))
+        ? { x: Number(cfg.pivot.x) || 0, y: Number(cfg.pivot.y) || 0, z: Number(cfg.pivot.z) || 0 }
+        : null,
     },
     active: false, // 等事件触发才开始
     t: 0,          // 平移当前偏移（米）
@@ -96,7 +103,28 @@ export function updateSceneMovers(dt) {
       m.rot += d * c.speed * m.dir;
       if (m.rot >= c.angle) { m.rot = c.angle; if (c.loop === 'oneway') { m.dir = -1; m.active = false; } else m.dir = -1; }
       else if (m.rot <= -c.angle) { m.rot = -c.angle; if (c.loop === 'oneway') { m.dir = 1; m.active = false; } else m.dir = 1; }
-      if (m.rot !== prev) m.obj.rotation.y += THREE.MathUtils.degToRad(m.rot - prev);
+      if (m.rot !== prev) {
+        const dTheta = THREE.MathUtils.degToRad(m.rot - prev);
+        const p = m.pivot;
+        if (p) {
+          // 绕「旋转原点」旋转：刚体绕其局部 pivot 点（在世界中固定）转 dTheta。
+          // 例：门绕端点开合（pivot 设在门轴那侧），而非绕物体默认原点（脚底/边角）甩飞。
+          const obj = m.obj;
+          const ry = obj.rotation.y;
+          const cosR = Math.cos(ry), sinR = Math.sin(ry);
+          const sx = obj.scale.x, sz = obj.scale.z;
+          const pwx = p.x * sx, pwz = p.z * sz;       // pivot 水平分量（含缩放）
+          const px = obj.position.x + (cosR * pwx + sinR * pwz);
+          const pz = obj.position.z + (-sinR * pwx + cosR * pwz);
+          const c1 = Math.cos(dTheta), s1 = Math.sin(dTheta);
+          const dx = obj.position.x - px, dz = obj.position.z - pz;
+          obj.position.x = px + (c1 * dx - s1 * dz);
+          obj.position.z = pz + (s1 * dx + c1 * dz);
+          obj.rotation.y += dTheta;
+        } else {
+          m.obj.rotation.y += dTheta;
+        }
+      }
     }
     m.moved = true;
   }

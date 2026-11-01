@@ -363,6 +363,11 @@ export function createEditor() {
     mvLeave: document.getElementById('mvLeave'),
     mvLeaveRow: document.getElementById('mvLeaveRow'),
     mvInfo: document.getElementById('mvInfo'),
+    mvPivotRow: document.getElementById('mvPivotRow'),
+    mvPivotX: document.getElementById('mvPivotX'),
+    mvPivotY: document.getElementById('mvPivotY'),
+    mvPivotZ: document.getElementById('mvPivotZ'),
+    mvPivotCenter: document.getElementById('mvPivotCenter'),
     showColliders: document.getElementById('showColliders'),
     btnBound: document.getElementById('tBound'),
     boundaryPanel: document.getElementById('boundaryPanel'),
@@ -1914,6 +1919,9 @@ export function createEditor() {
     StepUI.mvDist.value = m.dist ?? 2;
     StepUI.mvSpeed.value = m.speed ?? 2;
     StepUI.mvAngle.value = m.angle ?? 90;
+    StepUI.mvPivotX.value = (m.pivot && m.pivot.x) || 0;
+    StepUI.mvPivotY.value = (m.pivot && m.pivot.y) || 0;
+    StepUI.mvPivotZ.value = (m.pivot && m.pivot.z) || 0;
     StepUI.mvEvent.value = m.event || '';
     const isZone = rec.url === 'builtin:zone';
     StepUI.mvTabRow.style.display = isZone ? 'block' : 'none';
@@ -1936,6 +1944,7 @@ export function createEditor() {
     if (StepUI.mvAxisRow) StepUI.mvAxisRow.style.display = (rot || none) ? 'none' : 'block';
     if (StepUI.mvDistRow) StepUI.mvDistRow.style.display = (rot || none) ? 'none' : 'block';
     if (StepUI.mvAngleRow) StepUI.mvAngleRow.style.display = rot ? 'block' : 'none';
+    if (StepUI.mvPivotRow) StepUI.mvPivotRow.style.display = rot ? 'block' : 'none';
   }
 
   function updateMoverInfo(rec) {
@@ -1945,8 +1954,12 @@ export function createEditor() {
     for (const m of list) {
       if (!m.type && !m.event) continue;
       let s = MV_LABEL[m.type] || '未设类型';
-      if (m.type === 'rotate' || m.type === 'rotate_oneway') s += ' ' + (m.angle ?? 90) + '°';
-      else if (m.type) s += ' ' + (m.axis || 'y') + ' ' + (m.dist ?? 2) + 'm';
+      if (m.type === 'rotate' || m.type === 'rotate_oneway') {
+        s += ' ' + (m.angle ?? 90) + '°';
+        if (m.pivot && (m.pivot.x || m.pivot.y || m.pivot.z)) {
+          s += ' 原点(' + (m.pivot.x || 0).toFixed(1) + ',' + (m.pivot.y || 0).toFixed(1) + ',' + (m.pivot.z || 0).toFixed(1) + ')';
+        }
+      } else if (m.type) s += ' ' + (m.axis || 'y') + ' ' + (m.dist ?? 2) + 'm';
       if (m.event) s += ' ←「' + m.event + '」';
       parts.push(s);
     }
@@ -1992,6 +2005,26 @@ export function createEditor() {
   bindMover('mvAngle', (rec, m, el) => { m.angle = parseFloat(el.value) || 90; });
   bindMover('mvSpeed', (rec, m, el) => { m.speed = parseFloat(el.value) || 2; });
   bindMover('mvEvent', (rec, m, el) => { m.event = el.value.trim(); });
+  // 旋转原点（局部偏移，相对物体原点，米）：旋转运动器绕该点转，而非物体默认原点。
+  bindMover('mvPivotX', (rec, m, el) => { if (!m.pivot) m.pivot = { x: 0, y: 0, z: 0 }; m.pivot.x = parseFloat(el.value) || 0; });
+  bindMover('mvPivotY', (rec, m, el) => { if (!m.pivot) m.pivot = { x: 0, y: 0, z: 0 }; m.pivot.y = parseFloat(el.value) || 0; });
+  bindMover('mvPivotZ', (rec, m, el) => { if (!m.pivot) m.pivot = { x: 0, y: 0, z: 0 }; m.pivot.z = parseFloat(el.value) || 0; });
+  // 「用几何中心」：把旋转原点自动设为物体本地包围盒中心（解决模型原点在脚底/边角，转起来甩飞）。
+  if (StepUI.mvPivotCenter) StepUI.mvPivotCenter.addEventListener('click', () => {
+    const rec = state.selected;
+    if (!rec || !rec.obj) return;
+    const box = new THREE.Box3().setFromObject(rec.obj);
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    rec.obj.worldToLocal(center); // 转 holder 局部未缩放坐标 = 旋转数学语义下的 pivot
+    const list = moversOf(rec);
+    const m = list[mvSelIdx];
+    if (!m) return;
+    if (!m.pivot) m.pivot = { x: 0, y: 0, z: 0 };
+    m.pivot.x = center.x; m.pivot.y = center.y; m.pivot.z = center.z;
+    syncMoverUI(rec);
+    markDirty();
+  });
   // 三维区域专属：选项卡文字/事件、进/离区域事件（挂在 rec 上，不属于任何单个运动器）
   bindMover('mvTabText', (rec, _m, el) => {
     if (!rec.tab) rec.tab = { text: '', event: '' };

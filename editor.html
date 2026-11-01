@@ -274,6 +274,16 @@
           </div>
           <div class="field" id="mvDistRow"><label>距离(米)</label><input id="mvDist" type="number" step="0.5" min="0.1" value="2" /></div>
           <div class="field" id="mvAngleRow" style="display:none"><label>摆角(度)</label><input id="mvAngle" type="number" step="5" min="1" value="90" /></div>
+          <div class="field" id="mvPivotRow" style="display:none">
+            <label>旋转原点</label>
+            <div style="display:flex;gap:4px;align-items:center">
+              <input id="mvPivotX" type="number" step="0.1" value="0" style="width:46px" title="相对物体原点的 X 偏移(米)" />
+              <input id="mvPivotY" type="number" step="0.1" value="0" style="width:46px" title="Y 偏移(米)" />
+              <input id="mvPivotZ" type="number" step="0.1" value="0" style="width:46px" title="Z 偏移(米)" />
+              <button id="mvPivotCenter" type="button" class="import-btn" style="flex:1;font-size:11px">用几何中心</button>
+            </div>
+            <div style="color:#9aa4b1;font-size:10px;margin-top:2px">相对物体原点的局部偏移(米)。默认(0,0,0)绕物体自身原点转；设门轴在端点让门绕铰链开合。点「用几何中心」自动取包围盒中心。</div>
+          </div>
           <div class="field"><label>速度</label><input id="mvSpeed" type="number" step="0.5" min="0.1" value="2" /></div>
           <div class="field"><label>触发事件</label><input id="mvEvent" type="text" maxlength="32" placeholder="如 open_door" /></div>
           <div class="field" id="mvTabRow" style="display:none"><label>选项卡文字</label><input id="mvTabText" type="text" maxlength="12" placeholder="如：开门（留空不显示）" /></div>
