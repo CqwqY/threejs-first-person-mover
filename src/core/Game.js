@@ -7229,6 +7229,23 @@ export class Game {
     };
   }
 
+  // 玩家附近（不要求对准）最近的一颗可交互大球：手机端没有准星、靠「走过去」进入，
+  // 用距离判定；PC 端仍走 _ballAimed（需把准星对准）。两者共用 _toggleBallEnter 入口。
+  _ballNear() {
+    if (this._propsOff || !this.props || !this._propsBuilt) return null;
+    const s = this.localState;
+    let best = null;
+    let bestD = Infinity;
+    const bodies = this.props.bodies || [];
+    for (const b of bodies) {
+      if (b.pad || b.kind !== 'ball' || b.ridden) continue;
+      const d = Math.hypot(b.x - s.x, b.y - s.y, b.z - s.z);
+      if (d > Config.BALL_ENTER_RANGE + b.r) continue;
+      if (d < bestD) { best = b; bestD = d; }
+    }
+    return best;
+  }
+
   // 「推」按钮：与左键踢同一入口（踢即推，力度按质量衰减）
   _ballPush() {
     if (this._propsOff || !this.props || !this._propsBuilt) return;
@@ -7294,8 +7311,9 @@ export class Game {
       return;
     }
     const s = this.localState;
-    const target = this._ballAimed();
-    if (!target) { this._toast('先把准星对准大足球（走近一点）'); return; }
+    // 手机端（无准星）靠「走过去」进入：对准不到但附近有球也允许进；PC 仍要求对准。
+    const target = this._ballAimed() || (this._coarsePointer ? this._ballNear() : null);
+    if (!target) { this._toast(this._coarsePointer ? '走近大足球再进入' : '先把准星对准大足球（走近一点）'); return; }
     // 记住进球前的视角，出来时还原；进到球里改为「球内第一人称」（相机在球心、随球翻滚，模型藏起）
     this._ballPrevThirdPerson = this.thirdPerson;
     this.props.enterBall(target);
@@ -7338,11 +7356,14 @@ export class Game {
       return out;
     }
     if (this._nearestZipline()) out.push(markF({ text: '抓索', fn: () => this._toggleZipline() }));
-    if (!this._propsOff && this.props && this._propsBuilt && this._ballAimed()) {
-      out.push({ text: '推', fn: () => this._ballPush() });
+    // 手机端用「靠近」判定（无准星，走过去即可），PC 用「对准」判定。
+    const ballTarget = this._coarsePointer ? this._ballNear() : this._ballAimed();
+    if (!this._propsOff && this.props && this._propsBuilt && ballTarget) {
+      // 「推」依赖准星方向，只在 PC（有准星）提供；手机端只给「进入」。
+      if (!this._coarsePointer) out.push({ text: '推', fn: () => this._ballPush() });
       out.push(markF({ text: '进入', fn: () => this._toggleBallEnter() }));
       // PC（非粗指针）第一次对准球提示一次按键
-      if (!this._ballHintShown) {
+      if (!this._coarsePointer && !this._ballHintShown) {
         this._ballHintShown = true;
         this._toast('对准大足球：左键推它，' + this._keyLabel(Config.INTERACT_KEY) + ' 进入');
       }
