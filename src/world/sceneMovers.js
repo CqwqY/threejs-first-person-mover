@@ -28,6 +28,7 @@ import * as THREE from 'three';
 
 const _movers = []; // { obj, cfg, active, t, rot, dir, moved, onMoved, off }
 const _v = new THREE.Vector3(); // 随动重算的复用缓冲（不每帧分配）
+let _moverMoving = false; // 本帧是否有运动器真的动了（供物理唤醒静止球，让平台能把球顶起/带着走）
 
 // 注册一个运动器。obj 是 EditorBuildings 里带好位置/朝向/缩放的 holder。
 // 运动量是「注册姿态 + 累计偏移」，场景重建后从零开始，不会漂移累积。
@@ -84,11 +85,14 @@ export function clearSceneMovers() {
 }
 
 export function sceneMoverCount() { return _movers.length; }
+// 本帧是否有运动器在动：物理层据此唤醒所有静止球，使移动中的碰撞体（盒/凸包随动）能把球顶起。
+export function sceneMoversMoving() { return _moverMoving; }
 
 // 每帧推进。数量级 = 编辑器里配了运动器的摆件数（个位数），全量遍历毫无压力。
 export function updateSceneMovers(dt) {
   if (!_movers.length) return;
   const d = Math.min(Math.max(dt, 0), 0.1); // 掉帧/切后台回来的大 dt 钳住，防瞬移
+  _moverMoving = false;
   for (const m of _movers) {
     if (!m.active || !m.obj.parent) continue;
     const c = m.cfg;
@@ -127,6 +131,7 @@ export function updateSceneMovers(dt) {
       }
     }
     m.moved = true;
+    _moverMoving = true; // 有运动器这一帧动了（平移/旋转都算）→ 物理需唤醒静止球
   }
   // 碰撞体随动：放在运动循环之后统一刷（每帧至多一次/物件），不让「谁先谁后」影响同一帧内的姿态。
   for (const m of _movers) {

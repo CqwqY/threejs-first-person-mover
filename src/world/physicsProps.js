@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 import { Config } from '../config.js';
 import { moveSphereWorld, raycastWorld, sphereWorldMTV } from '../world/collision/worldQuery.js';
+import { sceneMoversMoving } from '../world/sceneMovers.js'; // 运动器在动？→ 唤醒静止球让平台能顶起它
 import { PROP_KINDS, resolveKind } from './props/defs.js';
 import { buildSoccerBallGeometry } from './props/soccerBall.js';
 import { P0_ZONES, PROP_SEED, mulberry32, trackDistance } from './props/layout.js';
@@ -241,6 +242,16 @@ export class PhysicsProps {
     if (!this.enabled || !this.bodies.length) return;
     const now = performance.now() / 1000;
 
+    // 平台在动：唤醒所有静止球，让它们重新与（已随动到新位置的）盒/凸包碰撞体碰撞，
+    // 被上升/平移的平台顶起或带着走。球有 resting 快路径（静下来就跳过积分），否则平台从下面顶上来时它纹丝不动。
+    // ⚠ 仅对默认 box/convex 碰撞体有效：complex(trimesh) 碰撞体不随运动移动（编辑器里把平台改成盒/凸包碰撞即可）。
+    if (sceneMoversMoving()) {
+      for (const b of this.bodies) {
+        if (b.pad || b.ridden) continue;
+        b.resting = false;
+      }
+    }
+
     for (const b of this.bodies) {
       if (b.pad) continue;
       if (b === this.ridingBall) {
@@ -398,6 +409,18 @@ export class PhysicsProps {
     return best;
   }
 
+  // 附近所有可进入的大球（未骑乘、在范围 BALL_ENTER_RANGE+r 内）：供多球「鼠标切换选择」用。
+  ballsInEnterRange(state) {
+    if (!state) return [];
+    const out = [];
+    for (const b of this.bodies) {
+      if (b.pad || b.kind !== 'ball' || b.ridden) continue;
+      const d = Math.hypot(b.x - state.x, b.y - state.y, b.z - state.z);
+      if (d <= Config.BALL_ENTER_RANGE + b.r) out.push(b);
+    }
+    return out;
+  }
+
   // 进入：把自己锁进球里（同一时刻只能骑一颗，换球先下旧球）
   enterBall(b) {
     if (!b || b.pad || b.ridden) return false;
@@ -550,24 +573,26 @@ export class PhysicsProps {
   // 踢：射线命中最近的道具，给一个按质量衰减的冲量。
   // 射程按「球面」算（PROP_KICK_RANGE + 半径）：不然巨型足球（r=2.6）站在它旁边
   // 球心就有 ~3.1m 远，永远够不着。
-  kick(ox, oy, oz, dx, dy, dz) {
+  kick(ox, oy, oz, dx, dy, dz, forceBall) {
     if (!this.enabled) return false;
-    let best = null;
-    let bestT = Infinity;
-    const cosArc = Math.cos((Config.PROP_KICK_ARC * Math.PI) / 180);
-    for (const b of this.bodies) {
-      if (b.pad || b.ridden) continue; // 球里有人的时候不许踢（位置由骑手驱动，踢了也会被覆盖）
-      const cx = b.x - ox, cy = b.y - oy, cz = b.z - oz;
-      const t = cx * dx + cy * dy + cz * dz;
-      if (t <= 0 || t > Config.PROP_KICK_RANGE + b.r) continue;
-      const px = ox + dx * t, py = oy + dy * t, pz = oz + dz * t;
-      const perp = Math.hypot(px - b.x, py - b.y, pz - b.z);
-      if (perp > b.r + 0.25) continue;
-      // 张角：命中方向与视线夹角（远距离时半径小，靠距离判就够了；这里再加一道保险）
-      const dot = (cx * dx + cy * dy + cz * dz) / (Math.hypot(cx, cy, cz) || 1);
-      if (dot < cosArc) continue;
-      best = b;
-      bestT = t;
+    let best = forceBall || null;
+    if (!best) {
+      let bestT = Infinity;
+      const cosArc = Math.cos((Config.PROP_KICK_ARC * Math.PI) / 180);
+      for (const b of this.bodies) {
+        if (b.pad || b.ridden) continue; // 球里有人的时候不许踢（位置由骑手驱动，踢了也会被覆盖）
+        const cx = b.x - ox, cy = b.y - oy, cz = b.z - oz;
+        const t = cx * dx + cy * dy + cz * dz;
+        if (t <= 0 || t > Config.PROP_KICK_RANGE + b.r) continue;
+        const px = ox + dx * t, py = oy + dy * t, pz = oz + dz * t;
+        const perp = Math.hypot(px - b.x, py - b.y, pz - b.z);
+        if (perp > b.r + 0.25) continue;
+        // 张角：命中方向与视线夹角（远距离时半径小，靠距离判就够了；这里再加一道保险）
+        const dot = (cx * dx + cy * dy + cz * dz) / (Math.hypot(cx, cy, cz) || 1);
+        if (dot < cosArc) continue;
+        best = b;
+        bestT = t;
+      }
     }
     if (!best) return false;
 

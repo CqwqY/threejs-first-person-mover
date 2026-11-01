@@ -806,6 +806,12 @@ export class Game {
 
     // Boss 战期间鼠标左键投掷粉笔头（指针锁定时 click 不会走画布锁定逻辑，直接在这里派发攻击）；
     // 开了加特林就改成「按住持续扫射」
+    window.addEventListener('wheel', (e) => {
+      if (this._dead || this._soul) return;
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return; // 输入框里滚动不抢
+      if (this._enterCands && this._enterCands.length > 1) this._cycleEnterSel(e.deltaY < 0 ? 1 : -1);
+    }, { passive: true });
     this.renderer.domElement.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       if (document.pointerLockElement !== this.renderer.domElement) return;
@@ -7246,10 +7252,16 @@ export class Game {
     return best;
   }
 
-  // 「推」按钮：与左键踢同一入口（踢即推，力度按质量衰减）
-  _ballPush() {
+  // 「推」按钮：与左键踢同一入口（踢即推，力度按质量衰减）。可指定目标球（多球切换时用）。
+  _ballPush(target) {
     if (this._propsOff || !this.props || !this._propsBuilt) return;
-    this._tryKickProp();
+    const sel = target || (this._enterCands && this._enterCands[this._enterSel || 0]);
+    if (!sel) { this._tryKickProp(); return; }
+    const s = this.localState;
+    let dx = sel.x - s.x, dz = sel.z - s.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    dx /= dl; dz /= dl; // 从玩家指向被推球（水平）的方向
+    this.props.kick(s.x, s.y - 0.15, s.z, dx, 0, dz, sel);
   }
 
   // ---------- 统一互动键（PC 端 F）----------
@@ -7269,8 +7281,10 @@ export class Game {
     if (this.localState && this.localState.ride) { this._toggleVehicle(); return; }
     // 4) 站地上且够得到钢索：抓上去
     if (this._nearestZipline()) { this._toggleZipline(); return; }
-    // 5) 准星对着大足球：钻进去
-    if (this._ballAimed()) { this._toggleBallEnter(); return; }
+    // 5) 附近有大足球（多颗时桌面靠瞄准/滚轮切换、手机靠走过去）：钻进去
+    if (!this._propsOff && this.props && this._propsBuilt && this._enterCands && this._enterCands.length) {
+      this._toggleBallEnter(); return;
+    }
     // 6) 站在带「选项卡」的三维区域里：触发它配的事件（_zoneTabActive 由 _updateZoneUI 每帧刷新）
     if (this._zoneTabActive && this._zoneTabActive.event) { this._fireZoneTab(); return; }
     // 7) 剩下的交给载具（够不到车就静默返回，不弹无谓提示）
@@ -7283,6 +7297,44 @@ export class Game {
     if (c.startsWith('Key')) return c.slice(3);
     if (c.startsWith('Digit')) return c.slice(5);
     return c;
+  }
+
+  // ---- 多球「鼠标切换选择」：附近多颗可进大球时，滚轮/瞄准切换哪颗，F 作用于选中项 ----
+  // 每帧（_updateStdHint 里）刷新候选与选中项；桌面端准星瞄准到某颗会自动选中它。
+  _collectEnterCandidates() {
+    if (this._propsOff || !this.props || !this._propsBuilt) { this._enterCands = []; return; }
+    const list = this.props.ballsInEnterRange(this.localState);
+    this._enterCands = list;
+    if (!this._enterSel || this._enterSel >= list.length) this._enterSel = 0;
+    // 桌面端：准星瞄准到候选中的某颗 → 选中它（鼠标转向即切换）
+    if (!this._coarsePointer) {
+      const aimed = this._ballAimed();
+      if (aimed) { const idx = list.indexOf(aimed); if (idx >= 0) this._enterSel = idx; }
+    }
+  }
+  // 滚轮/「切换」按钮循环选中（dir=+1 下一个，-1 上一个）
+  _cycleEnterSel(dir) {
+    const n = (this._enterCands && this._enterCands.length) || 0;
+    if (n < 2) return;
+    this._enterSel = (((this._enterSel || 0) + dir) % n + n) % n;
+  }
+  // 高亮当前选中球：一个环形（Torus），穿模显示，套在选中球外。
+  _updateEnterHighlight() {
+    const cands = this._enterCands || [];
+    const sel = cands[this._enterSel || 0];
+    if (!sel || (this.props && this.props.ridingBall)) { if (this._selRing) this._selRing.visible = false; return; }
+    if (!this._selRing) {
+      const geo = new THREE.TorusGeometry(1, 0.05, 8, 40);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x39d0ff, transparent: true, opacity: 0.9, depthTest: false });
+      this._selRing = new THREE.Mesh(geo, mat);
+      this._selRing.renderOrder = 999;
+      this.scene.add(this._selRing);
+    }
+    const r = sel.r + 0.25;
+    this._selRing.scale.set(r, r, r);
+    this._selRing.position.set(sel.x, sel.y, sel.z);
+    this._selRing.rotation.x = Math.PI / 2;
+    this._selRing.visible = true;
   }
 
   // 准星是否对着大足球（返回球体对象或 null）。按钮板与 F 键共用同一判定，避免两处口径不一致。
@@ -7311,9 +7363,11 @@ export class Game {
       return;
     }
     const s = this.localState;
-    // 手机端（无准星）靠「走过去」进入：对准不到但附近有球也允许进；PC 仍要求对准。
-    const target = this._ballAimed() || (this._coarsePointer ? this._ballNear() : null);
-    if (!target) { this._toast(this._coarsePointer ? '走近大足球再进入' : '先把准星对准大足球（走近一点）'); return; }
+    this._collectEnterCandidates();
+    // 优先用「当前选中」的候选球；找不到再退回对准/就近（兼容旧习惯）。
+    const cand = this._enterCands || [];
+    const target = cand[this._enterSel || 0] || this._ballAimed() || (this._coarsePointer ? this._ballNear() : null);
+    if (!target) { this._toast(this._coarsePointer ? '走近大足球再进入' : '靠近大足球（滚轮/瞄准切换），' + this._keyLabel(Config.INTERACT_KEY) + ' 进入'); return; }
     // 记住进球前的视角，出来时还原；进到球里改为「球内第一人称」（相机在球心、随球翻滚，模型藏起）
     this._ballPrevThirdPerson = this.thirdPerson;
     this.props.enterBall(target);
@@ -7357,15 +7411,18 @@ export class Game {
     }
     if (this._nearestZipline()) out.push(markF({ text: '抓索', fn: () => this._toggleZipline() }));
     // 手机端用「靠近」判定（无准星，走过去即可），PC 用「对准」判定。
-    const ballTarget = this._coarsePointer ? this._ballNear() : this._ballAimed();
-    if (!this._propsOff && this.props && this._propsBuilt && ballTarget) {
-      // 「推」依赖准星方向，只在 PC（有准星）提供；手机端只给「进入」。
-      if (!this._coarsePointer) out.push({ text: '推', fn: () => this._ballPush() });
-      out.push(markF({ text: '进入', fn: () => this._toggleBallEnter() }));
-      // PC（非粗指针）第一次对准球提示一次按键
-      if (!this._coarsePointer && !this._ballHintShown) {
+    // 附近有大足球：列出所有候选，桌面靠瞄准/滚轮切换、手机靠「切换」按钮，F/进入作用于选中项
+    const cand = this._enterCands || [];
+    if (!this._propsOff && this.props && this._propsBuilt && cand.length) {
+      const sel = cand[this._enterSel || 0];
+      // 「推」只在 PC（有准星）提供；手机端只给「进入 / 切换」。
+      if (!this._coarsePointer) out.push({ text: '推', fn: () => this._ballPush(sel) });
+      const lbl = cand.length > 1 ? '进入(' + (this._enterSel + 1) + '/' + cand.length + ')' : '进入';
+      out.push(markF({ text: lbl, fn: () => this._toggleBallEnter() }));
+      if (cand.length > 1) out.push({ text: '切换', fn: () => this._cycleEnterSel(1) });
+      if (!this._ballHintShown) {
         this._ballHintShown = true;
-        this._toast('对准大足球：左键推它，' + this._keyLabel(Config.INTERACT_KEY) + ' 进入');
+        this._toast('大足球：' + (this._coarsePointer ? '点「切换」选要进的，再点「进入」' : '滚轮/瞄准切换要进哪颗，' + this._keyLabel(Config.INTERACT_KEY) + ' 进入'));
       }
     }
     const tab = this._zoneTabActive;
@@ -7381,10 +7438,12 @@ export class Game {
   _updateStdHint() {
     const box = this._stdHintBox;
     if (!box) return;
-    if (this._soul || this._dead) { box.style.display = 'none'; return; }
+    if (this._soul || this._dead) { if (this._selRing) this._selRing.visible = false; box.style.display = 'none'; return; }
     // 上/下车按钮正显示时让位（同一位置，两排都显示会叠在一起）
     const vehVisible = this._vehHint && this._vehHint.style.display !== 'none';
+    this._collectEnterCandidates();
     const acts = vehVisible ? [] : this._stdActions();
+    this._updateEnterHighlight();
     if (!acts.length) { box.style.display = 'none'; this._stdActsKey = ''; return; }
     const key = acts.map((a) => a.text + (a.f ? '*' : '')).join('|');
     if (key !== this._stdActsKey) {
