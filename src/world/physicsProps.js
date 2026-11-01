@@ -421,6 +421,25 @@ export class PhysicsProps {
     return out;
   }
 
+  // 环境力：把「自己拥有的」球朝某点拉（黑洞 / 磁吸等复用）。竖直方向交给重力。
+  // 只拉 owner ＝本地玩家的球：owner 是位置权威，避免多人对同一颗球各拉各的、抢所有权导致抖动；
+  // 被骑乘的球（ridingBall）由骑手控制，跳过；ownerId 为空（P0 布局球）的球不拉（由各端自然保留）。
+  applyRadialPull(cx, cz, radius, maxSpeed) {
+    if (!this.enabled) return;
+    const me = this.localId;
+    for (const b of this.bodies) {
+      if (b.pad || b.ridden || b.kind !== 'ball') continue;
+      if (b.ownerId !== me) continue;
+      const dx = cx - b.x, dz = cz - b.z;
+      const d = Math.hypot(dx, dz);
+      if (d >= radius || d < 0.7) continue;
+      const speed = Math.min(maxSpeed, d * 3);
+      b.vx = (dx / d) * speed;
+      b.vz = (dz / d) * speed;
+      b.resting = false; // 唤醒：退出 resting 快路径，让 _integrate 重新积分被吸的球
+    }
+  }
+
   // 进入：把自己锁进球里（同一时刻只能骑一颗，换球先下旧球）
   enterBall(b) {
     if (!b || b.pad || b.ridden) return false;

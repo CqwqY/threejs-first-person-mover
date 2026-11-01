@@ -128,7 +128,7 @@ export const SHOP_ITEMS = [
     id: 'inflatable_ball',
     name: '充气足球',
     price: 120,
-    desc: '对着面前打气，变出一颗直径 5 米的巨型透明足球：可以踢、可以推，人还能直接钻进去。场上最多同时 8 颗。',
+    desc: '对着面前打气，变出一颗直径 5 米的巨型透明足球：可以踢、可以推，人还能直接钻进去。场上最多同时 5 颗（服务端限制）。',
     effect: { k: 'spawnball' },
   },
   // ---- 家具（可摆放）· Kenney Furniture Kit 2.0（CC0）----

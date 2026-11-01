@@ -3353,6 +3353,9 @@ export class Game {
           // y 传 null：竖直方向仍交给重力，不然会被吸得悬停在空中
           phys.velocityHold = { x: (dx / d) * speed, y: null, z: (dz / d) * speed, t: 0.15 };
         }
+        // 球也继承「被黑洞吸引」的能力：owner 是位置权威，只拉自己拥有的球，避免多人黑洞抢同一颗。
+        // 对本地 + 远端黑洞都生效（远端黑洞在自己客户端也由 owner 拉、并广播 state），所以全场一致。
+        if (this.props) this.props.applyRadialPull(h.group.position.x, h.group.position.z, Config.BLACKHOLE_PULL_RADIUS, Config.BLACKHOLE_PULL_SPEED);
       }
 
       if (h.t >= Config.BLACKHOLE_LIFE) {
