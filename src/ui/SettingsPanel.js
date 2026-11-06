@@ -29,6 +29,7 @@ export const DEFAULT_SETTINGS = {
   quality: 'mid', // 画质档：high / mid / low（聚合控制阴影分辨率、dpr 封顶、阴影类型）
   renderScale: 'auto', // 渲染分辨率：auto=自适应；'85'/'70' 等 = 钉死为该百分比（弱卡兜底）
   sharpen: 0.5, // 超分锐化强度：0=关；降分辨率后靠它找回清晰度（过大反而显锯齿）
+  tsr: true, // 时域超分（多帧重建，WebGL2 下的类 DLSS 效果）；关掉退回单 pass 锐化
   // 初值跟随已有的 MSAA 标记：之前因为选过低画质档而关掉 AA 的人，不会在这里被悄悄打开
   antiAlias:
     typeof localStorage !== 'undefined' && localStorage.getItem('fpm-noaa') === '1' ? 'off' : 'on',
@@ -151,6 +152,8 @@ const FIELDS = [
   { id: 'renderScale', label: '渲染分辨率(卡顿先降它)', kind: 'select', options: ['auto', '100', '85', '70', '60', '50'], group: '画质', gameOnly: true },
   // 降分辨率后画面会糊，靠这个锐化升采样找补回来（0=关，越大越锐利，过头有锯齿感）
   { id: 'sharpen', label: '超分锐化(配合降分辨率)', kind: 'range', min: 0, max: 1.5, step: 0.1, group: '画质', gameOnly: true },
+  // 多帧时域重建：低分辨率下把边缘/细线恢复到接近原生，代价是每帧多一趟便宜全屏 pass。
+  { id: 'tsr', label: '时域超分(类DLSS·卡就关)', kind: 'toggle', defaultValue: true, group: '画质', gameOnly: true },
   // 降分辨率时立即生效；满分辨率时是画布 MSAA，改完要刷新页面
   { id: 'antiAlias', label: '抗锯齿(刷新后生效)', kind: 'select', options: ['on', 'off'], group: '画质', gameOnly: true },
   { id: 'viewFar', label: '视距', kind: 'range', min: 200, max: 1000, step: 10, group: '视野与阴影' },

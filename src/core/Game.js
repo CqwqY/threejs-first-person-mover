@@ -6,6 +6,7 @@ import { createTimeSky } from '../world/SkyBox.js';
 import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting, bakeFeatureEnabled } from '../world/Lights.js';
 import { ShadowBaker } from '../world/ShadowBaker.js';
 import { RealCharShadow } from '../world/RealCharShadow.js';
+import { TemporalUpscale } from '../world/TemporalUpscale.js';
 import { vehicleSeatPose } from '../world/Attachment.js';
 import { getZiplines, getZones, pointInZoneLocal, projectOnSegment } from '../world/builtins.js';
 import { sceneFire } from '../world/sceneEvents.js';
@@ -206,6 +207,20 @@ export class Game {
     this._sharpen = 0.5;
     this._upRT = null; this._upScene = null; this._upCam = null; this._upMat = null;
     this._upFailed = false;
+    // 时域超分（低分辨率 + 多帧重建，WebGL2 下的 DLSS 效果）：默认开。
+    // ?tsr=0 临时关、?tsr=1 强制开；设置面板可持久化改。能力只在构造期测一次：
+    // WebGL1 没有可靠的可读深度纹理，做不了重投影，直接退回单 pass CAS。
+    this._tsrCapable = TemporalUpscale.supported(this.renderer);
+    this._tsrOn = !!Config.TSR_ENABLED && loadSettings('scene-settings-game-v1').tsr !== false;
+    try {
+      const tsrQ = new URLSearchParams(location.search).get('tsr');
+      if (tsrQ === '0') this._tsrOn = false;
+      else if (tsrQ === '1') this._tsrOn = true;
+    } catch (e) { /* 非浏览器环境没有 location，忽略 URL 开关 */ }
+    this._tsr = null;
+    this._tsrFailed = false;
+    this._sceneRT = null; // 本帧主场景真正渲进去的 RT（TSR 或 CAS 二选一）
+    this._dispSize = new THREE.Vector2(); // getDrawingBufferSize 复用（热路径零分配）
     // 阴影总开关：**默认关**（实测填充率是唯一瓶颈，阴影是最贵的那一趟）。
     // ⚠ 光改 DEFAULT_SETTINGS 是**没用的** —— 游戏端面板 liveApply=false，binds 只在点「应用设置」时跑，
     //   而这里以前又硬编码 enabled=true ⇒ 启动时必须显式按存档值落一次，否则默认值永远是摆设。
@@ -466,13 +481,22 @@ export class Game {
         // 那个只能在构造期决定，改完要刷新页面才生效。
         antiAlias: (v) => {
           this._aaOn = v !== 'off';
-          try { localStorage.setItem('fpm-noaa', this._aaOn ? '0' : '1'); } catch (e) { /* 忽略 */ }
-          if (this._upRT) { try { this._upRT.dispose(); } catch (e) { /* 忽略 */ } this._upRT = null; }
+          try { localStorage.setItem('fpm-noaa', this._aaOn ? '0' : '1'); } catch (e) { /* 隐私模式下忽略 */ }
+          if (this._upRT) { try { this._upRT.dispose(); } catch (e) { console.warn('[Game] 释放超分 RT 失败:', e); } this._upRT = null; }
+          if (this._tsr) this._tsr.reset();
           this._applyRenderScale();
         },
         // 超分锐化强度：0=关（降分辨率后由浏览器拉伸，会糊）；越大越锐利，过头会有锯齿感
         sharpen: (v) => {
           this._sharpen = Number(v) || 0;
+          this._applyRenderScale();
+        },
+        // 时域超分（DLSS 效果）：开 = 多帧 jitter + 深度重投影重建；关 = 退回单 pass 锐化。
+        // 切换时清历史：开关前后画面不连续，旧历史被重投影会拖出一片鬼影。
+        tsr: (v) => {
+          this._tsrOn = !!v;
+          this._tsrFailed = false;
+          if (this._tsr) this._tsr.reset();
           this._applyRenderScale();
         },
         // 手机技能槽排布：切到「2行竖列」时槽位从轮盘搬到网格里。
@@ -543,7 +567,7 @@ export class Game {
         telemetryAuto: (v) => { telemetryAutoSet(!!v); if (v && this._started) this._scheduleTelemetry(); },
       },
       {
-        fields: ['quality', 'renderScale', 'sharpen', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'showFps', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
+        fields: ['quality', 'renderScale', 'sharpen', 'tsr', 'antiAlias', 'viewFar', 'shadowR', 'shadowSize', 'castShadow', 'nameTag', 'showFps', 'skillLayout', 'rideView', 'dayNight', 'dayCycle', 'bgmVolume', 'dayOffset', 'assetCache'],
         storeKey: 'scene-settings-game-v1',
         modal: true,   // 游戏端用居中弹窗；编辑器仍走右上浮层（调光照时要能看着场景）
         title: '设置',
@@ -1006,8 +1030,17 @@ export class Game {
     const up = this._useUpscale();
     this.renderer.setPixelRatio(base * (up ? 1 : (this._dynScale || 1)));
     this.renderer.setSize(w || window.innerWidth, h || window.innerHeight, !!(w && h));
-    if (up) this._ensureRT();
-    else if (this._upRT) { try { this._upRT.dispose(); } catch (e) { /* 忽略 */ } this._upRT = null; }
+    if (up) this._ensureTargets();
+    else {
+      // 回到原生分辨率（自适应升档 / 用户关掉锐化）：超分那套 RT 不再有用。
+      // TSR 的 RT 先留着（下次降回来可直接复用），但历史必须清：画面已经不连续。
+      this._sceneRT = null;
+      if (this._upRT) {
+        try { this._upRT.dispose(); } catch (e) { console.warn('[Game] 释放超分 RT 失败:', e); }
+        this._upRT = null;
+      }
+      if (this._tsr) this._tsr.reset();
+    }
   }
 
   // ---- 超分（低分辨率渲染 + 锐化升采样）----
@@ -1082,6 +1115,51 @@ export class Game {
     //   锐化升采样已把降采样的锯齿补回来，弱机（恒在降分辨率）直接省掉这层填充 → 帧率更稳。
     if (s >= 0.999) return 4;
     return 0;
+  }
+
+  // ---- 时域超分（TSR）与单 pass 锐化的 RT 二选一 ----
+  // ⚠ 两条路径的 RT 必须完全分离：设置面板的 antiAlias 绑定会 dispose _upRT，
+  //   若 TSR 也复用同一个对象，一次点「应用设置」就把历史图和深度纹理一起毁了。
+  _tsrActive() {
+    return !!(this._tsrOn && this._tsrCapable && !this._tsrFailed && this._useUpscale()
+      && (this._tsr ? !this._tsr.failed : true));
+  }
+
+  _ensureTargets() {
+    const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
+    const s = this._dynScale || 1;
+    const rw = Math.max(2, Math.floor(window.innerWidth * base * s));
+    const rh = Math.max(2, Math.floor(window.innerHeight * base * s));
+    // 走超分时画布保持原生分辨率，历史图就按 drawingBuffer 的真实尺寸建。
+    const disp = this.renderer.getDrawingBufferSize(this._dispSize);
+    const dw = Math.max(2, Math.floor(disp.x));
+    const dh = Math.max(2, Math.floor(disp.y));
+    const rtype = (Config.UPSCALE_LDR_RT && this._quality !== 'high')
+      ? THREE.UnsignedByteType : THREE.HalfFloatType;
+    if (this._tsrActive()) {
+      if (this._upRT) {
+        try { this._upRT.dispose(); } catch (e) { console.warn('[Game] 释放 CAS RT 失败:', e); }
+        this._upRT = null;
+      }
+      if (!this._tsr) this._tsr = new TemporalUpscale(this.renderer);
+      if (this._tsr.ensure(rw, rh, dw, dh, rtype)) {
+        this._sceneRT = this._tsr.sceneRT;
+        return true;
+      }
+      // 建不出来就永久退回 CAS 并出声；绝不每帧重试（每帧建 RT = 每帧卡）。
+      this._tsrFailed = true;
+      console.warn('[Game] 时域超分不可用，已退回单 pass 锐化');
+    }
+    // 已判定失败的 TSR 对象要连 RT 一起释放，否则两张显示分辨率历史图会常驻显存。
+    // 用户主动开关切换则不释放：保留已编译的 shader，来回切不会反复触发编译卡顿。
+    if (this._tsr && this._tsr.failed) {
+      this._tsr.dispose();
+      this._tsr = null;
+    }
+    if (!this._ensureRT()) return false;
+    this._sceneRT = this._upRT;
+    if (this._tsr) this._tsr.reset(); // 路径切换/关闭后旧历史作废
+    return true;
   }
 
   _ensureRT() {
@@ -1198,7 +1276,12 @@ export class Game {
         if (this._upScene && typeof r.compile === 'function') r.compile(this._upScene, this._upCam);
         const prevScale = this._dynScale;
         this._dynScale = 0.7; // 用一个"一定会走超分"的系数把 RT 真建出来（换系数时会自动 dispose 旧的）
-        try { if (typeof this._ensureRT === 'function') this._ensureRT(); } finally { this._dynScale = prevScale; }
+        try {
+          if (typeof this._ensureTargets === 'function') this._ensureTargets();
+          // TSR 的 resolve 着色器也要在加载屏里编掉：等自适应把分辨率压下去才第一次见到它，
+          // 那一帧会同时吃「建历史 RT + 编程序」两笔开销，表现为一次特别深的掉帧。
+          if (this._tsr) this._tsr.precompile(r);
+        } finally { this._dynScale = prevScale; }
       }
       } catch (e) {
       console.warn('[Game] 着色器预热失败（忽略，退回运行时编译）:', e);
@@ -1281,6 +1364,8 @@ export class Game {
   _rescanLod() {
     this._scanLodCandidates();
     this._updateLod(this.camera ? this.camera.position : null);
+    // 世界重建（换房 / 编辑器重新生成）后画面内容整体变了，历史图必须作废。
+    if (this._tsr) this._tsr.reset();
   }
 
   _renderFrame() {
@@ -1294,7 +1379,7 @@ export class Game {
     // 距离分级：远处物体不投影、更远整块隐藏（内部 300ms 节流）。
     // 对战中城市建筑已整组隐藏，这边不再插手（否则会把它们设回可见，与对战隐藏打架）。
     if (!this._combat) updateLod(this.camera.position);
-    const up = this._useUpscale() && this._ensureUpscale() && this._ensureRT();
+    const up = this._useUpscale() && this._ensureUpscale() && this._ensureTargets();
     if (!up) {
       this.renderer.setRenderTarget(null);
       this.renderer.render(this.scene, this.camera);
@@ -1302,16 +1387,27 @@ export class Game {
       this._sceneTris = this.renderer.info.render.triangles;
       return;
     }
-    this.renderer.setRenderTarget(this._upRT);
+    const sceneRT = this._sceneRT;
+    const tsr = this._tsrActive() ? this._tsr : null;
+    // 抖动只作用在主场景这一趟：渲染完立刻还原，射线拾取/交互看到的仍是干净投影。
+    const jitter = tsr ? tsr.beginFrame(this.camera) : null;
+    this.renderer.setRenderTarget(sceneRT);
     this.renderer.render(this.scene, this.camera);
     // 立刻取走场景那一趟的统计：下一趟升采样会重置 renderer.info
     this._sceneCalls = this.renderer.info.render.calls;
     this._sceneTris = this.renderer.info.render.triangles;
     this.renderer.setRenderTarget(null);
+    if (tsr) tsr.endFrame(this.camera);
+
+    // 时域累积写进显示分辨率历史图，随后那趟锐化在它上面做 RCAS；
+    // resolve 失败/首帧无历史时自然退回本帧的低分辨率颜色（不会黑屏）。
+    const histTex = (tsr && jitter && tsr.resolve(this.renderer, this.camera, jitter))
+      ? tsr.historyTexture : null;
     const u = this._upMat.uniforms;
-    u.tDiffuse.value = this._upRT.texture;
+    u.tDiffuse.value = histTex || sceneRT.texture;
     u.uSharp.value = this._sharpen || 0;
-    u.uTexel.value.set(1 / this._upRT.width, 1 / this._upRT.height);
+    u.uTexel.value.set(1 / (histTex ? tsr.displayW : sceneRT.width),
+      1 / (histTex ? tsr.displayH : sceneRT.height));
     this.renderer.render(this._upScene, this._upCam);
   }
 
@@ -1378,7 +1474,8 @@ export class Game {
       // 配合这一格就能判断是「我们画得太满」还是「显示链路按像素限速」。
       '缓冲 ' + (this.renderer.domElement.width || 0) + '×' + (this.renderer.domElement.height || 0) +
       '   内部 ' + (this._dynScale || 1).toFixed(2) + '×' +
-      (this._useUpscale() ? ' 超分锐化' + (this._sharpen || 0).toFixed(1) : '') + '\n' +
+      (this._useUpscale() ? ' 超分锐化' + (this._sharpen || 0).toFixed(1) : '') +
+      (this._tsrActive() ? ' TSR' : '') + '\n' +
       'GPU ' + this._gpuName() + (this._gpuIsSoftware ? '  ⚠软件渲染·请开硬件加速' : '');
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }
@@ -2086,6 +2183,8 @@ export class Game {
   // 远端看到 tp 变了会「直接落位 + 清插值缓冲」，不再从旧位置平滑滑过去。
   _markTeleport() {
     this.localState.tp = (this.localState.tp || 0) + 1;
+    // 画面瞬间换了内容：历史图里全是旧位置的像素，重投影只会拖出一片鬼影。
+    if (this._tsr) this._tsr.reset();
     if (this.network) this.network.sendState(this.localState.toJSON());
   }
 

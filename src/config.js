@@ -277,6 +277,16 @@ export const Config = {
   // RT 读写带宽与显存直接减半（老卡/集显是带宽瓶颈），高档仍保留 HalfFloat 防暗部色带。
   UPSCALE_LDR_RT: true,       // true = low/mid 档用 8bit RT；false = 所有档都用 HalfFloat
 
+  // ---- 时域超分 TSR（WebGL2 下的「DLSS 效果」：jitter + 深度重投影 + 历史累积）----
+  // 与上面单 pass 空间升采样的区别：单 pass 每帧只有 1 个样本，放大后必糊；
+  // TSR 每帧把投影抖到不同亚像素位置，用 8~32 帧把样本汇成超采样图，
+  // 再用深度重投影把上一帧的历史搬过来，边缘/细线/斜边的清晰度与稳定性接近原生。
+  // 详细推导与降级路径见 src/world/TemporalUpscale.js 顶部注释。
+  TSR_ENABLED: true,          // 0 = 整体关掉，退回单 pass CAS（URL ?tsr=0 亦可临时关）
+  TSR_HISTORY_MAX: 0.88,      // 静态像素最多保留多少历史（越大越稳，收敛越慢）
+  TSR_VAR_GAMMA: 1.25,        // YCoCg 方差裁剪倍数（压鬼影；太小会抹掉细线）
+  TSR_RESET_DIST: 30,         // 相机单帧位移超过它就清历史（与瞬移判定同尺度）
+
   // ---- 人物专属实时阴影（只渲人物，不重渲世界）----
   // 静态世界用 ShadowBaker 的 4 时段烘焙图（永不重渲）；人物另外走一趟只含人物的深度投影，
   // 贴到跟随玩家的地面 quad 上。成本 = 1 张 256² RT + 1 趟无光照人物 pass + 1 个 quad，
