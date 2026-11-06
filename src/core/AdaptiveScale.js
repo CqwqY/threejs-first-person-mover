@@ -19,29 +19,43 @@ export const ADAPT = {
   RAISE_COOLDOWN: 5000, // ms：刚降过档至少冷却这么久才允许升（治降→升→降震荡）
 };
 
+/**
+ * TSR 开启时自动模式的上限（纯函数，Node 可测）。
+ * 仍以 ADAPT.CEIL 为硬上限；override 只用于 URL ?tsrscale= 的 A/B，允许把它抬高但绝不越过硬上限。
+ */
+export function tsrScaleCap(override, autoCeil) {
+  const base = Number(autoCeil) || 0.78;
+  const cap = override ? Math.max(base, Number(override) || base) : base;
+  return Math.min(ADAPT.CEIL, cap);
+}
+
 // state: { scale, lastChange, lastDrop }；now 单位 ms（performance.now()）。
+// opts 可选 { ceil, floor }：TSR 开启时把自动区间压到「DLSS Quality 等效」的 0.5~0.78×，
+//   那里时域重建才有足够相位与信息增益；不传则完全保持原有 0.5~0.95× 行为。
 // 返回 null = 本帧不动；否则返回新的 { scale, lastChange, lastDrop }。
 // ⚠ 只读入参、不改入参：调用方拿到结果再落到 Game 的字段上，避免半更新状态。
-export function adaptScaleDecision(state, fps, now) {
+export function adaptScaleDecision(state, fps, now, opts) {
+  const ceil = opts && isFinite(opts.ceil) ? opts.ceil : ADAPT.CEIL;
+  const floor = opts && isFinite(opts.floor) ? opts.floor : ADAPT.FLOOR;
   const s = Number(state.scale);
   if (!isFinite(s) || !isFinite(fps) || fps <= 0) return null;
   if (now - state.lastChange < ADAPT.MIN_INTERVAL) return null;
 
   let next = s;
   let dropped = false;
-  if (fps < ADAPT.DROP && s > ADAPT.FLOOR) {
-    next = Math.max(ADAPT.FLOOR, s - ADAPT.DROP_STEP);
+  if (fps < ADAPT.DROP && s > floor) {
+    next = Math.max(floor, s - ADAPT.DROP_STEP);
     dropped = true;
-  } else if (fps > ADAPT.RAISE && s < ADAPT.CEIL) {
+  } else if (fps > ADAPT.RAISE && s < ceil) {
     // 刚降过档就别急着升回去：那是横跳最常见的一拍。
     if (now - state.lastDrop < ADAPT.RAISE_COOLDOWN) return null;
-    next = Math.min(ADAPT.CEIL, s + ADAPT.RAISE_STEP);
+    next = Math.min(ceil, s + ADAPT.RAISE_STEP);
   } else {
     return null;
   }
 
   // 硬护栏：无论入参被谁写成 1.0，自动模式的结果永远落在超分区间内。
-  next = Math.max(ADAPT.FLOOR, Math.min(ADAPT.CEIL, next));
+  next = Math.max(floor, Math.min(ceil, next));
   // 只过滤「实际没变」，阈值必须很小：0.5 起步、步长 0.04 时最后一档是 0.94→0.95
   // （差 0.01），用旧的 0.01 判据会把这一步吃掉，永远卡在 0.94 上不去。
   if (Math.abs(next - s) < 1e-4) return null;

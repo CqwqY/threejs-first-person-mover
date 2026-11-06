@@ -14,11 +14,15 @@
 //
 // 功耗控制（本项目实测：像素着色占 89%，唯一有效杠杆是降分辨率）：
 //   · 主场景仍渲在低分辨率 RT（0.5× 时像素量 1/4）；
-//   · 历史累积跑在显示分辨率，但每帧只多 1 趟便宜全屏 pass（Lanczos 权重走 256×1 LUT，
-//     不在片元里算 sin）；原来的锐化 pass 变成「读历史图 + RCAS」，数量不变；
-//   · 低/中画质档用 8bit RT（Config.UPSCALE_LDR_RT），显存与带宽减半；
+//   · 历史累积跑在显示分辨率，但每帧只多 1 趟全屏 pass（Lanczos 权重走 256×1 LUT，
+//     不在片元里算 sin）；原来的锐化 pass 变成「读历史图 + 8 邻域自适应锐化」，数量不变；
+//   · ⚠ TSR 路径的 RT 强制 HalfFloat（Config.TSR_HDR_RT）：8bit 存线性色时 1/255 的
+//     量化步长与相邻 jitter 相位的色差同量级，历史里根本存不进新信息 —— 这是
+//     「开了 TSR 却看不出提升」的主因之一。单 pass CAS 路径仍可用 8bit 省带宽；
 //   · 无 velocity buffer（要重渲整场景，老卡不划算）→ 相机运动靠深度重投影，
 //     动态人物/球靠颜色方差裁剪与深度差异快速降权，而不是额外渲染一趟。
+//   · 低分辨率会让 GPU 自动选更粗的 mip 层，纹理细节在采样瞬间就丢了；
+//     Game 侧另行注入负 LOD bias（MipBias.js），这一步时域重建补不回来。
 //
 // 失败/降级：任何一步抛错或能力不足 → failed=true，Game 永久退回单 pass CAS，并出声 warn，
 //   绝不静默半黑屏。kill-switch：Config.TSR_ENABLED=0 或 URL ?tsr=0。
@@ -63,7 +67,9 @@ const FRAG = [
   'uniform mat4 uInvVP;',
   'uniform mat4 uPrevVP;',
   'uniform float uHistoryValid;',
+  'uniform float uFeedback;',
   'uniform float uHistoryMax;',
+  'uniform float uHistoryMin;',
   'uniform float uVarGamma;',
   'uniform float uNear;',
   'uniform float uFar;',
@@ -148,14 +154,26 @@ const FRAG = [
   '  vec4 h = texture2D(tHistory, puv);',
   '  vec3 mu = sumY / 9.0;',
   '  vec3 sigma = sqrt(max(sumY2 / 9.0 - mu * mu, vec3(0.0)));',
-  '  vec3 loY = max(toYCoCg(mn) - 0.01, mu - uVarGamma * sigma);',
-  '  vec3 hiY = min(toYCoCg(mx) + 0.01, mu + uVarGamma * sigma);',
+  // ⚠⚠ 这里曾把「sigma AABB」与「当前帧 3x3 min/max」取**交集**，等于双重限幅：
+  //   平坦区 sigma≈0 → AABB 塌成一个点 → 上一帧里由别的 jitter 相位采到的亚像素细节
+  //   全部被裁掉，历史等于没存进新信息，TSR 退化成「单帧 Lanczos + 锐化」。
+  //   标准 TSR/FSR2 的 variance clipping 只用 mu±γσ（或只用 neighborhood min/max），
+  //   不能两者取交集。这里改取**并集**：至少不比当前帧邻域范围更窄。
+  '  vec3 mnY = toYCoCg(mn) - 0.02;',
+  '  vec3 mxY = toYCoCg(mx) + 0.02;',
+  '  vec3 loY = min(mnY, mu - uVarGamma * sigma);',
+  '  vec3 hiY = max(mxY, mu + uVarGamma * sigma);',
   '  vec3 hY = toYCoCg(h.rgb);',
-  '  vec3 cY = clamp(hY, loY, hiY); // variance clipping：历史色只能落在当前邻域范围内',
+  '  vec3 cY = clamp(hY, loY, hiY); // variance clipping：只压明显脱离邻域的鬼影',
   '  vec3 histClipped = toRGB(cY);',
-  '  float colorConf = clamp(1.0 - length(hY - cY) * 3.0, 0.08, 1.0);',
-  '  float depthConf = 1.0 - smoothstep(0.018, 0.09, abs(curA - h.a));',
-  '  float a = uHistoryMax * colorConf * depthConf;',
+  // 置信度过严也会把历史整体丢弃：旧版 length*3 + 下限 0.08、深度 0.018~0.09，
+  // 相机一动（重投影双线性 + 8bit alpha）大量像素 a<0.1 → 又变回单帧上采样。
+  '  float colorConf = clamp(1.0 - length(hY - cY) * 1.5, 0.0, 1.0);',
+  '  float depthConf = 1.0 - smoothstep(0.035, 0.16, abs(curA - h.a));',
+  // uFeedback 由 JS 按累积帧数与相机运动算好（静止几帧就拉到 HISTORY_MAX，
+  // 运动时降到 MOTION_FEEDBACK），这里只夹到 [HistoryMin, HistoryMax] 护栏内。
+  '  float fb = clamp(uFeedback, uHistoryMin, uHistoryMax);',
+  '  float a = fb * max(colorConf, 0.35) * max(depthConf, 0.4);',
   '  gl_FragColor = vec4(mix(cur, histClipped, a), curA);',
   '}',
 ].join('\n');
@@ -185,6 +203,9 @@ export class TemporalUpscale {
     this._hasHistory = false;
     this._seq = 0;
     this._phases = 8;
+    this._accum = 0;            // 连续有效累积帧数（驱动反馈权重快速爬升）
+    this._motion = 1;           // 平滑后的相机运动量，0=完全静止，1=明显在动
+    this._feedback = Config.TSR_FEEDBACK_MIN || 0.3;
     this._jitterApplied = false;
     this._hasCam = false;
 
@@ -211,6 +232,12 @@ export class TemporalUpscale {
     return t ? t.texture : null;
   }
 
+  /** 连续有效累积帧数（HUD 诊断用：静止时应稳定涨到 60+）。 */
+  get accumFrames() { return this._accum; }
+
+  /** 当前帧历史反馈权重（HUD 诊断用）。 */
+  get feedback() { return this._feedback; }
+
   // 尺寸/格式变化时重建全部 RT 并清历史。调用频率：每帧一次，尺寸没变时是几个整数比较。
   ensure(rw, rh, dw, dh, type) {
     if (this.failed) return false;
@@ -218,6 +245,10 @@ export class TemporalUpscale {
     rh = Math.max(2, Math.floor(rh));
     dw = Math.max(2, Math.floor(dw));
     dh = Math.max(2, Math.floor(dh));
+    // ⚠ 8bit RT 存的是**线性**色：1/255 ≈ 0.0039 的量化步长，正好和相邻 jitter 相位
+    //   之间的颜色差同量级 → 写进历史图时细节被量化抹平，多帧累积等于白做。
+    //   TSR 路径（sceneRT + 2 张历史图）一律 HalfFloat；单 pass CAS 路径仍可用 8bit 省带宽。
+    if (Config.TSR_HDR_RT) type = THREE.HalfFloatType;
     const same = this.sceneRT && this.hist[0] && this.hist[1]
       && this.renderW === rw && this.renderH === rh
       && this.displayW === dw && this.displayH === dh
@@ -302,7 +333,9 @@ export class TemporalUpscale {
         uInvVP: { value: new THREE.Matrix4() },
         uPrevVP: { value: new THREE.Matrix4() },
         uHistoryValid: { value: 0 },
+        uFeedback: { value: this._feedback },
         uHistoryMax: { value: Config.TSR_HISTORY_MAX },
+        uHistoryMin: { value: Config.TSR_FEEDBACK_MIN || 0.3 },
         uVarGamma: { value: Config.TSR_VAR_GAMMA },
         uNear: { value: 0.1 },
         uFar: { value: 500 },
@@ -337,15 +370,31 @@ export class TemporalUpscale {
       camera.updateMatrixWorld();
       camera.getWorldPosition(this._tmpPos);
       camera.getWorldQuaternion(this._tmpQuat);
+      // 相机运动量：位移 0.15m/帧 或转角约 3.6°/帧 视为「明显在动」。
+      // 重投影在运动时误差大（双线性采样 + 无 velocity buffer），反馈要降下来防拖影。
+      let motion = 1;
       if (this._hasCam) {
-        const jump = this._prevPos.distanceTo(this._tmpPos) > (Config.TSR_RESET_DIST || 30);
+        const dist = this._prevPos.distanceTo(this._tmpPos);
+        const spin = 1 - Math.abs(this._prevQuat.dot(this._tmpQuat));
+        const jump = dist > (Config.TSR_RESET_DIST || 30);
         // dot 是 cos(半角)；0.25 对应约 151 度，正常甩鼠标不会误判。
-        const spin = 1 - Math.abs(this._prevQuat.dot(this._tmpQuat)) > 0.75;
-        if (jump || spin) this.reset();
+        const snap = spin > 0.75;
+        if (jump || snap) this.reset();
+        motion = Math.min(1, dist / 0.15 + spin / 0.002);
       }
       this._prevPos.copy(this._tmpPos);
       this._prevQuat.copy(this._tmpQuat);
       this._hasCam = true;
+      // 反馈权重自加速：旧版固定 0.88 → 每帧新样本只占 12%，要 ~30 帧才收敛，
+      // 走动一次又清零，玩家根本等不到「变清楚」的那一刻。
+      // 现在按累积帧数 n/(n+1) 起步（0.5→0.67→0.75→0.83→…），静止 3~5 帧即见效。
+      this._motion = this._motion * 0.5 + motion * 0.5;
+      this._accum = Math.min(64, this._accum + 1);
+      const ramp = this._accum / (this._accum + 1);
+      const stillFb = Math.min(Config.TSR_HISTORY_MAX, Math.max(ramp, 0.5));
+      const movFb = Config.TSR_MOTION_FEEDBACK || 0.62;
+      this._feedback = Math.max(Config.TSR_FEEDBACK_MIN || 0.3,
+        movFb + (stillFb - movFb) * (1 - this._motion));
 
       // 重投影必须使用「消掉 jitter」的 VP：否则静止画面也会因相位变化被反复重采样，
       // 累积永远收敛不了（等于自己把超采样打散）。
@@ -403,6 +452,7 @@ export class TemporalUpscale {
       u.uInvVP.value.copy(this._curVP).invert();
       u.uPrevVP.value.copy(this._prevVP);
       u.uHistoryValid.value = this._hasHistory ? 1 : 0;
+      u.uFeedback.value = this._feedback;
       u.uNear.value = camera.near;
       u.uFar.value = camera.far;
       renderer.setRenderTarget(write);
@@ -425,6 +475,9 @@ export class TemporalUpscale {
     this._hasHistory = false;
     this._seq = 0;
     this._hasCam = false;
+    this._accum = 0;
+    this._motion = 1;
+    this._feedback = Config.TSR_FEEDBACK_MIN || 0.3;
   }
 
   _disposeTargets() {

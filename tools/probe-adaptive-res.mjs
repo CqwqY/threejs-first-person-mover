@@ -1,55 +1,90 @@
-// 自检：填充率治理（自适应分辨率 + 阴影重渲频率）
+// 自检：填充率治理（自适应分辨率 + 阴影重渲策略）
 //
 // 依据 fpm-perf-20261006-102317.json：基线 1.0× 仅 18.2fps，把分辨率压到
 //   0.5× → 49.4fps（2.7×）；关面光源/环境反射几乎无变化（18.2→18.3）。
 //   结论：填充率（像素着色）是唯一瓶颈，分辨率是唯一有效杠杆。
-//   游戏已有自适应分辨率，但旧地板 0.6、起步 1.0，没吃到 0.5× 的红利。
-//   本探针钉死三件事：① 自适应地板=0.5 且起步按画质档给低起点；
-//                     ② 降/升阈值留迟滞防横跳；③ 阴影重渲从隔帧(2)改每 3 帧。
+//
+// ⚠ 2026-11-07 校准：自适应决策逻辑早已抽到 src/core/AdaptiveScale.js（纯函数，Node 可测），
+//   Game._adaptResolution 只负责落字段；旧版这里还按 Game.js 里的硬编码常量
+//   （FLOOR=0.5 / +0.08 / RAISE=54 / 1000ms / _shadowTick%3）做字符串断言，全是假失败。
+//   现在改为：常量直接 import 真值 + 真跑决策函数 + Game 接线静态断言。
 //
 // 跑法：node tools/probe-adaptive-res.mjs
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ADAPT, adaptScaleDecision, tsrScaleCap } from '../src/core/AdaptiveScale.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const src = readFileSync(path.join(ROOT, 'src/core/Game.js'), 'utf8');
+const read = (p) => readFileSync(path.join(ROOT, p), 'utf8').replace(/\r\n/g, '\n');
+const game = read('src/core/Game.js');
+const logic = read('src/core/AdaptiveScale.js');
 let fails = 0;
 function ok(cond, msg) {
   if (cond) console.log('  PASS  ' + msg);
   else { console.log('  FAIL  ' + msg); fails++; }
 }
-function has(re, msg) { ok(re.test(src), msg); }
+function eq(a, b, msg) {
+  if (a === b) console.log('  PASS  ' + msg + '  (' + a + ')');
+  else { console.log('  FAIL  ' + msg + '  got ' + JSON.stringify(a) + ' want ' + JSON.stringify(b)); fails++; }
+}
+function near(a, b, tol, msg) {
+  ok(Math.abs(a - b) <= tol, msg + '  (' + a.toFixed(6) + ' vs ' + b.toFixed(6) + ')');
+}
 
-// ---------------------------------------------------------------- ① 自适应地板 = 0.5
-console.log('\n[1] 自适应分辨率地板钉在实测甜点 0.5×');
-has(/FLOOR\s*=\s*0\.5/, '_adaptResolution 里 FLOOR = 0.5（E5: 0.5×→49.4fps）');
-has(/s\s*=\s*Math\.max\(FLOOR,\s*s\s*-\s*0\.15\)/, '降到地板用 0.15 步长（比旧 0.2 更细，能停准在 0.5）');
-has(/s\s*=\s*Math\.min\(1,\s*s\s*\+\s*0\.08\)/, '升回用 0.08 步长');
-has(/fps\s*<\s*DROP\s*&&\s*s\s*>\s*FLOOR/, '低于 DROP 且未触底才降（地板 0.5 是硬下限）');
+// ---------------------------------------------------------------- ① 常量
+console.log('\n[1] 自适应常量（真值，来自 AdaptiveScale.js）');
+eq(ADAPT.FLOOR, 0.5, '地板 0.5×：实测甜点，再低收益递减（E5: 0.5×→49.4fps）');
+eq(ADAPT.DROP, 42, 'DROP = 42');
+eq(ADAPT.RAISE, 56, 'RAISE = 56（贴近 vsync 上限，别一流畅就猛升）');
+eq(ADAPT.DROP_STEP, 0.15, '降档步长 0.15');
+eq(ADAPT.RAISE_STEP, 0.04, '升档步长 0.04（旧 0.08 太跳）');
+eq(ADAPT.MIN_INTERVAL, 2000, '节流 2s（旧 1s 会频繁重建 drawingBuffer）');
+eq(ADAPT.RAISE_COOLDOWN, 5000, '降档后 5s 冷却，治降→升→降震荡');
+eq(ADAPT.CEIL, 0.95, '自动上限 0.95');
+eq(ADAPT.UPSCALE_LIMIT, 0.98, '超分路径阈值 0.98');
+ok(ADAPT.DROP < ADAPT.RAISE && ADAPT.CEIL < ADAPT.UPSCALE_LIMIT,
+  '迟滞与硬切阈值有序（永不跨 0.98 突然切画质/色调）');
+ok(/export function adaptScaleDecision/.test(logic), '决策逻辑是导出的纯函数');
+ok(/只读入参|不改入参/.test(logic), '纯函数不改入参');
 
-// ---------------------------------------------------------------- ② 阈值迟滞
-console.log('\n[2] 降/升阈值留 12 帧迟滞，避免横跳');
-has(/DROP\s*=\s*42/, 'DROP = 42（低于此才降，留余量）');
-has(/RAISE\s*=\s*54/, 'RAISE = 54（高于此才升，与 DROP 拉开迟滞）');
+// ---------------------------------------------------------------- ② 真跑决策
+console.log('\n[2] 真跑：降档 / 地板 / 升档 / 节流 / 冷却');
+const d1 = adaptScaleDecision({ scale: 0.8, lastChange: 0, lastDrop: -1e9 }, 30, 10000);
+near(d1.scale, 0.65, 1e-9, 'fps=30 从 0.8 降 0.15');
+let low = { scale: 0.6, lastChange: 0, lastDrop: -1e9 };
+for (let i = 0; i < 6; i++) {
+  low = adaptScaleDecision(low, 20, 10000 + i * (ADAPT.MIN_INTERVAL + 1)) || low;
+}
+near(low.scale, ADAPT.FLOOR, 1e-9, '持续掉帧停在 0.5 地板，不会更低');
+eq(adaptScaleDecision(low, 20, 99999), null, '触底后不再降');
+eq(adaptScaleDecision({ scale: 0.8, lastChange: 0, lastDrop: -1e9 }, 50, 10000), null,
+  '迟滞区间内不动');
+eq(adaptScaleDecision({ scale: 0.8, lastChange: 0, lastDrop: -1e9 }, 60, 1000), null,
+  'MIN_INTERVAL 内不重复调整');
+const cool = adaptScaleDecision(d1, 60, 10000 + ADAPT.MIN_INTERVAL + 1);
+eq(cool, null, '刚降档就流畅：冷却期内不回升');
+const afterCool = adaptScaleDecision(d1, 60, 10000 + ADAPT.RAISE_COOLDOWN + 1);
+ok(!!afterCool && afterCool.scale > d1.scale, '冷却结束后才允许回升');
+eq(tsrScaleCap(null, 0.78), 0.78, 'TSR 自动上限 0.78（本轮新增区间）');
 
-// ---------------------------------------------------------------- ③ 起步按画质档给低起点
-console.log('\n[3] 自动模式开局即接近稳态，跳过 1.0× 卡顿爬坡');
-has(/_autoStartScale\(\)\s*\{/, '_autoStartScale() 集中起点逻辑');
-has(/q\s*===\s*'high'\s*\?\s*1\s*:\s*q\s*===\s*'mid'\s*\?\s*0\.85\s*:\s*0\.7/, 'high=1 / mid=0.85 / low=0.7');
-has(/this\._dynScale\s*=\s*this\._autoStartScale\(\)/, '_applyQuality 用统一起点（不被初始化顺序冲掉）');
-has(/this\._dynScale\s*=\s*this\._autoStartScale\(\);\s*\/\/\s*自动模式从/, '_setRenderScale(auto) 也用统一起点');
+// ---------------------------------------------------------------- ③ Game 接线
+console.log('\n[3] Game 接线：起点 / 决策入口 / 硬钳');
+ok(/import \{ ADAPT, adaptScaleDecision, tsrScaleCap \}/.test(game), '导入纯逻辑模块');
+ok(/adaptScaleDecision\(/.test(game) && /_dynDropAt/.test(game), '_adaptResolution 走纯决策并维护冷却');
+ok(/_autoStartScale\(\)/.test(game), '_autoStartScale 集中起点逻辑');
+ok(/q === 'high' \? 1 : q === 'mid' \? 0\.85 : 0\.7/.test(game), '非 TSR 的画质档起点 high/mid/low');
+ok(/TSR_AUTO_TARGET/.test(game), 'TSR 开启时改走 0.67× 区间');
+ok(/this\._dynScale = this\._autoStartScale\(\)/.test(game), '画质切换 / 设置切换用统一起点');
+ok(/ADAPT\.CEIL/.test(game), '_applyRenderScale 仍保留自动模式硬钳');
 
-// ---------------------------------------------------------------- ④ 阴影每 3 帧重渲
-console.log('\n[4] 阴影重渲频率 2→3（吃掉基线那批 67ms 巨帧）');
-has(/this\._shadowTick\s*=\s*\(this\._shadowTick\s*\+\s*1\)\s*%\s*3/, '_shadowTick 改 % 3（每 3 帧重渲）');
-// 旧写法必须消失，否则说明没改干净
-ok(!/_shadowTick\s*=\s*\(this\._shadowTick\s*\+\s*1\)\s*&\s*1/.test(src), '旧的「& 1」隔帧写法已移除');
-has(/每 3 帧重渲/, '_applyQuality 注释同步为「每 3 帧」');
+// ---------------------------------------------------------------- ④ 阴影
+console.log('\n[4] 阴影重渲策略（烘焙优先，旧 _shadowTick 已退役）');
+ok(/_bakedReady/.test(game) && /_shadowPhaseDirty/.test(game),
+  '烘焙就绪后按相位换贴图，shadow pass 整个跳过');
+ok(/每 3 帧重渲/.test(game), '未烘焙路径的节流注释保留实测依据');
+ok(!/_shadowTick\s*=\s*\(this\._shadowTick\s*\+\s*1\)\s*%\s*3/.test(game),
+  '旧的 _shadowTick % 3 已被烘焙策略取代');
 
-// ---------------------------------------------------------------- ⑤ 节流 1s
-console.log('\n[5] 重建 drawingBuffer 节流 1s（旧 1.5s，太慢跟手差）');
-has(/now\s*-\s*this\._dynLast\s*<\s*1000/, '自适应节流 1000ms');
-
-console.log('\n' + (fails ? `✗ ${fails} 项失败` : '✓ 全部通过'));
+console.log('\n' + (fails ? '✗ ' + fails + ' 项失败' : '✓ 全部通过'));
 process.exit(fails ? 1 : 0);

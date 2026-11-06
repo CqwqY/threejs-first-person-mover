@@ -7,7 +7,7 @@ import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointSha
 import { ShadowBaker } from '../world/ShadowBaker.js';
 import { RealCharShadow } from '../world/RealCharShadow.js';
 import { TemporalUpscale } from '../world/TemporalUpscale.js';
-import { ADAPT, adaptScaleDecision } from './AdaptiveScale.js';
+import { ADAPT, adaptScaleDecision, tsrScaleCap } from './AdaptiveScale.js';
 import { vehicleSeatPose } from '../world/Attachment.js';
 import { getZiplines, getZones, pointInZoneLocal, projectOnSegment } from '../world/builtins.js';
 import { sceneFire } from '../world/sceneEvents.js';
@@ -55,6 +55,7 @@ import { ensureTheme } from '../ui/theme.js';
 import { installUiHotkey } from '../util/UiVisibility.js';
 import { startRenderSample, sampleFrame, waitRenderSample, report as reportTelemetry, telemetryAutoGet, telemetryAutoSet } from '../util/Telemetry.js';
 import { applyFragmentPrecisionToScene, applyFragmentPrecision } from '../world/FragmentPrecision.js';
+import { applyMipBiasToScene, mipBiasFor, setMipBias, getMipBias } from '../world/MipBias.js';
 
 // 在线同步辅助：拉取后端最新场景，成功则用其重建场景建筑并写入同一份碰撞体数组。
 // target 必须是 LocalPlayer 持有的那条共享数组：buildEditorBuildings 会把同步碰撞体与
@@ -208,7 +209,7 @@ export class Game {
     this._fpsAcc = 0;
     this._fpsN = 0;
     // 超分（低分辨率渲染 + 锐化升采样）：_sharpen=0 表示关闭，退回浏览器直接拉伸
-    this._sharpen = 0.5;
+    this._sharpen = 0.7;
     this._upRT = null; this._upScene = null; this._upCam = null; this._upMat = null;
     this._upFailed = false;
     // 时域超分（低分辨率 + 多帧重建，WebGL2 下的 DLSS 效果）：默认开。
@@ -225,6 +226,18 @@ export class Game {
     this._tsrFailed = false;
     this._sceneRT = null; // 本帧主场景真正渲进去的 RT（TSR 或 CAS 二选一）
     this._dispSize = new THREE.Vector2(); // getDrawingBufferSize 复用（热路径零分配）
+    // 负 LOD bias：降内部分辨率时把纹理采样往更细的 mip 层拉，否则细节在采样瞬间就丢了。
+    // ?mipbias=0 可临时关，便于 A/B；WebGL1 不注入（TSR 本身也只在 WebGL2 生效）。
+    this._mipBiasOn = !!Config.TSR_MIP_BIAS && this._tsrCapable;
+    this._mipScanAt = 0;
+    this._tsrScaleOverride = null; // ?tsrscale=0.5 的 A/B 覆盖；null = 用默认区间
+    try {
+      const q = new URLSearchParams(location.search);
+      if (q.get('mipbias') === '0') this._mipBiasOn = false;
+      const s = q.get('tsrscale');
+      const n = s === null ? NaN : Number(s);
+      if (isFinite(n) && n >= 0.4 && n <= 0.95) this._tsrScaleOverride = n;
+    } catch (e) { /* 非浏览器环境没有 location，忽略 URL 开关 */ }
     // 阴影总开关：**默认关**（实测填充率是唯一瓶颈，阴影是最贵的那一趟）。
     // ⚠ 光改 DEFAULT_SETTINGS 是**没用的** —— 游戏端面板 liveApply=false，binds 只在点「应用设置」时跑，
     //   而这里以前又硬编码 enabled=true ⇒ 启动时必须显式按存档值落一次，否则默认值永远是摆设。
@@ -501,6 +514,9 @@ export class Game {
           this._tsrOn = !!v;
           this._tsrFailed = false;
           if (this._tsr) this._tsr.reset();
+          // 开关切换时立即换到对应的自动区间（0.67× / 0.85×），
+          // 否则只靠 Math.min 硬钳，关掉 TSR 后仍卡在 0.67× 要等自适应慢慢爬回去。
+          if (this._autoScale !== false) this._dynScale = this._autoStartScale();
           this._applyRenderScale();
         },
         // 手机技能槽排布：切到「2行竖列」时槽位从轮盘搬到网格里。
@@ -1000,14 +1016,34 @@ export class Game {
     return false;
   }
 
+  // TSR 是否处于「可用」状态。⚠ 这里不能用 _tsrActive()：它依赖 _useUpscale()，
+  //   而 _useUpscale() 又依赖 _dynScale —— 在算 _dynScale 起点时会形成循环依赖。
+  _tsrAutoMode() {
+    return !!(this._tsrOn && this._tsrCapable && !this._tsrFailed);
+  }
+
+  // TSR 开启时自动模式的上限。仍以 ADAPT.CEIL(0.95) 为硬上限，再压到 0.78×：
+  // 0.85~0.95× 时内部像素只少 10~28%、抖动相位只有 9~11 个，时域重建几乎没增量，
+  // 观感就是「开了和没开一样」。0.67× 才是 DLSS Quality 的等效区间。
+  _tsrScaleCap() {
+    return tsrScaleCap(this._tsrScaleOverride, Config.TSR_AUTO_CEIL);
+  }
+
   // 渲染分辨率设置项：'auto' 交给自适应；数字串（'80'）钉死为该百分比，不再自动调整。
   // 自动模式下按画质档给一个"接近稳态"的起点：弱档开局就低，跳过 1.0× 卡顿爬坡。
+  // TSR 开启时改走 0.67× 的 Quality 区间（见 _tsrScaleCap）。
   // 集中在这里，_applyQuality 与 _setRenderScale 共用，避免初始化顺序把起点冲掉。
   // ⚠ 移动端（尤其苹果 3× DPR）起点额外压低：前几秒别烧满分辨率，自适应再慢慢升回
   //   （fps>56 时每 2s 才 +0.04，降档后还有 5s 冷却，不会来回横跳）。
   // ⚠ 自动模式的起点也封在 CEIL 以内：high 档原本给 1.0×，会一开局就跨过超分阈值，
   //   白天/夜晚色调还跟后面降回来时不一样。要原生 1.0× 只能手动钉 100%。
   _autoStartScale() {
+    if (this._tsrScaleOverride) return Math.min(this._tsrScaleOverride, this._tsrScaleCap());
+    if (this._tsrAutoMode()) {
+      let t = Number(Config.TSR_AUTO_TARGET) || 0.67;
+      if (this._isMobileDevice()) t = Math.min(t, 0.6);
+      return Math.min(t, this._tsrScaleCap());
+    }
     const q = this._quality || 'mid';
     let s = q === 'high' ? 1 : q === 'mid' ? 0.85 : 0.7;
     if (this._isMobileDevice()) s = Math.min(s, q === 'high' ? 0.8 : q === 'mid' ? 0.6 : 0.5);
@@ -1034,7 +1070,8 @@ export class Game {
     // 覆盖构造期默认值、切画质档、恢复默认设置等所有把 _dynScale 写成 1 的入口。
     // 手动钉 100% 时 _autoScale === false，不受此限（用户明确要原生直渲）。
     if (this._autoScale !== false) {
-      this._dynScale = Math.min(this._dynScale || 1, ADAPT.CEIL);
+      const cap = this._tsrAutoMode() ? this._tsrScaleCap() : ADAPT.CEIL;
+      this._dynScale = Math.min(this._dynScale || 1, cap);
     }
     const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
     // 走超分时画布保持原生分辨率（最后由升采样那趟铺满屏幕），低分辨率只在 RT 里；
@@ -1084,19 +1121,24 @@ export class Game {
           'uniform float uSharp;\n' +
           'varying vec2 vUv;\n' +
           'void main() {\n' +
-          '  vec3 c = texture2D(tDiffuse, vUv).rgb;\n' +
-          '  vec3 l = texture2D(tDiffuse, vUv - vec2(uTexel.x, 0.0)).rgb;\n' +
-          '  vec3 r = texture2D(tDiffuse, vUv + vec2(uTexel.x, 0.0)).rgb;\n' +
-          '  vec3 u = texture2D(tDiffuse, vUv + vec2(0.0, uTexel.y)).rgb;\n' +
-          '  vec3 d = texture2D(tDiffuse, vUv - vec2(0.0, uTexel.y)).rgb;\n' +
-          '  vec3 blur = (l + r + u + d) * 0.25;\n' +
-          // 非锐化掩膜：把「中心与邻域的差」按比例加回去
-          '  vec3 sharp = c + (c - blur) * uSharp * 2.0;\n' +
-          // 限幅到邻域范围（CAS 的做法）：不允许超出局部极值，
-          // 否则过冲会变成亮/暗描边，锯齿和噪点也会被一起放大成毛边。
-          '  vec3 mn = min(min(l, r), min(u, d));\n' +
-          '  vec3 mx = max(max(l, r), max(u, d));\n' +
-          '  sharp = clamp(sharp, mn, mx);\n' +
+          '  vec3 c  = texture2D(tDiffuse, vUv).rgb;\n' +
+          '  vec3 l  = texture2D(tDiffuse, vUv + vec2(-uTexel.x, 0.0)).rgb;\n' +
+          '  vec3 r  = texture2D(tDiffuse, vUv + vec2( uTexel.x, 0.0)).rgb;\n' +
+          '  vec3 u  = texture2D(tDiffuse, vUv + vec2(0.0,  uTexel.y)).rgb;\n' +
+          '  vec3 d  = texture2D(tDiffuse, vUv + vec2(0.0, -uTexel.y)).rgb;\n' +
+          '  vec3 lu = texture2D(tDiffuse, vUv + vec2(-uTexel.x,  uTexel.y)).rgb;\n' +
+          '  vec3 ru = texture2D(tDiffuse, vUv + vec2( uTexel.x,  uTexel.y)).rgb;\n' +
+          '  vec3 ld = texture2D(tDiffuse, vUv + vec2(-uTexel.x, -uTexel.y)).rgb;\n' +
+          '  vec3 rd = texture2D(tDiffuse, vUv + vec2( uTexel.x, -uTexel.y)).rgb;\n' +
+          // 8 邻域 Laplacian：旧版 4 邻域十字抓不到对角边缘，斜线/围栏/文字仍发糊。
+          '  vec3 blur = (l + r + u + d + lu + ru + ld + rd) * 0.125;\n' +
+          '  vec3 mn = min(min(min(l, r), min(u, d)), min(min(lu, ru), min(ld, rd)));\n' +
+          '  vec3 mx = max(max(max(l, r), max(u, d)), max(max(lu, ru), max(ld, rd)));\n' +
+          // 自适应收力：局部对比越大越不敢锐，否则高光/黑边会过冲成描边和锯齿。
+          '  float contrast = dot(mx - mn, vec3(0.25, 0.5, 0.25));\n' +
+          '  float k = uSharp * 2.0 * (1.0 - 0.55 * smoothstep(0.02, 0.5, contrast));\n' +
+          '  vec3 sharp = c + (c - blur) * k;\n' +
+          '  sharp = clamp(sharp, min(mn, c), max(mx, c));\n' +
           // 场景渲进 RT 时 Three 不做 toneMapping（WebGLPrograms 里 currentRenderTarget !== null
           // 就用 NoToneMapping），RT 里是线性色。这一趟若只做 sRGB 转换，画面会比原生直渲
           // 更亮更硬（高光直接 clip）→ 分辨率一跨阈值、路径一切换，整屏环境光色调就跟着变。
@@ -1240,19 +1282,27 @@ export class Game {
     // ⚠ 必须排在下面的 compile 之前 —— 注入改的是 shader 源码，注入后再 compile 才是新程序；
     //   反过来（先编再注入）会白编一遍、游戏中首次看见材质时重编 = 卡顿尖峰。
     // ⚠ 也会把材质标 needsUpdate，让本来已缓存的高精度程序失效。注入是幂等的，重复调用安全。
+    // ⚠ 注入顺序：mipbias 先包装，片元精度后包装（外层会调用内层的 prev），两个注入都生效。
+    // ⚠ 两者共用一次 needsUpdate 遍历：旧版只在 fragprec 返回 >0 时才标，
+    //   若 mipbias 是唯一新注入而 fragprec 已幂等，材质就不会重编译 → 注入静默不生效。
     let _fragN = 0;
     try {
-      _fragN = applyFragmentPrecisionToScene(this.scene);
-      if (_fragN > 0) {
-        this.scene.traverse((o) => {
-          const m = o && o.material;
-          if (!m) return;
-          if (Array.isArray(m)) { for (const mm of m) { if (mm) mm.needsUpdate = true; } }
-          else m.needsUpdate = true;
-        });
-      }
+      if (this._mipBiasOn) _fragN += applyMipBiasToScene(this.scene);
+    } catch (e) {
+      console.warn('[Game] 负 mip bias 注入失败（忽略，bias 保持 0）:', e);
+    }
+    try {
+      _fragN += applyFragmentPrecisionToScene(this.scene);
     } catch (e) {
       console.warn('[Game] 片元精度注入失败（忽略，保留 highp）:', e);
+    }
+    if (_fragN > 0) {
+      this.scene.traverse((o) => {
+        const m = o && o.material;
+        if (!m) return;
+        if (Array.isArray(m)) { for (const mm of m) { if (mm) mm.needsUpdate = true; } }
+        else m.needsUpdate = true;
+      });
     }
     try {
       if (typeof updateShadowBudgets === 'function') updateShadowBudgets(this.camera.position);
@@ -1298,7 +1348,9 @@ export class Game {
         this._ensureUpscale();
         if (this._upScene && typeof r.compile === 'function') r.compile(this._upScene, this._upCam);
         const prevScale = this._dynScale;
-        this._dynScale = 0.7; // 用一个"一定会走超分"的系数把 RT 真建出来（换系数时会自动 dispose 旧的）
+        // 用一个"一定会走超分"的系数把 RT 真建出来；优先沿用当前值，
+        // 否则 TSR 模式下 0.67 与这里硬写的 0.7 会建两套不同尺寸的 RT、下一帧又重建一次。
+        this._dynScale = Math.min(prevScale || 1, 0.7);
         try {
           if (typeof this._ensureTargets === 'function') this._ensureTargets();
           // TSR 的 resolve 着色器也要在加载屏里编掉：等自适应把分辨率压下去才第一次见到它，
@@ -1391,7 +1443,26 @@ export class Game {
     if (this._tsr) this._tsr.reset();
   }
 
+  // 负 LOD bias 跟着内部渲染比例走：0.67× → -0.58，0.5× → -1.0，原生直渲 → 0。
+  // 顺带 2s 补扫一次运行期新建的材质（护盾/球/编辑器物件），只给新材质标 needsUpdate，
+  // 否则每次扫描都把全场材质重编译一遍 = 周期性大卡顿。
+  _syncMipBias() {
+    const b = (this._useUpscale() && this._mipBiasOn)
+      ? mipBiasFor(this._dynScale || 1, true) : 0;
+    if (b !== getMipBias()) setMipBias(b);
+    if (!this._mipBiasOn) return;
+    const now = performance.now();
+    if (now - this._mipScanAt < 2000) return;
+    this._mipScanAt = now;
+    try {
+      applyMipBiasToScene(this.scene, (mat) => { mat.needsUpdate = true; });
+    } catch (e) {
+      console.warn('[Game] 运行期 mip bias 补扫失败（忽略）:', e);
+    }
+  }
+
   _renderFrame() {
+    this._syncMipBias();
     // 点光源阴影名额：按「离相机最近」分配（最多 4 盏，见 Lights.js）。
     // 只在渲染前跑一次，成本是几十个灯的距离排序；数量恒定所以不会触发 shader 重编译。
     updateShadowBudgets(this.camera.position);
@@ -1448,7 +1519,8 @@ export class Game {
       scale: this._dynScale,
       lastChange: this._dynLast,
       lastDrop: this._dynDropAt,
-    }, fps, performance.now());
+    }, fps, performance.now(),
+    this._tsrAutoMode() ? { ceil: this._tsrScaleCap() } : null);
     if (!d) return;
     this._dynScale = d.scale;
     this._dynLast = d.lastChange;
@@ -1494,7 +1566,8 @@ export class Game {
       '缓冲 ' + (this.renderer.domElement.width || 0) + '×' + (this.renderer.domElement.height || 0) +
       '   内部 ' + (this._dynScale || 1).toFixed(2) + '×' +
       (this._useUpscale() ? ' 超分锐化' + (this._sharpen || 0).toFixed(1) : '') +
-      (this._tsrActive() ? ' TSR' : '') + '\n' +
+      (this._tsrActive() ? ' TSR' + (this._tsr ? '/' + this._tsr.accumFrames + 'f' : '') : '') +
+      (getMipBias() < 0 ? ' mip' + getMipBias().toFixed(2) : '') + '\n' +
       'GPU ' + this._gpuName() + (this._gpuIsSoftware ? '  ⚠软件渲染·请开硬件加速' : '');
     if (txt !== p.txt) { p.el.textContent = txt; p.txt = txt; }
   }

@@ -77,7 +77,8 @@ ok(/this\._tsr\.reset\(\)/.test(rescan), '世界重建清历史');
 const bindTsr = blockAt(game, 'tsr: (v) => {');
 ok(/this\._tsrOn = !!v/.test(bindTsr) && /this\._tsr\.reset\(\)/.test(bindTsr), '设置面板开关即时生效且清历史');
 ok(/'sharpen', 'tsr', 'antiAlias'/.test(game), 'tsr 在设置面板 fields 里');
-ok(/\(this\._tsrActive\(\) \? ' TSR' : ''\)/.test(game), '性能 HUD 能看到 TSR 是否生效');
+ok(/accumFrames/.test(game) && /getMipBias\(\)/.test(game) && /' TSR'/.test(game),
+  '性能 HUD 能确认 TSR 生效（累积帧数 + 负 mip bias + 内部比例）');
 ok(/tsr: true/.test(panel) && /id: 'tsr'/.test(panel), '默认开 + 面板有开关');
 eq(Config.TSR_ENABLED, true, 'Config 总开关默认开');
 ok(Config.TSR_HISTORY_MAX > 0 && Config.TSR_HISTORY_MAX < 1, '历史权重上限在 (0,1)');
@@ -134,7 +135,15 @@ ok(!!t.sceneRT.depthTexture, '主场景 RT 带可读深度纹理');
 eq(t.sceneRT.samples, 0, '主场景 RT 无多重采样');
 eq(t.hist[0].width, 1920, '历史图 0 为显示分辨率');
 eq(t.hist[1].height, 1080, '历史图 1 为显示分辨率');
-eq(t.hist[0].texture.type, THREE.UnsignedByteType, '历史图跟随 low/mid 的 8bit 格式');
+eq(t.hist[0].texture.type, THREE.HalfFloatType, 'TSR 历史图强制 HalfFloat（8bit 会量化掉 jitter 细节）');
+eq(t.sceneRT.texture.type, THREE.HalfFloatType, 'TSR 主场景 RT 同样为 HalfFloat');
+// 关掉 TSR_HDR_RT 时必须能退回调用方传进来的 8bit，不能把 format 写死。
+const prevHdr = Config.TSR_HDR_RT;
+Config.TSR_HDR_RT = false;
+const tLdr = new TemporalUpscale(stub);
+eq(tLdr.ensure(960, 540, 1920, 1080, THREE.UnsignedByteType), true, '关闭 HDR 后 ensure 仍成功');
+eq(tLdr.hist[0].texture.type, THREE.UnsignedByteType, 'TSR_HDR_RT=0 时历史图回退 8bit');
+Config.TSR_HDR_RT = prevHdr;
 const firstRT = t.sceneRT;
 eq(t.ensure(960, 540, 1920, 1080, THREE.UnsignedByteType), true, '同尺寸复用');
 eq(t.sceneRT, firstRT, '同尺寸不重建 RT（热路径零分配）');
