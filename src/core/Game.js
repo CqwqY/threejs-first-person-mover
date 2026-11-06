@@ -7,6 +7,7 @@ import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointSha
 import { ShadowBaker } from '../world/ShadowBaker.js';
 import { RealCharShadow } from '../world/RealCharShadow.js';
 import { TemporalUpscale } from '../world/TemporalUpscale.js';
+import { ADAPT, adaptScaleDecision } from './AdaptiveScale.js';
 import { vehicleSeatPose } from '../world/Attachment.js';
 import { getZiplines, getZones, pointInZoneLocal, projectOnSegment } from '../world/builtins.js';
 import { sceneFire } from '../world/sceneEvents.js';
@@ -192,10 +193,13 @@ export class Game {
     // dpr 封顶：iPhone 的 dpr=3，按 3 渲染像素量翻倍；且缩放导致 dpr 变化时
     // 会反复触发 canvas 重算（掉帧/抖动的隐藏来源）
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this._qualityDpr));
-    // 自适应分辨率系数：1 = 画质档封顶值；帧率不够时自动往下压（最低 0.6），
-    // 富余时慢慢升回。老卡/入门卡（填充率是真瓶颈）靠这个自动保帧率。
+    // 自适应分辨率系数：1 = 画质档封顶值；帧率不够时自动往下压（最低 0.5），
+    // 富余时慢慢升回（自动模式上限 0.95，绝不跨超分阈值 —— 见 AdaptiveScale.js）。
     this._dynScale = 1;
     this._dynLast = 0;
+    // 上次「因掉帧而降档」的时刻：降档后要冷却一段时间才允许回升，否则会在
+    // 降→升→降之间横跳（每次横跳还会重建 drawingBuffer，本身就是卡顿源）。
+    this._dynDropAt = -1e9;
     // 帧率采样累加器：主循环每帧 _fpsAcc += dt、_fpsN++，满 0.5s 结算一次
     // （驱动自适应分辨率 + 帧数角标）。⚠ 必须显式初始化 —— 漏了的话
     // `undefined += dt` 会变成 NaN，`NaN >= 0.5` 恒为 false，整块永不执行，
@@ -1000,12 +1004,14 @@ export class Game {
   // 自动模式下按画质档给一个"接近稳态"的起点：弱档开局就低，跳过 1.0× 卡顿爬坡。
   // 集中在这里，_applyQuality 与 _setRenderScale 共用，避免初始化顺序把起点冲掉。
   // ⚠ 移动端（尤其苹果 3× DPR）起点额外压低：前几秒别烧满分辨率，自适应再慢慢升回
-  //   （_adaptResolution 在 fps>54 时会 s+=0.08 回升，不会把强机永久锁死在低画质）。
+  //   （fps>56 时每 2s 才 +0.04，降档后还有 5s 冷却，不会来回横跳）。
+  // ⚠ 自动模式的起点也封在 CEIL 以内：high 档原本给 1.0×，会一开局就跨过超分阈值，
+  //   白天/夜晚色调还跟后面降回来时不一样。要原生 1.0× 只能手动钉 100%。
   _autoStartScale() {
     const q = this._quality || 'mid';
     let s = q === 'high' ? 1 : q === 'mid' ? 0.85 : 0.7;
     if (this._isMobileDevice()) s = Math.min(s, q === 'high' ? 0.8 : q === 'mid' ? 0.6 : 0.5);
-    return s;
+    return Math.min(s, ADAPT.CEIL);
   }
 
   _setRenderScale(v) {
@@ -1024,6 +1030,12 @@ export class Game {
   // 只改 drawingBuffer（setSize 第三参 false），不动 CSS 尺寸，否则布局会被撑变形。
   // 传入 w/h 时同时更新 CSS 尺寸（窗口缩放用）；不传则只改 drawingBuffer（改分辨率用）。
   _applyRenderScale(w, h) {
+    // 自动模式一律钳在超分区间内（ADAPT.CEIL < 0.98）：这是防「路径硬切」的最后一道闸，
+    // 覆盖构造期默认值、切画质档、恢复默认设置等所有把 _dynScale 写成 1 的入口。
+    // 手动钉 100% 时 _autoScale === false，不受此限（用户明确要原生直渲）。
+    if (this._autoScale !== false) {
+      this._dynScale = Math.min(this._dynScale || 1, ADAPT.CEIL);
+    }
     const base = Math.min(window.devicePixelRatio || 1, this._qualityDpr);
     // 走超分时画布保持原生分辨率（最后由升采样那趟铺满屏幕），低分辨率只在 RT 里；
     // 不超分时才是老做法：直接把 drawingBuffer 压小，让浏览器拉伸。
@@ -1032,7 +1044,7 @@ export class Game {
     this.renderer.setSize(w || window.innerWidth, h || window.innerHeight, !!(w && h));
     if (up) this._ensureTargets();
     else {
-      // 回到原生分辨率（自适应升档 / 用户关掉锐化）：超分那套 RT 不再有用。
+      // 回到原生分辨率（手动钉 100% / 用户关掉锐化）：超分那套 RT 不再有用。
       // TSR 的 RT 先留着（下次降回来可直接复用），但历史必须清：画面已经不连续。
       this._sceneRT = null;
       if (this._upRT) {
@@ -1050,7 +1062,8 @@ export class Game {
 
   // 只有「确实在降分辨率」且「用户没把锐化关掉」时才走超分路径
   _useUpscale() {
-    return !this._upFailed && (this._sharpen || 0) > 0.001 && (this._dynScale || 1) < 0.98;
+    return !this._upFailed && (this._sharpen || 0) > 0.001
+      && (this._dynScale || 1) < ADAPT.UPSCALE_LIMIT;
   }
 
   _ensureUpscale() {
@@ -1084,11 +1097,21 @@ export class Game {
           '  vec3 mn = min(min(l, r), min(u, d));\n' +
           '  vec3 mx = max(max(l, r), max(u, d));\n' +
           '  sharp = clamp(sharp, mn, mx);\n' +
-          '  gl_FragColor = vec4(clamp(sharp, 0.0, 1.0), 1.0);\n' +
+          // 场景渲进 RT 时 Three 不做 toneMapping（WebGLPrograms 里 currentRenderTarget !== null
+          // 就用 NoToneMapping），RT 里是线性色。这一趟若只做 sRGB 转换，画面会比原生直渲
+          // 更亮更硬（高光直接 clip）→ 分辨率一跨阈值、路径一切换，整屏环境光色调就跟着变。
+          // 补上 tonemapping_fragment，让 RT 路径与直渲路径走同一条 ACES 曲线。
+          // ⚠ 别在 tonemapping 之前把值截到 1.0：HalfFloat RT 的 HDR 高光要留给 ACES 压。
+          '  gl_FragColor = vec4(max(sharp, 0.0), 1.0);\n' +
+          '  #include <tonemapping_fragment>\n' +
           '  #include <colorspace_fragment>\n' +
           '}\n',
         depthTest: false,
         depthWrite: false,
+        // 显式打开：Three 只对 toneMapped 材质在屏幕 pass 注入 ACES 函数与
+        // toneMappingExposure uniform。虽然是默认值，写死可防有人顺手关掉后
+        // RT 路径又变回「没有色调映射」，颜色重新和直渲分家。
+        toneMapped: true,
       });
       const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
       mesh.frustumCulled = false;
@@ -1412,28 +1435,24 @@ export class Game {
   }
 
   // 自适应分辨率：按实测真实帧率动态调整 pixelRatio。
-  // 老卡/入门卡（如 640 级）是真·填充率瓶颈，画面分辨率是唯一有效杠杆 ——
-  // 与其让用户手动调画质档，不如自动保帧率：掉帧就降，富余就慢慢升回。
-  // 节流 1s：改 pixelRatio 会重建 drawingBuffer，频繁做本身会卡，但 1s 足够跟手又不抖。
+  // 决策逻辑抽到 AdaptiveScale.js（纯函数，能被 Node 探针真跑），这里只负责落字段 + 触发重算。
+  // 老卡/入门卡（如 640 级）是真·填充率瓶颈，画面分辨率是唯一有效杠杆。
   //
-  // ⚠ 地板 0.5 是实测定的（见 fpm-perf-20261006-102317.json）：GT640 上
-  //   0.5× → 49.4fps（对比 1.0× 的 18.2，2.7×）；再低画面发虚、且 0.5 已把
-  //   像素量砍到 1/4，继续降收益递减、锯齿/噪点反而更扎眼。故锁 0.5。
-  // ⚠ DROP/RAISE 之间留 12 帧迟滞：避免"刚降到 44 又升回、升到 55 又降"的横跳。
+  // ⚠ 自动模式绝不升到 1.0×：那会跨过 _useUpscale() 的 0.98 判据，把渲染路径从
+  //   「低分 RT + 升采样」硬切成「原生直渲」—— 清晰度突变、色调变、随后像素量翻倍
+  //   又掉帧降回来，来回横跳。这就是「一流畅画质突然很高、环境光色调都变了」。
+  // ⚠ 想用原生 1.0×：设置面板把「渲染分辨率」手动钉成 100%（此时 _autoScale=false）。
   _adaptResolution(fps) {
     if (this._autoScale === false) return; // 用户手钉了分辨率，不再自动干预
-    const now = performance.now();
-    if (now - this._dynLast < 1000) return;
-    const FLOOR = 0.5;   // 实测甜点（E5）：再低不划算
-    const DROP = 42;     // 低于此帧率就降（留余量，别等卡到 30 才动）
-    const RAISE = 54;    // 高于此才升回（与 DROP 拉开迟滞，防横跳）
-    let s = this._dynScale;
-    if (fps < DROP && s > FLOOR) s = Math.max(FLOOR, s - 0.15);
-    else if (fps > RAISE && s < 1) s = Math.min(1, s + 0.08);
-    else return;
-    if (Math.abs(s - this._dynScale) < 0.01) return;
-    this._dynScale = s;
-    this._dynLast = now;
+    const d = adaptScaleDecision({
+      scale: this._dynScale,
+      lastChange: this._dynLast,
+      lastDrop: this._dynDropAt,
+    }, fps, performance.now());
+    if (!d) return;
+    this._dynScale = d.scale;
+    this._dynLast = d.lastChange;
+    this._dynDropAt = d.lastDrop;
     this._applyRenderScale();
   }
 
@@ -1728,12 +1747,17 @@ export class Game {
       this._shadowPhase = phaseIdx;
       this._shadowPhaseDirty = true;
     }
+    // 夜间地板：sunUp=0 时不再压到 0.30/0.25/0，而是 Config 里那组可调下限。
+    // 白天 sunUp=1 时三项都回到 100% 基准 / 全亮背景，昼夜对比仍在。
+    const na = Config.NIGHT_AMBIENT_MIN;
+    const nh = Config.NIGHT_HEMI_MIN;
     this._sun.intensity = this._dayBaseSun * sunUp;
-    this._ambient.intensity = this._dayBaseAmbient * (0.3 + 0.7 * sunUp);
-    this._hemi.intensity = this._dayBaseHemi * (0.25 + 0.75 * sunUp);
-    // 兜底背景色日落后压暗（时段天空球壳正常覆盖时看不见它）
+    this._ambient.intensity = this._dayBaseAmbient * (na + (1 - na) * sunUp);
+    this._hemi.intensity = this._dayBaseHemi * (nh + (1 - nh) * sunUp);
+    // 兜底背景色日落后压暗（时段天空球壳正常覆盖时看不见它）；
+    // 给个下限，天空贴图加载失败时夜里也不至于整屏纯黑。
     if ('backgroundIntensity' in this.scene) {
-      this.scene.backgroundIntensity = sunUp;
+      this.scene.backgroundIntensity = Config.NIGHT_BG_MIN + (1 - Config.NIGHT_BG_MIN) * sunUp;
     }
 
     // 时段天空盒：按当前时刻选图并交叉淡入，同时跟随相机（无视差、不被裁剪）
@@ -8483,7 +8507,7 @@ export class Game {
     this._updateLod(this.camera.position);
 
     // 自适应分辨率（始终生效，不依赖 ?perf）：每 0.5s 用真实帧率判一次，
-    // 掉到 42 以下就降分辨率、回到 54 以上才升回（迟滞防横跳），让弱卡自动保住帧率。
+    // 掉到 42 以下就降分辨率、回到 56 以上才小幅升回（上限 0.95×，不切渲染路径）。
     this._fpsAcc += dt; this._fpsN++;
     if (this._fpsAcc >= 0.5) {
       const fps = this._fpsN / this._fpsAcc;

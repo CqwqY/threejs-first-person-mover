@@ -149,7 +149,11 @@ const FIELDS = [
   { id: 'quality', label: '画质（聚合）', kind: 'select', options: ['low', 'mid', 'high'], group: '画质', gameOnly: true },
   // 渲染分辨率：auto=自适应（掉帧自动降、富余自动升）；其余为钉死的百分比。
   // 老卡/入门卡（如 GT 640）是真·填充率瓶颈，这一项比画质档更直接有效。
-  { id: 'renderScale', label: '渲染分辨率(卡顿先降它)', kind: 'select', options: ['auto', '100', '85', '70', '60', '50'], group: '画质', gameOnly: true },
+  {
+    id: 'renderScale', label: '渲染分辨率(卡顿先降它)', kind: 'select',
+    options: ['auto', '100', '85', '70', '60', '50'], group: '画质', gameOnly: true,
+    hint: '自动模式最高只升到 95%，始终留在超分路径上（避免流畅时画质/色调突然跳变）；想要满分辨率请手动选 100%。',
+  },
   // 降分辨率后画面会糊，靠这个锐化升采样找补回来（0=关，越大越锐利，过头有锯齿感）
   { id: 'sharpen', label: '超分锐化(配合降分辨率)', kind: 'range', min: 0, max: 1.5, step: 0.1, group: '画质', gameOnly: true },
   // 多帧时域重建：低分辨率下把边缘/细线恢复到接近原生，代价是每帧多一趟便宜全屏 pass。
