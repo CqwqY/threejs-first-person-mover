@@ -268,7 +268,27 @@ export const Config = {
   BALL_RIDE_MAX_SPEED: 14,      // 骑乘球最大水平速度（米/秒）
   BALL_RIDE_DAMP_K: 0.9,        // 惯性阻尼系数（指数衰减，越大停得越快；松手后滑行渐停）
   BALL_RIDE_RESTITUTION: 0.15,  // 骑乘球撞墙/落地恢复系数（小 = 软碰，不弹飞）
-  BALL_RIDE_ROLL_CAM: 0,        // 1 = 相机随球翻滚；0 = 相机保持直立（只球在滚，画面不晃）。手机端无鼠标，默认关             // 骑乘大球时相机抬高（看向球心偏上，能看清自己站在球里）
+  BALL_RIDE_ROLL_CAM: 0,
+  // ---- 低功耗超分（WebGL 下的 DLSS 等价路径：降内部分辨率 + 单 pass 空间升采样）----
+  // DLSS 4.5/5 依赖 RTX 50 的 Tensor Core（FP8/FP4）做推理，WebGL2 + 无 AI 单元的 GPU 完全用不了；
+  // WebGPU 版 FSR2/DLSS-like 时域超分(@pmndrs/upscaler / three FSR1Node) 没有 WebGL fallback。
+  // 本项目现存的 _dynScale + 锐化升采样就是 WebGL 下唯一被实测验证有效的杠杆（0.5x -> 23.2fps 涨到 47.8fps）。
+  // 这里再省一层带宽：低/中画质档把升采样 RT 从 HalfFloat(16bit/通道) 换成 8bit/通道，
+  // RT 读写带宽与显存直接减半（老卡/集显是带宽瓶颈），高档仍保留 HalfFloat 防暗部色带。
+  UPSCALE_LDR_RT: true,       // true = low/mid 档用 8bit RT；false = 所有档都用 HalfFloat
+
+  // ---- 人物专属实时阴影（只渲人物，不重渲世界）----
+  // 静态世界用 ShadowBaker 的 4 时段烘焙图（永不重渲）；人物另外走一趟只含人物的深度投影，
+  // 贴到跟随玩家的地面 quad 上。成本 = 1 张 256² RT + 1 趟无光照人物 pass + 1 个 quad，
+  // 与「每帧重渲全场景 shadow map」相比低两个数量级，且不受 renderScale 影响。
+  CHAR_SHADOW_ENABLED: 1,      // 0 = 关（只留 FakeShadow 圆斑）
+  CHAR_SHADOW_SIZE: 256,       // 人物阴影 RT 边长（128/256/512）
+  CHAR_SHADOW_RANGE: 9,        // 阴影相机正交半径（米）；超出这个范围的人物不投影
+  CHAR_SHADOW_OPACITY: 0.34,   // 影子最深不透明度
+
+  // ---- 瞬移不平滑 / 挂载随动 ----
+  TELEPORT_SNAP_DIST: 30,      // 兜底：没带 tp 标志时，单帧位移超过这个距离也直接落位（米）
+        // 1 = 相机随球翻滚；0 = 相机保持直立（只球在滚，画面不晃）。手机端无鼠标，默认关             // 骑乘大球时相机抬高（看向球心偏上，能看清自己站在球里）
   ZIPLINE_RANGE: 2.8,             // 离钢索多近才能抓上（米，以胸口高度判；低端刻意压低到 2.2m 便于从地面抓）
   ZIPLINE_SPEED: 7,               // 在索上移动速度（米/秒，W 向远端 / S 向近端）
   PROP_SIM_RANGE: 40,             // 距本地玩家超过这个距离的道具不积分（米）

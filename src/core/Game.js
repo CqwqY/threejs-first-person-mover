@@ -5,6 +5,8 @@ import { buildScenery } from '../world/buildScenery.js';
 import { createTimeSky } from '../world/SkyBox.js';
 import { createLights, updateShadowBudgets, setAreaBaseIntensity, setMaxPointShadow, enableDynamicLighting, bakeFeatureEnabled } from '../world/Lights.js';
 import { ShadowBaker } from '../world/ShadowBaker.js';
+import { RealCharShadow } from '../world/RealCharShadow.js';
+import { vehicleSeatPose } from '../world/Attachment.js';
 import { getZiplines, getZones, pointInZoneLocal, projectOnSegment } from '../world/builtins.js';
 import { sceneFire } from '../world/sceneEvents.js';
 import { updateSceneMovers } from '../world/sceneMovers.js';
@@ -344,6 +346,8 @@ export class Game {
     // ---- 玩家管理器：维护所有玩家（本地 + 远程） ----
     // 本地玩家的真实 id 在收到服务器 welcome 时才确定，先前保持 null
     this.playerManager = new PlayerManager(this.scene);
+    // 人物专属实时阴影（只渲人物层，不重渲世界；内部自带加载期预热）
+    this._charShadow = new RealCharShadow(this.renderer, this.scene);
 
     // 本地玩家的可序列化状态（id 稍后由 welcome 消息填充）
     this.localState = new PlayerState('', 0, Config.PLAYER_HEIGHT, 0);
@@ -1086,15 +1090,20 @@ export class Game {
     const w = Math.max(2, Math.floor(window.innerWidth * base * s));
     const h = Math.max(2, Math.floor(window.innerHeight * base * s));
     const samples = this._upSamples(s);
-    // ⚠ 复用判据必须连 samples 一起比：分辨率刚好没变但采样档变了（跨 0.85 边界）时必须重建，
-    //   否则 samples 永远停在旧值上。
-    if (this._upRT && this._upRT.width === w && this._upRT.height === h && this._upRT.samples === samples) return true;
+    // 低功耗 RT 格式随画质档变（8bit / HalfFloat），也必须进复用判据，
+    // 否则 high→mid 时分辨率没变就不重建，8bit 永远不生效。
+    const rtype = (Config.UPSCALE_LDR_RT && this._quality !== 'high')
+      ? THREE.UnsignedByteType : THREE.HalfFloatType;
+    // ⚠ 复用判据必须连 samples / type 一起比：分辨率刚好没变但采样档或格式变了时必须重建。
+    if (this._upRT && this._upRT.width === w && this._upRT.height === h
+      && this._upRT.samples === samples && this._upRT.texture.type === rtype) return true;
     try {
       if (this._upRT) this._upRT.dispose();
       this._upRT = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
-        type: THREE.HalfFloatType, // 避免线性空间 8bit 在暗部产生色带
+        // 低功耗：low/mid 档用 8bit RT（带宽/显存减半），high 档保留 HalfFloat 防暗部色带。
+        type: rtype,
         depthBuffer: true,
         stencilBuffer: false,
         // 多重采样：场景渲进 RT 后就没了画布那层 MSAA，必须在 RT 上补回来，
@@ -1278,6 +1287,8 @@ export class Game {
     // 点光源阴影名额：按「离相机最近」分配（最多 4 盏，见 Lights.js）。
     // 只在渲染前跑一次，成本是几十个灯的距离排序；数量恒定所以不会触发 shader 重编译。
     updateShadowBudgets(this.camera.position);
+    // 人物专属实时阴影：先渲 256² 人物 RT（静态世界影仍用烘焙图），再渲主画面
+    if (this._charShadow) this._charShadow.update(this.playerManager, this.localState, this._sunOffset);
     // 兜底：若加载期没编译完（异常路径），首帧在这里一次性预编译，避免游戏中边走边卡
     if (!this._shadersCompiled) this._precompileShaders();
     // 距离分级：远处物体不投影、更远整块隐藏（内部 300ms 节流）。
@@ -1534,6 +1545,7 @@ export class Game {
     this._setChatLock(false);
     this._updateHealthBar();
     this._toast('已在出生点重生');
+    this._markTeleport();
   }
 
   // 一天比例（0~1）的最短弧线性插值：处理跨零点（0.95→0.05 应走 +0.1 而非 -0.9）
@@ -1760,6 +1772,7 @@ export class Game {
           this.localState.z = msg.spawn.z;
           this.localState.yaw = msg.spawn.yaw;
           this._placed = true;
+          this._markTeleport();
         }
         this._spawn = msg.spawn; // 记住出生点，死亡重生时用
         this._lobbySpawn = msg.spawn; // 大厅出生点单独记一份，退出对战回主世界时用
@@ -1819,7 +1832,7 @@ export class Game {
         }
         // 训练场本机兜底（老服务端）：此时本机没进房间，快照是「大厅」的，套进来会让
         // 大厅玩家凭空出现在竞技场里，所以直接跳过。
-        if (!this._trainLocal) this.playerManager.applySnapshot(msg.players);
+        if (!this._trainLocal) this.playerManager.applySnapshot(this._resolveMountedPlayers(msg.players));
         // 对战中：人数即「同场人数」，供对战状态条显示
         if (this._combat) this._combat.alive = (msg.players || []).length;
         // 战绩：别人（和观战前的自己）的血量到 0 就是阵亡，时刻按本机时钟记
@@ -2068,6 +2081,67 @@ export class Game {
     return el;
   }
 
+  // ---- 瞬移标记 ----
+  // 重生 / 传送 / 换房都会调这里：tp 自增并立刻排一次上报。
+  // 远端看到 tp 变了会「直接落位 + 清插值缓冲」，不再从旧位置平滑滑过去。
+  _markTeleport() {
+    this.localState.tp = (this.localState.tp || 0) + 1;
+    if (this.network) this.network.sendState(this.localState.toJSON());
+  }
+
+  // 取某个玩家的「网络权威状态」：本地取 localState，远端取 rp.target（未经插值/物理），
+  // 绝不读 rp.state —— 那是渲染插值后的值，会引入一帧延迟与相对车身抖动。
+  _authoritativeState(id) {
+    if (!id) return null;
+    if (id === this.localState.id) return this.localState;
+    const rp = this.playerManager.players.get(id);
+    return rp ? rp.target : null;
+  }
+
+  // ---- 挂载随动：以驾驶员权威位置为准，直接算乘员位置 ----
+  // 每帧在 localPlayer.update 之前跑一遍，主循环尾部 _updateVehicle 再钉一次（覆盖物理）。
+  // 数据源是 rp.target / localState，与「驾驶员这一帧有没有被算过」完全无关。
+  _applyLocalMount() {
+    const st = this.localState;
+    if (st.ride !== 2 || !st.mt) return;
+    const d = this._authoritativeState(st.mt);
+    if (!d) { this._dismountVehicle(); this._toast('驾驶员离开了，已下车'); return; }
+    const pose = vehicleSeatPose(d);
+    if (!pose) return;
+    st.x = pose.x; st.y = pose.y; st.z = pose.z;
+    st.yaw = pose.yaw;
+    if (pose.pitch !== undefined) st.pitch = pose.pitch;
+    if (this.localPlayer && this.localPlayer.physics) this.localPlayer.physics.velocity.set(0, 0, 0);
+  }
+
+  // 快照预处理：把所有「挂载中的乘员」的位置改写成「驾驶员权威位置 + 偏移」。
+  // 先给每份增量快照补成全量（缺的字段沿用上一帧权威值），再统一解析 ——
+  // 服务器下发的乘客自身坐标一律忽略，因此不存在「先算驾驶员再算乘员」的链式依赖，
+  // 也不需要驾驶员代报乘客位置。改动后的数组直接交给 PlayerManager 走正常插值。
+  _resolveMountedPlayers(players) {
+    if (!Array.isArray(players)) return players;
+    const full = new Map();
+    for (const d of players) {
+      if (!d || !d.id) continue;
+      let base = null;
+      if (d.id === this.localState.id) base = this.localState.toJSON();
+      else { const rp = this.playerManager.players.get(d.id); if (rp) base = rp.target.toJSON(); }
+      full.set(d.id, Object.assign({}, base || {}, d));
+    }
+    for (const d of players) {
+      if (!d || !d.id) continue;
+      const pax = full.get(d.id);
+      if (pax.ride !== 2 || !pax.mt) continue;
+      const drv = full.get(pax.mt) || this._authoritativeState(pax.mt);
+      if (!drv) continue;
+      const pose = vehicleSeatPose(drv);
+      if (!pose) continue;
+      d.x = pose.x; d.y = pose.y; d.z = pose.z; d.yaw = pose.yaw;
+      if (pose.pitch !== undefined) d.pitch = pose.pitch;
+    }
+    return players;
+  }
+
   // 载具当前占用的座位（driver / passenger 为玩家 id，null 表示空）
   _vehicleSeats() {
     const out = { driver: null, passenger: null };
@@ -2134,11 +2208,10 @@ export class Game {
         : '已上车（驾驶位）：W/S 前进后退 · A/D 转向 · 空格刹车');
     } else {
       this._vehDriver = driverId || null;
+      st.mt = driverId || ''; // 挂载到驾驶员：位置一律由他的权威状态 + 偏移直算
       phys.controlLock = true; // 后座不参与操控
       phys.velocity.set(0, 0, 0);
-      // 后座位置之后全由驾驶员代报；但服务器必须先知道「我坐上了后座」，
-      // 驾驶员才会开始代报，所以这里开一个短重发窗口，防单包丢失导致双方互相等待。
-      this._vehPaxResend = 0.6;
+      // 位置由 mt 挂载直算，自己照常上报（不再由驾驶员代报、也不再需要重发窗口）。
       this._toast('已上车（后座）');
     }
   }
@@ -2151,6 +2224,7 @@ export class Game {
     if (quitRace) this._exitRace(null); // 文案并到下面那条 toast，别让两条互相顶掉
     st.ride = 0;
     st.veh = '';
+    st.mt = '';
     this._vehDriver = null;
     document.body.classList.remove('kui-ride'); // 下车：恢复顶栏/校卡/技能槽
     if (this.mobileControls) this.mobileControls.setDriving(false); // 手机：驾驶键组换回「跳」
@@ -2221,33 +2295,20 @@ export class Game {
       for (const [id, v] of this._vehPool) if (!inUse.has(id)) v.group.visible = false;
     }
 
-    // 1.5) 驾驶员：后座乘客由他统一上报，乘客自己不再单独广播。
-    // 用驾驶员本地权威坐标算出发放位置，让乘客在所有屏幕上都稳稳挂在车后方。
-    if (st.ride === 1 && seats.passenger) {
-      const back = Config.VEHICLE_SEAT_BACK;
-      const driver = this._playerStateById(seats.driver);
-      if (driver) {
-        this.network.sendVehPax(
-          seats.passenger,
-          driver.x + Math.sin(driver.yaw) * back,
-          driver.y,
-          driver.z + Math.cos(driver.yaw) * back,
-          driver.yaw
-        );
-      }
-    }
+    // 1.5) 后座位置不再由驾驶员代报：乘员各自从「驾驶员权威快照 + 偏移」直算
+    // （见 _resolveMountedPlayers / _applyLocalMount），避免先算驾驶员再算乘员的链式依赖。
 
-    // 2) 后座：把本地玩家钉在驾驶位后方；驾驶员不在了就自动下车
+    // 2) 后座：物理跑完再钉一次（用驾驶员权威状态 + 偏移，不用插值后的 rp.state）；
+    //    主要定位已在 _applyLocalMount 里完成，这里只负责覆盖物理的残留位移。
     if (st.ride === 2) {
-      const d = this._playerStateById(seats.driver);
+      const d = this._authoritativeState(st.mt || seats.driver);
       if (d) {
-        const back = Config.VEHICLE_SEAT_BACK;
-        st.x = d.x + Math.sin(d.yaw) * back;
-        st.z = d.z + Math.cos(d.yaw) * back;
-        st.y = d.y;
-        st.yaw = d.yaw;
-        st.pitch = d.pitch;
-        this.localPlayer.physics.velocity.set(0, 0, 0);
+        const pose = vehicleSeatPose(d);
+        if (pose) {
+          st.x = pose.x; st.z = pose.z; st.y = pose.y; st.yaw = pose.yaw;
+          if (pose.pitch !== undefined) st.pitch = pose.pitch;
+          this.localPlayer.physics.velocity.set(0, 0, 0);
+        }
       } else {
         this._dismountVehicle();
         this._toast('驾驶员离开了，已下车');
@@ -3611,6 +3672,7 @@ export class Game {
     if (Number.isFinite(nz)) st.z = THREE.MathUtils.clamp(nz, -Config.GROUND_DEPTH / 2, Config.GROUND_DEPTH / 2);
     st.y = Number.isFinite(ny) ? ny : Config.PLAYER_HEIGHT * phys.sizeScale;
     if (phys.velocity) phys.velocity.set(0, 0, 0);
+    this._markTeleport();
   }
 
   // 抓的人屏幕顶部的方向指示：一个指向目标方位的箭头
@@ -6069,6 +6131,7 @@ export class Game {
     this.localPlayer.physics.velocity.set(0, 0, 0);
     this._dead = false;
     this._spawn = sp;
+    this._markTeleport();
     this._updateHealthBar();
     this._clearTransients(); // 清掉主世界留下的投掷物/黑洞/特效，避免带进竞技场
 
@@ -6125,6 +6188,7 @@ export class Game {
     this.localState.yaw = sp.yaw || 0;
     this.localState.y = Config.PLAYER_HEIGHT * this.localPlayer.physics.sizeScale;
     this.localState.health = Config.HEALTH_MAX;
+    this._markTeleport();
     this.localPlayer.physics.velocity.set(0, 0, 0);
     this._dead = false;
     this._spawn = sp;
@@ -8147,6 +8211,8 @@ export class Game {
     //   玩家本帧解算才能用上「门现在的位置」（放在后面会慢一帧，快速升降/关门时会出现穿模）。
     updateSceneMovers(dt);
     if (!this._soul) {
+      // 挂载随动：先由驾驶员权威状态直接算出乘客位置（不依赖本地驾驶员计算顺序）
+      this._applyLocalMount();
       // 挂滑索时跳过常规更新（重力/碰撞会把位置拽走），位置交给 _updateZipline 直接驱动
       if (this._zip) this._updateZipline(dt);
       else if (this.props && this.props.ridingBall) this._updateBallRide(dt);
@@ -8273,14 +8339,9 @@ export class Game {
     this.localState.size = this.localPlayer.physics.sizeScale;
     // 上报当前手持武器（棍子/加特林），让其他玩家把武器挂到我们模型的手部锚点上
     this.localState.wep = this._heldWeaponKind();
-    // 后座乘客的位置之后全由驾驶员统一代报（避免两份位置互相打架、相对车身乱抖）；
-    // 只在刚上车的短窗口内自报几次，让服务器知道「有人坐上后座」，驾驶员才好接手代报。
-    if (this.localState.ride !== 2) {
-      this.network.sendState(this.localState.toJSON());
-    } else if (this._vehPaxResend > 0) {
-      this._vehPaxResend -= dt;
-      this.network.sendState(this.localState.toJSON());
-    }
+    // 所有座位（含后座）都自己上报：后座位置由「驾驶员权威快照 + 偏移」直算，
+    // 不再需要驾驶员代报，也不再有「谁先算谁后算」的顺序依赖。
+    this.network.sendState(this.localState.toJSON());
 
     // 渲染当前帧
     // 阴影每 3 帧重渲：autoUpdate 已关，这里每 3 帧置一次 needsUpdate。

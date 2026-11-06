@@ -23,6 +23,8 @@ export class PlayerState {
     this.wep = '';  // 手持武器：'' = 空，'club' = 棍子，'gatling' = 加特林
     this.ride = 0;  // 载具座位：0 = 没骑，1 = 驾驶，2 = 后座
     this.veh = '';  // 所乘载具的标识（Config.VEHICLE_ID），用于把前后座配成一对
+    this.tp = 0;    // 瞬移序号：每次重生/传送自增。远端看到序号变了就直接落位，不插值、不平滑
+    this.mt = '';   // 挂载目标（驾驶员玩家 id）：ride===2 时位置 = 目标权威位置 + 本地偏移，不链式计算
   }
 
   // 生成用于网络传输的纯 JSON 快照（不包含 onGround 之外的派生/本地字段）
@@ -40,6 +42,8 @@ export class PlayerState {
       wep: this.wep,
       ride: this.ride,
       veh: this.veh,
+      tp: this.tp,
+      mt: this.mt,
     };
   }
 
@@ -58,6 +62,8 @@ export class PlayerState {
     if (data.wep !== undefined) this.wep = data.wep;
     if (data.ride !== undefined) this.ride = data.ride;
     if (data.veh !== undefined) this.veh = data.veh;
+    if (data.tp !== undefined) this.tp = data.tp;
+    if (data.mt !== undefined) this.mt = data.mt;
     return this;
   }
 
@@ -75,6 +81,8 @@ export class PlayerState {
     if (target.wep !== undefined) this.wep = target.wep;
     if (target.ride !== undefined) this.ride = target.ride;
     if (target.veh !== undefined) this.veh = target.veh;
+    if (target.tp !== undefined) this.tp = target.tp;
+    if (target.mt !== undefined) this.mt = target.mt;
     return this;
   }
 }

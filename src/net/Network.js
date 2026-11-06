@@ -439,6 +439,8 @@ export class Network {
     if ((st.wep || '') !== (p.wep || '')) return true;
     if ((st.ride | 0) !== (p.ride | 0)) return true;
     if ((st.veh || '') !== (p.veh || '')) return true;
+    if ((st.tp | 0) !== (p.tp | 0)) return true;   // 瞬移序号变了必须立刻发，别等静止保活包
+    if ((st.mt || '') !== (p.mt || '')) return true; // 挂载/解绑也要立刻发
     return false;
   }
 
@@ -446,6 +448,7 @@ export class Network {
     return {
       x: st.x || 0, y: st.y || 0, z: st.z || 0, yaw: st.yaw || 0,
       size: st.size, health: st.health, hold: st.hold, wep: st.wep, ride: st.ride, veh: st.veh,
+      tp: st.tp, mt: st.mt,
     };
   }
 }

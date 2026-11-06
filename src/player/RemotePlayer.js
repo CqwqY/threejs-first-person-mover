@@ -42,6 +42,7 @@ export class RemotePlayer {
 
     // 快照缓冲：时间轴插值 + 外推 + 自适应延迟（INTERP_MODE = 'off' 时退回旧的指数平滑）
     this.buf = new SnapshotBuffer();
+    this._lastTp = (stateData && stateData.tp) || 0; // 初始序号，避免第一帧被当成瞬移
     // ⚠ 入库要给**全量**：stateData 可能是增量（服务端 delta 只发 {id}），
     //   直接入库会让插值采到 undefined → NaN → 人整只消失。state 已是「默认值 + 增量」的合并结果。
     this.buf.push(this.state);
@@ -70,6 +71,33 @@ export class RemotePlayer {
   // （增量补全由 SnapshotBuffer.push 内部做：缺的字段沿用上一份样本）
   applyState(stateData) {
     this.target.fromJSON(stateData);
+    const tpChanged = stateData.tp !== undefined && stateData.tp !== this._lastTp;
+    if (stateData.tp !== undefined) this._lastTp = stateData.tp;
+    // 兜底：老服务端 / 没带 tp 的重生、换房、被吸到远处，用位移阈值认出来
+    const jump = Math.hypot(this.target.x - this.state.x,
+      this.target.y - this.state.y, this.target.z - this.state.z);
+    if (tpChanged || jump > Config.TELEPORT_SNAP_DIST) {
+      // 瞬移不平滑：直接落位 + 清快照历史。若只清 target 不清缓冲，
+      // SnapshotBuffer 仍会拿旧位置插值，_approach 又按 12m/s 限速，人会「滑」过去。
+      this.state.x = this.target.x;
+      this.state.y = this.target.y;
+      this.state.z = this.target.z;
+      this.state.yaw = this.target.yaw;
+      this.state.pitch = this.target.pitch;
+      // 元数据只在确实带值时覆盖，避免增量快照里缺字段把血量/手持刷回默认值
+      if (this.target.size !== undefined) this.state.size = this.target.size;
+      if (this.target.health !== undefined) this.state.health = this.target.health;
+      if (this.target.hold !== undefined) this.state.hold = this.target.hold;
+      if (this.target.wep !== undefined) this.state.wep = this.target.wep;
+      if (this.target.ride !== undefined) this.state.ride = this.target.ride;
+      if (this.target.veh !== undefined) this.state.veh = this.target.veh;
+      if (this.target.mt !== undefined) this.state.mt = this.target.mt;
+      if (this.target.tp !== undefined) this.state.tp = this.target.tp;
+      this._knockT = 0; // 清掉残留的击飞预演，别让瞬移后又被旧冲量推走
+      this.buf.reset(this.target.toJSON());
+      this.syncModel();
+      return;
+    }
     this.buf.push(stateData);
   }
 

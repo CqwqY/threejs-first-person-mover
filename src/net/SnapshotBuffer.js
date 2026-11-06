@@ -59,8 +59,20 @@ export class SnapshotBuffer {
       hold: pick(cur.hold, prev.hold),
       ride: pick(cur.ride, prev.ride),
       veh: pick(cur.veh, prev.veh),
+      tp: pick(cur.tp, prev.tp),
+      mt: pick(cur.mt, prev.mt),
       onGround: pick(cur.onGround, prev.onGround),
     };
+  }
+
+  // 瞬移：丢弃全部历史（否则插值/外推会把人从旧位置一路拉回来），只留这一份全量样本。
+  // 到达间隔直方图也一起清，免得这次瞬移被算成抖动、把对抗延迟拉高。
+  reset(fullData) {
+    this._buf.length = 0;
+    this._gaps.length = 0;
+    this._lastPush = 0;
+    this._delayT = 0;
+    if (fullData) this.push(fullData);
   }
 
   // 最新一份快照数据（用于同步 health/hold/ride 等非插值字段）
@@ -143,7 +155,7 @@ export class SnapshotBuffer {
     return {
       x: d.x, y: d.y, z: d.z, yaw: d.yaw, pitch: d.pitch,
       size: d.size, health: d.health, hold: d.hold, ride: d.ride, veh: d.veh,
-      onGround: d.onGround,
+      tp: d.tp, mt: d.mt, onGround: d.onGround,
     };
   }
 }
