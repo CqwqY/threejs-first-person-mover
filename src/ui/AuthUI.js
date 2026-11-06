@@ -34,16 +34,37 @@ async function api(method, path, body, token) {
   }
 }
 
+// 缓存最近一次登录资料：主页在「token 有效但账号接口暂时不通」时也要能显示玩家名字，
+// 而不是一片空白。只存展示用的昵称/颜色，不存 token。
+const PROFILE_CACHE_KEY = 'fpm-last-profile';
+function saveProfileCache(profile) {
+  try {
+    if (!profile) { localStorage.removeItem(PROFILE_CACHE_KEY); return; }
+    localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify({
+      nickname: profile.nickname || '',
+      username: profile.username || '',
+      nicknameColor: profile.nicknameColor || '',
+    }));
+  } catch (e) { /* 隐私模式下忽略 */ }
+}
+export function cachedProfile() {
+  try {
+    const raw = localStorage.getItem(PROFILE_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
 // 显示登录/注册弹窗；用户完成一次交互后 resolve
 function showModal(done) {
   ensureTheme();
 
   const root = document.createElement('div');
-  root.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(20,24,32,0.45);backdrop-filter:blur(6px);';
+  // ⚠ 层级必须高于主页遮罩（10000）：主页先挂载，登录弹窗是盖在底图之上的。
+  root.style.cssText = 'position:fixed;inset:0;z-index:11000;display:flex;align-items:center;justify-content:center;background:rgba(20,24,32,0.45);backdrop-filter:blur(6px);';
   root.innerHTML = `
     <div class="kui-panel" style="width:340px;">
       <div class="kui-panel__body">
-        <div class="kui-title" style="margin-bottom:18px;">账号登录</div>
+        <div class="kui-title" style="margin-bottom:18px;">请登录</div>
         <input id="au-name" class="kui-input" placeholder="用户名" style="margin-bottom:10px;" />
         <input id="au-nick" class="kui-input" placeholder="昵称（注册时可起，可留空）" style="margin-bottom:10px;display:none;" />
         <input id="au-pass" class="kui-input" type="password" placeholder="密码" style="margin-bottom:10px;" />
@@ -58,7 +79,7 @@ function showModal(done) {
         <button id="au-submit" class="kui-btn kui-btn--primary" style="width:100%;">登 录</button>
         <div style="display:flex;justify-content:space-between;margin-top:12px;">
           <a id="au-toggle" class="kui-btn kui-btn--ghost" href="javascript:void(0)" style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">没有账号？去注册</a>
-          <a id="au-skip" class="kui-btn kui-btn--ghost" href="javascript:void(0)" style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">游客进入</a>
+          <a id="au-skip" class="kui-btn kui-btn--ghost" href="javascript:void(0)" style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;font-size:12px;opacity:.7;">暂不登录（游客）</a>
         </div>
       </div>
     </div>`;
@@ -116,6 +137,7 @@ function showModal(done) {
   }
 
   function finish(token, profile) {
+    saveProfileCache(profile);
     root.remove();
     done({ token, profile, gender: selectedGender, genderChosen });
   }
@@ -127,14 +149,24 @@ function showModal(done) {
   name.focus();
 }
 
-// 进入游戏前的登录流程：已保存 token 则校验并直接进入；否则弹窗登录/注册/游客
-export async function ensureAuth() {
+// 进入游戏前的登录流程：**每次打开主页都重新校验一遍登录态**。
+// 已保存 token → 拉一次资料确认有效；失效/没有 token → 弹「请登录」窗。
+// opts.onNeedLogin：即将弹窗时通知主页把中间文字切成「请登录」。
+export async function ensureAuth(opts = {}) {
+  const needLogin = () => {
+    if (typeof opts.onNeedLogin !== 'function') return;
+    try { opts.onNeedLogin(); }
+    catch (e) { console.warn('[auth] 通知主页登录态失败:', e); }
+  };
   const saved = localStorage.getItem('fp_token');
   if (saved) {
     try {
       // 用 token 拉一次资料：拿到昵称/颜色后直接进入，HUD 不必干等 WS 回执
       const out = await api('GET', '/api/profile', null, saved);
-      if (out && out.ok && out.profile) return { token: saved, profile: out.profile };
+      if (out && out.ok && out.profile) {
+        saveProfileCache(out.profile);
+        return { token: saved, profile: out.profile };
+      }
       if (out && out.ok === false) {
         // 服务端明确判定失效：清掉本地会话，走登录流程
         localStorage.removeItem('fp_token');
@@ -142,9 +174,10 @@ export async function ensureAuth() {
         return { token: saved, profile: null }; // 返回体异常，保守放行
       }
     } catch {
-      // 网络不通：仍带 token 进入（WS 侧会再校验），HUD 暂显「登录中」
+      // 网络不通：仍带 token 进入（WS 侧会再校验），主页用缓存昵称显示
       return { token: saved, profile: null };
     }
   }
+  needLogin();
   return new Promise((resolve) => showModal(resolve));
 }
