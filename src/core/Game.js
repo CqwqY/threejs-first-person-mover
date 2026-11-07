@@ -1611,17 +1611,16 @@ export class Game {
     const rtt = net ? net.rttMs : 0;
     const peers = net ? net.peerCount : 0;
     const direct = net ? net.directLinks : 0;
-    // 网格启用时显示「直连N/总数」（0/0 也算，表示网格在跑但没人）；
-    // 只有网格没启用（?p2p=0 或浏览器无 WebRTC）才显示 wss —— 两者含义完全不同。
-    const mode = (net && net.p2pEnabled) ? ('直连' + direct + '/' + peers) : 'wss';
-    // 上行通道：UDP = 客户端↔源站已直连（绕开 CF）；CF = 仍在走 Cloudflare 中继
+    // 只有 P2P 网格启用且有对端时才显示「直连N/总数」；主力是上行通道那一项。
+    const mesh = (net && net.p2pEnabled && peers > 0) ? (' · 直连' + direct + '/' + peers) : '';
+    // 上行通道：UDP = 客户端↔源站已直连（绕开 CF）；CF = 仍在走 Cloudflare
     const uplink = (net && net.transport === 'webrtc') ? 'UDP' : 'CF';
-    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + ' · ' + mode + ' · ' + uplink;
+    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + mesh + ' · ' + uplink;
     const txt = n + ' FPS\n' + line2;
     if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
     // 开放到整页：任何脚本/控制台都能读到当前网络状态
     if (typeof window !== 'undefined') {
-      window.__netStats = { fps: n, rttMs: rtt, mode, direct, peers, uplink };
+      window.__netStats = { fps: n, rttMs: rtt, direct, peers, uplink, mesh: !!mesh };
     }
     // 数字与边框都按档位着色（一眼看出流畅/可接受/卡）
     b.el.style.color = color;

@@ -53,11 +53,12 @@ export class Network {
     this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
     this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
 
-    // 玩家↔玩家 P2P 网格（**默认开启**；?p2p=0 关闭回退）。
-    // 只搬高频移动状态；打不通的那对仍走服务器快照，所以默认开启不会让任何人更差。
+    // 玩家↔玩家 P2P 网格（**默认关闭**；?p2p=1 才启用）。
+    // 实测：玩家↔玩家在对称 NAT 下打洞失败；但「客户端↔源站」直连是通的（服务端日志有 DataChannel 已打开）。
+    // 所以主力走客户端↔源站直连，P2P 网格只作实验开关。
     const q = typeof location !== 'undefined' ? location.search : '';
-    this._p2pEnabled = !/(?:^|[?&])p2p=0(?:&|$)/.test(q);
-    if (!this._p2pEnabled) this._rankStun(); // 只有退回「客户端↔源站」RTC 时才需要 STUN 排序
+    this._p2pEnabled = /(?:^|[?&])p2p=1(?:&|$)/.test(q);
+    if (!this._p2pEnabled) this._rankStun(); // 主力路径需要 STUN 排序
 
     // 延迟测量（应用层 ping/pong，走当前数据通道）
     this._rtt = 0;
