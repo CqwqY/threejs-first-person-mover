@@ -673,17 +673,18 @@ export class Network {
       if (!this._stateMuted) {
         if (this._stateChanged(st)) {
           this.send({ t: 'state', ...st });
-          if (this._mesh) this._mesh.broadcastState(st);
           this._lastSent = this._copyState(st);
           this._staticTicks = 0;
         } else {
           this._staticTicks = (this._staticTicks || 0) + 1;
           if (this._staticTicks >= SEND_STATIC_DIV) {
             this.send({ t: 'state', ...st });
-            if (this._mesh) this._mesh.broadcastState(st);
             this._staticTicks = 0;
           }
         }
+        // P2P 直连固定 20Hz 广播：保证对端的到达间隔稳定。若像服务器那样静止降到 5Hz，
+        // 对端会把 200ms 间隔误判成抖动、把插值缓冲撑大，画面重新变黏。
+        if (this._mesh) this._mesh.broadcastState(st);
       }
       this._pendingState = null;
     }

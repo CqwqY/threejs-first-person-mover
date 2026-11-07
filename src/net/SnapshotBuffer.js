@@ -32,7 +32,9 @@ export class SnapshotBuffer {
     if (!data) return;
     if (this._lastPush) {
       const gap = tRecvMs - this._lastPush;
-      if (gap > 0 && gap < 1000) {
+      // 只统计「像正常帧间隔」的样本：几毫秒内的连发是粘包，>300ms 是切后台/断流，
+      // 把一次 300ms 的停顿算成抖动会让接下来缓冲顶到上限（画面莫名变黏）。
+      if (gap > 8 && gap < 300) {
         this._gaps.push(gap);
         if (this._gaps.length > this._gapMax) this._gaps.shift();
       }
@@ -80,18 +82,27 @@ export class SnapshotBuffer {
     return this._buf.length ? this._buf[this._buf.length - 1].data : null;
   }
 
-  // 自适应抗抖延迟：按实测到达间隔的 p95 决定缓冲深度（要能盖住最坏的一次到达空档），
-  // 再留 20ms 余量。范围钳在 60~250ms：网络好时压到最低、延迟小；抖动大时自动放宽。
-  // 调整带 >10ms 迟滞 + 每步 ≤10ms，避免延迟来回震荡。
+  // 自适应抗抖延迟：抖动取「到达间隔相对平均值的离散度（标准差）」，而不是间隔本身。
+  //
+  // ⚠ 关键区别：20Hz 下正常间隔就是 ~50ms，若把「间隔的 p95」当成抖动来定缓冲，
+  //   稳定网络也会被强行加 70~80ms 延迟 —— 这正是玩家说的「慢/粘稠」。
+  //   标准差在稳定链路上趋近 0，于是低延迟链路（P2P 直连）能把缓冲压到 minDelay，
+  //   只有真的抖动/丢包时才加厚。范围钳在 min~max，每步 ≤10ms 防震荡。
   suggestDelayMs(now = performance.now()) {
     if (now < this._delayT) return this._delay;
     this._delayT = now + 1000;
-    if (!this._gaps.length) return this._delay;
-    const s = [...this._gaps].sort((a, b) => a - b);
-    const jitter = s[Math.min(s.length - 1, Math.floor(s.length * 0.95))]; // p95（ms）
-    const target = Math.max(this.minDelay, Math.min(this.maxDelay, jitter + 20));
+    if (this._gaps.length < 4) return this._delay;
+    const n = this._gaps.length;
+    let mean = 0;
+    for (const g of this._gaps) mean += g;
+    mean /= n;
+    let varr = 0;
+    for (const g of this._gaps) varr += (g - mean) * (g - mean);
+    const jitter = Math.sqrt(varr / n); // 到达间隔标准差（ms）
+    // 正常采样由 minDelay 兜住；抖动每 1ms 标准差补 3ms，上限 maxDelay
+    const target = Math.min(this.maxDelay, Math.max(this.minDelay, this.minDelay + jitter * 3));
     const d = target - this._delay;
-    if (Math.abs(d) > 10) this._delay += Math.max(-10, Math.min(10, Math.round(d)));
+    if (Math.abs(d) > 8) this._delay += Math.max(-10, Math.min(10, Math.round(d)));
     return this._delay;
   }
 
