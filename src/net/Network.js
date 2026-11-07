@@ -1,18 +1,15 @@
 // 职责：封装原生 WebSocket 客户端：连接、断线重连、消息注册与状态上报节流。
 import { Config } from '../config.js';
 
-// 公共 STUN 服务器：国内优先（小米 / B站 / 斗鱼 / 湖南卫视 / 华为云），再加 Cloudflare / Google 兜底。
-// 说明：STUN 只负责 NAT 打洞（发现本端的公网映射），不做中继；ICE 会同时向列表里的服务器发请求，
-// 谁先回应就用谁 —— 这本身就是「谁快选谁」。_rankStun() 还会实测延迟并缓存排序。
-// 已剔除 stun.qq.com（只解析不回应）。
+// 公共 STUN 服务器：只保留「真实 Binding 请求实测可回包」的 3 家（2026-11-07 实测：
+// 小米 47ms / B站 64ms / Cloudflare 194ms），分属不同网络覆盖不同运营商。
+// ⚠ 挂不通的 STUN 不是「多一个备选」，而是让 ICE 收集白等超时、拖慢建连；
+//   stun.qq.com / stun.huaweicloud.com 实测不回包，Google 在国内各网络差异大，一律不挂。
+// ⚠ STUN 只做 NAT 打洞（发现公网映射），不转发数据，救不了对称 NAT / CGNAT —— 那种情况必须 TURN。
 const STUN_SERVERS = [
   'stun:stun.miwifi.com:3478',
   'stun:stun.chat.bilibili.com:3478',
-  'stun:stun.douyucdn.cn:18000',
-  'stun:stun.hitv.com:3478',
-  'stun:124.70.180.79:3478',
   'stun:stun.cloudflare.com:3478',
-  'stun:stun.l.google.com:19302',
 ];
 
 export class Network {
@@ -50,7 +47,7 @@ export class Network {
     // WebRTC 直连状态：wss 连上后尝试建 DataChannel(UDP) 直连源站，绕开 CF 降延迟。
     // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
     this._transport = 'wss';          // 'wss' | 'webrtc'，供 UI / 调试查询
-    this._rtc = { pc: null, dc: null, open: false, timer: null };
+    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
     this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
     this._rankStun();                 // 后台测一遍 STUN 延迟并缓存（不阻塞首次连接）
   }
@@ -89,7 +86,7 @@ export class Network {
     if (this._rtc.pc) { try { this._rtc.pc.close(); } catch {} }
     if (this._rtc.dc) { try { this._rtc.dc.close(); } catch {} }
     if (this._rtc.timer) { clearTimeout(this._rtc.timer); }
-    this._rtc = { pc: null, dc: null, open: false, timer: null };
+    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
     this._transport = 'wss';
     // 首次连接与断线重连对外状态不同：重连时 UI 要显示「重连中 (n/5)」
     this._setStatus(this._everOpened || this._reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
@@ -223,7 +220,13 @@ export class Network {
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         gathered.push(e.candidate);
-        this.send({ t: 'rtc_ice', cand: e.candidate.candidate, mid: e.candidate.sdpMid });
+        this.send({
+          t: 'rtc_ice',
+          cand: e.candidate.candidate,
+          mid: e.candidate.sdpMid,
+          idx: e.candidate.sdpMLineIndex,
+          ufrag: e.candidate.usernameFragment,
+        });
       }
     };
     // 诊断：收集完候选后汇总类型与地址族，直连失败时能看出「有没有 IPv6 候选」这个关键点
@@ -249,6 +252,15 @@ export class Network {
         console.warn('[net] WebRTC 连接状态 = ' + s + '，已回落 wss');
       }
     };
+    // ICE 一旦 failed 立刻短路：打不通的 NAT 再等也不会通，别让人对着「建立中」干等满 8 秒
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'failed') {
+        console.warn('[net] ICE failed，直连失败，回落 wss');
+        this._rtc.open = false;
+        this._transport = 'wss';
+        if (this._rtc.timer) { clearTimeout(this._rtc.timer); this._rtc.timer = null; }
+      }
+    };
 
     // 超时回落：8s 内直连没开起来就放弃，继续用 wss
     this._rtc.timer = setTimeout(() => {
@@ -269,18 +281,37 @@ export class Network {
       .catch(() => { /* 协商失败，回落 wss */ });
   }
 
-  // 收到服务器回的 answer：把它的 SDP 设为本端远端描述，完成握手。
+  // 收到服务器回的 answer：把它的 SDP 设为本端远端描述，完成握手，再灌入早到的候选。
   _onRtcAnswer(msg) {
     const pc = this._rtc.pc;
     if (!pc) return;
-    pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp }).catch(() => {});
+    pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp })
+      .then(() => this._flushEarlyCandidates())
+      .catch(() => {});
   }
 
-  // 收到服务器的 ICE 候选：补进本端 PC。
+  // 收到服务器的 ICE 候选。trickle 候选可能早于 answer 到达，此时 setRemoteDescription 还没跑，
+  // 直接 addIceCandidate 会抛 InvalidStateError ── 先存起来，等远端描述落地再灌。
   _onRtcIce(msg) {
     const pc = this._rtc.pc;
     if (!pc) return;
-    pc.addIceCandidate({ candidate: msg.cand, sdpMid: msg.mid }).catch(() => {});
+    const cand = { candidate: msg.cand, sdpMid: msg.mid, sdpMLineIndex: msg.idx };
+    if (!this._rtc.remoteDescribed) {
+      this._rtc.early.push(cand);
+      return;
+    }
+    pc.addIceCandidate(cand).catch(() => {});
+  }
+
+  // 远端描述落地后，把缓存里早到的候选一次性补进去。
+  _flushEarlyCandidates() {
+    const rtc = this._rtc;
+    rtc.remoteDescribed = true;
+    const pending = rtc.early;
+    rtc.early = [];
+    for (const c of pending) {
+      try { if (rtc.pc) rtc.pc.addIceCandidate(c).catch(() => {}); } catch { /* 过期候选忽略 */ }
+    }
   }
 
   // 给 RTCPeerConnection 用的 iceServers：有实测排序就取最快的几个，否则用全量列表（ICE 内部会并发赛跑）。
