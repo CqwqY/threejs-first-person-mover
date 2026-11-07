@@ -1,5 +1,6 @@
 // 职责：封装原生 WebSocket 客户端：连接、断线重连、消息注册与状态上报节流。
 import { Config } from '../config.js';
+import { PeerMesh } from './PeerMesh.js';
 
 // 公共 STUN 服务器：只保留「真实 Binding 请求实测可回包」的 3 家（2026-11-07 实测：
 // 小米 47ms / B站 64ms / Cloudflare 194ms），分属不同网络覆盖不同运营商。
@@ -50,6 +51,23 @@ export class Network {
     this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
     this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
     this._rankStun();                 // 后台测一遍 STUN 延迟并缓存（不阻塞首次连接）
+
+    // 玩家↔玩家 P2P 网格（默认关闭；URL 带 ?p2p=1 才启用，确认稳定后再改默认）。
+    // 只搬高频移动状态；打不通的那对仍走服务器快照。
+    this._p2pEnabled = typeof location !== 'undefined' && /(?:^|[?&])p2p=1(?:&|$)/.test(location.search);
+    this._selfId = '';
+    this._meshHandlers = {};
+    this._mesh = null;
+    if (this._p2pEnabled && typeof RTCPeerConnection !== 'undefined') {
+      this._mesh = new PeerMesh({
+        iceServers: STUN_SERVERS.map((u) => ({ urls: u })),
+        maxDirect: 12,
+        sendSignal: (to, data) => this.send({ t: 'signal', to, data }),
+        onOpen: (id) => { if (this._meshHandlers.onOpen) this._meshHandlers.onOpen(id); },
+        onClose: (id) => { if (this._meshHandlers.onClose) this._meshHandlers.onClose(id); },
+        onState: (id, st) => { if (this._meshHandlers.onState) this._meshHandlers.onState(id, st); },
+      });
+    }
   }
 
   // 当前连接状态（供 UI 主动查询）
@@ -112,8 +130,8 @@ export class Network {
       if (this.token) {
         this.send({ t: 'auth', token: this.token });
       }
-      // wss 已通，立刻尝试 WebRTC 直连（信令走这趟 wss，游戏数据随后可能切到 UDP 直连）
-      this._startWebRtc();
+      // wss 已通：启用玩家网格时不再尝试「客户端↔源站」直连（源站无对外 UDP，注定打不通）
+      if (!this._p2pEnabled) this._startWebRtc();
     };
 
     this.ws.onmessage = (event) => {
@@ -123,6 +141,8 @@ export class Network {
       } catch {
         return;
       }
+      // 玩家网格信令（offer/answer/ICE）：交给 PeerMesh，不能当游戏消息分发
+      if (msg.t === 'signal') { if (this._mesh) this._mesh.handleSignal(msg); return; }
       // WebRTC 直连信令：rtc_answer / rtc_ice 是握手用的，不能当游戏消息分发。
       // rtc_up 是服务器确认直连已开的回执，客户端无需处理。
       if (msg.t === 'rtc_answer') { this._onRtcAnswer(msg); return; }
@@ -188,6 +208,30 @@ export class Network {
 
   // 当前数据通道：'wss'（CF 代理 TCP）或 'webrtc'（直连 UDP）。供 UI / 调试显示。
   get transport() { return this._transport || 'wss'; }
+
+  // 注册玩家网格回调：onOpen(id) / onClose(id) / onState(id, state)
+  setMeshHandlers(h) {
+    this._meshHandlers = Object.assign(this._meshHandlers || {}, h || {});
+  }
+
+  // 告诉网格「我是谁」（收到 welcome 后调用）
+  setSelfId(id) {
+    this._selfId = String(id || '');
+    if (this._mesh) this._mesh.setSelfId(this._selfId);
+  }
+
+  // 告诉网格「当前同场有哪些玩家」（每次快照调用；大厅/房间自动切换）
+  setScope(ids) {
+    if (this._mesh) this._mesh.setScope(ids);
+  }
+
+  // 当前有几条玩家直连（调试/UI 用）
+  get directLinkCount() {
+    if (!this._mesh) return 0;
+    let n = 0;
+    for (const p of this._mesh.peers.values()) if (p.direct) n++;
+    return n;
+  }
 
   // 尝试建立 WebRTC 直连：经现有 wss 交换信令，DataChannel(UDP) 通了就接管游戏数据。
   // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
@@ -629,12 +673,14 @@ export class Network {
       if (!this._stateMuted) {
         if (this._stateChanged(st)) {
           this.send({ t: 'state', ...st });
+          if (this._mesh) this._mesh.broadcastState(st);
           this._lastSent = this._copyState(st);
           this._staticTicks = 0;
         } else {
           this._staticTicks = (this._staticTicks || 0) + 1;
           if (this._staticTicks >= SEND_STATIC_DIV) {
             this.send({ t: 'state', ...st });
+            if (this._mesh) this._mesh.broadcastState(st);
             this._staticTicks = 0;
           }
         }

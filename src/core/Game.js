@@ -438,6 +438,13 @@ export class Game {
 
     this.network = new Network(Config.RELAY_URL, this._token);
     this.network.onMessage((msg) => this._onNetworkMessage(msg));
+    // 玩家↔玩家 P2P 网格：直连成功的玩家 id 集合；快照里这些 id 不再套用服务器那份，避免双重更新。
+    this._directIds = new Set();
+    this.network.setMeshHandlers({
+      onOpen: (id) => this._directIds.add(id),
+      onClose: (id) => this._directIds.delete(id),
+      onState: (id, st) => this.playerManager.applyPeerState(id, st),
+    });
     // 连接状态 UI：重连中显示角标，5 次失败显示「网络错误」面板
     this._netBadge = null;   // 顶部「正在重连 (n/5)…」角标
     this._netErrorEl = null; // 全屏「网络错误」面板
@@ -1960,6 +1967,7 @@ export class Game {
         // 确定本地 id，注册自己（模型隐藏），并加入服务器已存在的玩家
         const firstPlace = !this._placed; // 仅首次进入才用出生点；重连保留当前位置
         this.localState.id = msg.id;
+        if (this.network) this.network.setSelfId(msg.id); // 玩家网格据此判断谁发起直连
         // 用服务端分配的出生点初始化本地位置/朝向，避免都堆在原点
         if (firstPlace) {
           this.localState.x = msg.spawn.x;
@@ -2026,7 +2034,12 @@ export class Game {
         }
         // 训练场本机兜底（老服务端）：此时本机没进房间，快照是「大厅」的，套进来会让
         // 大厅玩家凭空出现在竞技场里，所以直接跳过。
-        if (!this._trainLocal) this.playerManager.applySnapshot(this._resolveMountedPlayers(msg.players));
+        if (!this._trainLocal) {
+          // 用快照的玩家列表驱动 P2P 网格成员（大厅/房间自动切换）
+          if (this.network) this.network.setScope((msg.players || []).map((p) => p.id));
+          // 已直连的玩家交给 P2P 更新，快照里跳过他们（但 applySnapshot 仍会把他们记为「见过」，不会误删）
+          this.playerManager.applySnapshot(this._resolveMountedPlayers(msg.players), this._directIds);
+        }
         // 对战中：人数即「同场人数」，供对战状态条显示
         if (this._combat) this._combat.alive = (msg.players || []).length;
         // 战绩：别人（和观战前的自己）的血量到 0 就是阵亡，时刻按本机时钟记

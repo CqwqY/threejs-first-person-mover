@@ -120,7 +120,7 @@ export class PlayerManager {
 //   玩家刚换房（换房本来就该由 leave/match 消息负责通知）。
 //   ⇒ 删除只认两个权威来源：**leave 消息**与 **welcome 的在线列表**（pruneTo，立即生效）；
 //     快照缺席只做兜底，且必须**连续缺席约 2 秒**才动手。
-  applySnapshot(players) {
+  applySnapshot(players, skipIds) {
     // 畸形包（players 不是数组）直接忽略：绝不能把「没拿到数据」当成「人都走光了」
     if (!Array.isArray(players)) return;
     const seen = new Set();
@@ -133,6 +133,14 @@ export class PlayerManager {
 
       seen.add(data.id);
       this.miss.delete(data.id); // 这帧见到了：清零缺席计数
+      // 已建立 P2P 直连的玩家：位置由直连负责，这里只标记「见过」防止被兜底删除，不套用服务器那份。
+      // 但模型若还没创建（直连比首个快照还快），必须先用这条快照把模型建出来，否则人会是隐形的。
+      if (skipIds && skipIds.has(data.id)) {
+        if (!this.players.get(data.id)) {
+          this.addPlayer(data.id, data, data.nick, data.color, undefined, 'snapshot');
+        }
+        continue;
+      }
       const remote = this.players.get(data.id);
       if (remote) {
         // 已有玩家：仅更新目标状态，由 RemotePlayer 插值逼近
@@ -151,6 +159,17 @@ export class PlayerManager {
       if (n >= MISS_LIMIT) {
         this.removePlayer(id, '连续 ' + n + ' 帧不在快照里（约 ' + Math.round(n * 50 / 100) / 10 + ' 秒）');
       }
+    }
+  }
+
+  // 收到某个玩家的 P2P 直连状态：只更新已存在的远程模型（模型由服务器快照带昵称/颜色创建）。
+  // 若模型还没建好就先不管——等快照把人建出来，直连随后只负责刷新位置。
+  applyPeerState(id, data) {
+    if (!id || id === this.localId || !data) return;
+    const remote = this.players.get(id);
+    if (remote) {
+      remote.applyState(data);
+      this.miss.delete(id); // 直连有数据，别被快照兜底误删
     }
   }
 
