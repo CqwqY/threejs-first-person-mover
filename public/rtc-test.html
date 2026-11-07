@@ -109,13 +109,23 @@
   }
 
   setTimeout(function () {
-    if (!done) {
-      log('8 秒内未收集完候选（UDP 可能被限制）', 'WARN');
-      if (!done) {
-        done = true;
-        verdict.textContent = '结论：候选收集超时，UDP 很可能被限制。';
-        verdict.className = 'card warn';
-      }
+    if (done) return;
+    done = true;
+    // 超时不一定失败：只要已经拿到 srflx 或 IPv6，就说明 UDP 可用，候选没收集完不影响直连。
+    var srflx = 0, v6 = 0;
+    for (var i = 0; i < cands.length; i++) {
+      if (cands[i].type === 'srflx' || cands[i].type === 'relay') srflx++;
+      var a = cands[i].address || '';
+      if (a.indexOf(':') >= 0) v6++;
+    }
+    if (srflx > 0 || v6 > 0) {
+      log('8 秒内未收完候选，但已拿到公网映射（srflx=' + srflx + ' IPv6=' + v6 + '），UDP 可用', 'OK');
+      verdict.textContent = '结论：UDP 可用（已拿到 srflx/IPv6）。游戏里若仍显示 CF，是缓存/版本问题，不是网络限制。';
+      verdict.className = 'card ok';
+    } else {
+      log('8 秒内既没有 srflx 也没有 IPv6', 'WARN');
+      verdict.textContent = '结论：没有 srflx 也没有 IPv6，UDP 很可能被限制。';
+      verdict.className = 'card bad';
     }
   }, 8000);
 })();

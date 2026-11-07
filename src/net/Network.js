@@ -400,7 +400,7 @@ export class Network {
         this._rtc.pc = null;
         this._rtc.dc = null;
       }
-    }, 8000);
+    }, 12000);
 
     pc.createOffer()
       .then((offer) => pc.setLocalDescription(offer))
@@ -455,7 +455,7 @@ export class Network {
 
   // 给 RTCPeerConnection 用的 iceServers：有实测排序就取最快的几个，否则用全量列表（ICE 内部会并发赛跑）。
   _iceServers() {
-    const list = (this._stunRanked && this._stunRanked.length ? this._stunRanked : STUN_SERVERS).slice(0, 4);
+    const list = (this._stunRanked && this._stunRanked.length ? this._stunRanked : STUN_SERVERS).slice(0, 3);
     return list.map((u) => ({ urls: u }));
   }
 
