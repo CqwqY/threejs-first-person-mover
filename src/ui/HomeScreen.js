@@ -1,22 +1,24 @@
-// 职责：进游戏前的「主页」。结构只有三块：
-//   ① 全屏背景：public/video/ 下三支校园短片交叉淡入轮播（静态 loading-bg.jpg 兜底）
-//   ② 屏幕中间：登录状态 / 玩家昵称（旧的校门 Logo 与大字标题已弃用）
-//   ③ 下方一条加载进度条；加载完成后**这条进度条本身**变成「点击进入游戏」按钮
+// 职责：进游戏前的「主页 + 加载页」，同一套 DOM 两层皮：
+//   ① 主页：public/video/ 下三支校园短片交叉淡入轮播（静态 loading-bg.jpg 兜底）
+//      + 中间登录状态 / 玩家昵称 + 底部「进入游戏」按钮。**默认就能点**，不等任何加载。
+//   ② 加载页：点「进入游戏」后立刻切成静态图片背景 + 一条铺满全宽、贴屏幕底边的进度条，
+//      真实加载进度走在这里。加载完成后**自动淡出**，不需要再点第二次。
 //
-// 状态机：login（检测登录/弹窗）→ loading（真实资产进度）→ ready（进度条变按钮）
-//        → entered（点击后淡出，露出后台已在实时渲染的校园世界）。
-// 期间遮罩吞掉指针事件，避免点击漏进游戏里（视角乱转 / 误开背包）。
+// 状态机：home（默认可点）→ loading（图片 + 全底进度条）→ entered（加载完自动淡出）。
+// ⚠ 关键：Game 的创建与资源加载全部发生在点「进入游戏」**之后**（见 main.js）；
+//   主页阶段零加载，遮罩吞掉 loading 阶段的指针事件，避免点击漏进游戏里。
 //
 // 用法（main.js）：
 //   const home = createHomeScreen();
-//   home.setStatus('正在检测登录…');          // 弹窗期间主页上显示的文字
-//   home.setProfile(auth.profile);            // 登录后中间换成玩家昵称
-//   const game = new Game(...); game.start(); home.beginLoading();
-//   await waitAssets(home, game);             // 内部反复调 home.setProgress(done,total)
-//   await home.markReady();                  // 进度条变按钮，点击后 resolve
+//   home.setStatus('正在检测登录…');
+//   const authPromise = ensureAuth({ onNeedLogin: ... });   // 并发，不阻塞按钮
+//   await home.waitForEnter();                              // 默认可点；点之前不碰 Game
+//   const game = new Game(...); game.start();               // 此时才真正开始加载
+//   await waitAssets(home, game);                          // 内部反复调 home.setProgress()
+//   home.finish();                                         // 加载完自动淡出，直接进入
 //
 // ⚠ 与旧 LoadingScreen 的区别：不再有独立居中的「点击进入游戏」大横条，
-//   也不再显示校门 Logo / 标题；入口就是底部那条进度条变形后的按钮。
+//   也不再显示校门 Logo / 标题；主页入口就是底部那条按钮，加载入口复用同一条元素。
 import { ensureTheme } from './theme.js';
 
 const KEYFRAMES_ID = 'fpm-home-kf';
@@ -98,14 +100,15 @@ export function createHomeScreen(opts = {}) {
   const videos = (Array.isArray(opts.videos) ? opts.videos : HOME_VIDEOS)
     .filter((u) => typeof u === 'string' && u.length > 0);
   const useVideo = videos.length > 0 && !videoDisabledByUrl();
-  let finished = false;
-  let readyResolve = null;
-  const ready = new Promise((res) => { readyResolve = res; });
+  let finished = false;   // 已淡出移除：加载完成后由 finish() 置位
+  let entered = false;    // 已点「进入游戏」：主页切成加载页（但还没淡出）
+  let enterResolve = null;
+  const enterPromise = new Promise((res) => { enterResolve = res; });
 
   // ---- 遮罩根：盖在 canvas 之上，靠 bg 层做不透明背景 ----
   const root = document.createElement('div');
   root.className = 'fpm-home';
-  root.dataset.phase = 'login';
+  root.dataset.phase = 'home';
   root.style.cssText =
     'position:fixed;inset:0;z-index:10000;overflow:hidden;user-select:none;' +
     '-webkit-tap-highlight-color:transparent;background:transparent;' +
@@ -208,7 +211,8 @@ export function createHomeScreen(opts = {}) {
     }
   }
 
-  // 进入游戏：立刻停解码并释放 src，别让 720p60 的视频在后台继续吃 CPU/GPU。
+  // 点「进入游戏」/ 永久停播：立刻停解码并释放 src，别让 720p60 的视频在后台继续吃 CPU/GPU。
+  // display:none 让静态图片底图**当帧**接管（不等 .8s 淡出过渡），加载页因此一定是图片。
   // ⚠ 不因 stopped 提前 return：disableVideo() 会先置 stopped，但那时 src 还没释放，
   //   进游戏仍需走一遍释放（下面每一步都幂等）。
   function stopVideos() {
@@ -219,6 +223,7 @@ export function createHomeScreen(opts = {}) {
     for (const v of videoEls) {
       pauseVideo(v);
       v.style.opacity = '0';
+      v.style.display = 'none';
       v.removeAttribute('src');
       if (typeof v.load === 'function') {
         try { v.load(); } catch (e) { warn('释放背景视频资源失败', e); }
@@ -385,7 +390,7 @@ export function createHomeScreen(opts = {}) {
   center.appendChild(subEl);
   center.appendChild(switchEl);
 
-  // ---- 下方：一条进度条（加载完成后它自己变成「点击进入游戏」按钮）----
+  // ---- 下方：同一条元素，主页时是「进入游戏」按钮，点击后变成铺满全底的加载进度条 ----
   const bottom = document.createElement('div');
   bottom.style.cssText =
     'position:absolute;left:50%;bottom:max(7%,calc(env(safe-area-inset-bottom) + 22px));' +
@@ -416,18 +421,18 @@ export function createHomeScreen(opts = {}) {
     'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
     'color:#fff;font-size:12px;font-weight:600;letter-spacing:.04em;opacity:0;' +
     'text-shadow:0 1px 3px rgba(0,0,0,.6);pointer-events:none;';
-  label.textContent = '等待登录';
+  label.textContent = '进入游戏';
 
   bar.appendChild(fill);
   bar.appendChild(sweep);
   bar.appendChild(label);
   bottom.appendChild(bar);
-  // 进度条下方一行状态（加载件数/百分比），就绪时隐藏
+  // 进度条下方一行状态（登录提示），加载阶段隐藏（进度信息改写在条内 label 上）
   const hint = document.createElement('div');
   hint.style.cssText =
     'font-size:12px;color:#cdd6f0;opacity:.8;text-align:center;min-height:16px;' +
     'text-shadow:0 1px 6px rgba(0,0,0,.6);transition:opacity .3s ease;';
-  hint.textContent = '请登录以继续';
+  hint.textContent = '点击即可进入校园';
   bottom.appendChild(hint);
 
   root.appendChild(bg);
@@ -435,26 +440,28 @@ export function createHomeScreen(opts = {}) {
   root.appendChild(center);
   root.appendChild(bottom);
 
-  // 加载/登录期间吞掉指针事件，别让点击漏进后面的游戏世界。
-  // ⚠ ready 阶段必须放行：否则进度条变形后的「点击进入」按钮会被自己吞掉。
+  // 加载阶段吞掉指针事件，别让点击漏进后面的游戏世界。
+  // ⚠ home 阶段必须放行：主页的「进入游戏」按钮默认就能点，被自己吞掉就永远进不去。
   root.addEventListener('pointerdown', (e) => {
     resumeVideos(); // 自动播放被拦时，借这次交互补一次 play()（不改变事件行为）
-    if (root.dataset.phase === 'ready' || root.dataset.phase === 'entered') return;
+    if (root.dataset.phase === 'home' || root.dataset.phase === 'entered') return;
     // 放行「切换账号」：capture 阶段 preventDefault 会连带抑制它后续的 click，
-    // 否则这个链接在登录/加载阶段看着能点、实际毫无反应（静默失效）。
+    // 否则这个链接看着能点、实际毫无反应（静默失效）。
     if (e.target === switchEl) return;
     e.preventDefault();
     e.stopPropagation();
   }, true);
   root.addEventListener('click', () => {
-    if (root.dataset.phase === 'ready' && !finished) beginEnter();
+    if (root.dataset.phase === 'home' && !finished) beginEnter();
   });
   bar.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (root.dataset.phase === 'ready' && !finished) beginEnter();
+    if (root.dataset.phase === 'home' && !finished) beginEnter();
   });
 
   document.body.appendChild(root);
+  // 默认可点：主页按钮在挂载后立刻绘制，不等登录、不等任何资源加载。
+  revealHome();
   // 必须等元素进了 DOM 再 play()：iOS Safari 对游离节点上的自动播放更严格。
   if (useVideo) {
     root.dataset.videoState = 'starting';
@@ -465,14 +472,14 @@ export function createHomeScreen(opts = {}) {
     root.dataset.videoState = 'off';
   }
 
+  // 点「进入游戏」：立刻切成加载页（图片背景 + 铺满全底的进度条），并放行 main.js
+  // 去创建 Game、开始加载。⚠ 这里**不淡出**：加载全程都在遮罩后面进行。
   function beginEnter() {
-    if (finished) return;
-    finished = true;
-    stopVideos();
-    root.dataset.phase = 'entered';
-    root.style.opacity = '0';
-    setTimeout(() => { if (root.parentElement) root.remove(); }, 600);
-    if (readyResolve) readyResolve();
+    if (entered || finished) return;
+    entered = true;
+    stopVideos();     // 视频当帧隐藏并释放，加载页露出静态图片
+    enterLoading();
+    if (enterResolve) enterResolve();
   }
 
   function setStatus(text, sub) {
@@ -491,55 +498,100 @@ export function createHomeScreen(opts = {}) {
     switchEl.style.display = 'block';
   }
 
-  function beginLoading() {
-    if (root.dataset.phase !== 'login') return;
+  // 加载页：静态图片背景 + 底部**铺满全宽、贴屏幕底边**的进度条。
+  // 视频已在 beginEnter() 里隐藏释放；这里只改版式，DOM 四层结构不变。
+  // ⚠ 必须用显式属性覆盖初始 cssText：里面写了 left:50% / transform:translateX(-50%)
+  //   / width:min(460px,82vw) / border-radius:999px，任何一条漏掉都会让进度条歪掉。
+  function enterLoading() {
+    if (root.dataset.phase !== 'home') return;
     root.dataset.phase = 'loading';
-    hint.textContent = '正在准备校园场景…';
+    center.style.opacity = '0'; // 加载页只留背景图和底部进度条
+    bottom.style.left = '0';
+    bottom.style.right = '0';
+    bottom.style.bottom = '0';
+    bottom.style.width = '100%';
+    bottom.style.transform = 'none';
+    bottom.style.gap = '0';
+    bar.dataset.mode = 'loading';
+    bar.setAttribute('role', 'progressbar');
+    bar.style.width = '100%';
+    bar.style.height = 'min(26px,4vh)';
+    bar.style.borderRadius = '0';
+    bar.style.background = 'rgba(255,255,255,.10)';
+    bar.style.boxShadow = 'inset 0 1px 3px rgba(0,0,0,.42)';
+    bar.style.cursor = 'default';
+    bar.style.animation = 'none';
+    fill.style.opacity = '1';
+    fill.style.width = '0%';
+    fill.style.borderRadius = '0';
+    sweep.style.opacity = '.5';
+    label.style.opacity = '1';
+    label.style.fontSize = '12px';
+    label.style.fontWeight = '600';
+    label.style.letterSpacing = '.04em';
+    label.textContent = '正在加载…';
+    // hint 必须彻底移出 flex 流：bottom 是 column 布局且贴底，留着它（哪怕透明）
+    // 仍占 16px，进度条就会被顶到屏幕底边上方，不再是「铺满全底」。
+    hint.style.display = 'none';
+    hint.style.opacity = '0';
+    nextFrame(() => { root.dataset.loadingPainted = '1'; });
   }
 
-  // 加载完成：进度条**本体**变成可点的「点击进入游戏」按钮（不再另起一条大横条）。
-  function revealReady() {
-    if (root.dataset.phase === 'ready' || finished) return;
-    root.dataset.phase = 'ready';
-    fill.style.width = '100%';
-    fill.style.opacity = '0';
-    sweep.style.opacity = '0';
-    hint.style.opacity = '0';
-    bar.dataset.mode = 'ready';
+  // 主页：底部按钮**默认就是可点的**「进入游戏」，不需要等任何加载。
+  function revealHome() {
+    if (root.dataset.phase !== 'home' || finished) return;
+    bar.dataset.mode = 'button';
     bar.setAttribute('role', 'button');
     bar.style.height = 'min(58px,11vh)';
     bar.style.background = 'linear-gradient(90deg,rgba(59,130,246,.92),rgba(37,99,235,.92))';
     bar.style.boxShadow = '0 10px 34px rgba(37,99,235,.42),inset 0 1px 0 rgba(255,255,255,.26)';
     bar.style.cursor = 'pointer';
     bar.style.animation = 'fpm-home-readyPulse 2.4s ease-in-out infinite';
-    label.textContent = '点击进入游戏';
+    fill.style.width = '0%';
+    fill.style.opacity = '0';
+    sweep.style.opacity = '0';
+    label.textContent = '进入游戏';
     label.style.opacity = '1';
     label.style.fontSize = 'min(22px,5vw)';
     label.style.fontWeight = '800';
     label.style.letterSpacing = '.18em';
-    // 就绪后让中央内容稍微退场，视觉焦点落到底部入口按钮
-    center.style.opacity = '.82';
-    nextFrame(() => { root.dataset.readyPainted = '1'; });
+    hint.style.opacity = '.8';
+    nextFrame(() => { root.dataset.homePainted = '1'; });
   }
 
   return {
     root,
     setStatus,
     setProfile,
-    beginLoading,
-    // 资产就绪 → 返回 Promise（玩家点击进度条/任意处后 resolve）
-    markReady() { revealReady(); return ready; },
-    // 兼容旧调用：直接结束（兜底）
-    finish() { beginEnter(); },
-    // done/total：total 为 0 表示总量未知，此时进度条慢慢爬避免像卡死
-    setProgress(done, total) {
-      if (finished || root.dataset.phase === 'ready' || root.dataset.phase === 'entered') return;
-      beginLoading();
-      fill.style.width = progressWidth(done, total) + '%';
-      hint.textContent = progressLabel(done, total);
-    },
     // 让主页能显示「正在检测登录」「请登录」这类阶段性文案
     setHint(text) { hint.textContent = text; },
+    // 只改条内文字、不动进度宽度：用于「连接场景 / 载入角色」这类阶段性反馈，
+    // 避免前两段（等 sceneReady / welcome）进度条看起来像卡死在 0%。
+    setStage(text) {
+      if (finished || root.dataset.phase !== 'loading') return;
+      label.textContent = text;
+    },
+    // 主页默认可点：main.js 先 await 它，之后才创建 Game / 开始加载
+    waitForEnter() { return enterPromise; },
+    // 点「进入游戏」后切到加载页（由 beginEnter 调用，也可外部直接调，幂等）
+    enterLoading,
+    // 加载完成：自动淡出直接进入游戏，不需要再点一次
+    finish() {
+      if (finished) return;
+      finished = true;
+      stopVideos();
+      root.dataset.phase = 'entered';
+      root.style.opacity = '0';
+      setTimeout(() => { if (root.parentElement) root.remove(); }, 600);
+      // 兜底放行：异常路径下也不让 main 永远卡在 waitForEnter（Promise 重复 resolve 无害）
+      if (enterResolve) enterResolve();
+    },
+    // done/total：total 为 0 表示总量未知，此时进度条慢慢爬避免像卡死
+    setProgress(done, total) {
+      if (finished || root.dataset.phase !== 'loading') return;
+      fill.style.width = progressWidth(done, total) + '%';
+      label.textContent = progressLabel(done, total);
+    },
     get phase() { return root.dataset.phase; },
     get done() { return finished; },
   };

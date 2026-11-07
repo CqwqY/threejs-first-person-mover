@@ -24,21 +24,24 @@ const QUIET_MS = 900;
 const ASSET_TIMEOUT_MS = 40000;
 
 // 等「模型都到位」：场景就绪 → 收到 welcome（玩家模型才开始加载）→ 加载计数归零 + 安静期。
-// 每一段都有超时兜底，且全程可被「不等了」打断（由外层的 race 结束）。
+// 每一段都有超时兜底，全场 40s 后无条件放行（含弱网、离线）。
+// ⚠ 只在点「进入游戏」之后才会被调用：主页阶段不发起任何资源加载。
 async function waitAssets(home, game) {
   const t0 = performance.now();
   markLoadPhase('waitStart');
   // 第一段：远端场景拉取（它会触发场景那批 GLB 加载）
+  home.setStage('正在连接校园场景…');
   await withTimeout(game.sceneReady(), 12000).catch(() => {});
   markLoadPhase('sceneReady');
   // 第二段：等 welcome —— 玩家角色模型到这一刻才发起加载。
   // 不等它就会在角色还没开始下载时放行（手机上表现为「人没出来就进游戏了」）。
+  home.setStage('正在载入玩家角色…');
   await game.welcomeReady(6000).catch(() => {});
   markLoadPhase('welcomeReady');
   // 第三段：等计数归零，且**连续安静 QUIET_MS** 没有新任务进来才算真的完。
-  // 每轮看一眼进度条，并给「不等了」留出打断机会。
+  // 每轮看一眼进度条，并给 40s 兜底放行的机会。
+  home.setStage('正在加载模型…');
   for (;;) {
-    if (home.done) { markLoadPhase('assetsDone'); markLoadPhase('assetsSkipped'); return; }
     const { pending, total } = stats();
     home.setProgress(total - pending, total);
     // 关键判据：空闲且安静够久 → 认定加载完
@@ -49,8 +52,13 @@ async function waitAssets(home, game) {
 }
 
 
-// 启动顺序（主页大改后）：先挂主页底图 → 再检测登录（没登录弹「请登录」）→
-// 中间换成玩家名字 → 创建 Game 后台加载 → 进度条走真实进度 → 变「点击进入游戏」→ 进入。
+// 启动顺序（点击后才加载）：
+//   ① 挂主页（视频背景 + 中间登录态/玩家名 + 底部「进入游戏」按钮，默认就能点）
+//   ② 并发检测登录（没登录弹「请登录」），结果只更新主页文字，不阻塞按钮
+//   ③ await home.waitForEnter() —— 这一刻之前**完全不创建 Game、不加载任何资源**
+//   ④ 点「进入游戏」→ 主页切成加载页（静态图片 + 铺满全底的进度条）
+//      → 等登录完成 → 云同步 → new Game() → game.start() → waitAssets() 走真实进度
+//   ⑤ 加载完成 home.finish() 自动淡出，直接进入游戏（不需要再点一次）
 // ⚠ 主页必须先于登录弹窗挂载：弹窗是盖在底图之上的，否则背后是一片空白 canvas。
 async function main() {
   markLoadPhase('boot');
@@ -62,22 +70,33 @@ async function main() {
   });
   home.setStatus('正在检测登录…');
 
-  // 每次进入都重新校验 token。登录流程任何异常都不能让页面卡在白屏：失败按游客进入。
-  let auth = { token: '', profile: null };
-  try {
-    auth = await ensureAuth({
-      onNeedLogin: () => {
-        home.setStatus('请登录', '登录后即可进入校园');
-        home.setHint('请登录后开始加载');
-      },
-    });
-  } catch (e) {
+  // 每次进入都重新校验 token，但**并发**进行：主页按钮此刻已经可点，不必等接口返回。
+  // 登录流程任何异常都不能让页面卡死：失败按游客继续。
+  const authPromise = ensureAuth({
+    onNeedLogin: () => {
+      home.setStatus('请登录', '登录后即可进入校园');
+      home.setHint('请登录后进入游戏');
+    },
+  }).catch((e) => {
     console.warn('[main] 登录流程失败，以游客身份进入:', e);
-  }
-  // token 有效但账号接口暂时不通时，用上次缓存的昵称把名字补上
-  const shownProfile = auth.profile || (auth.token ? cachedProfile() : null);
-  if (shownProfile) home.setProfile(shownProfile);
-  else home.setStatus(auth.token ? '已登录' : '游客模式', '未登录也能进入，云端功能不可用');
+    return { token: '', profile: null };
+  });
+  // 登录结果一到就把中间文字换成玩家名（或登录态）；纯展示，不阻塞进入流程。
+  // token 有效但账号接口暂时不通时，用上次缓存的昵称把名字补上。
+  authPromise.then((auth) => {
+    const shownProfile = auth.profile || (auth.token ? cachedProfile() : null);
+    if (shownProfile) home.setProfile(shownProfile);
+    else home.setStatus(auth.token ? '已登录' : '游客模式', '未登录也能进入，云端功能不可用');
+  }).catch((e) => {
+    console.warn('[main] 更新主页登录态失败（不影响进入）:', e);
+  });
+  markLoadPhase('authStarted');
+
+  // 默认可点：等用户点「进入游戏」。点之前不碰 Game，所以主页零加载、秒开。
+  await home.waitForEnter();
+  markLoadPhase('enter');
+
+  const auth = await authPromise;
   markLoadPhase('authDone');
 
   // 账号存档云同步（学币 / 已购 / 兑换码 / 技能槽 / 性别）：必须在 new Game 之前拉一次，
@@ -90,13 +109,13 @@ async function main() {
   const gender = localStorage.getItem('fpm-gender') === 'girl' ? 'girl' : 'boy';
   const game = new Game(auth.token, auth.profile, gender);
   game.start();
-  home.beginLoading();
   markLoadPhase('gameStart');
-  // 等场景/模型都到位（quietFor 安静期 + 40s 兜底），进度条走真实进度
+  // 等场景/模型都到位（quietFor 安静期 + 40s 兜底），加载页进度条走真实进度。
+  // 加载页此时已由 beginEnter() 切成静态图片 + 铺满全底的进度条。
   await waitAssets(home, game);
-  // 完成后进度条本体变成「点击进入游戏」，点击才淡出主页、露出实时渲染的校园世界
-  await home.markReady();
-  markLoadPhase('enter');
+  // 加载完直接淡出进入游戏，不再需要第二次点击。
+  home.finish();
+  markLoadPhase('entered');
   // 手机触屏：追加虚拟摇杆（移动）与右侧拖动（视角）。非触屏设备内部会直接跳过。
   // 人称切换器只认注入进来的这一对回调，不认识 Game 本身（模块之间靠注入解耦）
   const mobileCtl = initMobileControls(game.input, {
