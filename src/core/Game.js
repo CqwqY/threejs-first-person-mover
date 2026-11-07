@@ -1614,12 +1614,14 @@ export class Game {
     // 网格启用时显示「直连N/总数」（0/0 也算，表示网格在跑但没人）；
     // 只有网格没启用（?p2p=0 或浏览器无 WebRTC）才显示 wss —— 两者含义完全不同。
     const mode = (net && net.p2pEnabled) ? ('直连' + direct + '/' + peers) : 'wss';
-    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + ' · ' + mode;
+    // 上行通道：UDP = 客户端↔源站已直连（绕开 CF）；CF = 仍在走 Cloudflare 中继
+    const uplink = (net && net.transport === 'webrtc') ? 'UDP' : 'CF';
+    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + ' · ' + mode + ' · ' + uplink;
     const txt = n + ' FPS\n' + line2;
     if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
     // 开放到整页：任何脚本/控制台都能读到当前网络状态
     if (typeof window !== 'undefined') {
-      window.__netStats = { fps: n, rttMs: rtt, mode, direct, peers };
+      window.__netStats = { fps: n, rttMs: rtt, mode, direct, peers, uplink };
     }
     // 数字与边框都按档位着色（一眼看出流畅/可接受/卡）
     b.el.style.color = color;
