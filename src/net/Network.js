@@ -2,14 +2,16 @@
 import { Config } from '../config.js';
 import { PeerMesh } from './PeerMesh.js';
 
-// 公共 STUN 服务器：只保留「真实 Binding 请求实测可回包」的 3 家（2026-11-07 实测：
-// 小米 47ms / B站 64ms / Cloudflare 194ms），分属不同网络覆盖不同运营商。
-// ⚠ 挂不通的 STUN 不是「多一个备选」，而是让 ICE 收集白等超时、拖慢建连；
-//   stun.qq.com / stun.huaweicloud.com 实测不回包，Google 在国内各网络差异大，一律不挂。
+// 公共 STUN 服务器：2026-11-07 在源站（广东移动）用真实 Binding 请求逐个实测，按延迟排序。
+// 实测通过：斗鱼 17ms / 湖南卫视 25ms / 华为云 40ms / B站 52ms / 小米 82ms / Cloudflare 184ms。
+// 实测失败：腾讯 stun.qq.com 不回包；阿里云/腾讯云/百度/网易/抖音/360 的 stun 域名**根本不存在**。
 // ⚠ STUN 只做 NAT 打洞（发现公网映射），不转发数据，救不了对称 NAT / CGNAT —— 那种情况必须 TURN。
 const STUN_SERVERS = [
-  'stun:stun.miwifi.com:3478',
+  'stun:stun.douyucdn.cn:18000',
+  'stun:stun.hitv.com:3478',
+  'stun:124.70.180.79:3478',
   'stun:stun.chat.bilibili.com:3478',
+  'stun:stun.miwifi.com:3478',
   'stun:stun.cloudflare.com:3478',
 ];
 
@@ -165,8 +167,9 @@ export class Network {
       if (this.token) {
         this.send({ t: 'auth', token: this.token });
       }
-      // wss 已通：启用玩家网格时不再尝试「客户端↔源站」直连（源站无对外 UDP，注定打不通）
-      if (!this._p2pEnabled) this._startWebRtc();
+      // wss 已通：同时尝试「客户端↔源站」直连。源站有公网 IPv6，同局域网也走 host 候选，
+      // 成功后上行全部走 UDP、绕开 Cloudflare；失败自动回落 wss，不影响现有功能。
+      this._startWebRtc();
     };
 
     this.ws.onmessage = (event) => {
