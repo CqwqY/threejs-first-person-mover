@@ -182,6 +182,11 @@ export class Network {
       // 延迟测量：pong 回填 RTT；收到 ping 就回 pong（服务端/对端都可能发）
       if (msg.t === 'pong') { this._onPong(msg); return; }
       if (msg.t === 'ping') { this.send({ t: 'pong', c: msg.c }); return; }
+      // 信令投递回执：服务端明确告知 offer/answer 有没有送达对面
+      if (msg.t === 'signal_ack') {
+        console.log('[p2p] 信令投递' + (msg.ok ? '成功（对端在线）' : '失败（对端不在线）') + ' → ' + msg.to + ' [' + (msg.kind || '') + ']');
+        return;
+      }
       // 玩家网格信令（offer/answer/ICE）：交给 PeerMesh，不能当游戏消息分发
       if (msg.t === 'signal') { if (this._mesh) this._mesh.handleSignal(msg); return; }
       // WebRTC 直连信令：rtc_answer / rtc_ice 是握手用的，不能当游戏消息分发。
