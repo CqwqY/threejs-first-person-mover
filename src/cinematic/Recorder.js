@@ -1,49 +1,63 @@
 // 职责：逐帧渲染产物的导出（纯前端，零后端）。
 //
-// 导出优先级（自动降级）：
-//   1) WebCodecs + mp4-muxer 合成 MP4 —— 不依赖 SharedArrayBuffer，GitHub Pages 可用（Chrome/Edge）。
-//   2) ffmpeg.wasm 合成 MP4 —— 需跨源隔离（COOP/COEP），Pages 上通常不可用，作为本地自托管兜底。
+// 导出优先级（自动降级，且每层失败都会把原因带回页面，不静默吞掉）：
+//   1) WebCodecs + 本地 mp4-muxer 合成 MP4 —— 零网络依赖、无需 SharedArrayBuffer，Pages 可用（Chrome/Edge）。
+//   2) ffmpeg.wasm 合成 MP4 —— 需跨源隔离（COOP/COEP）；Pages 上不可用，仅本地自托管兜底。
 //   3) 帧序列导出 —— 用户「选文件夹」直接写入；浏览器不支持文件夹选择器时，打包成单个 ZIP 下载。
 //
 // 帧抓取依赖渲染器开启 preserveDrawingBuffer（见 main.js 的 renderer 配置）。
 
-const FF_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
-const CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.12.6/dist/esm';
-const MP4MUXER_URL = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.5/+esm';
+// ⚠ MP4 合成器必须是本地依赖（npm 包，随产物打包），不能从 CDN 动态 import：
+//   实测 cdn.jsdelivr.net 在国内/部分网络下直接不可达，而 WebCodecs 编码 + ffmpeg.wasm
+//   兜底曾同时挂在同一家 CDN 上 —— 结果「渲染并导出 MP4」最后只吐出一堆 PNG/ZIP，
+//   用户看到的就是「合成视频没了」。本地化后主路径零网络依赖，离线也能出 MP4。
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+
+// ffmpeg.wasm 兜底：只在跨源隔离环境（本地自托管 + COOP/COEP）才可能跑起来，
+// GitHub Pages 上没有隔离头，直接跳过，不再白等 CDN 超时。CDN 多源按顺序重试。
+const FF_BASES = [
+  'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm',
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm',
+];
+const CORE_BASES = [
+  'https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/esm',
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.12.6/dist/esm',
+];
 
 let _ff = null;
 let _ffLoading = null;
-let _muxerMod = null;
-let _muxerLoading = null;
 
 async function loadFFmpeg(onLog) {
   if (_ff) return _ff;
   if (_ffLoading) return _ffLoading;
   _ffLoading = (async () => {
-    const mod = await import(/* @vite-ignore */ `${FF_BASE}/index.js`);
-    const FFmpeg = mod.FFmpeg || mod.default?.FFmpeg;
-    const ffmpeg = new FFmpeg();
-    if (onLog) ffmpeg.on('log', ({ message }) => onLog(message));
-    await ffmpeg.load({
-      coreURL: `${CORE_BASE}/ffmpeg-core.js`,
-      wasmURL: `${CORE_BASE}/ffmpeg-core.wasm`,
-      classWorkerURL: `${FF_BASE}/worker.js`,
-    });
-    _ff = ffmpeg;
-    return ffmpeg;
-  })();
+    // ffmpeg.wasm 单线程版也要 SharedArrayBuffer；没有跨源隔离时 load() 必然失败。
+    if (!globalThis.crossOriginIsolated) {
+      throw new Error('当前页面未开启跨源隔离（COOP/COEP），ffmpeg.wasm 不可用');
+    }
+    let lastErr = null;
+    for (let i = 0; i < FF_BASES.length; i++) {
+      try {
+        const mod = await import(/* @vite-ignore */ `${FF_BASES[i]}/index.js`);
+        const FFmpeg = mod.FFmpeg || mod.default?.FFmpeg;
+        const ffmpeg = new FFmpeg();
+        if (onLog) ffmpeg.on('log', ({ message }) => onLog(message));
+        await ffmpeg.load({
+          coreURL: `${CORE_BASES[i]}/ffmpeg-core.js`,
+          wasmURL: `${CORE_BASES[i]}/ffmpeg-core.wasm`,
+          classWorkerURL: `${FF_BASES[i]}/worker.js`,
+        });
+        _ff = ffmpeg;
+        return ffmpeg;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[rec] ffmpeg CDN 源不可用，尝试下一个:', FF_BASES[i], e);
+        // 单个 FFmpeg 实例加载失败后不能复用，下一轮重新 new
+      }
+    }
+    throw lastErr || new Error('ffmpeg.wasm 加载失败');
+  })().finally(() => { _ffLoading = null; });
   return _ffLoading;
-}
-
-async function loadMp4Muxer() {
-  if (_muxerMod) return _muxerMod;
-  if (_muxerLoading) return _muxerLoading;
-  _muxerLoading = (async () => {
-    const mod = await import(/* @vite-ignore */ MP4MUXER_URL);
-    _muxerMod = mod.Muxer ? mod : (mod.default || {});
-    return _muxerMod;
-  })();
-  return _muxerLoading;
 }
 
 function downloadBlob(blob, name) {
@@ -200,9 +214,7 @@ export class Recorder {
     if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
       throw new Error('WebCodecs 不可用');
     }
-    const { Muxer, ArrayBufferTarget } = await loadMp4Muxer();
-    if (!Muxer || !ArrayBufferTarget) throw new Error('mp4-muxer 加载失败');
-
+    // 合成器是本地 npm 包（顶部静态 import），不需要任何网络请求。
     const first = this.frames[0];
     const isVF = captureVideo && (first instanceof VideoFrame);
     let w, h;
@@ -225,37 +237,51 @@ export class Recorder {
       video: { codec: 'avc', width: w, height: h, frameRate: fps },
       fastStart: 'in-memory',
     });
+    let encodeError = null;
     const encoder = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: (e) => { throw e; },
+      // ⚠ 回调里 throw 不会冒泡到 await（只会变成未捕获异常，导出卡死在「合成视频中」）。
+      //   先记下来，在编码循环与 flush 之后统一抛出，才能被 exportVideo 的降级链捕获。
+      error: (e) => { encodeError = e instanceof Error ? e : new Error(String(e)); },
     });
     encoder.configure({ codec, width: w, height: h, bitrate: pickBitrate(w, h), framerate: fps });
 
     const frameDur = 1_000_000 / fps; // 微秒
     const n = this.frames.length;
     const gop = Math.max(1, Math.round(fps * 2));
-    for (let i = 0; i < n; i++) {
-      let vf;
-      if (isVF) {
-        vf = this.frames[i]; // 已是 VideoFrame，直接喂编码器
-      } else {
-        const bmp = await createImageBitmap(this.frames[i]);
-        vf = new VideoFrame(bmp, {
-          timestamp: Math.round(i * frameDur),
-          duration: Math.round(frameDur),
-        });
-        bmp.close();
+    try {
+      for (let i = 0; i < n; i++) {
+        if (encodeError) throw encodeError;
+        let vf;
+        if (isVF) {
+          vf = this.frames[i]; // 已是 VideoFrame，直接喂编码器
+        } else {
+          const bmp = await createImageBitmap(this.frames[i]);
+          vf = new VideoFrame(bmp, {
+            timestamp: Math.round(i * frameDur),
+            duration: Math.round(frameDur),
+          });
+          bmp.close();
+        }
+        encoder.encode(vf, { keyFrame: i % gop === 0 });
+        vf.close();
+        if (onProgress) onProgress((i + 1) / n / 2);
       }
-      encoder.encode(vf, { keyFrame: i % gop === 0 });
-      vf.close();
-      if (onProgress) onProgress((i + 1) / n / 2);
+      await encoder.flush();
+      if (encodeError) throw encodeError;
+    } catch (e) {
+      // 编码器已坏，别继续复用；错误交给上层决定是否降级
+      try { encoder.close(); } catch (_) { /* 忽略关闭异常 */ }
+      throw encodeError || e;
     }
-    await encoder.flush();
     muxer.finalize();
     const { buffer } = muxer.target;
-    downloadBlob(new Blob([buffer], { type: 'video/mp4' }), `${sanitizeName(baseName)}.mp4`);
+    const name = `${sanitizeName(baseName)}.mp4`;
+    const blob = new Blob([buffer], { type: 'video/mp4' });
+    downloadBlob(blob, name);
     if (onProgress) onProgress(1);
-    return { method: 'webcodecs' };
+    // 回传 blob：页面里可直接 <video> 预览/另存，不必只依赖浏览器下载栏。
+    return { method: 'webcodecs', blob, name };
   }
 
   // ffmpeg.wasm 兜底（需跨源隔离；Pages 上通常失败）
@@ -272,9 +298,11 @@ export class Recorder {
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'out.mp4',
     ]);
     const data = await ffmpeg.readFile('out.mp4');
-    downloadBlob(new Blob([data.buffer || data], { type: 'video/mp4' }), 'cinematic.mp4');
+    const name = 'cinematic.mp4';
+    const blob = new Blob([data.buffer || data], { type: 'video/mp4' });
+    downloadBlob(blob, name);
     if (onProgress) onProgress(1);
-    return { method: 'ffmpeg' };
+    return { method: 'ffmpeg', blob, name };
   }
 
   // 把已抓好的 VideoFrame 转回 PNG Blob（仅 WebCodecs 失败、需要走 ffmpeg / 帧序列兜底时用到）
@@ -283,7 +311,16 @@ export class Recorder {
     const out = [];
     for (let i = 0; i < n; i++) {
       const vf = this.frames[i];
-      const bmp = await createImageBitmap(vf);
+      // 若 WebCodecs 编码到一半才失败，前面的 VideoFrame 可能已被 close()，
+      // 再 createImageBitmap 会抛 InvalidStateError。别静默吞掉半个帧序列，
+      // 明确报错让上层提示「重新渲染一次」（这几帧已经不可恢复）。
+      let bmp;
+      try {
+        bmp = await createImageBitmap(vf);
+      } catch (e) {
+        try { vf.close(); } catch (_) { /* 已关闭 */ }
+        throw new Error(`第 ${i + 1} 帧已失效，无法转回 PNG；请重新点击「渲染并导出 MP4」再渲染一次。`);
+      }
       const cv = document.createElement('canvas');
       cv.width = bmp.width; cv.height = bmp.height;
       cv.getContext('2d').drawImage(bmp, 0, 0);
@@ -299,9 +336,11 @@ export class Recorder {
   // 主导出入口：WebCodecs → ffmpeg → 帧序列（文件夹/ZIP）
   async exportVideo({ fps, baseName = 'frames', captureVideo = false, onProgress, onLog } = {}) {
     if (this.frames.length === 0) throw new Error('没有帧可导出');
+    const reasons = [];
     try {
       return await this.exportVideoWebCodecs({ fps, baseName, captureVideo, onProgress, onLog });
     } catch (e) {
+      reasons.push('WebCodecs: ' + (e && e.message ? e.message : String(e)));
       console.warn('[rec] WebCodecs 失败，降级:', e);
     }
     // 若之前抓的是 VideoFrame，降级路径（ffmpeg / 帧序列）需要 PNG，先转回
@@ -309,11 +348,15 @@ export class Recorder {
     try {
       return await this.exportVideoFFmpeg({ fps, onProgress, onLog });
     } catch (e) {
+      reasons.push('ffmpeg: ' + (e && e.message ? e.message : String(e)));
       console.warn('[rec] ffmpeg 不可用，降级为帧序列:', e);
     }
-    // 帧序列兜底：先尝试文件夹，失败则 ZIP
+    // 帧序列兜底：先尝试文件夹，失败则 ZIP。
+    // ⚠ 带上 reasons：页面必须明说「MP4 没合成出来」，而不是让用户以为拿到了视频。
     let dirHandle = null;
     try { dirHandle = await this.pickFolder(); } catch (_) { dirHandle = null; }
-    return await this.exportFrames({ dirHandle, baseName, onProgress });
+    const res = await this.exportFrames({ dirHandle, baseName, onProgress });
+    res.reason = reasons.join(' / ');
+    return res;
   }
 }

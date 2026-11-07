@@ -1,4 +1,4 @@
-// 影片导演单页入口：加载校园场景 → 自由飞行打关键帧 → 逐帧渲染 → ffmpeg 合成导出。
+// 影片导演单页入口：加载校园场景 → 自由飞行打关键帧 → 逐帧渲染 → 本地合成 MP4 + 页面内预览。
 // 不依赖登录 / 联机 / 游戏内 UI，纯前端。
 import * as THREE from 'three';
 import { buildCampusScene } from './sceneBuilder.js';
@@ -25,6 +25,12 @@ const frameCount = document.getElementById('frameCount');
 const setRes = document.getElementById('setRes');
 const setName = document.getElementById('setName');
 const btnFrames = document.getElementById('btnFrames');
+const videoPanel = document.getElementById('videoPanel');
+const previewVideo = document.getElementById('previewVideo');
+const btnSaveVideo = document.getElementById('btnSaveVideo');
+const btnCloseVideo = document.getElementById('btnCloseVideo');
+const btnShowVideo = document.getElementById('btnShowVideo');
+let previewUrl = null; // 上一次成片的 blob URL（换片时先 revoke，避免内存泄漏）
 
 let renderer, scene, camera, director, timeline, recorder;
 let lights = null;              // buildCampusScene 返回的灯光（含太阳、sunTarget、offset）
@@ -138,6 +144,29 @@ function bindUI() {
   btnKey.addEventListener('click', addKeyAtCursor);
   btnRender.addEventListener('click', renderAndExport);
   btnFrames.addEventListener('click', exportFrames);
+  btnCloseVideo.addEventListener('click', () => {
+    previewVideo.pause();
+    videoPanel.style.display = 'none';
+  });
+  btnShowVideo.addEventListener('click', () => {
+    if (!previewUrl) return;
+    videoPanel.style.display = 'flex';
+  });
+}
+
+// 合成成功后把 MP4 直接挂到页面里播放：即使浏览器拦了自动下载，也能看、能另存。
+// 只在「换片 / 关页面」时释放 URL；关闭弹层不释放，用户还可能回来重播或另存。
+function showVideoPreview(blob, name) {
+  if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+  previewUrl = URL.createObjectURL(blob);
+  previewVideo.src = previewUrl;
+  btnSaveVideo.href = previewUrl;
+  btnSaveVideo.download = name || 'campus_tour.mp4';
+  btnShowVideo.style.display = ''; // 关掉弹层后仍能从顶栏找回成片
+  videoPanel.style.display = 'flex';
+  // play() 返回 Promise；自动播放被拦是 rejection 而非同步异常，try/catch 抓不到。
+  const playing = previewVideo.play();
+  if (playing && typeof playing.catch === 'function') playing.catch(() => {});
 }
 
 function addKeyAtCursor() {
@@ -233,19 +262,20 @@ async function renderFrames({ captureVideo = false } = {}) {
 
   // 渲染尺寸：
   //  · 明确选了分辨率（如 1080p）→ 按所选像素精确渲染（pixelRatio=1，输出就是该分辨率，不变形不缩水）。
-  //  · 「自适应屏幕」→ 保留设备像素比（不降清晰度，导出产物与屏幕同分辨率）。
+  //  · 「自适应屏幕」→ 按 CSS 像素 x DPR 得到物理像素（等效保留设备像素比，不降清晰度）。
   //  ⚠ 绝不为提速强制降 pixelRatio：那会直接 lowering 导出画质（用户明确要求不降画面）。
   //    提速度靠的是下面的「直接抓 VideoFrame 跳过 PNG 往返」，而不是砍分辨率。
+  // H.264 要求宽高为偶数：奇数尺寸会让 VideoEncoder.configure 直接失败、
+  // MP4 合成静默降级成帧序列。这里把输出像素统一向下取偶（最多少 1 像素，肉眼无感）。
+  // 「自适应屏幕」按 物理像素 = CSS 像素 x DPR 计算，画质与原来 setPixelRatio 方案相同。
+  const even = (n) => Math.max(2, Math.floor(n / 2) * 2);
   const [rw, rh] = (setRes.value || '').split('x').map((n) => parseInt(n, 10));
-  if (rw && rh) {
-    renderer.setPixelRatio(1);
-    renderer.setSize(rw, rh, false);
-    camera.aspect = rw / rh;
-  } else {
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setSize(window.innerWidth, window.innerHeight, false);
-    camera.aspect = window.innerWidth / window.innerHeight;
-  }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const outW = rw && rh ? even(rw) : even(Math.round(window.innerWidth * dpr));
+  const outH = rw && rh ? even(rh) : even(Math.round(window.innerHeight * dpr));
+  renderer.setPixelRatio(1);
+  renderer.setSize(outW, outH, false);
+  camera.aspect = outW / outH;
   camera.updateProjectionMatrix();
 
   renderPanel.style.display = 'block';
@@ -328,18 +358,22 @@ async function renderAndExport() {
     });
   } catch (e) {
     console.error(e);
-    renderLabel.textContent = '导出失败：' + e.message;
+    alert('导出失败：' + e.message);
+    restoreViewport(); // 失败也必须回编辑态，否则页面永久卡在「渲染模式」
     return;
   }
 
-  if (res.method === 'webcodecs') {
-    renderLabel.textContent = `导出完成：${baseName}.mp4 已开始下载（WebCodecs）。`;
-  } else if (res.method === 'ffmpeg') {
-    renderLabel.textContent = '导出完成：cinematic.mp4 已开始下载。';
-  } else if (res.method === 'folder') {
-    renderLabel.textContent = `导出完成：帧序列已写入你选择的「${baseName}/」文件夹。`;
+  // WebCodecs / ffmpeg 两条 MP4 路径都回传 blob，统一进页面预览
+  if (res.blob) {
+    showVideoPreview(res.blob, res.name);
+    renderLabel.textContent = `导出完成：${res.name} 已下载，弹层里可直接重播 / 另存。`;
   } else {
-    renderLabel.textContent = `导出完成：${baseName}.zip 已下载（浏览器不支持选文件夹）。`;
+    // ⚠ 只拿到帧序列时必须说清「MP4 没合成出来」+ 原因，不能静默降级让用户以为视频丢了。
+    const what = res.method === 'folder'
+      ? `帧序列已写入「${baseName}/」文件夹`
+      : `${baseName}.zip 已下载（帧序列 PNG）`;
+    renderLabel.textContent = `MP4 合成失败，已改为导出帧序列：${what}。原因：${res.reason || '未知'}`;
+    console.warn('[cinematic] MP4 合成失败，降级帧序列:', res.reason);
   }
   setTimeout(restoreViewport, 900);
 }
@@ -383,7 +417,8 @@ async function exportFrames() {
     }
   } catch (e) {
     console.error(e);
-    renderLabel.textContent = '导出失败：' + e.message;
+    alert('导出帧序列失败：' + e.message);
+    restoreViewport();
     return;
   }
   setTimeout(restoreViewport, 900);
