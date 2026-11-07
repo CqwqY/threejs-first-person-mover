@@ -1611,8 +1611,9 @@ export class Game {
     const rtt = net ? net.rttMs : 0;
     const peers = net ? net.peerCount : 0;
     const direct = net ? net.directLinks : 0;
-    // 有同场玩家就显示「直连N/总数」，一眼看出这一对打没打穿；没别人就显示 wss
-    const mode = peers > 0 ? ('直连' + direct + '/' + peers) : 'wss';
+    // 网格启用时显示「直连N/总数」（0/0 也算，表示网格在跑但没人）；
+    // 只有网格没启用（?p2p=0 或浏览器无 WebRTC）才显示 wss —— 两者含义完全不同。
+    const mode = (net && net.p2pEnabled) ? ('直连' + direct + '/' + peers) : 'wss';
     const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + ' · ' + mode;
     const txt = n + ' FPS\n' + line2;
     if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
@@ -2046,9 +2047,10 @@ export class Game {
         }
         // 训练场本机兜底（老服务端）：此时本机没进房间，快照是「大厅」的，套进来会让
         // 大厅玩家凭空出现在竞技场里，所以直接跳过。
+        // 用快照的玩家列表驱动 P2P 网格成员（大厅/房间自动切换）。
+        // ⚠ 这一行不能放进下面的 _trainLocal 分支：否则训练场兜底时网格永远不建，连日志都没有。
+        if (this.network) this.network.setScope((msg.players || []).map((p) => p.id));
         if (!this._trainLocal) {
-          // 用快照的玩家列表驱动 P2P 网格成员（大厅/房间自动切换）
-          if (this.network) this.network.setScope((msg.players || []).map((p) => p.id));
           // 已直连的玩家交给 P2P 更新，快照里跳过他们（但 applySnapshot 仍会把他们记为「见过」，不会误删）
           this.playerManager.applySnapshot(this._resolveMountedPlayers(msg.players), this._directIds);
         }

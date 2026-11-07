@@ -40,7 +40,11 @@ export class PeerMesh {
     for (const id of [...this.peers.keys()]) {
       if (!scope.has(id)) this.removePeer(id);
     }
-    this.scopeSize = scope.size; // 同场人数（HUD 显示「直连N/总人数」用）
+    // 同场人数变化时打一条（排查「没有任何输出」时，能看到 scope 到底有没有人）
+    if (scope.size !== (this.scopeSize || 0)) {
+      console.log('[p2p] 同场人数 = ' + scope.size, [...scope]);
+    }
+    this.scopeSize = scope.size; // HUD 显示「直连N/总人数」用
     if (!this.selfId) return;
     // 新增的：id 较小的一方主动发起；另一方先占位等对方 offer
     for (const id of scope) {

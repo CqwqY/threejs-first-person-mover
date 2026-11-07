@@ -69,7 +69,16 @@ export class Network {
       if (typeof location !== 'undefined') {
         const sp = new URLSearchParams(location.search);
         const turnUrl = sp.get('turn');
-        if (turnUrl) {
+        if (turnUrl === 'openrelay') {
+          // 公共 TURN 预设（metered.ca openrelay，免费/尽力而为）——仅用于快速验证「是不是 NAT 打不通」。
+          // ⚠ 数据会经第三方中继转发，确认是 NAT 问题后应换成自己的 coturn。
+          const u = 'openrelayproject';
+          iceServers.push(
+            { urls: 'turn:openrelay.metered.ca:80', username: u, credential: u },
+            { urls: 'turn:openrelay.metered.ca:443', username: u, credential: u },
+            { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: u, credential: u }
+          );
+        } else if (turnUrl) {
           const s = { urls: turnUrl };
           const tu = sp.get('turnuser'); const tp = sp.get('turnpass');
           if (tu) s.username = tu;
@@ -88,6 +97,12 @@ export class Network {
         onState: (id, st) => { if (this._meshHandlers.onState) this._meshHandlers.onState(id, st); },
       });
     }
+    // 无条件启动日志：任何一次进游戏都能看到网格到底有没有起来（排查「没有任何输出」用）
+    console.log('[p2p] 构建 p2p-39d7f9c', {
+      启用: this._p2pEnabled,
+      有WebRTC: typeof RTCPeerConnection !== 'undefined',
+      网格: !!this._mesh,
+    });
   }
 
   // 当前连接状态（供 UI 主动查询）
@@ -257,10 +272,14 @@ export class Network {
     this._meshHandlers = Object.assign(this._meshHandlers || {}, h || {});
   }
 
+  // 是否启用了 P2P 网格（HUD 用来区分「没启用」与「启用了但没打通」）
+  get p2pEnabled() { return !!this._p2pEnabled; }
+
   // 告诉网格「我是谁」（收到 welcome 后调用）
   setSelfId(id) {
     this._selfId = String(id || '');
     if (this._mesh) this._mesh.setSelfId(this._selfId);
+    console.log('[p2p] 我的 id = ' + this._selfId);
   }
 
   // 告诉网格「当前同场有哪些玩家」（每次快照调用；大厅/房间自动切换）
