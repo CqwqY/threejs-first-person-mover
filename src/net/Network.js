@@ -15,6 +15,11 @@ const STUN_SERVERS = [
   'stun:stun.cloudflare.com:3478',
 ];
 
+// 直连失败后自动重试的次数与间隔：源站处运营商多出口 NAT，同一会话有概率绑到不可用的出口，
+// 重建一次会重新选出口（实测：失败后手动刷新一次即通）。有了重试，用户不必自己去刷新页面。
+const RTC_MAX_RETRY = 2;
+const RTC_RETRY_DELAY = 1200;
+
 export class Network {
   constructor(url, token) {
     this.url = url;
@@ -50,7 +55,7 @@ export class Network {
     // WebRTC 直连状态：wss 连上后尝试建 DataChannel(UDP) 直连源站，绕开 CF 降延迟。
     // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
     this._transport = 'wss';          // 'wss' | 'webrtc'，供 UI / 调试查询
-    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
+    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false, retries: 0, retryTimer: null };
     this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
 
     // 玩家↔玩家 P2P 网格（**默认关闭**；?p2p=1 才启用）。
@@ -154,7 +159,8 @@ export class Network {
     if (this._rtc.pc) { try { this._rtc.pc.close(); } catch {} }
     if (this._rtc.dc) { try { this._rtc.dc.close(); } catch {} }
     if (this._rtc.timer) { clearTimeout(this._rtc.timer); }
-    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
+    if (this._rtc.retryTimer) { clearTimeout(this._rtc.retryTimer); }
+    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false, retries: 0, retryTimer: null };
     this._transport = 'wss';
     // 首次连接与断线重连对外状态不同：重连时 UI 要显示「重连中 (n/5)」
     this._setStatus(this._everOpened || this._reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
@@ -323,6 +329,7 @@ export class Network {
   // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
   _startWebRtc() {
     if (typeof RTCPeerConnection === 'undefined') return; // 非浏览器或老浏览器：直接跳过
+    if (this._rtc.pc) return; // 已经有一轮协商在进行，别叠加
     let pc, dc;
     try {
       pc = new RTCPeerConnection({ iceServers: this._iceServers() });
@@ -334,12 +341,15 @@ export class Network {
     }
 
     dc.onopen = () => {
+      if (this._rtc.dc !== dc) return; // 旧连接的迟到事件，忽略
       this._rtc.open = true;
+      this._rtc.retries = 0;      // 连上了就把重试计数清零，下次断开还能再试
       this._transport = 'webrtc';
       console.log('[net] WebRTC 直连已建立，多人数据走 UDP 直连');
       this._reportSelectedPair();
     };
     dc.onmessage = (e) => {
+      if (this._rtc.dc !== dc) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       // 直连上的游戏消息与 wss 走同一套分发，复用现有 _handlers
@@ -378,30 +388,34 @@ export class Network {
       if (!hasV6) console.warn('[net] 本端没有 IPv6 候选：源站只有公网 IPv6，直连大概率失败（会回落 wss）');
     };
     pc.onconnectionstatechange = () => {
+      if (this._rtc.pc !== pc) return; // 旧连接（已被重试替换）的事件一律忽略
       const s = pc.connectionState;
       if (s === 'failed' || s === 'disconnected' || s === 'closed') {
         this._rtc.open = false;
         this._transport = 'wss';
         console.warn('[net] WebRTC 连接状态 = ' + s + '，已回落 wss');
+        // 只有 failed 才自动重试：disconnected 常能自行恢复，closed 是我们主动关的
+        if (s === 'failed') this._retryRtc('连接 failed');
       }
     };
-    // ICE 一旦 failed 立刻短路：打不通的 NAT 再等也不会通，别让人对着「建立中」干等满 8 秒
+    // ICE failed 立刻短路，然后自动重试（源站多出口 NAT，重建会话会重新选出口）
     pc.oniceconnectionstatechange = () => {
+      if (this._rtc.pc !== pc) return;
       if (pc.iceConnectionState === 'failed') {
         console.warn('[net] ICE failed，直连失败，回落 wss');
         this._rtc.open = false;
         this._transport = 'wss';
         if (this._rtc.timer) { clearTimeout(this._rtc.timer); this._rtc.timer = null; }
+        this._retryRtc('ICE failed');
       }
     };
 
-    // 超时回落：8s 内直连没开起来就放弃，继续用 wss
+    // 超时回落：12s 内直连没开起来就放弃本次，继续用 wss，并安排一次重试
     this._rtc.timer = setTimeout(() => {
+      if (this._rtc.pc !== pc) return;
       if (!this._rtc.open) {
         console.log('[net] WebRTC 直连超时，回落 wss');
-        try { if (pc) pc.close(); } catch {}
-        this._rtc.pc = null;
-        this._rtc.dc = null;
+        this._retryRtc('超时');
       }
     }, 12000);
 
@@ -447,6 +461,37 @@ export class Network {
 
   // 是否「公网可达」候选：srflx/relay 放行；host 只放行公网 IPv4/IPv6。
   // 内网 IPv4、CGNAT(100.64/10)、mDNS(.local)、IPv6 ULA(fd)/link-local(fe80) 一律丢弃。
+  // 直连失败后自动重建，用户不必再手动刷新页面。
+  // 源站出口在运营商多出口 NAT 后面，同一会话有概率绑到打不通的那个出口；重建会话会重新选出口。
+  _retryRtc(reason) {
+    const r = this._rtc;
+    if (r.retryTimer) return;                 // 已安排过重试，不叠加
+    if (r.pc && r.open) return;               // 已经连上，无需重试
+    if (r.retries >= RTC_MAX_RETRY) {
+      console.warn('[net] 直连重试 ' + r.retries + ' 次仍失败（' + reason + '），本次保持走 wss');
+      return;
+    }
+    r.retries++;
+    if (r.timer) { clearTimeout(r.timer); r.timer = null; }
+    try { if (r.dc) r.dc.close(); } catch { /* 忽略 */ }
+    try { if (r.pc) r.pc.close(); } catch { /* 忽略 */ }
+    r.pc = null;
+    r.dc = null;
+    r.open = false;
+    r.remoteDescribed = false;
+    r.early = [];
+    this._transport = 'wss';
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return; // wss 也断了：等它重连后再发起
+    console.log('[net] 直连失败（' + reason + '），' + (RTC_RETRY_DELAY / 1000) + 's 后自动重试 ' + r.retries + '/' + RTC_MAX_RETRY);
+    r.retryTimer = setTimeout(() => {
+      r.retryTimer = null;
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      // 先让服务端把旧 PC 释放，否则它会复用已 failed 的连接
+      this.send({ t: 'rtc_reset' });
+      this._startWebRtc();
+    }, RTC_RETRY_DELAY);
+  }
+
   // 用 getStats() 找出「实际被采用的候选对」，直接回答「这条路是怎么通的」：
   // 两端都是 srflx 才说明是公网 UDP 直连（没走私网、没走 relay 中继）。
   _reportSelectedPair() {
