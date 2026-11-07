@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>WebRTC 自检</title>
+<style>
+  html,body{margin:0;padding:0;background:#111;color:#e8e8e8;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+  .wrap{max-width:720px;margin:0 auto;padding:16px 16px 40px}
+  h1{font-size:18px;margin:8px 0 12px;font-weight:600}
+  .card{background:#1b1b1b;border:1px solid #333;border-radius:12px;padding:12px 14px;margin-bottom:12px}
+  .k{color:#8fd3ff}
+  .ok{color:#7ee2a8}
+  .bad{color:#ff8a8a}
+  .warn{color:#ffd76a}
+  pre{white-space:pre-wrap;word-break:break-all;margin:0;font:12px/1.7 ui-monospace,Menlo,Consolas,monospace}
+  .hint{color:#9a9a9a;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>WebRTC 自检</h1>
+  <div class="card"><pre id="out">检测中…</pre></div>
+  <div class="card hint" id="verdict">正在检查浏览器与 UDP 连通性…</div>
+  <div class="card hint">
+    说明：<br>
+    1) 若「RTCPeerConnection: false」= 浏览器/内置 WebView 禁用了 WebRTC，游戏里永远只能走 wss。<br>
+    2) 若「srflx: 0」且「IPv6: 0」= UDP/STUN 出不去，直连不可能。<br>
+    3) 微信/QQ/微博内置浏览器经常限制 WebRTC，请用系统 Safari / Chrome 打开。
+  </div>
+</div>
+<script>
+(function () {
+  var out = document.getElementById('out');
+  var verdict = document.getElementById('verdict');
+  var lines = [];
+  function log(s, cls) {
+    lines.push((cls ? '[' + cls + '] ' : '') + s);
+    out.textContent = lines.join('\n');
+  }
+  var ua = navigator.userAgent;
+  var inApp = /MicroMessenger|QQ\/|Weibo|DingTalk|AlipayClient|baiduboxapp/i.test(ua);
+  log('UA: ' + ua);
+  log('安全上下文(HTTPS): ' + (window.isSecureContext ? 'true' : 'false'));
+  log('RTCPeerConnection: ' + (typeof RTCPeerConnection !== 'undefined'));
+  log('RTCDataChannel: ' + (typeof RTCDataChannel !== 'undefined'));
+  if (inApp) log('检测到内置浏览器（微信/QQ 等），WebRTC 可能被限制', 'WARN');
+
+  if (typeof RTCPeerConnection === 'undefined') {
+    verdict.textContent = '结论：浏览器不支持或禁用了 WebRTC。换系统 Safari / Chrome 再试。';
+    verdict.className = 'card bad';
+    return;
+  }
+
+  var STUN = [
+    'stun:stun.douyucdn.cn:18000',
+    'stun:stun.hitv.com:3478',
+    'stun:124.70.180.79:3478',
+    'stun:stun.chat.bilibili.com:3478',
+    'stun:stun.miwifi.com:3478'
+  ];
+  var pc;
+  try {
+    pc = new RTCPeerConnection({ iceServers: STUN.map(function (u) { return { urls: u }; }) });
+  } catch (e) {
+    log('创建 PeerConnection 失败: ' + e.message, 'ERROR');
+    verdict.textContent = '结论：浏览器限制了 WebRTC（企业策略/扩展/WebView）。';
+    verdict.className = 'card bad';
+    return;
+  }
+
+  var cands = [];
+  var done = false;
+  pc.onicecandidate = function (e) {
+    if (!e.candidate) return;
+    cands.push(e.candidate);
+    var a = e.candidate.address || '';
+    var fam = a.indexOf(':') >= 0 ? 'IPv6' : (a ? 'IPv4' : '?');
+    log('候选: ' + e.candidate.type + '  ' + fam + '  ' + a + (e.candidate.port ? ':' + e.candidate.port : ''));
+  };
+  pc.onicegatheringstatechange = function () {
+    if (pc.iceGatheringState !== 'complete' || done) return;
+    done = true;
+    var types = {}; var v4 = 0, v6 = 0, srflx = 0;
+    for (var i = 0; i < cands.length; i++) {
+      var c = cands[i];
+      types[c.type] = (types[c.type] || 0) + 1;
+      if (c.type === 'srflx' || c.type === 'relay') srflx++;
+      var a = c.address || '';
+      if (a.indexOf(':') >= 0) v6++; else if (a) v4++;
+    }
+    log('汇总: ' + JSON.stringify({ 类型: types, IPv4: v4, IPv6: v6, srflx: srflx }));
+    if (srflx > 0 || v6 > 0) {
+      verdict.textContent = '结论：UDP/STUN 可用（拿到公网映射或 IPv6），游戏里应能直连源站。若游戏仍显示 CF，是版本/缓存问题。';
+      verdict.className = 'card ok';
+    } else {
+      verdict.textContent = '结论：没有 srflx 也没有 IPv6，UDP 出不去，直连不可能（需 TURN 或换网络）。';
+      verdict.className = 'card bad';
+    }
+  };
+
+  try {
+    pc.createDataChannel('t');
+    pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).catch(function (e) {
+      log('createOffer 失败: ' + e.message, 'ERROR');
+    });
+  } catch (e) {
+    log('createOffer 异常: ' + e.message, 'ERROR');
+  }
+
+  setTimeout(function () {
+    if (!done) {
+      log('8 秒内未收集完候选（UDP 可能被限制）', 'WARN');
+      if (!done) {
+        done = true;
+        verdict.textContent = '结论：候选收集超时，UDP 很可能被限制。';
+        verdict.className = 'card warn';
+      }
+    }
+  }, 8000);
+})();
+</script>
+</body>
+</html>

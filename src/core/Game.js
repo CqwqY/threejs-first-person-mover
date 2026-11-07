@@ -1613,14 +1613,17 @@ export class Game {
     const direct = net ? net.directLinks : 0;
     // 只有 P2P 网格启用且有对端时才显示「直连N/总数」；主力是上行通道那一项。
     const mesh = (net && net.p2pEnabled && peers > 0) ? (' · 直连' + direct + '/' + peers) : '';
-    // 上行通道：UDP = 客户端↔源站已直连（绕开 CF）；CF = 仍在走 Cloudflare
-    const uplink = (net && net.transport === 'webrtc') ? 'UDP' : 'CF';
-    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + mesh + ' · ' + uplink;
+    // 上行通道：UDP = 客户端↔源站已直连（绕开 CF）；CF = 仍在走 Cloudflare；无RTC = 浏览器/WebView 禁用了 WebRTC
+    const hasRtc = (typeof RTCPeerConnection !== 'undefined');
+    const uplink = !hasRtc ? '无RTC' : ((net && net.transport === 'webrtc') ? 'UDP' : 'CF');
+    // 包标记：两端必须一致，不一致就是有一端缓存了旧版本
+    const tag = net ? net.assetTag : '';
+    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + mesh + ' · ' + uplink + (tag ? ' · ' + tag : '');
     const txt = n + ' FPS\n' + line2;
     if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
     // 开放到整页：任何脚本/控制台都能读到当前网络状态
     if (typeof window !== 'undefined') {
-      window.__netStats = { fps: n, rttMs: rtt, direct, peers, uplink, mesh: !!mesh };
+      window.__netStats = { fps: n, rttMs: rtt, direct, peers, uplink, mesh: !!mesh, tag, hasRtc };
     }
     // 数字与边框都按档位着色（一眼看出流畅/可接受/卡）
     b.el.style.color = color;

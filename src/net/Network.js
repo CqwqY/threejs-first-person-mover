@@ -102,10 +102,15 @@ export class Network {
     }
     // 无条件启动日志：任何一次进游戏都能看到网格到底有没有起来（排查「没有任何输出」用）。
     // 资源名带内容哈希，两端必须一致；不一致 = 有一端还是旧缓存。
+    this._assetTag = 'dev';
     let asset = '';
     try {
       const s = typeof document !== 'undefined' ? document.querySelector('script[type="module"]') : null;
-      if (s && s.src) asset = s.src.split('/').pop();
+      if (s && s.src) {
+        asset = s.src.split('/').pop();
+        const m = asset.match(/-([A-Za-z0-9_-]{4,})\.js$/);
+        this._assetTag = m ? m[1].slice(-6) : asset.slice(-8);
+      }
     } catch { /* 忽略 */ }
     console.log('[p2p] 构建标记', {
       启用: this._p2pEnabled,
@@ -290,6 +295,9 @@ export class Network {
 
   // 是否启用了 P2P 网格（HUD 用来区分「没启用」与「启用了但没打通」）
   get p2pEnabled() { return !!this._p2pEnabled; }
+
+  // 当前前端包的短标记（入口 JS 哈希后 6 位），HUD 显示，用于一眼对比两端版本
+  get assetTag() { return this._assetTag || 'dev'; }
 
   // 告诉网格「我是谁」（收到 welcome 后调用）
   setSelfId(id) {
