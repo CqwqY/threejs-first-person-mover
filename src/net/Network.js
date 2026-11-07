@@ -337,6 +337,7 @@ export class Network {
       this._rtc.open = true;
       this._transport = 'webrtc';
       console.log('[net] WebRTC 直连已建立，多人数据走 UDP 直连');
+      this._reportSelectedPair();
     };
     dc.onmessage = (e) => {
       let msg;
@@ -446,6 +447,38 @@ export class Network {
 
   // 是否「公网可达」候选：srflx/relay 放行；host 只放行公网 IPv4/IPv6。
   // 内网 IPv4、CGNAT(100.64/10)、mDNS(.local)、IPv6 ULA(fd)/link-local(fe80) 一律丢弃。
+  // 用 getStats() 找出「实际被采用的候选对」，直接回答「这条路是怎么通的」：
+  // 两端都是 srflx 才说明是公网 UDP 直连（没走私网、没走 relay 中继）。
+  _reportSelectedPair() {
+    const pc = this._rtc.pc;
+    if (!pc || typeof pc.getStats !== 'function') return;
+    let p;
+    try { p = pc.getStats(null); } catch { return; }
+    Promise.resolve(p).then((stats) => {
+      const byId = new Map();
+      let pair = null;
+      stats.forEach((r) => {
+        if (r.type === 'local-candidate' || r.type === 'remote-candidate') byId.set(r.id, r);
+        if (r.type === 'candidate-pair' && (r.state === 'succeeded' || r.nominated === true)) pair = r;
+      });
+      if (!pair) return;
+      const fmt = (c) => {
+        if (!c) return '?';
+        return (c.address || c.ip || '?') + ':' + (c.port || '?') + ' [' + (c.candidateType || '?') + ']';
+      };
+      const l = byId.get(pair.localCandidateId);
+      const r = byId.get(pair.remoteCandidateId);
+      const info = {
+        本端: fmt(l),
+        源站: fmt(r),
+        协议: (l && (l.protocol || l.transport)) || (r && (r.protocol || r.transport)) || '',
+      };
+      this._selectedPair = info;
+      console.log('[net] 实际选中候选对', info);
+      if (typeof window !== 'undefined') window.__netPair = info;
+    }).catch(() => { /* 统计失败不影响连接 */ });
+  }
+
   _isPublicCandidate(c) {
     if (!c) return false;
     if (c.type === 'srflx' || c.type === 'relay') return true;
