@@ -99,11 +99,18 @@ export class Network {
         onState: (id, st) => { if (this._meshHandlers.onState) this._meshHandlers.onState(id, st); },
       });
     }
-    // 无条件启动日志：任何一次进游戏都能看到网格到底有没有起来（排查「没有任何输出」用）
-    console.log('[p2p] 构建 p2p-39d7f9c', {
+    // 无条件启动日志：任何一次进游戏都能看到网格到底有没有起来（排查「没有任何输出」用）。
+    // 资源名带内容哈希，两端必须一致；不一致 = 有一端还是旧缓存。
+    let asset = '';
+    try {
+      const s = typeof document !== 'undefined' ? document.querySelector('script[type="module"]') : null;
+      if (s && s.src) asset = s.src.split('/').pop();
+    } catch { /* 忽略 */ }
+    console.log('[p2p] 构建标记', {
       启用: this._p2pEnabled,
       有WebRTC: typeof RTCPeerConnection !== 'undefined',
       网格: !!this._mesh,
+      资源: asset,
     });
   }
 
