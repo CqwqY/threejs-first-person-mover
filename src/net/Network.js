@@ -50,11 +50,16 @@ export class Network {
     this._transport = 'wss';          // 'wss' | 'webrtc'，供 UI / 调试查询
     this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false };
     this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
-    this._rankStun();                 // 后台测一遍 STUN 延迟并缓存（不阻塞首次连接）
 
-    // 玩家↔玩家 P2P 网格（默认关闭；URL 带 ?p2p=1 才启用，确认稳定后再改默认）。
-    // 只搬高频移动状态；打不通的那对仍走服务器快照。
-    this._p2pEnabled = typeof location !== 'undefined' && /(?:^|[?&])p2p=1(?:&|$)/.test(location.search);
+    // 玩家↔玩家 P2P 网格（**默认开启**；?p2p=0 关闭回退）。
+    // 只搬高频移动状态；打不通的那对仍走服务器快照，所以默认开启不会让任何人更差。
+    const q = typeof location !== 'undefined' ? location.search : '';
+    this._p2pEnabled = !/(?:^|[?&])p2p=0(?:&|$)/.test(q);
+    if (!this._p2pEnabled) this._rankStun(); // 只有退回「客户端↔源站」RTC 时才需要 STUN 排序
+
+    // 延迟测量（应用层 ping/pong，走当前数据通道）
+    this._rtt = 0;
+    this._lastPingSent = 0;
     this._selfId = '';
     this._meshHandlers = {};
     this._mesh = null;
@@ -141,6 +146,9 @@ export class Network {
       } catch {
         return;
       }
+      // 延迟测量：pong 回填 RTT；收到 ping 就回 pong（服务端/对端都可能发）
+      if (msg.t === 'pong') { this._onPong(msg); return; }
+      if (msg.t === 'ping') { this.send({ t: 'pong', c: msg.c }); return; }
       // 玩家网格信令（offer/answer/ICE）：交给 PeerMesh，不能当游戏消息分发
       if (msg.t === 'signal') { if (this._mesh) this._mesh.handleSignal(msg); return; }
       // WebRTC 直连信令：rtc_answer / rtc_ice 是握手用的，不能当游戏消息分发。
@@ -208,6 +216,23 @@ export class Network {
 
   // 当前数据通道：'wss'（CF 代理 TCP）或 'webrtc'（直连 UDP）。供 UI / 调试显示。
   get transport() { return this._transport || 'wss'; }
+
+  // 当前链路延迟（ms）：有 P2P 直连就用直连里最小的那个，否则用服务器 RTT。
+  get rttMs() {
+    const peer = this._mesh ? this._mesh.minRtt() : 0;
+    return Math.round(peer || this._rtt) || 0;
+  }
+
+  // 当前直连玩家数（0 = 全部走服务器快照）
+  get directLinks() { return this._mesh ? this._mesh.directCount() : 0; }
+
+  // 连接方式标签：直连N / wss
+  netModeLabel() {
+    const d = this.directLinks;
+    if (d > 0) return '直连' + d;
+    if (this._transport === 'webrtc') return '直连';
+    return 'wss';
+  }
 
   // 注册玩家网格回调：onOpen(id) / onClose(id) / onState(id, state)
   setMeshHandlers(h) {
@@ -345,6 +370,15 @@ export class Network {
       return;
     }
     pc.addIceCandidate(cand).catch(() => {});
+  }
+
+  // 收到 pong：用同一个时钟域里的发送时间戳算 RTT，EWMA 平滑，过滤脏值。
+  _onPong(msg) {
+    const c = Number(msg.c);
+    if (!Number.isFinite(c)) return;
+    const sample = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - c;
+    if (sample < 0 || sample > 5000) return;
+    this._rtt = this._rtt > 0 ? this._rtt * 0.8 + sample * 0.2 : sample;
   }
 
   // 远端描述落地后，把缓存里早到的候选一次性补进去。
@@ -691,6 +725,12 @@ export class Network {
     if (this._pendingVeh) {
       this.send({ t: 'veh', ...this._pendingVeh });
       this._pendingVeh = null;
+    }
+    // 应用层测延迟：约 1s 一次，走当前数据通道（P2P 直连或 wss）
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (now - this._lastPingSent > 1000) {
+      this._lastPingSent = now;
+      this.send({ t: 'ping', c: now });
     }
   }
 

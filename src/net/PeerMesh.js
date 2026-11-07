@@ -63,7 +63,7 @@ export class PeerMesh {
   _ensurePeer(peerId) {
     let p = this.peers.get(peerId);
     if (!p) {
-      p = { pc: null, dc: null, direct: false, early: [], remoteDescribed: false, timer: null };
+      p = { pc: null, dc: null, direct: false, early: [], remoteDescribed: false, timer: null, rtt: 0 };
       this.peers.set(peerId, p);
     }
     return p;
@@ -163,6 +163,19 @@ export class PeerMesh {
     dc.onmessage = (e) => {
       let st;
       try { st = JSON.parse(e.data); } catch { return; }
+      if (!st) return;
+      // 延迟探针：_p = 对方发来的时间戳（回 _q）；_q = 对方对我 _p 的回执（算 RTT）
+      if (st._p !== undefined) {
+        try { if (p.dc && p.dc.readyState === 'open') p.dc.send(JSON.stringify({ _q: st._p })); } catch { /* 忽略 */ }
+        return;
+      }
+      if (st._q !== undefined) {
+        const sample = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - Number(st._q);
+        if (Number.isFinite(sample) && sample >= 0 && sample < 5000) {
+          p.rtt = p.rtt > 0 ? p.rtt * 0.8 + sample * 0.2 : sample;
+        }
+        return;
+      }
       if (this.onState) this.onState(peerId, st);
     };
     // 超时兜底：DC 迟迟不开就拆掉，回归服务器快照
@@ -179,11 +192,32 @@ export class PeerMesh {
     if (!this.peers.size) return;
     let json;
     try { json = JSON.stringify(st); } catch { return; }
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const ping = now - (this._lastPing || 0) > 1000;
+    if (ping) this._lastPing = now;
     for (const p of this.peers.values()) {
       if (p.direct && p.dc && p.dc.readyState === 'open') {
         try { p.dc.send(json); } catch { /* 单条发送失败忽略 */ }
+        // 每 1s 发一个测延迟探针（复用 state 通道，用保留键 _p 区分）
+        if (ping) { try { p.dc.send(JSON.stringify({ _p: now })); } catch { /* 忽略 */ } }
       }
     }
+  }
+
+  // 当前直连玩家数
+  directCount() {
+    let n = 0;
+    for (const p of this.peers.values()) if (p.direct) n++;
+    return n;
+  }
+
+  // 直连里最小的 RTT（ms）；尚未测出返回 0
+  minRtt() {
+    let m = 0;
+    for (const p of this.peers.values()) {
+      if (p.direct && p.rtt > 0) m = m > 0 ? Math.min(m, p.rtt) : p.rtt;
+    }
+    return m;
   }
 
   _downgrade(peerId) {

@@ -1593,8 +1593,8 @@ export class Game {
       'pointer-events:none;font:600 12px/1.2 ui-monospace,Menlo,Consolas,monospace;' +
       'padding:3px 7px;border-radius:6px;color:#9df5bd;background:rgba(0,0,0,.55);' +
       'border:1px solid rgba(157,245,189,.3);text-shadow:0 1px 2px rgba(0,0,0,.8);' +
-      'font-variant-numeric:tabular-nums;white-space:nowrap;';
-    el.textContent = '-- FPS';
+      'font-variant-numeric:tabular-nums;white-space:pre;';
+    el.textContent = '-- FPS\n--ms';
     el.style.display = 'none'; // 先藏，等首帧算出帧率再显示
     document.body.appendChild(el);
     return { el, txt: '', shown: false };
@@ -1606,8 +1606,17 @@ export class Game {
     const n = Math.round(fps);
     // 颜色分级：>=55 绿（流畅）/ >=30 黄（可接受）/ 其余红（卡）
     const color = n >= 55 ? '#9df5bd' : (n >= 30 ? '#ffd76a' : '#ff8a8a');
-    const txt = n + ' FPS';
+    // 第二行：延迟 + 连接方式（直连N / wss），用来确认跨局域网到底有没有打穿
+    const net = this.network;
+    const rtt = net ? net.rttMs : 0;
+    const mode = net ? net.netModeLabel() : '';
+    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + (mode ? ' · ' + mode : '');
+    const txt = n + ' FPS\n' + line2;
     if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
+    // 开放到整页：任何脚本/控制台都能读到当前网络状态
+    if (typeof window !== 'undefined') {
+      window.__netStats = { fps: n, rttMs: rtt, mode, direct: net ? net.directLinks : 0 };
+    }
     // 数字与边框都按档位着色（一眼看出流畅/可接受/卡）
     b.el.style.color = color;
     b.el.style.borderColor = color;
