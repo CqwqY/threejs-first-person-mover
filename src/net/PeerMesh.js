@@ -156,6 +156,7 @@ export class PeerMesh {
       if (p.timer) { clearTimeout(p.timer); p.timer = null; }
       if (p.direct) return;
       p.direct = true;
+      console.log('[p2p] 直连建立 → ' + peerId);
       if (this.onOpen) this.onOpen(peerId);
     };
     dc.onclose = () => { this._downgrade(peerId); };
@@ -191,6 +192,7 @@ export class PeerMesh {
     if (p.timer) { clearTimeout(p.timer); p.timer = null; }
     if (p.direct) {
       p.direct = false;
+      console.warn('[p2p] 直连断开，该玩家回落服务器快照 → ' + peerId);
       if (this.onClose) this.onClose(peerId);
     }
     try { if (p.dc) p.dc.close(); } catch { /* 忽略 */ }
