@@ -348,16 +348,18 @@ export class Network {
     };
     const gathered = [];
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        gathered.push(e.candidate);
-        this.send({
-          t: 'rtc_ice',
-          cand: e.candidate.candidate,
-          mid: e.candidate.sdpMid,
-          idx: e.candidate.sdpMLineIndex,
-          ufrag: e.candidate.usernameFragment,
-        });
-      }
+      if (!e.candidate) return;
+      gathered.push(e.candidate);
+      // 只把「公网可达」的候选发给源站：内网 IPv4 / CGNAT / mDNS / ULA 一律不发。
+      // 否则源站会先去试 192.168.x 这类打不通的对，把建连预算耗光。
+      if (!this._isPublicCandidate(e.candidate)) return;
+      this.send({
+        t: 'rtc_ice',
+        cand: e.candidate.candidate,
+        mid: e.candidate.sdpMid,
+        idx: e.candidate.sdpMLineIndex,
+        ufrag: e.candidate.usernameFragment,
+      });
     };
     // 诊断：收集完候选后汇总类型与地址族，直连失败时能看出「有没有 IPv6 候选」这个关键点
     pc.onicegatheringstatechange = () => {
@@ -440,6 +442,21 @@ export class Network {
     const sample = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - c;
     if (sample < 0 || sample > 5000) return;
     this._rtt = this._rtt > 0 ? this._rtt * 0.8 + sample * 0.2 : sample;
+  }
+
+  // 是否「公网可达」候选：srflx/relay 放行；host 只放行公网 IPv4/IPv6。
+  // 内网 IPv4、CGNAT(100.64/10)、mDNS(.local)、IPv6 ULA(fd)/link-local(fe80) 一律丢弃。
+  _isPublicCandidate(c) {
+    if (!c) return false;
+    if (c.type === 'srflx' || c.type === 'relay') return true;
+    const addr = c.address || '';
+    if (!addr) return false;
+    if (addr.endsWith('.local')) return false;
+    if (/^(10\.|192\.168\.|127\.|169\.254\.)/.test(addr)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return false;
+    if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr)) return false;
+    if (/^(fe80|fd)/i.test(addr)) return false;
+    return true;
   }
 
   // 远端描述落地后，把缓存里早到的候选一次性补进去。
