@@ -1,6 +1,20 @@
 // 职责：封装原生 WebSocket 客户端：连接、断线重连、消息注册与状态上报节流。
 import { Config } from '../config.js';
 
+// 公共 STUN 服务器：国内优先（小米 / B站 / 斗鱼 / 湖南卫视 / 华为云），再加 Cloudflare / Google 兜底。
+// 说明：STUN 只负责 NAT 打洞（发现本端的公网映射），不做中继；ICE 会同时向列表里的服务器发请求，
+// 谁先回应就用谁 —— 这本身就是「谁快选谁」。_rankStun() 还会实测延迟并缓存排序。
+// 已剔除 stun.qq.com（只解析不回应）。
+const STUN_SERVERS = [
+  'stun:stun.miwifi.com:3478',
+  'stun:stun.chat.bilibili.com:3478',
+  'stun:stun.douyucdn.cn:18000',
+  'stun:stun.hitv.com:3478',
+  'stun:124.70.180.79:3478',
+  'stun:stun.cloudflare.com:3478',
+  'stun:stun.l.google.com:19302',
+];
+
 export class Network {
   constructor(url, token) {
     this.url = url;
@@ -37,6 +51,8 @@ export class Network {
     // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
     this._transport = 'wss';          // 'wss' | 'webrtc'，供 UI / 调试查询
     this._rtc = { pc: null, dc: null, open: false, timer: null };
+    this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
+    this._rankStun();                 // 后台测一遍 STUN 延迟并缓存（不阻塞首次连接）
   }
 
   // 当前连接状态（供 UI 主动查询）
@@ -182,7 +198,7 @@ export class Network {
     if (typeof RTCPeerConnection === 'undefined') return; // 非浏览器或老浏览器：直接跳过
     let pc, dc;
     try {
-      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      pc = new RTCPeerConnection({ iceServers: this._iceServers() });
       dc = pc.createDataChannel('game');
       this._rtc.pc = pc;
       this._rtc.dc = dc;
@@ -203,16 +219,34 @@ export class Network {
         try { handler(msg); } catch { /* 隔离单条异常 */ }
       }
     };
+    const gathered = [];
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        gathered.push(e.candidate);
         this.send({ t: 'rtc_ice', cand: e.candidate.candidate, mid: e.candidate.sdpMid });
       }
+    };
+    // 诊断：收集完候选后汇总类型与地址族，直连失败时能看出「有没有 IPv6 候选」这个关键点
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState !== 'complete') return;
+      const types = {};
+      let hasV6 = false, hasV4 = false;
+      for (const c of gathered) {
+        const t = c.type || 'host';
+        types[t] = (types[t] || 0) + 1;
+        const addr = c.address || '';
+        if (addr.indexOf(':') >= 0) hasV6 = true;
+        else if (addr) hasV4 = true;
+      }
+      console.log('[net] ICE 候选汇总', { 类型: types, IPv4: hasV4, IPv6: hasV6 });
+      if (!hasV6) console.warn('[net] 本端没有 IPv6 候选：源站只有公网 IPv6，直连大概率失败（会回落 wss）');
     };
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
       if (s === 'failed' || s === 'disconnected' || s === 'closed') {
         this._rtc.open = false;
         this._transport = 'wss';
+        console.warn('[net] WebRTC 连接状态 = ' + s + '，已回落 wss');
       }
     };
 
@@ -247,6 +281,64 @@ export class Network {
     const pc = this._rtc.pc;
     if (!pc) return;
     pc.addIceCandidate({ candidate: msg.cand, sdpMid: msg.mid }).catch(() => {});
+  }
+
+  // 给 RTCPeerConnection 用的 iceServers：有实测排序就取最快的几个，否则用全量列表（ICE 内部会并发赛跑）。
+  _iceServers() {
+    const list = (this._stunRanked && this._stunRanked.length ? this._stunRanked : STUN_SERVERS).slice(0, 4);
+    return list.map((u) => ({ urls: u }));
+  }
+
+  // 实测各 STUN 的往返延迟（以收到 srflx 候选为准），排序后缓存进 sessionStorage。
+  // 后台运行，不阻塞首次连接；首次连接直接用全量列表，ICE 会自然选最快响应的那个。
+  async _rankStun() {
+    if (typeof RTCPeerConnection === 'undefined') return;
+    if (this._stunRanked) return;
+    // 命中会话缓存：10 分钟内不重复测
+    try {
+      const raw = sessionStorage.getItem('fpm_stun_rank');
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c && c.ts && Date.now() - c.ts < 600000 && Array.isArray(c.list) && c.list.length) {
+          this._stunRanked = c.list;
+          console.log('[net] STUN 延迟排序（缓存）', c.list);
+          return;
+        }
+      }
+    } catch { /* sessionStorage 不可用则忽略，继续实测 */ }
+
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const probeOne = (url) => new Promise((resolve) => {
+      let pc;
+      try { pc = new RTCPeerConnection({ iceServers: [{ urls: url }] }); }
+      catch { resolve({ url, ms: Infinity }); return; }
+      let done = false;
+      const t0 = now();
+      const finish = (ms) => {
+        if (done) return;
+        done = true;
+        try { pc.close(); } catch { /* 忽略 */ }
+        resolve({ url, ms });
+      };
+      pc.onicecandidate = (e) => {
+        if (e.candidate && e.candidate.type === 'srflx') finish(now() - t0);
+      };
+      setTimeout(() => finish(Infinity), 2200);
+      try {
+        pc.createDataChannel('probe');
+        pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => finish(Infinity));
+      } catch { finish(Infinity); }
+    });
+
+    const results = await Promise.all(STUN_SERVERS.map(probeOne));
+    const ok = results.filter((r) => Number.isFinite(r.ms)).sort((a, b) => a.ms - b.ms);
+    if (ok.length) {
+      this._stunRanked = ok.map((r) => r.url);
+      console.log('[net] STUN 延迟排序（实测，ms）', ok.map((r) => r.url.replace('stun:', '') + '=' + Math.round(r.ms)));
+      try { sessionStorage.setItem('fpm_stun_rank', JSON.stringify({ ts: Date.now(), list: this._stunRanked })); } catch { /* 忽略 */ }
+    } else {
+      console.warn('[net] 所有 STUN 均未返回 srflx（网络屏蔽，或纯 IPv4 客户端对只有公网 IPv6 的源站）');
+    }
   }
 
   // 命中上报：把自己的投掷伤害告诉服务器，由服务器转发给被命中的玩家扣血
