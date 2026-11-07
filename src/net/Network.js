@@ -32,6 +32,11 @@ export class Network {
     this._sendInterval = null; // 20Hz 发送定时器
     this._sendRate = 20; // 上报频率（Hz）
     this._stateMuted = false; // true = 暂停上报自身位置（训练场本机兜底用）
+
+    // WebRTC 直连状态：wss 连上后尝试建 DataChannel(UDP) 直连源站，绕开 CF 降延迟。
+    // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
+    this._transport = 'wss';          // 'wss' | 'webrtc'，供 UI / 调试查询
+    this._rtc = { pc: null, dc: null, open: false, timer: null };
   }
 
   // 当前连接状态（供 UI 主动查询）
@@ -64,6 +69,12 @@ export class Network {
   // 建立连接并绑定事件
   connect() {
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    // 重连时先关掉上一次的直连资源，避免 PC/DC 泄漏；再复位状态机
+    if (this._rtc.pc) { try { this._rtc.pc.close(); } catch {} }
+    if (this._rtc.dc) { try { this._rtc.dc.close(); } catch {} }
+    if (this._rtc.timer) { clearTimeout(this._rtc.timer); }
+    this._rtc = { pc: null, dc: null, open: false, timer: null };
+    this._transport = 'wss';
     // 首次连接与断线重连对外状态不同：重连时 UI 要显示「重连中 (n/5)」
     this._setStatus(this._everOpened || this._reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
 
@@ -88,6 +99,8 @@ export class Network {
       if (this.token) {
         this.send({ t: 'auth', token: this.token });
       }
+      // wss 已通，立刻尝试 WebRTC 直连（信令走这趟 wss，游戏数据随后可能切到 UDP 直连）
+      this._startWebRtc();
     };
 
     this.ws.onmessage = (event) => {
@@ -97,6 +110,11 @@ export class Network {
       } catch {
         return;
       }
+      // WebRTC 直连信令：rtc_answer / rtc_ice 是握手用的，不能当游戏消息分发。
+      // rtc_up 是服务器确认直连已开的回执，客户端无需处理。
+      if (msg.t === 'rtc_answer') { this._onRtcAnswer(msg); return; }
+      if (msg.t === 'rtc_ice') { this._onRtcIce(msg); return; }
+      if (msg.t === 'rtc_up') { return; }
       for (const handler of this._handlers) {
         handler(msg);
       }
@@ -138,16 +156,97 @@ export class Network {
     this.connect();
   }
 
-  // 发送 JSON 消息；未连接时静默丢弃
+  // 发送 JSON 消息；未连接时静默丢弃。
+  // 双通道：DataChannel(UDP 直连) 开好后优先走它（绕开 CF），否则走 wss(TCP)。
   send(msg) {
+    const json = JSON.stringify(msg);
+    if (this._rtc && this._rtc.open && this._rtc.dc && this._rtc.dc.readyState === 'open') {
+      try { this._rtc.dc.send(json); return; } catch { /* 直连发送失败，落到下面走 wss */ }
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+      this.ws.send(json);
     }
   }
 
   // 注册消息回调
   onMessage(callback) {
     this._handlers.push(callback);
+  }
+
+  // 当前数据通道：'wss'（CF 代理 TCP）或 'webrtc'（直连 UDP）。供 UI / 调试显示。
+  get transport() { return this._transport || 'wss'; }
+
+  // 尝试建立 WebRTC 直连：经现有 wss 交换信令，DataChannel(UDP) 通了就接管游戏数据。
+  // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
+  _startWebRtc() {
+    if (typeof RTCPeerConnection === 'undefined') return; // 非浏览器或老浏览器：直接跳过
+    let pc, dc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      dc = pc.createDataChannel('game');
+      this._rtc.pc = pc;
+      this._rtc.dc = dc;
+    } catch (e) {
+      return; // 建连失败就算了，继续用 wss
+    }
+
+    dc.onopen = () => {
+      this._rtc.open = true;
+      this._transport = 'webrtc';
+      console.log('[net] WebRTC 直连已建立，多人数据走 UDP 直连');
+    };
+    dc.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      // 直连上的游戏消息与 wss 走同一套分发，复用现有 _handlers
+      for (const handler of this._handlers) {
+        try { handler(msg); } catch { /* 隔离单条异常 */ }
+      }
+    };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        this.send({ t: 'rtc_ice', cand: e.candidate.candidate, mid: e.candidate.sdpMid });
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === 'failed' || s === 'disconnected' || s === 'closed') {
+        this._rtc.open = false;
+        this._transport = 'wss';
+      }
+    };
+
+    // 超时回落：8s 内直连没开起来就放弃，继续用 wss
+    this._rtc.timer = setTimeout(() => {
+      if (!this._rtc.open) {
+        console.log('[net] WebRTC 直连超时，回落 wss');
+        try { if (pc) pc.close(); } catch {}
+        this._rtc.pc = null;
+        this._rtc.dc = null;
+      }
+    }, 8000);
+
+    pc.createOffer()
+      .then((offer) => pc.setLocalDescription(offer))
+      .then(() => {
+        const ld = pc.localDescription;
+        this.send({ t: 'rtc_offer', sdp: ld.sdp, type: ld.type });
+      })
+      .catch(() => { /* 协商失败，回落 wss */ });
+  }
+
+  // 收到服务器回的 answer：把它的 SDP 设为本端远端描述，完成握手。
+  _onRtcAnswer(msg) {
+    const pc = this._rtc.pc;
+    if (!pc) return;
+    pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp }).catch(() => {});
+  }
+
+  // 收到服务器的 ICE 候选：补进本端 PC。
+  _onRtcIce(msg) {
+    const pc = this._rtc.pc;
+    if (!pc) return;
+    pc.addIceCandidate({ candidate: msg.cand, sdpMid: msg.mid }).catch(() => {});
   }
 
   // 命中上报：把自己的投掷伤害告诉服务器，由服务器转发给被命中的玩家扣血
