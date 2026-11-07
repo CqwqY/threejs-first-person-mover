@@ -40,6 +40,7 @@ export class PeerMesh {
     for (const id of [...this.peers.keys()]) {
       if (!scope.has(id)) this.removePeer(id);
     }
+    this.scopeSize = scope.size; // 同场人数（HUD 显示「直连N/总人数」用）
     if (!this.selfId) return;
     // 新增的：id 较小的一方主动发起；另一方先占位等对方 offer
     for (const id of scope) {
@@ -63,7 +64,7 @@ export class PeerMesh {
   _ensurePeer(peerId) {
     let p = this.peers.get(peerId);
     if (!p) {
-      p = { pc: null, dc: null, direct: false, early: [], remoteDescribed: false, timer: null, rtt: 0 };
+      p = { pc: null, dc: null, direct: false, early: [], remoteDescribed: false, timer: null, rtt: 0, sentOffer: false, gotSignal: false, gathered: [] };
       this.peers.set(peerId, p);
     }
     return p;
@@ -75,22 +76,44 @@ export class PeerMesh {
     if (typeof RTCPeerConnection === 'undefined') return p;
     const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     p.pc = pc;
+    p.gathered = [];
+    p.sentOffer = false;
+    p.gotSignal = false;
+    p.remoteDescribed = false;
+    p.early = [];
 
     pc.onicecandidate = (e) => {
-      if (e.candidate && e.candidate.candidate) {
-        this.sendSignal(peerId, {
-          kind: 'ice',
-          candidate: {
-            candidate: e.candidate.candidate,
-            sdpMid: e.candidate.sdpMid,
-            sdpMLineIndex: e.candidate.sdpMLineIndex,
-            usernameFragment: e.candidate.usernameFragment,
-          },
-        });
+      if (!e.candidate || !e.candidate.candidate) return;
+      p.gathered.push(e.candidate);
+      this.sendSignal(peerId, {
+        kind: 'ice',
+        candidate: {
+          candidate: e.candidate.candidate,
+          sdpMid: e.candidate.sdpMid,
+          sdpMLineIndex: e.candidate.sdpMLineIndex,
+          usernameFragment: e.candidate.usernameFragment,
+        },
+      });
+    };
+    // 诊断：候选收集完，汇总类型与地址族。没有 srflx/relay 且没有 IPv6 ⇒ 蜂窝 CGNAT 打不通
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState !== 'complete') return;
+      let v4 = 0; let v6 = 0; let srflx = 0;
+      for (const c of p.gathered) {
+        if (c.type === 'srflx' || c.type === 'relay') srflx++;
+        const a = c.address || '';
+        if (a.indexOf(':') >= 0) v6++; else if (a) v4++;
       }
+      console.log('[p2p] 本端候选 → ' + peerId, { 数量: p.gathered.length, srflx, IPv4: v4, IPv6: v6 });
     };
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') this._downgrade(peerId);
+      const s = pc.iceConnectionState;
+      if (s === 'failed') {
+        console.warn('[p2p] ICE failed → ' + peerId + '（两端网络无法互通，回落服务器）');
+        this._downgrade(peerId);
+      } else if (s === 'connected' || s === 'completed') {
+        console.log('[p2p] ICE ' + s + ' → ' + peerId);
+      }
     };
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
@@ -110,6 +133,8 @@ export class PeerMesh {
     this._attach(peerId, dc);
     const offer = await p.pc.createOffer();
     await p.pc.setLocalDescription(offer);
+    p.sentOffer = true;
+    console.log('[p2p] 已发 offer → ' + peerId);
     this.sendSignal(peerId, { kind: 'offer', sdp: offer.sdp || '' });
   }
 
@@ -120,14 +145,17 @@ export class PeerMesh {
     if (!peerId || peerId === this.selfId || !data) return;
     const p = this._ensurePc(peerId);
     if (!p.pc) return;
+    p.gotSignal = true;
     (async () => {
       if (data.kind === 'offer') {
+        console.log('[p2p] 收到 offer ← ' + peerId + '，回 answer');
         await p.pc.setRemoteDescription({ type: 'offer', sdp: data.sdp || '' });
         this._flushEarly(peerId);
         const ans = await p.pc.createAnswer();
         await p.pc.setLocalDescription(ans);
         this.sendSignal(peerId, { kind: 'answer', sdp: ans.sdp || '' });
       } else if (data.kind === 'answer') {
+        console.log('[p2p] 收到 answer ← ' + peerId);
         await p.pc.setRemoteDescription({ type: 'answer', sdp: data.sdp || '' });
         this._flushEarly(peerId);
       } else if (data.kind === 'ice' && data.candidate) {
@@ -182,7 +210,10 @@ export class PeerMesh {
     if (!p.timer) {
       p.timer = setTimeout(() => {
         p.timer = null;
-        if (!p.direct) this._downgrade(peerId);
+        if (p.direct) return;
+        const why = (p.sentOffer ? '已发 offer' : '未发 offer') + (p.gotSignal ? '，收到过对端信令' : '，未收到对端任何信令');
+        console.warn('[p2p] 直连超时 → ' + peerId + '（' + why + '），回落服务器');
+        this._downgrade(peerId);
       }, OPEN_TIMEOUT);
     }
   }
@@ -235,6 +266,10 @@ export class PeerMesh {
     p.dc = null;
     p.early = [];
     p.remoteDescribed = false;
+    p.gathered = [];
+    p.sentOffer = false;
+    p.gotSignal = false;
+    p.rtt = 0;
   }
 
   removePeer(peerId) {

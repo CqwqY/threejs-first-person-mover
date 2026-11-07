@@ -1609,13 +1609,16 @@ export class Game {
     // 第二行：延迟 + 连接方式（直连N / wss），用来确认跨局域网到底有没有打穿
     const net = this.network;
     const rtt = net ? net.rttMs : 0;
-    const mode = net ? net.netModeLabel() : '';
-    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + (mode ? ' · ' + mode : '');
+    const peers = net ? net.peerCount : 0;
+    const direct = net ? net.directLinks : 0;
+    // 有同场玩家就显示「直连N/总数」，一眼看出这一对打没打穿；没别人就显示 wss
+    const mode = peers > 0 ? ('直连' + direct + '/' + peers) : 'wss';
+    const line2 = (rtt > 0 ? rtt + 'ms' : '--ms') + ' · ' + mode;
     const txt = n + ' FPS\n' + line2;
     if (txt !== b.txt) { b.el.textContent = txt; b.txt = txt; }
     // 开放到整页：任何脚本/控制台都能读到当前网络状态
     if (typeof window !== 'undefined') {
-      window.__netStats = { fps: n, rttMs: rtt, mode, direct: net ? net.directLinks : 0 };
+      window.__netStats = { fps: n, rttMs: rtt, mode, direct, peers };
     }
     // 数字与边框都按档位着色（一眼看出流畅/可接受/卡）
     b.el.style.color = color;

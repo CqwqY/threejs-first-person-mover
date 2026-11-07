@@ -63,9 +63,24 @@ export class Network {
     this._selfId = '';
     this._meshHandlers = {};
     this._mesh = null;
+    // ICE 服务器：STUN 列表 + 可选 TURN（URL 参数 ?turn=turn:host:port&turnuser=..&turnpass=..）
+    const iceServers = STUN_SERVERS.map((u) => ({ urls: u }));
+    try {
+      if (typeof location !== 'undefined') {
+        const sp = new URLSearchParams(location.search);
+        const turnUrl = sp.get('turn');
+        if (turnUrl) {
+          const s = { urls: turnUrl };
+          const tu = sp.get('turnuser'); const tp = sp.get('turnpass');
+          if (tu) s.username = tu;
+          if (tp) s.credential = tp;
+          iceServers.push(s);
+        }
+      }
+    } catch { /* URLSearchParams 不可用则忽略 */ }
     if (this._p2pEnabled && typeof RTCPeerConnection !== 'undefined') {
       this._mesh = new PeerMesh({
-        iceServers: STUN_SERVERS.map((u) => ({ urls: u })),
+        iceServers,
         maxDirect: 12,
         sendSignal: (to, data) => this.send({ t: 'signal', to, data }),
         onOpen: (id) => { if (this._meshHandlers.onOpen) this._meshHandlers.onOpen(id); },
@@ -225,6 +240,9 @@ export class Network {
 
   // 当前直连玩家数（0 = 全部走服务器快照）
   get directLinks() { return this._mesh ? this._mesh.directCount() : 0; }
+
+  // 同场玩家数（不含自己），HUD 用「直连N/总数」
+  get peerCount() { return this._mesh ? (this._mesh.scopeSize || 0) : 0; }
 
   // 连接方式标签：直连N / wss
   netModeLabel() {
