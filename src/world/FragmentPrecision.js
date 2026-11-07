@@ -19,8 +19,21 @@
 //   而 `fragmentShader` 这个串就是 onBeforeCompile 能改到的那部分。GLSL ES 规范明确：
 //   "Multiple precision statements for the same basic type can appear inside the same scope,
 //    with later statements overriding earlier statements within that scope."
-//   ⇒ 在片元主体最前面插一行 `precision mediump float;`，就**覆盖**掉了 prefix 里的 highp，
-//     且作用域是整段主体（后续所有未显式限定精度的 float 声明都跟着变 mediump）。
+//
+// ⚠⚠ 插入点必须是「片元主体里 void main() 所在行的前面」，**绝不能是主体最前面**。
+//   2026-11-07 线上报 `Precisions of uniform 'directionalLightShadows' member
+//   'directionalLightShadows.shadowIntensity' differ between VERTEX and FRAGMENT shaders`
+//   + VALIDATE_STATUS false + useProgram: program not valid，整块 MeshStandardMaterial 渲染不出来。
+//   真凶就是旧版把 `precision mediump float;` 插在主体开头：three 的片元主体前面全是
+//   `#include <shadowmap_pars_fragment>` 之类的**全局声明**，展开后里面有
+//   `struct DirectionalLightShadow { float shadowIntensity; ... }` 和
+//   `uniform DirectionalLightShadow directionalLightShadows[...]`；顶点主体里
+//   `#include <shadowmap_pars_vertex>` 声明的是**同一个 uniform**。
+//   GLSL linker 要求同名 uniform/varying 在 VS 与 FS 的精度**完全一致** —— 片元被我们
+//   提前降级成 mediump、顶点保持 highp，链接直接失败（ANGLE/D3D 严格校验，部分驱动会放过）。
+//   ⇒ 现在插在 main 之前：所有全局 uniform/varying/struct/辅助函数仍按 prefix 的 highp 声明，
+//     与顶点一致；只有 main 体内的局部计算吃到 mediump（PBR 光照主要就在这里），收益仍在。
+//   找不到 void main() 时**不注入**（安全退回全 highp），绝不产出链接不过的 shader。
 //
 // ⚠ 必须避开的两类材质：
 //   ① ShaderMaterial（自己手写片元的，如障眼法窗户 FakeWindow）—— 它们的片元里可能已经写了
@@ -84,7 +97,24 @@ export function applyFragmentPrecision(mat) {
 }
 
 /**
- * 就地往 shader 的片元主体最前面插精度声明。幂等（查标记）。
+ * 找精度声明的插入点：片元主体里 `void main() {` **所在行的行首**。
+ *
+ * 用「行首」而不是 `void main` 的字符位置，是为了不把 precision 语句塞进
+ * `void` 与 `main` 之间（缩进/换行写法在 three 各 ShaderLib 之间并不统一）。
+ * 单独导出，方便 Node 探针直接对真实 ShaderLib 源码断言。
+ *
+ * @param {string} glsl 片元着色器主体（onBeforeCompile 拿到的那段，可能已被别的模块展开过 include）
+ * @returns {number} 插入索引；找不到 main 返回 -1
+ */
+export function precisionInjectionPoint(glsl) {
+  if (typeof glsl !== 'string') return -1;
+  const m = /\bvoid\s+main\s*\([^)]*\)\s*\{/.exec(glsl);
+  if (!m) return -1;
+  return glsl.lastIndexOf('\n', m.index) + 1;
+}
+
+/**
+ * 就地往 shader 的片元主体插精度声明（位置见 precisionInjectionPoint）。幂等（查标记）。
  * 单独导出，方便其他模块（或探针）直接调用。
  *
  * @param {{fragmentShader?:string}} shader
@@ -93,7 +123,14 @@ export function applyFragmentPrecision(mat) {
 export function injectFragmentPrecision(shader) {
   if (!shader || typeof shader.fragmentShader !== 'string') return false;
   if (shader.fragmentShader.indexOf(FRAG_MARK) !== -1) return false; // 幂等
-  shader.fragmentShader = FRAG_DECL + shader.fragmentShader;
+  const at = precisionInjectionPoint(shader.fragmentShader);
+  if (at < 0) {
+    // 找不到 main 就别硬插：插在主体开头会让全局 uniform 精度与顶点不一致（见文件头注释）。
+    console.warn('[fragprec] 片元着色器里找不到 void main()，跳过 mediump 注入（保留 highp）');
+    return false;
+  }
+  const s = shader.fragmentShader;
+  shader.fragmentShader = s.slice(0, at) + FRAG_DECL + s.slice(at);
   return true;
 }
 

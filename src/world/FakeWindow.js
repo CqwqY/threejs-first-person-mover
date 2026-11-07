@@ -482,49 +482,73 @@ export function injectHoleCode(shader) {
   // 幂等：已经注入过就跳过（onBeforeCompile 在程序重建时会被重新调用，可能重复进入）
   if (shader.fragmentShader.indexOf('inAnyWindowHole') !== -1) return false;
 
+  const vSrc = shader.vertexShader;
+  const fSrc = shader.fragmentShader;
+
+  // ---- 局部坐标变量：标准材质用 transformed，手写 shader 只能用 position ----
+  // 'transformed' 由 three 的 <begin_vertex> 展开出来，含 morph/skin 位移，精度最好。
+  // 但自定义 ShaderMaterial（障眼法窗户）没有这个 chunk；position 是 three 在 prefixVertex
+  // 里无条件声明的 attribute，任何材质都拿得到。
+  // ⚠ 旧版兜底分支硬写 transformed，往窗户 ShaderMaterial 里注入后报
+  //   ERROR: 0:82: 'transformed' : undeclared identifier → 整个材质编译失败（2026-11-07）。
+  const hasBeginVertex = vSrc.indexOf('#include <begin_vertex>') !== -1;
+  const localPos = hasBeginVertex ? 'transformed' : 'position';
+  const vDecl = 'varying vec3 vFpmWorldPos;\n';
+  const vInject = '  vFpmWorldPos = (modelMatrix * vec4(' + localPos + ', 1.0)).xyz;\n';
+
+  // ⚠⚠ 全部方案先在局部变量里算完、任何一步不合法就整体放弃。
+  //   绝不"先改一半再 return" —— 只注入 fragment 的 varying 而 vertex 没产出，
+  //   GLSL linker 会直接判 varying 不匹配，又是一次静默的整块渲染失效。
+  // ---- ① vertex：补世界坐标 varying ----
+  let newV = vSrc;
+  if (vSrc.indexOf('vFpmWorldPos') === -1) {
+    let injected = null;
+    if (hasBeginVertex && vSrc.indexOf('#include <fog_vertex>') !== -1) {
+      // 首选锚点：<fog_vertex> 一定排在 <begin_vertex> 之后，此刻 transformed 已定义且在 main 内
+      injected = vSrc.replace('#include <fog_vertex>', vInject + '#include <fog_vertex>');
+    } else {
+      // 兜底（depth.vertex 没有 fog_vertex）：插在 main 的最后一个 } 之前。
+      // 必须确认这个 } 真的在 main 体内，否则会把赋值写到全局作用域 → 编译失败。
+      const m = /\bvoid\s+main\s*\([^)]*\)\s*\{/.exec(vSrc);
+      const end = vSrc.lastIndexOf('}');
+      if (m && end > m.index + m[0].length) {
+        injected = vSrc.slice(0, end) + vInject + vSrc.slice(end);
+      }
+    }
+    if (injected === null) {
+      console.warn('[hole] 顶点着色器里找不到安全的注入位置，跳过挖洞补丁（保留原生材质）');
+      return false;
+    }
+    newV = vDecl + injected;
+  }
+
+  // ---- ② fragment：varying 声明 + 判定函数 + discard ----
+  let newF = 'varying vec3 vFpmWorldPos;\n' + holeChunkGLSL() + '\n' + fSrc;
+  if (newF.indexOf('#include <clipping_planes_fragment>') !== -1) {
+    // 插在 clipping_planes_fragment 之后（three 片元里最早、已完成 discard 剪裁的阶段）
+    newF = newF.replace('#include <clipping_planes_fragment>',
+      '#include <clipping_planes_fragment>\n  if (uHoleCount > 0.5 && inAnyWindowHole(vFpmWorldPos)) discard;');
+  } else {
+    // 自定义材质没有该 chunk：退到 main 开头。用正则而非字面量 'void main() {'，
+    // 因为手写 shader 的空格/换行写法不统一，字面量匹配失败会静默不插 discard。
+    const m = /\bvoid\s+main\s*\([^)]*\)\s*\{/.exec(newF);
+    if (!m) {
+      console.warn('[hole] 片元着色器里找不到 void main()，跳过挖洞补丁（保留原生材质）');
+      return false;
+    }
+    const at = m.index + m[0].length;
+    newF = newF.slice(0, at)
+      + '\n  if (uHoleCount > 0.5 && inAnyWindowHole(vFpmWorldPos)) discard;'
+      + newF.slice(at);
+  }
+
+  // ---- ③ 校验全过，才落地（含共享 uniform 引用）----
   const uni = shader.uniforms || (shader.uniforms = {});
   uni.uHoleCount = holeUniforms.uHoleCount;
   uni.uHoles = holeUniforms.uHoles;
   uni.uHoleHalf = holeUniforms.uHoleHalf;
-
-  // ---- vertex：补一个世界坐标 varying ----
-  // 首选锚点 '#include <fog_vertex>' —— 它一定排在 '#include <begin_vertex>'（transformed 诞生处）
-  // 之后，所以此刻 transformed 已可用，且它在 main 体内。
-  // 深度材质（ShaderLib.depth）没有 fog_vertex → 走兜底：插在 main 的最后一个 } 之前
-  //   （已验证：depth.vertex 的最后一个 } 正是 main 的结束符）。
-  const vDecl = 'varying vec3 vFpmWorldPos;\n';
-  const vInject = 'vFpmWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n';
-  if (shader.vertexShader.indexOf('vFpmWorldPos') === -1) {
-    // 'transformed' 是 three 顶点着色器的标准局部坐标变量（<begin_vertex> 之后就有）
-    if (shader.vertexShader.indexOf('#include <fog_vertex>') !== -1) {
-      shader.vertexShader = shader.vertexShader.replace(
-        '#include <fog_vertex>',
-        vInject + '#include <fog_vertex>'
-      );
-    } else {
-      // 兜底：直接挂在 main 的最后一个 } 之前
-      const i = shader.vertexShader.lastIndexOf('}');
-      shader.vertexShader = shader.vertexShader.slice(0, i) + vInject + shader.vertexShader.slice(i);
-    }
-    shader.vertexShader = vDecl + shader.vertexShader;
-  }
-
-  // ---- fragment：声明 + 判定函数 + discard ----
-  shader.fragmentShader = 'varying vec3 vFpmWorldPos;\n' + holeChunkGLSL() + '\n' + shader.fragmentShader;
-  // 插在 clipping_planes_fragment 之后（three 片元里最早、且已完成 discard 剪裁的阶段）。
-  // 万一该 chunk 不存在（自定义材质），退到 'void main() {' 之后第一行 —— 但此时
-  // vFpmWorldPos 已声明，位置信息不依赖任何后续代码，放在函数开头同样是安全的。
-  if (shader.fragmentShader.indexOf('#include <clipping_planes_fragment>') !== -1) {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <clipping_planes_fragment>',
-      '#include <clipping_planes_fragment>\n  if (uHoleCount > 0.5 && inAnyWindowHole(vFpmWorldPos)) discard;'
-    );
-  } else {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      'void main() {',
-      'void main() {\n  if (uHoleCount > 0.5 && inAnyWindowHole(vFpmWorldPos)) discard;'
-    );
-  }
+  shader.vertexShader = newV;
+  shader.fragmentShader = newF;
   return true;
 }
 
@@ -536,6 +560,13 @@ export function injectHoleCode(shader) {
  */
 export function patchBuildingMaterial(mat) {
   if (!mat || typeof mat.onBeforeCompile !== 'function') return false;
+  // ⚠ ShaderMaterial / RawShaderMaterial 一律不挖洞：
+  //   ① 它们的 vertex 是手写的，没有 three 的 <begin_vertex> / transformed，旧版兜底
+  //      注入 transformed 直接编译失败（2026-11-07 线上 'undeclared identifier'）；
+  //   ② 障眼法窗户本身就是假透明，给它加 discard 没有意义。
+  //   EditorBuildings.applyEditorHoles 的旧注释以为「不含 onBeforeCompile 会自动跳过」是错的：
+  //   Material 基类本来就带一个空的 onBeforeCompile，typeof === 'function' 从来没拦住过。
+  if (mat.isShaderMaterial || mat.isRawShaderMaterial) return false;
   if (_holeAppliedMats.has(mat)) return false;
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = function (shader, renderer) {

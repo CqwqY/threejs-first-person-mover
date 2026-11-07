@@ -133,6 +133,8 @@ export function createHomeScreen(opts = {}) {
   let playTimer = null;
 
   const warn = (msg, e) => { console.warn('[home] ' + msg, e === undefined ? '' : e); };
+  // 只在真浏览器里打状态日志：Node 自检探针不该被这些行刷屏。
+  const info = (msg) => { if (typeof window !== 'undefined') console.info('[home] ' + msg); };
 
   function clearPlayTimer() {
     if (playTimer !== null && typeof clearTimeout === 'function') clearTimeout(playTimer);
@@ -158,10 +160,35 @@ export function createHomeScreen(opts = {}) {
     return videoEls[wantSlot >= 0 ? wantSlot : active] || null;
   }
 
-  // 自动播放被浏览器拦下后，第一次点击/触摸主页时补一次 play()（不吞也不改事件）。
+  // 自动播放被浏览器拦下后，第一次点击/触摸/按键时补一次 play()（不吞也不改事件）。
   function resumeVideos() {
     if (stopped || !useVideo) return;
-    tryPlay(currentVideo());
+    const v = currentVideo();
+    if (v && v.paused) { info('借用户交互恢复背景视频播放'); tryPlay(v); }
+  }
+
+  // ⚠ 监听挂在 document 而不是主页 root：登录弹窗 z-index 11000 盖在 root 之上，
+  //   用户点「登录/游客」时事件目标是弹窗，root 根本收不到 → 恢复播放的机会就丢了。
+  //   用 capture 阶段能同时收到弹窗内的点击，且不影响任何原有事件行为。
+  function armGlobalResume() {
+    if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+    let armed = true;
+    const onFirst = () => {
+      if (!armed) return;
+      resumeVideos();
+      const v = currentVideo();
+      if (!v || !v.paused) {
+        armed = false;
+        if (typeof document.removeEventListener === 'function') {
+          document.removeEventListener('pointerdown', onFirst, true);
+          document.removeEventListener('touchstart', onFirst, true);
+          document.removeEventListener('keydown', onFirst, true);
+        }
+      }
+    };
+    document.addEventListener('pointerdown', onFirst, true);
+    document.addEventListener('touchstart', onFirst, true);
+    document.addEventListener('keydown', onFirst, true);
   }
 
   function pauseVideo(v) {
@@ -173,6 +200,7 @@ export function createHomeScreen(opts = {}) {
   function disableVideo(reason) {
     warn(reason);
     stopped = true;
+    root.dataset.videoState = 'fallback';
     clearPlayTimer();
     for (const v of videoEls) {
       pauseVideo(v);
@@ -186,6 +214,7 @@ export function createHomeScreen(opts = {}) {
   function stopVideos() {
     if (!videoEls.length) return;
     stopped = true;
+    root.dataset.videoState = 'stopped';
     clearPlayTimer();
     for (const v of videoEls) {
       pauseVideo(v);
@@ -204,8 +233,9 @@ export function createHomeScreen(opts = {}) {
     slotIndex[slot] = i;
     if (slotUrl[slot] === url) return; // 已预载过，别重复 load（会重新下载）
     slotUrl[slot] = url;
+    // 给 src 赋值本身就会触发资源加载；**不要再显式 load()** —— 它会中断刚发起的 play()
+    // （部分内核直接以 AbortError reject），正是「视频一直不出现」的另一半原因。
     v.src = url;
-    if (typeof v.load === 'function') v.load();
   }
 
   function reveal(slot) {
@@ -222,18 +252,24 @@ export function createHomeScreen(opts = {}) {
     }
     active = slot;
     failStreak = 0;
+    root.dataset.videoState = 'video';
+    info('背景视频已淡入：' + (slotUrl[slot] || '?'));
     // 空出来的那支立刻预载下一支，下次切换零等待；浏览器 HTTP 缓存会复用已下载的片段。
     prepare(1 - active, nextVideoIndex(curIndex, videos.length));
   }
 
-  // 8 秒还没真正播起来就跳过这一支，别让主页永远停在静态底图还以为视频在跑。
+  // 8 秒还没真正播起来就跳过这一支。
+  // ⚠ 判据不能再用 wantSlot：现在 playAt 会立即 reveal（wantSlot 随即置 -1），
+  //   用旧判据会让超时分支永远早退、视频卡在 poster 上还没人知道。
   function armTimeout(slot, i) {
     if (typeof window === 'undefined') return; // Node 自检不挂定时器
     clearPlayTimer();
     playTimer = setTimeout(() => {
       playTimer = null;
-      if (stopped || wantSlot !== slot) return;
-      warn('背景视频缓冲超时，跳过：' + videos[i]);
+      if (stopped || slot !== active) return;
+      const v = videoEls[slot];
+      if (v && !v.paused && v.readyState >= 2) return; // 确实在播，放行
+      warn('背景视频 8 秒内没有进入播放状态，跳过：' + videos[i]);
       failStreak++;
       if (failStreak >= videos.length * 2) {
         disableVideo('背景视频连续失败，已永久退回静态底图');
@@ -249,24 +285,39 @@ export function createHomeScreen(opts = {}) {
     wantSlot = next;
     prepare(next, i);
     tryPlay(videoEls[next]);
+    // ⚠ 不再把淡入绑在 playing/canplay 事件上：自动播放被拦、省流模式、
+    //   或浏览器压根不发这些事件时，opacity 会永远停在 0，主页就一直显示静态图。
+    //   video 元素带 poster（= 静态底图），即便还没解码出帧也不会黑屏 ⇒ 直接淡入是安全的。
+    reveal(next);
     armTimeout(next, i);
   }
 
   function makeVideo(slot) {
     const v = document.createElement('video');
     // 静音 + playsinline 是移动端自动播放的硬条件；没有音轨也强制静音，别和 BGM 抢。
+    // ⚠ 故意**不设 autoplay 属性**：两个 video 共用一个预载槽，给它设 src 时
+    //   autoplay 会让那支也偷偷开始播（双份 720p60 解码）。播放统一由 playAt 主动调 play()。
     v.muted = true;
     v.playsInline = true;
     v.loop = false;
     v.preload = 'auto';
+    // poster = 静态底图：视频还没解码出帧时元素本身显示这张图，淡入不会黑屏。
+    v.setAttribute('poster', bgUrl);
     v.setAttribute('muted', '');
     v.setAttribute('playsinline', '');
     v.setAttribute('webkit-playsinline', '');
     v.style.cssText =
       'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;' +
       'pointer-events:none;opacity:0;transition:opacity .8s ease;';
-    v.addEventListener('playing', () => { reveal(slot); });
-    v.addEventListener('canplay', () => { reveal(slot); }); // 备用：个别浏览器不发 playing
+    // 淡入已由 playAt 直接做；这些事件只用来在自动播放被拦后补一次 play + 打状态日志。
+    // 只对「正在显示 / 正等待显示」的那一支补播；预载槽发 canplay 时绝不能跟着播。
+    const onProgress = () => {
+      if (stopped || (slot !== active && slot !== wantSlot) || !v.paused) return;
+      tryPlay(v);
+    };
+    v.addEventListener('loadeddata', onProgress);
+    v.addEventListener('canplay', onProgress);
+    v.addEventListener('playing', onProgress);
     v.addEventListener('ended', () => {
       if (stopped || slot !== active) return;
       playAt(nextVideoIndex(curIndex, videos.length));
@@ -405,7 +456,14 @@ export function createHomeScreen(opts = {}) {
 
   document.body.appendChild(root);
   // 必须等元素进了 DOM 再 play()：iOS Safari 对游离节点上的自动播放更严格。
-  if (useVideo) playAt(0);
+  if (useVideo) {
+    root.dataset.videoState = 'starting';
+    info('背景视频启动，共 ' + videos.length + ' 支');
+    playAt(0);
+    armGlobalResume();
+  } else {
+    root.dataset.videoState = 'off';
+  }
 
   function beginEnter() {
     if (finished) return;

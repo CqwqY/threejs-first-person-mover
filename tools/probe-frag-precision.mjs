@@ -31,14 +31,18 @@ catch (e) { console.error('无法加载 three:', e.message); process.exit(1); }
 const FragPrec = await import(pathToFileURL(resolve(root, 'src/world/FragmentPrecision.js')).href);
 const { injectFragmentPrecision, canDowngrade, applyFragmentPrecisionToScene, fragmentPrecisionCount } = FragPrec;
 
-console.log('【1】注入标记与声明');
+console.log('【1】注入标记与声明（插在 main 之前，不是主体开头）');
 {
-  const injectFragmentPrecision = FragPrec.injectFragmentPrecision;
-  const shader = { fragmentShader: 'void main(){ gl_FragColor=vec4(1.0); }' };
+  const shader = { fragmentShader: 'uniform vec3 c;\nvoid main(){ gl_FragColor=vec4(c,1.0); }' };
   const r = injectFragmentPrecision(shader);
   ok('注入返回 true', r === true);
-  ok('主体以 FRAG_MARK 开头', shader.fragmentShader.startsWith('/* fpm-mediump */precision mediump float;'));
-  ok('原内容被保留在声明之后', shader.fragmentShader.indexOf('void main()') > 0);
+  const iDecl = shader.fragmentShader.indexOf('uniform vec3 c;');
+  const iMed = shader.fragmentShader.indexOf('/* fpm-mediump */precision mediump float;');
+  const iMain = shader.fragmentShader.indexOf('void main()');
+  ok('全局 uniform 声明在精度声明之前（保持 highp，与 VS 一致）', iDecl >= 0 && iDecl < iMed);
+  ok('mediump 声明插在 void main 所在行之前', iMed >= 0 && iMed < iMain);
+  ok('主体不再以 FRAG_MARK 开头（旧写法会毁掉 uniform 精度一致性）', !shader.fragmentShader.startsWith('/* fpm-mediump */'));
+  ok('原内容完整保留', shader.fragmentShader.includes('gl_FragColor=vec4(c,1.0);'));
 }
 
 console.log('【2】injectFragmentPrecision 幂等');
@@ -77,6 +81,10 @@ console.log('【4】覆盖语义：prefix(highp) + 主体(mediump) 拼接顺序'
   const iMed = full.indexOf('precision mediump float;');
   ok('highp 在前（prefix）', iHigh >= 0 && iHigh < iMed);
   ok('mediump 在后（主体，覆盖生效）', iMed > iHigh);
+  const iUni = full.indexOf('uniform vec3 c;');
+  const iMain = full.indexOf('void main()');
+  ok('uniform 在 mediump 之前 → 仍是 highp（VS/FS 一致）', iHigh < iUni && iUni < iMed);
+  ok('mediump 在 main 之前 → main 内局部计算吃到 mediump', iMed < iMain);
 }
 
 console.log('【5】applyFragmentPrecisionToScene 遍历场景 + 幂等');
@@ -106,6 +114,46 @@ console.log('【6】Game.js 接线：编译前调用 + 标 needsUpdate');
   ok('调用了 applyFragmentPrecisionToScene', game.includes('applyFragmentPrecisionToScene(this.scene)'));
   ok('编译前标 needsUpdate 触发重编', game.includes('m.needsUpdate = true') && game.indexOf('applyFragmentPrecisionToScene') < game.indexOf('_scanLodCandidates') ? game.indexOf('applyFragmentPrecisionToScene') < game.indexOf('r.compile') : true);
   ok('注入在 r.compile 之前（顺序正确）', game.indexOf('applyFragmentPrecisionToScene(this.scene)') < game.indexOf('if (typeof r.compile ===') || game.indexOf('applyFragmentPrecisionToScene(this.scene)') < game.indexOf('r.compile(this.scene'));
+}
+
+console.log('\n【7】回归：uniform 精度冲突（VALIDATE_STATUS false）');
+{
+  // 复刻 three 的 resolveIncludes：把片元主体里的 #include 展开成真实声明，
+  // 才能验证 mediump 到底落在 uniform 声明之前还是之后。
+  const expand = (src) => src.replace(/^[ \t]*#include +<([\w\d./]+)>/gm, (m, name) => {
+    const chunk = THREE.ShaderChunk[name];
+    return chunk === undefined ? m : expand(chunk);
+  });
+  const physF = expand(THREE.ShaderLib.physical.fragmentShader);
+  const physV = expand(THREE.ShaderLib.physical.vertexShader);
+  const sh = { fragmentShader: physF };
+  ok('真实展开后的 physical 片元能注入', injectFragmentPrecision(sh) === true);
+  const iShadow = sh.fragmentShader.indexOf('uniform DirectionalLightShadow directionalLightShadows');
+  const iMed = sh.fragmentShader.indexOf('/* fpm-mediump */');
+  ok('片元展开后确实含 directionalLightShadows uniform', iShadow >= 0);
+  ok('顶点展开后也声明同一个 uniform（所以两边精度必须一致）',
+    physV.indexOf('uniform DirectionalLightShadow directionalLightShadows') >= 0);
+  ok('该 uniform 声明在 mediump 之前 → 仍是 highp，link 通过', iShadow >= 0 && iShadow < iMed);
+  ok('顶点着色器完全没被注入（只改片元）', physV.indexOf('fpm-mediump') === -1);
+}
+
+console.log('\n【8】precisionInjectionPoint 与失败降级');
+{
+  const pip = FragPrec.precisionInjectionPoint;
+  ok('返回 main 所在行的行首', pip('uniform vec3 c;\nvoid main() { }') === 'uniform vec3 c;\n'.length);
+  ok('兼容 void main(void) 与换行大括号', pip('void  main ( void )\n{\n}') === 0);
+  ok('没有 main 返回 -1', pip('uniform vec3 c;') === -1);
+  const noMain = { fragmentShader: 'uniform vec3 c;\n' };
+  const origWarn = console.warn;
+  let warned = 0;
+  console.warn = () => { warned++; };
+  const r = injectFragmentPrecision(noMain);
+  console.warn = origWarn;
+  ok('找不到 main 时不注入且出声 warn（不静默）', r === false && warned === 1);
+  ok('失败时 shader 一字未改', noMain.fragmentShader === 'uniform vec3 c;\n');
+  const names = Object.keys(THREE.ShaderLib).filter((k) => typeof THREE.ShaderLib[k].fragmentShader === 'string');
+  ok('three 全部 ShaderLib 片元都能找到插入点（' + names.length + ' 个）',
+    names.length > 0 && names.every((k) => pip(THREE.ShaderLib[k].fragmentShader) >= 0));
 }
 
 console.log(`\n${fail === 0 ? '✓ 片元精度探针全部通过' : '✗ 有 ' + fail + ' 项失败'}（${pass} ok / ${fail} fail）`);

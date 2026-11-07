@@ -262,6 +262,53 @@ console.log('\n[6] patchBuildingMaterial：包装 onBeforeCompile，且不破坏
   ok(mod.patchBuildingMaterial({}) === false, '无 onBeforeCompile 的对象返回 false');
 }
 
+// ---------------------------------------------------------------- ⑥b 手写 ShaderMaterial 回归
+console.log('\n[6b] 回归：手写 ShaderMaterial 不得被注入 transformed / 不得打补丁');
+{
+  // 复刻 FakeWindow 的障眼法窗户 vertex：只有 position，没有 <begin_vertex> / transformed
+  const handV = [
+    'varying vec2 vUv;',
+    'varying vec3 vWorldPos;',
+    'void main(){',
+    '  vUv = uv;',
+    '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+    '  vWorldPos = wp.xyz;',
+    '  gl_Position = projectionMatrix * viewMatrix * wp;',
+    '}',
+  ].join('\n');
+  const handF = 'varying vec2 vUv;\nvoid main() { gl_FragColor = vec4(vUv, 0.0, 1.0); }';
+  const sh = { uniforms: {}, vertexShader: handV, fragmentShader: handF };
+  const origWarn = console.warn;
+  let warned = 0;
+  console.warn = () => { warned++; };
+  const did = mod.injectHoleCode(sh);
+  console.warn = origWarn;
+  ok(did === true, '手写 shader 仍能注入挖洞（改用 position，不放弃功能）');
+  ok(warned === 0, '合法手写 shader 不产生 warn');
+  ok(sh.vertexShader.indexOf('vec4(position, 1.0)') !== -1, 'vertex 里确实有 position 可用');
+  ok(sh.vertexShader.indexOf('vec4(transformed') === -1, '不再注入 transformed（回归 undeclared identifier）');
+  eq(countOccurrences(sh.vertexShader, 'vFpmWorldPos ='), 1, 'varying 赋值恰好 1 次');
+  ok(sh.fragmentShader.indexOf('inAnyWindowHole(vFpmWorldPos)) discard') !== -1,
+    '自定义 main（无 clipping chunk）也真的插进了 discard');
+
+  const sm = new THREE.ShaderMaterial({ vertexShader: 'void main(){}', fragmentShader: 'void main(){}' });
+  ok(mod.patchBuildingMaterial(sm) === false, 'ShaderMaterial 被显式排除，根本不会被打补丁');
+  const rm = new THREE.RawShaderMaterial({ vertexShader: 'void main(){}', fragmentShader: 'void main(){}' });
+  ok(mod.patchBuildingMaterial(rm) === false, 'RawShaderMaterial 同样排除');
+
+  // 找不到 main：整体不注入、一字不改、出声 warn（绝不半改）
+  const broken = { uniforms: {}, vertexShader: 'vec3 x;', fragmentShader: 'uniform float a;' };
+  const v0 = broken.vertexShader, f0 = broken.fragmentShader;
+  const ow = console.warn;
+  let w2 = 0;
+  console.warn = () => { w2++; };
+  const r = mod.injectHoleCode(broken);
+  console.warn = ow;
+  ok(r === false && w2 === 1, '无 main 时整体放弃并出声 warn');
+  ok(broken.vertexShader === v0 && broken.fragmentShader === f0,
+    '放弃时 shader 一字未改（不会造成 varying 单边声明）');
+}
+
 // ---------------------------------------------------------------- ⑦ patchShadowMaterial
 console.log('\n[7] patchShadowMaterial：深度材质必须换成可 discard 的，且 alphaTest>0');
 {

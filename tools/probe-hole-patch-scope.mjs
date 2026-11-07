@@ -141,7 +141,7 @@ console.log('\n[6] 洞全没了必须把补丁撤掉（否则材质永远带着 
   ok(mat.onBeforeCompile !== original, 'onBeforeCompile 已被包装');
   // 反证：包装后的 shader 里会有 discard 判定
   {
-    const shader = { vertexShader: '#include <fog_vertex>\n', fragmentShader: '#include <clipping_planes_fragment>\n', uniforms: {} };
+    const shader = { vertexShader: 'void main() {\n#include <fog_vertex>\n}\n', fragmentShader: 'void main() {\n#include <clipping_planes_fragment>\n}\n', uniforms: {} };
     mat.onBeforeCompile(shader);
     ok(shader.fragmentShader.includes('discard'), '打补丁后 shader 里确实出现了 discard（early-Z 会被放弃）');
   }
@@ -155,7 +155,7 @@ console.log('\n[6] 洞全没了必须把补丁撤掉（否则材质永远带着 
 
   // 恢复后重新注入判定：不再有 discard
   {
-    const shader = { vertexShader: '#include <fog_vertex>\n', fragmentShader: '#include <clipping_planes_fragment>\n', uniforms: {} };
+    const shader = { vertexShader: 'void main() {\n#include <fog_vertex>\n}\n', fragmentShader: 'void main() {\n#include <clipping_planes_fragment>\n}\n', uniforms: {} };
     mat.onBeforeCompile(shader);
     ok(!shader.fragmentShader.includes('discard'), '恢复后 shader 里不再有 discard（early-Z 回来了）');
   }

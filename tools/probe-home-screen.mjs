@@ -93,10 +93,15 @@ class El {
 }
 const doc = {
   _byId: {},
+  _docL: {},
   head: new El('head'),
   body: new El('body'),
   createElement: (tag) => new El(tag),
   getElementById: (id) => doc._byId[id] || null,
+  // document 级 capture 监听（自动播放被拦时的恢复入口）
+  addEventListener(type, fn) { doc._docL[type] = fn; },
+  removeEventListener(type) { delete doc._docL[type]; },
+  dispatch(type, evt) { if (doc._docL[type]) doc._docL[type](evt); },
 };
 globalThis.document = doc;
 globalThis.requestAnimationFrame = (fn) => { fn(); return 1; }; // 同步执行，断言稳定
@@ -140,6 +145,10 @@ ok(h.videos.every((v) => v.loop === false), '单支不 loop，由 ended 事件�
 ok(h.videos.every((v) => /object-fit:cover/.test(v.style.cssText) && /opacity:0/.test(v.style.cssText)),
   '视频铺满且初始透明（没画面时露出静态底图）');
 eq(h.videos[1].src, HOME_VIDEOS[0], '启动即播放第一支');
+eq(h.videos[0].getAttribute('poster'), '/loading-bg.jpg', 'video 带 poster，没解码出帧时不会黑屏');
+eq(h.videos[0].getAttribute('autoplay'), null, '不设 autoplay 属性（否则预载槽会跟着自动播，双份解码）');
+eq(h.root.dataset.videoState, 'video', '启动后立刻淡入视频层（不再等 playing 事件）');
+eq(h.videos[1].style.opacity, '1', '第一支启动即淡入（不依赖媒体事件）');
 eq(h.bar.getAttribute('role'), 'progressbar', '进度条初始语义是进度条');
 eq(h.bar.dataset.mode, 'loading', '进度条初始为加载模式');
 eq(h.label.textContent, '等待登录', '登录阶段进度条提示等待登录');
@@ -185,6 +194,8 @@ h.home.setProgress(12, 12);
 eq(h.fill.style.width, '100%', '加载完成进度条满');
 
 // 登录/加载阶段：点击必须被遮罩吞掉，不能漏进游戏
+// 模拟「自动播放被浏览器拦下」：当前视频停在 paused。
+vA.paused = true; vB.paused = true;
 const playsBefore = vA.plays + vB.plays;
 const blocked = mockEvt();
 h.root.dispatch('pointerdown', blocked);
@@ -232,6 +243,17 @@ h2.home.markReady();
 h2.root.dispatch('click', mockEvt());
 eq(h2.home.done, true, '就绪后点击任意处也可进入');
 
+// document 级恢复：登录弹窗 z-index 更高，点它时主页 root 收不到事件，
+// 必须靠 document capture 才能把被拦下的自动播放救回来。
+console.log('document 级恢复：登录弹窗内的点击也能触发');
+const h4 = makeHome();
+const [a4, b4] = h4.videos;
+a4.paused = true; b4.paused = true;
+const plays4 = a4.plays + b4.plays;
+doc.dispatch('pointerdown', mockEvt());
+ok(a4.plays + b4.plays > plays4, 'document capture 借弹窗内点击补播（主页 root 收不到该事件）');
+ok(doc._docL.pointerdown === undefined, '补播成功后一次性监听被移除');
+
 // 兜底 finish()
 const h3 = makeHome();
 h3.home.finish();
@@ -251,9 +273,17 @@ ok(/addEventListener\('playing'/.test(homeSrc) && /addEventListener\('ended'/.te
   '轮播靠 playing / ended 驱动，不依赖 duration 轮询');
 ok(/addEventListener\('error'/.test(homeSrc) && /disableVideo/.test(homeSrc),
   '加载失败有跳过与永久降级，且 console.warn 出声');
-ok(/armTimeout/.test(homeSrc) && /缓冲超时/.test(homeSrc), '缓冲超时有兜底，不会永久停在静态底图');
+ok(/armTimeout/.test(homeSrc) && /8 秒内没有进入播放状态/.test(homeSrc),
+  '缓冲/自动播放超时有兜底，不会永久停在 poster 上');
 ok(/stopVideos\(\);/.test(homeSrc) && /beginEnter/.test(homeSrc), '进入游戏立刻释放视频解码资源');
 ok(/resumeVideos\(\)/.test(homeSrc) && /pointerdown/.test(homeSrc), '自动播放被拦时借首次交互恢复');
+ok(/armGlobalResume/.test(homeSrc) && /document\.addEventListener\('pointerdown', onFirst, true\)/.test(homeSrc),
+  '恢复监听挂在 document capture（登录弹窗内的点击也能触发）');
+ok(/setAttribute\('poster', bgUrl\)/.test(homeSrc), 'poster 用静态底图，淡入不会黑屏');
+ok(!/setAttribute\('autoplay'/.test(homeSrc) && /slot !== active && slot !== wantSlot/.test(homeSrc),
+  '预载槽既不自动播、也不会被 canplay 补播（不会双份解码）');
+ok(/reveal\(next\);/.test(homeSrc) && /addEventListener\('playing', onProgress\)/.test(homeSrc),
+  '淡入不再以 playing/canplay 为前提（事件只用于补播）');
 ok(/homevideo=0|videoDisabledByUrl/.test(homeSrc), '有 ?homevideo=0 临时关闭开关');
 ok(/object-fit:cover/.test(homeSrc), '视频按比例铺满不拉伸');
 for (const u of HOME_VIDEOS) {

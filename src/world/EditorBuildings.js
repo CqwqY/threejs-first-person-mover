@@ -84,8 +84,9 @@ export function applyEditorHoles(scene) {
   if (!scene) return { count: 0, patched: 0, shadow: 0 };
   // ① 洞数据：把窗户记录里的角度（已存为弧度）喂给共享 uniform
   const wins = _holeWins;
-  // ② 目标材质：只取「可能被挖到」的物件的材质（窗户自己的 ShaderMaterial 不含
-  //    onBeforeCompile，patchBuildingMaterial 会自动跳过它）
+  // ② 目标材质：只取「可能被挖到」的物件的材质。窗户自己的 ShaderMaterial 由
+  //    patchBuildingMaterial 显式排除（它继承 Material 的 onBeforeCompile 空函数，
+  //    旧版没拦住，手写 vertex 被注入 transformed 后整个材质编译失败）。
   const aabbs = wins.map((w) => holeAabbOf(w, HOLE_DEPTH));
   const mats = [];
   const seen = new Set();

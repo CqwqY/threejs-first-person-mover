@@ -170,8 +170,9 @@ console.log('【7】源码断言：阴影总开关默认关 —— 三层缺一�
   ok(/this\.renderer\.shadowMap\.enabled\s*=\s*this\._shadowOn/.test(gm),
     'renderer.shadowMap.enabled 不再硬编码 true');
   ok(/this\._sun\.castShadow\s*=\s*this\._shadowOn/.test(gm), '太阳的 castShadow 跟随总开关');
-  ok(/needsUpdate\s*=\s*this\._shadowOn\s*&&\s*this\._shadowTick\s*=== 0/.test(gm),
-    '关着时主循环不再置 needsUpdate');
+  // 阴影节流已从「每 N 帧」重构为「按相位切换 / 玩家位移」；守卫仍是 _shadowOn，语义未变。
+  ok(/if\s*\(this\._shadowOn\s*&&\s*\(this\._shadowPhaseDirty\s*\|\|\s*shadowMoved\s*>/.test(gm),
+    '关着时主循环不再置 needsUpdate（按相位/位移节流）');
   ok(/if\s*\(v\)\s*this\.renderer\.shadowMap\.needsUpdate\s*=\s*true/.test(gm),
     '关→开时立刻补一次重渲（autoUpdate=false 下的空窗）');
   // 基准页：基线必须跟真实游戏一致，否则测出来的是"另一个游戏"（此前手机端数据对不上的来源之一）
