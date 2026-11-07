@@ -1,13 +1,15 @@
-// 自检：新主页的状态机（底图 / 登录态 / 玩家名 / 进度条变「点击进入」）与启动顺序。
+// 自检：新主页的状态机（视频背景 / 登录态 / 玩家名 / 进度条变「点击进入」）与启动顺序。
 //   node tools/probe-home-screen.mjs
 //
 // 用一份极简 DOM 桩真跑 createHomeScreen()：登录 → 加载 → 就绪 → 点击进入，
-// 重点验证「就绪后指针不再被遮罩吞掉」（否则进度条变成的按钮自己点不动）。
+// 重点验证「就绪后指针不再被遮罩吞掉」（否则进度条变成的按钮自己点不动），
+// 以及三支背景视频的交叉淡入轮播、失败降级与进入游戏后的资源释放。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  displayName, displayColor, progressLabel, progressWidth, createHomeScreen,
+  displayName, displayColor, progressLabel, progressWidth,
+  HOME_VIDEOS, nextVideoIndex, createHomeScreen,
 } from '../src/ui/HomeScreen.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -32,6 +34,14 @@ eq(progressWidth(3, 12), 25, '进度百分比');
 eq(progressWidth(0, 0), 10, '总量未知时慢慢爬');
 eq(progressWidth(99, 0), 85, '未知总量上限 85%');
 eq(progressWidth(20, 10), 100, 'done>total 钳到 100%');
+console.log('纯函数：视频轮播下标');
+eq(HOME_VIDEOS.length, 3, '默认三支背景视频');
+eq(nextVideoIndex(0, 3), 1, '第一支 → 第二支');
+eq(nextVideoIndex(2, 3), 0, '第三支 → 回到第一支');
+eq(nextVideoIndex(-1, 3), 0, '非法起点 -1 归一化为 0（错误恢复跳回第一支）');
+eq(nextVideoIndex(0, 0), -1, '空列表返回 -1（调用方据此不播）');
+ok(HOME_VIDEOS.every((u) => /^\/video\/home-[123]\.mp4$/.test(u)),
+  '视频路径是纯 ASCII 无空格的 /video/home-N.mp4');
 
 // ---- 极简 DOM 桩 ----
 class El {
@@ -47,9 +57,24 @@ class El {
     this._attrs = {};
     this._listeners = {};
     this._removed = false;
+    // video 元素桩：够跑 play/pause/load 与 playing/ended/error 事件链
+    this.src = '';
+    this.paused = true;
+    this.readyState = 0;
+    this.muted = false;
+    this.playsInline = false;
+    this.loop = true;
+    this.preload = '';
+    this.loads = 0;
+    this.plays = 0;
+    this.pauses = 0;
   }
   setAttribute(k, v) { this._attrs[k] = String(v); }
   getAttribute(k) { return this._attrs[k] ?? null; }
+  removeAttribute(k) { delete this._attrs[k]; }
+  play() { this.plays++; this.paused = false; return Promise.resolve(); }
+  pause() { this.pauses++; this.paused = true; }
+  load() { this.loads++; this.readyState = 0; }
   appendChild(c) {
     this.children.push(c);
     c.parentElement = this;
@@ -92,7 +117,8 @@ function makeHome() {
   const [nameEl, subEl, switchEl] = center.children;
   const [bar, hint] = bottom.children;
   const [fill, sweep, label] = bar.children;
-  return { home, root, bg, shade, center, bottom, nameEl, subEl, switchEl, bar, hint, fill, sweep, label };
+  return { home, root, bg, shade, center, bottom, nameEl, subEl, switchEl, bar, hint, fill, sweep, label,
+    videos: bg.children };
 }
 let switchCalls = 0;
 
@@ -100,12 +126,41 @@ console.log('真跑状态机：login → loading → ready → entered');
 const h = makeHome();
 eq(h.home.phase, 'login', '初始处于登录检测阶段');
 ok(h.root.style.cssText.includes('z-index:10000'), '主页遮罩层级为 10000');
-ok(h.bg.style.cssText.includes('loading-bg.jpg'), '底图层使用校门夜景底图');
-eq(h.root.children.length, 4, '主页只有 底图 / 压暗 / 中间 / 下方 四层');
+ok(h.bg.style.cssText.includes('loading-bg.jpg'), '静态底图仍在，视频失败/缓冲时不会黑屏');
+ok(h.bg.style.cssText.includes('overflow:hidden'), '背景层裁掉视频超出部分');
+eq(h.root.children.length, 4, '主页仍只有 背景 / 压暗 / 中间 / 下方 四层（视频嵌在背景层内）');
 ok(h.root.children.every((c) => c.tagName !== 'img'), '没有 Logo 图片节点（图标已弃用）');
+eq(h.videos.length, 2, '背景层内两个 video 元素做交叉淡入');
+ok(h.videos.every((v) => v.tagName === 'video'), '背景层的子元素确实是 video');
+ok(h.videos.every((v) => v.muted === true && v.getAttribute('muted') === ''),
+  '视频强制静音（移动端自动播放硬条件，也不和 BGM 抢）');
+ok(h.videos.every((v) => v.playsInline === true && v.getAttribute('playsinline') === ''),
+  'playsinline 已设置（否则 iOS 会强制全屏播放）');
+ok(h.videos.every((v) => v.loop === false), '单支不 loop，由 ended 事件驱动三支轮播');
+ok(h.videos.every((v) => /object-fit:cover/.test(v.style.cssText) && /opacity:0/.test(v.style.cssText)),
+  '视频铺满且初始透明（没画面时露出静态底图）');
+eq(h.videos[1].src, HOME_VIDEOS[0], '启动即播放第一支');
 eq(h.bar.getAttribute('role'), 'progressbar', '进度条初始语义是进度条');
 eq(h.bar.dataset.mode, 'loading', '进度条初始为加载模式');
 eq(h.label.textContent, '等待登录', '登录阶段进度条提示等待登录');
+
+console.log('真跑视频轮播：三支交叉淡入 + 循环');
+const [vA, vB] = h.videos;
+vB.dispatch('playing', null);
+eq(vB.style.opacity, '1', '第一支 playing 后淡入');
+eq(vA.src, HOME_VIDEOS[1], '空出的槽立刻预载第二支（切换零等待）');
+vB.dispatch('ended', null);
+vA.dispatch('playing', null);
+eq(vA.style.opacity, '1', '第二支交叉淡入');
+eq(vB.style.opacity, '0', '第一支淡出');
+eq(vB.paused, true, '淡出的旧视频已暂停（不会双份解码）');
+eq(vB.src, HOME_VIDEOS[2], '预载第三支');
+vA.dispatch('ended', null);
+vB.dispatch('playing', null);
+eq(vB.style.opacity, '1', '第三支播放');
+vB.dispatch('ended', null);
+vA.dispatch('playing', null);
+eq(vA.src, HOME_VIDEOS[0], '第三支结束后循环回第一支');
 
 h.home.setStatus('请登录', '登录后即可进入校园');
 eq(h.nameEl.textContent, '请登录', '未登录时中间提示请登录');
@@ -130,9 +185,11 @@ h.home.setProgress(12, 12);
 eq(h.fill.style.width, '100%', '加载完成进度条满');
 
 // 登录/加载阶段：点击必须被遮罩吞掉，不能漏进游戏
+const playsBefore = vA.plays + vB.plays;
 const blocked = mockEvt();
 h.root.dispatch('pointerdown', blocked);
 ok(blocked.prevented && blocked.stopped, '加载阶段遮罩吞掉指针事件');
+ok(vA.plays + vB.plays > playsBefore, '交互时补一次 play（自动播放被拦后的恢复路径）');
 const onSwitch = mockEvt();
 onSwitch.target = h.switchEl;
 h.root.dispatch('pointerdown', onSwitch);
@@ -163,6 +220,8 @@ h.bar.dispatch('click', mockEvt());
 eq(h.home.done, true, '点击进度条按钮后进入');
 eq(h.root.dataset.phase, 'entered', '状态机到 entered');
 eq(h.root.style.opacity, '0', '主页开始淡出');
+ok(h.videos.every((v) => v.paused === true), '进入游戏后视频全部暂停');
+ok(h.videos.every((v) => v.getAttribute('src') === null), '进入游戏后释放 src（不再后台解码 720p60）');
 await Promise.resolve();
 ok(resolved, 'markReady 返回的 Promise 已 resolve（main.js 才会继续初始化）');
 
@@ -185,8 +244,22 @@ const auth = read('src/ui/AuthUI.js');
 ok(!fs.existsSync(path.join(ROOT, 'src/ui/LoadingScreen.js')), '旧 LoadingScreen.js 已删除（无死代码）');
 ok(!/favicon-512\.png/.test(homeSrc), '主页不再引用弃用的校门 Logo 图片');
 ok(!/enterBar/.test(homeSrc), '不再有独立的居中点击进入大横条');
-ok(/loading-bg\.jpg/.test(homeSrc), '主页使用全屏底图');
+ok(/loading-bg\.jpg/.test(homeSrc), '静态兜底底图仍保留（视频失败不黑屏）');
 ok(/setAttribute\('role', 'button'\)/.test(homeSrc), '进度条通过 role 变为按钮');
+ok(/HOME_VIDEOS/.test(homeSrc) && /\/video\/home-3\.mp4/.test(homeSrc), '三支视频路径写死在常量里，便于换片');
+ok(/addEventListener\('playing'/.test(homeSrc) && /addEventListener\('ended'/.test(homeSrc),
+  '轮播靠 playing / ended 驱动，不依赖 duration 轮询');
+ok(/addEventListener\('error'/.test(homeSrc) && /disableVideo/.test(homeSrc),
+  '加载失败有跳过与永久降级，且 console.warn 出声');
+ok(/armTimeout/.test(homeSrc) && /缓冲超时/.test(homeSrc), '缓冲超时有兜底，不会永久停在静态底图');
+ok(/stopVideos\(\);/.test(homeSrc) && /beginEnter/.test(homeSrc), '进入游戏立刻释放视频解码资源');
+ok(/resumeVideos\(\)/.test(homeSrc) && /pointerdown/.test(homeSrc), '自动播放被拦时借首次交互恢复');
+ok(/homevideo=0|videoDisabledByUrl/.test(homeSrc), '有 ?homevideo=0 临时关闭开关');
+ok(/object-fit:cover/.test(homeSrc), '视频按比例铺满不拉伸');
+for (const u of HOME_VIDEOS) {
+  ok(fs.existsSync(path.join(ROOT, 'public', u.slice(1))), '素材存在 ' + u);
+  ok(!/\s|\(|\)/.test(u), '路径无空格括号 ' + u);
+}
 
 const zHome = Number((homeSrc.match(/z-index:(\d+)/) || [])[1]);
 const zAuth = Number((auth.match(/z-index:(\d+)/) || [])[1]);

@@ -1,5 +1,5 @@
 // 职责：进游戏前的「主页」。结构只有三块：
-//   ① 全屏底图（真实游戏截图，public/loading-bg.jpg）
+//   ① 全屏背景：public/video/ 下三支校园短片交叉淡入轮播（静态 loading-bg.jpg 兜底）
 //   ② 屏幕中间：登录状态 / 玩家昵称（旧的校门 Logo 与大字标题已弃用）
 //   ③ 下方一条加载进度条；加载完成后**这条进度条本身**变成「点击进入游戏」按钮
 //
@@ -20,6 +20,16 @@
 import { ensureTheme } from './theme.js';
 
 const KEYFRAMES_ID = 'fpm-home-kf';
+
+// 三支短片（源文件原名 2.mp4 / 3.mp4 / campus_tour (6).mp4）。
+// ⚠ 文件名必须是纯 ASCII 且无空格括号：原素材名带空格和括号，URL 编码后在
+//   Pages / 部分 CDN 路径下会 404，故入库时统一重命名为 home-1/2/3.mp4。
+// 想换片直接替换 public/video/ 下同名文件，或给 createHomeScreen({ videos }) 传新数组。
+export const HOME_VIDEOS = [
+  '/video/home-1.mp4',
+  '/video/home-2.mp4',
+  '/video/home-3.mp4',
+];
 
 function ensureKeyframes() {
   if (typeof document === 'undefined') return;
@@ -59,6 +69,22 @@ export function progressWidth(done, total) {
   return Math.min(85, 10 + done * 6);
 }
 
+// 轮播下一支的下标；空列表返回 -1（调用方据此不播）。
+export function nextVideoIndex(i, n) {
+  if (n <= 0) return -1;
+  return ((i + 1) % n + n) % n;
+}
+
+// 低端机 / 调试用的临时开关：?homevideo=0 立即退回静态底图。
+function videoDisabledByUrl() {
+  if (typeof location === 'undefined' || typeof URLSearchParams === 'undefined') return false;
+  try {
+    return new URLSearchParams(location.search).get('homevideo') === '0';
+  } catch (e) {
+    return false;
+  }
+}
+
 const nextFrame = (fn) => {
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
   else setTimeout(fn, 0);
@@ -68,6 +94,10 @@ export function createHomeScreen(opts = {}) {
   ensureTheme(); // 幂等：主题变量注入一次，登录弹窗也复用
   ensureKeyframes();
   const bgUrl = opts.background || '/loading-bg.jpg';
+  // 允许调用方传空数组彻底关掉视频；不传则用三支默认短片。
+  const videos = (Array.isArray(opts.videos) ? opts.videos : HOME_VIDEOS)
+    .filter((u) => typeof u === 'string' && u.length > 0);
+  const useVideo = videos.length > 0 && !videoDisabledByUrl();
   let finished = false;
   let readyResolve = null;
   const ready = new Promise((res) => { readyResolve = res; });
@@ -82,11 +112,187 @@ export function createHomeScreen(opts = {}) {
     'font-family:system-ui,"PingFang SC","Microsoft YaHei",sans-serif;' +
     'transition:opacity .55s ease;';
 
-  // ---- 底图：整张铺满，不再叠 Logo / 标题 ----
+  // ---- 背景层：静态底图永远在，视频只是叠在它上面 ----
+  // 视频没加载好、加载失败、解码超时、自动播放被拦时，露出的都是这张底图，不会黑屏。
   const bg = document.createElement('div');
   bg.style.cssText =
-    'position:absolute;inset:0;' +
+    'position:absolute;inset:0;overflow:hidden;' +
     'background:url(' + bgUrl + ') center/cover no-repeat;';
+
+  // ---- 视频轮播：两个 video 交替，一支播放时另一支预载下一支 ----
+  // 用 playing 事件（而非 canplay）作为淡入时机：canplay 可能在预载阶段就触发过，
+  // 等它会让切换永久卡住；playing 一定发生在 play() 之后，且代表真有画面在出。
+  const videoEls = [];
+  const slotUrl = ['', ''];
+  const slotIndex = [-1, -1];
+  let active = 0;        // 当前可见的那支
+  let wantSlot = -1;     // 正在等待播放的那支（淡入前）
+  let curIndex = -1;     // 当前播的是 videos 里的第几支
+  let stopped = false;   // 进入游戏 / 永久降级后置 true
+  let failStreak = 0;
+  let playTimer = null;
+
+  const warn = (msg, e) => { console.warn('[home] ' + msg, e === undefined ? '' : e); };
+
+  function clearPlayTimer() {
+    if (playTimer !== null && typeof clearTimeout === 'function') clearTimeout(playTimer);
+    playTimer = null;
+  }
+
+  function tryPlay(v) {
+    if (!v || typeof v.play !== 'function') return;
+    try {
+      // 老浏览器 play() 返回 undefined；现代浏览器返回 Promise，
+      // 被自动播放策略拦时 reject —— 此时留在静态底图，等用户首次交互再重试。
+      const p = v.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch((e) => { warn('背景视频自动播放被拦，等待用户交互后重试', e); });
+      }
+    } catch (e) {
+      warn('背景视频播放调用失败', e);
+    }
+  }
+
+  function currentVideo() {
+    if (!videoEls.length) return null;
+    return videoEls[wantSlot >= 0 ? wantSlot : active] || null;
+  }
+
+  // 自动播放被浏览器拦下后，第一次点击/触摸主页时补一次 play()（不吞也不改事件）。
+  function resumeVideos() {
+    if (stopped || !useVideo) return;
+    tryPlay(currentVideo());
+  }
+
+  function pauseVideo(v) {
+    if (!v || typeof v.pause !== 'function') return;
+    try { v.pause(); } catch (e) { warn('暂停背景视频失败', e); }
+  }
+
+  // 永久降级：视频全停、淡出，静态底图接管。不静默、出声 warn。
+  function disableVideo(reason) {
+    warn(reason);
+    stopped = true;
+    clearPlayTimer();
+    for (const v of videoEls) {
+      pauseVideo(v);
+      v.style.opacity = '0';
+    }
+  }
+
+  // 进入游戏：立刻停解码并释放 src，别让 720p60 的视频在后台继续吃 CPU/GPU。
+  // ⚠ 不因 stopped 提前 return：disableVideo() 会先置 stopped，但那时 src 还没释放，
+  //   进游戏仍需走一遍释放（下面每一步都幂等）。
+  function stopVideos() {
+    if (!videoEls.length) return;
+    stopped = true;
+    clearPlayTimer();
+    for (const v of videoEls) {
+      pauseVideo(v);
+      v.style.opacity = '0';
+      v.removeAttribute('src');
+      if (typeof v.load === 'function') {
+        try { v.load(); } catch (e) { warn('释放背景视频资源失败', e); }
+      }
+    }
+  }
+
+  function prepare(slot, i) {
+    if (i < 0 || i >= videos.length) return;
+    const v = videoEls[slot];
+    const url = videos[i];
+    slotIndex[slot] = i;
+    if (slotUrl[slot] === url) return; // 已预载过，别重复 load（会重新下载）
+    slotUrl[slot] = url;
+    v.src = url;
+    if (typeof v.load === 'function') v.load();
+  }
+
+  function reveal(slot) {
+    if (stopped || slot !== wantSlot) return;
+    clearPlayTimer();
+    wantSlot = -1;
+    const v = videoEls[slot];
+    curIndex = slotIndex[slot];
+    v.style.opacity = '1';
+    const old = videoEls[active];
+    if (old && old !== v) {
+      old.style.opacity = '0';
+      pauseVideo(old);
+    }
+    active = slot;
+    failStreak = 0;
+    // 空出来的那支立刻预载下一支，下次切换零等待；浏览器 HTTP 缓存会复用已下载的片段。
+    prepare(1 - active, nextVideoIndex(curIndex, videos.length));
+  }
+
+  // 8 秒还没真正播起来就跳过这一支，别让主页永远停在静态底图还以为视频在跑。
+  function armTimeout(slot, i) {
+    if (typeof window === 'undefined') return; // Node 自检不挂定时器
+    clearPlayTimer();
+    playTimer = setTimeout(() => {
+      playTimer = null;
+      if (stopped || wantSlot !== slot) return;
+      warn('背景视频缓冲超时，跳过：' + videos[i]);
+      failStreak++;
+      if (failStreak >= videos.length * 2) {
+        disableVideo('背景视频连续失败，已永久退回静态底图');
+        return;
+      }
+      playAt(nextVideoIndex(i, videos.length));
+    }, 8000);
+  }
+
+  function playAt(i) {
+    if (stopped || !videos.length || i < 0 || i >= videos.length) return;
+    const next = 1 - active;
+    wantSlot = next;
+    prepare(next, i);
+    tryPlay(videoEls[next]);
+    armTimeout(next, i);
+  }
+
+  function makeVideo(slot) {
+    const v = document.createElement('video');
+    // 静音 + playsinline 是移动端自动播放的硬条件；没有音轨也强制静音，别和 BGM 抢。
+    v.muted = true;
+    v.playsInline = true;
+    v.loop = false;
+    v.preload = 'auto';
+    v.setAttribute('muted', '');
+    v.setAttribute('playsinline', '');
+    v.setAttribute('webkit-playsinline', '');
+    v.style.cssText =
+      'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;' +
+      'pointer-events:none;opacity:0;transition:opacity .8s ease;';
+    v.addEventListener('playing', () => { reveal(slot); });
+    v.addEventListener('canplay', () => { reveal(slot); }); // 备用：个别浏览器不发 playing
+    v.addEventListener('ended', () => {
+      if (stopped || slot !== active) return;
+      playAt(nextVideoIndex(curIndex, videos.length));
+    });
+    v.addEventListener('error', () => {
+      if (stopped) return;
+      failStreak++;
+      warn('背景视频加载失败：' + (slotUrl[slot] || '?'));
+      v.style.opacity = '0';
+      if (failStreak >= videos.length * 2) {
+        disableVideo('背景视频连续失败，已永久退回静态底图');
+        return;
+      }
+      if (slot === active || slot === wantSlot) {
+        playAt(nextVideoIndex(slotIndex[slot], videos.length));
+      }
+    });
+    return v;
+  }
+
+  if (useVideo) {
+    videoEls[0] = makeVideo(0);
+    videoEls[1] = makeVideo(1);
+    bg.appendChild(videoEls[0]);
+    bg.appendChild(videoEls[1]);
+  }
 
   // ---- 压暗层：中间区域稍暗保证大字可读，底部更暗保证进度条可读 ----
   const shade = document.createElement('div');
@@ -181,6 +387,7 @@ export function createHomeScreen(opts = {}) {
   // 加载/登录期间吞掉指针事件，别让点击漏进后面的游戏世界。
   // ⚠ ready 阶段必须放行：否则进度条变形后的「点击进入」按钮会被自己吞掉。
   root.addEventListener('pointerdown', (e) => {
+    resumeVideos(); // 自动播放被拦时，借这次交互补一次 play()（不改变事件行为）
     if (root.dataset.phase === 'ready' || root.dataset.phase === 'entered') return;
     // 放行「切换账号」：capture 阶段 preventDefault 会连带抑制它后续的 click，
     // 否则这个链接在登录/加载阶段看着能点、实际毫无反应（静默失效）。
@@ -197,10 +404,13 @@ export function createHomeScreen(opts = {}) {
   });
 
   document.body.appendChild(root);
+  // 必须等元素进了 DOM 再 play()：iOS Safari 对游离节点上的自动播放更严格。
+  if (useVideo) playAt(0);
 
   function beginEnter() {
     if (finished) return;
     finished = true;
+    stopVideos();
     root.dataset.phase = 'entered';
     root.style.opacity = '0';
     setTimeout(() => { if (root.parentElement) root.remove(); }, 600);
