@@ -28,6 +28,10 @@ import * as THREE from 'three';
 
 const _movers = []; // { obj, cfg, active, t, rot, dir, moved, onMoved, off }
 const _v = new THREE.Vector3(); // 随动重算的复用缓冲（不每帧分配）
+// 服务器同步用：按「带运动器的 holder」聚合，一个 holder 上多个运动器只发一份 transform。
+// id 按注册顺序分配（各端地图数据/注册顺序一致），场景重建时归零，所以两端能对上。
+const _syncObjs = new Map(); // id -> { obj, movers:[m], onMoved }
+let _syncSeq = 0;
 let _moverMoving = false; // 本帧是否有运动器真的动了（供物理唤醒静止球，让平台能把球顶起/带着走）
 
 // 注册一个运动器。obj 是 EditorBuildings 里带好位置/朝向/缩放的 holder。
@@ -76,15 +80,71 @@ export function registerSceneMover(obj, cfg, onMoved) {
     m.active = !m.active; // 往返：toggle 开始/暂停/继续
   });
   _movers.push(m);
+  // 按 holder 聚合：同一个物件挂多个运动器时只发一份 transform，避免互相覆盖
+  if (!obj.__moverSyncId) {
+    obj.__moverSyncId = 'ma' + (_syncSeq++);
+    _syncObjs.set(obj.__moverSyncId, { obj, movers: [], onMoved: m.onMoved });
+  }
+  _syncObjs.get(obj.__moverSyncId).movers.push(m);
   return m;
 }
 
 export function clearSceneMovers() {
   for (const m of _movers) if (m.off) m.off();
   _movers.length = 0;
+  _syncObjs.clear();
+  _syncSeq = 0;
 }
 
 export function sceneMoverCount() { return _movers.length; }
+
+// ---- 服务器同步：全量姿态快照（服务端只转发，权威端是房间内编号最小的客户端）----
+// 只发 transform + 各运动器的累计量；因为积分是「每帧加增量」，直接覆盖这两个量后
+// 后续帧仍然自洽，不需要反推初始 base。新玩家进房时由服务端请求一次，全房间对齐。
+// ⚠ ms 只带 [t, rot]，**不覆盖 active/dir**：那两个由 scene_event 广播同步，
+//   快照是 3s 周期里的旧状态，写回去会把刚触发的运动硬生生关掉。
+export function getSceneMoverSnapshot() {
+  const out = [];
+  for (const [id, rec] of _syncObjs) {
+    const o = rec.obj;
+    if (!o || !o.parent) continue;
+    out.push({
+      id,
+      px: o.position.x, py: o.position.y, pz: o.position.z, ry: o.rotation.y,
+      ms: rec.movers.map((m) => [m.t, m.rot]),
+    });
+  }
+  return out;
+}
+
+// 返回成功套用的物件数。坏数据一律跳过，绝不把 NaN 写进物件 / 碰撞体。
+export function applySceneMoverSnapshot(arr) {
+  if (!Array.isArray(arr)) return 0;
+  let n = 0;
+  for (const s of arr) {
+    if (!s) continue;
+    const rec = _syncObjs.get(String(s.id || ''));
+    if (!rec || !rec.obj) continue;
+    const nums = [s.px, s.py, s.pz, s.ry].map(Number);
+    if (nums.some((v) => !Number.isFinite(v))) continue;
+    rec.obj.position.set(nums[0], nums[1], nums[2]);
+    rec.obj.rotation.y = nums[3];
+    if (Array.isArray(s.ms)) {
+      for (let i = 0; i < rec.movers.length && i < s.ms.length; i++) {
+        const row = s.ms[i], m = rec.movers[i];
+        if (!Array.isArray(row) || row.length < 2) continue;
+        const t = Number(row[0]), rot = Number(row[1]);
+        if (!Number.isFinite(t) || !Number.isFinite(rot)) continue;
+        m.t = t; m.rot = rot; // 只校正累计量，active/dir 由事件广播负责
+      }
+    }
+    if (rec.onMoved) {
+      try { rec.onMoved(); } catch (e) { console.warn('[sceneMovers] 同步姿态后刷碰撞体失败:', e); }
+    }
+    n++;
+  }
+  return n;
+}
 // 本帧是否有运动器在动：物理层据此唤醒所有静止球，使移动中的碰撞体（盒/凸包随动）能把球顶起。
 export function sceneMoversMoving() { return _moverMoving; }
 

@@ -193,29 +193,8 @@ export class Network {
 
     this.ws.onmessage = (event) => {
       let msg;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      // 延迟测量：pong 回填 RTT；收到 ping 就回 pong（服务端/对端都可能发）
-      if (msg.t === 'pong') { this._onPong(msg); return; }
-      if (msg.t === 'ping') { this.send({ t: 'pong', c: msg.c }); return; }
-      // 信令投递回执：服务端明确告知 offer/answer 有没有送达对面
-      if (msg.t === 'signal_ack') {
-        console.log('[p2p] 信令投递' + (msg.ok ? '成功（对端在线）' : '失败（对端不在线）') + ' → ' + msg.to + ' [' + (msg.kind || '') + ']');
-        return;
-      }
-      // 玩家网格信令（offer/answer/ICE）：交给 PeerMesh，不能当游戏消息分发
-      if (msg.t === 'signal') { if (this._mesh) this._mesh.handleSignal(msg); return; }
-      // WebRTC 直连信令：rtc_answer / rtc_ice 是握手用的，不能当游戏消息分发。
-      // rtc_up 是服务器确认直连已开的回执，客户端无需处理。
-      if (msg.t === 'rtc_answer') { this._onRtcAnswer(msg); return; }
-      if (msg.t === 'rtc_ice') { this._onRtcIce(msg); return; }
-      if (msg.t === 'rtc_up') { return; }
-      for (const handler of this._handlers) {
-        handler(msg);
-      }
+      try { msg = JSON.parse(event.data); } catch { return; }
+      this._dispatch(msg);
     };
 
     this.ws.onclose = () => {
@@ -263,6 +242,27 @@ export class Network {
     }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(json);
+    }
+  }
+
+  // 统一分发：wss 与 DataChannel 两条入站通道共用同一套信令过滤。
+  // ⚠ 之前 DC 那条没有过滤，DC 建立后服务端把 pong / signal_ack 也走 DC 发过来，
+  //   客户端当成游戏消息分发后静默丢弃 → RTT 永远 0、P2P 信令回执看不见。
+  _dispatch(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.t === 'pong') { this._onPong(msg); return; }
+    if (msg.t === 'ping') { this.send({ t: 'pong', c: msg.c }); return; }
+    if (msg.t === 'signal_ack') {
+      console.log('[p2p] 信令投递' + (msg.ok ? '成功（对端在线）' : '失败（对端不在线）') + ' → ' + msg.to + ' [' + (msg.kind || '') + ']');
+      return;
+    }
+    if (msg.t === 'signal') { if (this._mesh) this._mesh.handleSignal(msg); return; }
+    if (msg.t === 'rtc_answer') { this._onRtcAnswer(msg); return; }
+    if (msg.t === 'rtc_ice') { this._onRtcIce(msg); return; }
+    if (msg.t === 'rtc_up') return;
+    // 拷贝一份：handler 里再注册/退订也不会改动本次遍历
+    for (const handler of this._handlers.slice()) {
+      try { handler(msg); } catch (e) { console.warn('[net] 消息处理异常：', e); }
     }
   }
 
@@ -352,10 +352,8 @@ export class Network {
       if (this._rtc.dc !== dc) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
-      // 直连上的游戏消息与 wss 走同一套分发，复用现有 _handlers
-      for (const handler of this._handlers) {
-        try { handler(msg); } catch { /* 隔离单条异常 */ }
-      }
+      // 与 wss 走同一个 _dispatch：信令过滤 / RTT pong / handler 分发一处维护，避免两条通道行为漂移
+      this._dispatch(msg);
     };
     const gathered = [];
     pc.onicecandidate = (e) => {
@@ -646,14 +644,19 @@ export class Network {
   // 服务器不模拟，只钳数值后房间内转发（与 drop / meteor 同一套契约）。
   sendProp(ev, info) {
     if (!ev || !info || !info.id) return;
-    this.send({
+    const out = {
       t: 'prop',
       ev,
       id: info.id,
       kind: info.kind,
       x: info.x, y: info.y, z: info.z,
       vx: info.vx, vy: info.vy, vz: info.vz,
-    });
+    };
+    // 骑乘球 state 带四元数：远端靠它复现真实翻滚（漏了就退化成速度近似，看着不一致）
+    if (info.qw !== undefined) {
+      out.qx = info.qx; out.qy = info.qy; out.qz = info.qz; out.qw = info.qw;
+    }
+    this.send(out);
   }
 
   // 邀请传送：请 target 传送到我这里。带上**我此刻的坐标**（他要落在这儿），

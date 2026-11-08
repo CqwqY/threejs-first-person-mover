@@ -11,6 +11,12 @@
 //   否则上一份场景的订阅会残留 —— 旧运动器还挂着旧模型引用，触发一次就把已删除的对象动了。
 
 const _subs = new Map(); // 事件名 -> Set<fn>
+let _syncHook = null;    // (ev) => void：本地触发时上报服务器（由 Game 注入 network.send）
+
+// 只挂一次，重复调用以最后一次为准。传 null 可关闭（编辑器不需要联机）。
+export function setSceneEventSyncHook(fn) {
+  _syncHook = typeof fn === 'function' ? fn : null;
+}
 
 export function sceneOn(name, fn) {
   const key = String(name || '');
@@ -30,10 +36,17 @@ export function sceneOff(name, fn) {
 
 // 触发一个事件：同步调用所有订阅者。单个订阅者抛错不能拖垮其它订阅者（出声但不中断）。
 // 返回收到的订阅者数量（0 = 没有匹配的触发器，调用方可据此提示「没有东西响应」）。
-export function sceneFire(name) {
+// opts.broadcast === false：纯本地事件（玩家进出区域，各端按自己的位置各算一次，广播会让别人误触发）。
+// opts.remote === true：这是服务器转发来的事件，只本地执行、不再上报（否则会无限回环）。
+export function sceneFire(name, opts) {
   const key = String(name || '');
+  const o = opts || {};
   const set = _subs.get(key);
   if (!set || !set.size) return 0;
+  // 只上报真正有人订阅的事件，避免把空事件名广播满全房间
+  if (o.broadcast !== false && o.remote !== true && _syncHook) {
+    try { _syncHook(key); } catch (e) { console.warn('[sceneEvents] 事件同步上报失败:', e); }
+  }
   let n = 0;
   for (const fn of Array.from(set)) { // 拷贝：订阅者里再订阅/退订也安全
     try { fn(); n++; } catch (e) { console.error('[sceneEvents] 事件「' + key + '」的订阅者出错:', e); }

@@ -10,8 +10,8 @@ import { TemporalUpscale } from '../world/TemporalUpscale.js';
 import { ADAPT, adaptScaleDecision, tsrScaleCap } from './AdaptiveScale.js';
 import { vehicleSeatPose } from '../world/Attachment.js';
 import { getZiplines, getZones, pointInZoneLocal, projectOnSegment } from '../world/builtins.js';
-import { sceneFire } from '../world/sceneEvents.js';
-import { updateSceneMovers } from '../world/sceneMovers.js';
+import { sceneFire, setSceneEventSyncHook } from '../world/sceneEvents.js';
+import { updateSceneMovers, sceneMoverCount, getSceneMoverSnapshot, applySceneMoverSnapshot } from '../world/sceneMovers.js';
 import { createSettingsPanel, loadSettings, computeSunOffset, DEFAULT_SETTINGS } from '../ui/SettingsPanel.js';
 import { icon } from '../ui/icons.js';
 import { keyBadge } from '../ui/KeyHints.js';
@@ -425,6 +425,8 @@ export class Game {
     this.props = new PhysicsProps(this.scene, this.colliders, this.network);
     this._propsBuilt = false;
     this._propsTimer = 0;
+    this._sceneSyncAcc = 0;   // 运动器姿态上报累加器（必须初始化，否则 NaN ⇒ 整块永不执行）
+    this._pendingProps = [];  // welcome 补发的已存在活动球，等 buildLayout 完成后再补建
     this._propsView = {
       x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
       radius: Config.PLAYER_RADIUS, height: Config.PLAYER_HEIGHT, launch: null,
@@ -438,6 +440,12 @@ export class Game {
 
     this.network = new Network(Config.RELAY_URL, this._token);
     this.network.onMessage((msg) => this._onNetworkMessage(msg));
+    // ⚠ PhysicsProps 在上面构造时 network 还没建，拿到的是 undefined —— 必须在这里补注入，
+    //   否则所有 t:'prop' 上报（spawn/hit/state/gone/ride）全部短路，足球在多人里永远不同步。
+    this.props.net = this.network;
+    // 场景事件同步：本地点选项卡 / 触发运动器时广播给同房其他人。
+    // 进出区域是各端按自己位置独立结算的本地事件，调用处会传 broadcast:false，不走这里。
+    setSceneEventSyncHook((ev) => this.network.send({ t: 'scene_event', ev }));
     // 玩家↔玩家 P2P 网格：直连成功的玩家 id 集合；快照里这些 id 不再套用服务器那份，避免双重更新。
     this._directIds = new Set();
     this.network.setMeshHandlers({
@@ -1997,6 +2005,8 @@ export class Game {
         this._lobbySpawn = msg.spawn; // 大厅出生点单独记一份，退出对战回主世界时用
         this.localState.num = msg.num; // 本地也要知道自己序号，保证第三人称看到的男女与别人看到的一致
         if (this.props) this.props.setLocalId(msg.id);
+        // 服务端补发的活动球：prop 是单条广播不进快照，后进房的人靠这份列表补建
+        this._pendingProps = Array.isArray(msg.props) ? msg.props : [];
         this.playerManager.setLocal(msg.id);
         // 本地名牌：登录了用昵称，否则游客样式
         const myNick = this._profile ? (this._profile.nickname || this._profile.username || `玩家${msg.num}`) : `玩家${msg.num}`;
@@ -2100,6 +2110,20 @@ export class Game {
       case 'prop': {
         // 物理可交互物：别人施加的冲量 / 位置校正（服务端只转发，本地复现）
         if (this.props) this.props.applyRemote(msg.ev, msg);
+        break;
+      }
+      case 'scene_event': {
+        // 服务器转发的场景事件：只本地执行，不再上报（sceneFire 的 remote 标记防回环）
+        sceneFire(msg.ev, { remote: true });
+        break;
+      }
+      case 'scene_sync_req': {
+        // 有人刚进房，服务端请本端（房间权威）发一份全量运动器姿态给全房间对齐
+        this.network.send({ t: 'scene_sync', movers: getSceneMoverSnapshot() });
+        break;
+      }
+      case 'scene_sync': {
+        applySceneMoverSnapshot(msg.movers);
         break;
       }
       case 'tp_invite': {
@@ -7494,6 +7518,13 @@ export class Game {
     }
     const detail = stats.map((x) => `${x.zone}:${x.got}/${x.want}`).join(' ');
     console.log(`[props] ${this.props.count} 体 hash=${this.props.hash()}  ${detail}`);
+    // 补建服务端已有的动态球（welcome 时场景还没铺好，必须等 buildLayout 之后）
+    for (const p of this._pendingProps) {
+      try { this.props.applyRemote('spawn', p); }
+      catch (e) { console.warn('[props] 补建服务端已有活动球失败:', e); }
+    }
+    if (this._pendingProps.length) console.log('[props] 补建活动球 ' + this._pendingProps.length + ' 颗');
+    this._pendingProps = [];
   }
 
   // 商店「充气足球」：在面前打气变出一颗巨型透明足球（可踢/可推/人能走进去）。
@@ -7783,12 +7814,12 @@ export class Game {
     for (const g of now) {
       if (inside.has(g)) continue;
       const ev = g.userData.__zoneEvents;
-      if (ev && ev.enter) sceneFire(ev.enter);
+      if (ev && ev.enter) sceneFire(ev.enter, { broadcast: false });
     }
     for (const g of inside) {
       if (now.has(g)) continue;
       const ev = g.userData.__zoneEvents;
-      if (ev && ev.leave) sceneFire(ev.leave);
+      if (ev && ev.leave) sceneFire(ev.leave, { broadcast: false });
     }
     inside.clear();
     for (const g of now) inside.add(g);
@@ -8437,6 +8468,16 @@ export class Game {
     // ⚠ 必须排在玩家物理**之前**：配了运动器的物件是活动物体，碰撞体随动在这一次调用里刷好，
     //   玩家本帧解算才能用上「门现在的位置」（放在后面会慢一帧，快速升降/关门时会出现穿模）。
     updateSceneMovers(dt);
+    // 每 3s 上报一次运动器全量姿态。服务端只放行房间内编号最小的那条并广播全房间，
+    // 后进来的人因此能对齐已升起的平台，长期漂移也被周期性校正。
+    // 事件同步负责「什么时候动」，快照负责「现在在哪」——两者缺一不可。
+    this._sceneSyncAcc += dt;
+    if (this._sceneSyncAcc >= 3) {
+      this._sceneSyncAcc = 0;
+      if (sceneMoverCount() > 0 && this.network) {
+        this.network.send({ t: 'scene_sync', movers: getSceneMoverSnapshot() });
+      }
+    }
     if (!this._soul) {
       // 挂载随动：先由驾驶员权威状态直接算出乘客位置（不依赖本地驾驶员计算顺序）
       this._applyLocalMount();
