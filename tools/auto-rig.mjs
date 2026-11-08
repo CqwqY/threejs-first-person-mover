@@ -4,7 +4,11 @@
 // 做法：
 //  - 原 GLB 的 BIN chunk（含贴图/UV/法线/索引）一字不动，只在尾部追加 JOINTS_0 / WEIGHTS_0 /
 //    inverseBindMatrices / 骨架节点 / 动画 → 贴图 100% 保真（不依赖 Node 解码贴图，也不走 GLTFExporter 重排）。
-//  - 骨架基于 AABB 程序化放置（模型已归一化到 y∈[-0.5,0.5]），bind pose 为直立、手臂贴体侧（非 T-pose）。
+//  - 骨架基于 AABB 程序化放置（模型已归一化到 y∈[-0.5,0.5]）。⚠ 原始网格是 **T-pose**（手臂沿 ±Z 水平张开），
+//    而游戏里要的是手臂自然下垂（A-pose）。关键：GLTF 蒙皮在 bind 时 jointMatrix·inverseBind 恒为 I，
+//    给骨骼节点加的旋转会被 inverseBind 抵消、显示仍回到网格原样（T-pose）。所以"手臂下垂"不是改 bind pose，
+//    而是**烘焙进动画**——上臂/肘的动画旋转以「下垂基旋转」为底座（局部 = swing·drop），人物始终在播
+//    Idle/Walk/Run，因此游戏里自然显示 A-pose。网格、BONE_DEF、蒙皮权重仍全部按 T-pose 算，编辑器校准坐标不变。
 //    ⚠ 网格朝向（用 tools/probe-axis.mjs 实测 boy-rig）：网格的「左右」是 **Z 轴**（两层腿/脚的 Z 跨度
 //      0.256 > X 0.161），「前后」是 **X 轴**（正面朝 +X）。所以骨架的左右/手臂/腿必须摆在 ±Z 上，
 //      摆腿也要绕 Z（脚才能沿 X 前后摆）。曾把左右放在 ±X → 骨架相对网格整体差 90°（身子正、走路侧甩）。
@@ -92,6 +96,21 @@ const DEFAULT_ANIMS = [
   { name: 'Run', period: 0.7, A: 0.72, A2: 0.46, A3: 0.12, knee: true },
 ];
 
+// 常驻 rest 旋转（绕局部 X 轴的弧度）：把 T-pose 水平手臂转到自然下垂（A-pose）。
+// 左臂在 -Z、右臂在 +Z，要落向 -Y，符号相反。80°（非 90°）让手臂略向外张，更像真人 A-pose 而非并拢。
+const DEG = Math.PI / 180;
+const REST_ROT = {
+  l_shoulder: -80 * DEG,
+  r_shoulder: 80 * DEG,
+  // 肘部轻微常驻前屈，避免直臂贴身体显得僵硬（绕局部 X，前臂略向前）
+  l_elbow: 12 * DEG,
+  r_elbow: -12 * DEG,
+};
+function restQuat(name) {
+  const a = REST_ROT[name];
+  return a ? new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), a) : null;
+}
+
 // 按性别取配置：bones 必须是 [name, parent|null, [x,y,z]]，anims 字段齐全才采用。
 // ⚠ 这里只校验长度与主字段，坐标数值交给编辑器里的人肉校准（脚本不做猜测式修正）。
 function presetsFor(gender) {
@@ -142,13 +161,14 @@ function bake(gender) {
   const vCount = pos.length / 3;
   console.log(`[src] verts=${vCount} uv=${!!prim.attributes.TEXCOORD_0}`);
 
-  // 骨世界矩阵（bind pose，无旋转）：从 armature 根递归
+  // 骨世界矩阵（bind pose，纯平移，保持 T-pose）：从 armature 根递归。
+  // ⚠ 不在这里加 rest 旋转：GLTF 蒙皮里 jointMatrix·inverseBind 在 bind 时恒为 I，
+  //   节点旋转会被 inverseBind 抵消，显示仍是网格原样（T-pose）。"手臂下垂"改由动画基旋转承载（见 boneRot）。
   const absPos = BONE_DEF.map(([, , p]) => new THREE.Vector3(p[0], p[1], p[2]));
   const parentOf = BONE_DEF.map(([, par]) => (par ? BONE_DEF.findIndex((b) => b[0] === par) : -1));
   const localPos = BONE_DEF.map((_, i) =>
     parentOf[i] < 0 ? absPos[i].clone() : absPos[i].clone().sub(absPos[parentOf[i]]));
   const worldMat = [];
-  const root = new THREE.Matrix4();
   for (let i = 0; i < N_BONES; i++) {
     const m = new THREE.Matrix4().makeTranslation(localPos[i].x, localPos[i].y, localPos[i].z);
     if (parentOf[i] < 0) worldMat[i] = m.clone();
@@ -239,24 +259,32 @@ function bake(gender) {
   // 每运动骨：轴 + 幅度函数(相位 s∈[0,1))
   function legAng(s, amp) { return amp * Math.sin(2 * Math.PI * s); }
   function kneeAng(s, amp) { const h = amp * Math.sin(2 * Math.PI * s); return Math.max(0, -h) * 0.9; }
-  // 骨运动定义（按骨名）
-  function boneMotion(name, s, clip) {
+  // 骨运动：返回局部旋转四元数（含 rest 基 + swing）。局部 = swing · rest（先下垂 rest，再叠加摆动 swing）。
+  const IDENT = new THREE.Quaternion();
+  function quat(axis, ang) { return new THREE.Quaternion().setFromAxisAngle(axis, ang); }
+  function boneRot(name, s, clip) {
     const ph = s; // 相位
+    let sw = null;
     switch (name) {
-      case 'l_hip': return { axis: Z, ang: legAng(ph, clip.A) };
-      case 'r_hip': return { axis: Z, ang: -legAng(ph, clip.A) };
-      case 'l_knee': return clip.knee ? { axis: Z, ang: -kneeAng(ph, clip.A) } : null;
-      case 'r_knee': return clip.knee ? { axis: Z, ang: -kneeAng(ph + 0.5, clip.A) } : null;
-      case 'l_shoulder': return { axis: Z, ang: -legAng(ph, clip.A2) };
-      case 'r_shoulder': return { axis: Z, ang: legAng(ph, clip.A2) };
-      case 'l_elbow': return { axis: Z, ang: 0.22 + 0.06 * Math.sin(2 * Math.PI * ph) };
-      case 'r_elbow': return { axis: Z, ang: 0.22 + 0.06 * Math.sin(2 * Math.PI * ph) };
-      case 'chest': return { axis: Y, ang: clip.A3 * Math.sin(2 * Math.PI * ph) };
-      case 'head': return { axis: Y, ang: -clip.A3 * 0.5 * Math.sin(2 * Math.PI * ph) };
-      case 'hips': return { axis: Y, ang: clip.A3 * 0.3 * Math.sin(2 * Math.PI * ph) };
-      case 'spine': return { axis: Z, ang: 0.02 * Math.sin(2 * Math.PI * ph) };
-      default: return null;
+      case 'l_hip': sw = quat(Z, legAng(ph, clip.A)); break;
+      case 'r_hip': sw = quat(Z, -legAng(ph, clip.A)); break;
+      case 'l_knee': sw = clip.knee ? quat(Z, -kneeAng(ph, clip.A)) : null; break;
+      case 'r_knee': sw = clip.knee ? quat(Z, -kneeAng(ph + 0.5, clip.A)) : null; break;
+      case 'l_shoulder': sw = quat(Z, -legAng(ph, clip.A2)); break;
+      case 'r_shoulder': sw = quat(Z, legAng(ph, clip.A2)); break;
+      case 'l_elbow': sw = quat(Z, 0.22 + 0.06 * Math.sin(2 * Math.PI * ph)); break;
+      case 'r_elbow': sw = quat(Z, 0.22 + 0.06 * Math.sin(2 * Math.PI * ph)); break;
+      case 'chest': sw = quat(Y, clip.A3 * Math.sin(2 * Math.PI * ph)); break;
+      case 'head': sw = quat(Y, -clip.A3 * 0.5 * Math.sin(2 * Math.PI * ph)); break;
+      case 'hips': sw = quat(Y, clip.A3 * 0.3 * Math.sin(2 * Math.PI * ph)); break;
+      case 'spine': sw = quat(Z, 0.02 * Math.sin(2 * Math.PI * ph)); break;
+      default: sw = null;
     }
+    const r = restQuat(name);
+    if (!sw && !r) return null;
+    const q = sw ? sw.clone() : new THREE.Quaternion();
+    if (r) q.multiply(r); // 局部旋转 = swing · rest：先下垂，再在下垂姿势上摆
+    return q;
   }
   const jsonAnims = [];
   for (const clip of anims) {
@@ -266,15 +294,16 @@ function bake(gender) {
     const channels = [], samplers = [];
     for (let i = 0; i < N_BONES; i++) {
       const name = BONE_DEF[i][0];
-      // 检测该骨在任意相位是否有非零运动
+      // 检测该骨在任意相位是否偏离 identity（rest 本身也算，保证下垂姿态一直被写入）
       let anyMove = false;
-      for (let f = 0; f < FR; f++) { const m = boneMotion(name, f / (FR - 1), clip); if (m && Math.abs(m.ang) > 1e-4) { anyMove = true; break; } }
+      for (let f = 0; f < FR; f++) {
+        const q = boneRot(name, f / (FR - 1), clip);
+        if (q && q.angleTo(IDENT) > 1e-4) { anyMove = true; break; }
+      }
       if (!anyMove) continue;
       const out = new Float32Array(FR * 4);
-      const q = new THREE.Quaternion();
       for (let f = 0; f < FR; f++) {
-        const m = boneMotion(name, f / (FR - 1), clip);
-        q.setFromAxisAngle(m.axis, m.ang);
+        const q = boneRot(name, f / (FR - 1), clip);
         out[f * 4] = q.x; out[f * 4 + 1] = q.y; out[f * 4 + 2] = q.z; out[f * 4 + 3] = q.w;
       }
       const accOut = append('VEC4', FLOAT, FR, out);
