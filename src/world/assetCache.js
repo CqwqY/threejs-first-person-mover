@@ -15,7 +15,8 @@
 // 2026-11-08：编辑器骨骼校准改了 boy 的骨坐标，boy-rig.glb 重新烘焙 → 升 v7
 // 同日：girl 也同步 boy 那套骨骼，girl-rig.glb 重新烘焙 → 升 v8（v7 已被部分玩家缓存，不能沿用）
 // 2026-11-08(下)：原始网格是 T-pose，把"手臂下垂"烘焙进动画（bind pose 仍 T-pose），两 rig.glb 重烘焙 → 升 v9
-const CACHE_NAME = 'fpm-assets-v9';
+// 同日(再)：退回正确默认骨架（头骨 0.34 贴网格头、踝 -0.49 贴地；之前校准把头骨压到 0.12 导致头脱节），两 rig.glb 重烘焙 → 升 v10
+const CACHE_NAME = 'fpm-assets-v10';
 const PREFIX = 'fpm-assets-';
 
 // 单件上限：超过就不缓存（正常模型最多几 MB，这里是防异常大文件把配额撑爆）
