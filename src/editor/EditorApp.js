@@ -40,6 +40,7 @@ import {
   holeAabbOf, objectTouchesAnyHole, invalidateHoleBox,
 } from '../world/FakeWindow.js';
 import { applyBackfaceCulling } from '../world/BackfaceCull.js';
+import { createRigEditor } from './RigEditor.js';
 // 光照烘焙：把太阳直射+阴影烤进各网格 lightMap（静态建筑降填充率）。编辑器点「烘焙光照」触发。
 import {
   bakeMeshLightmaps, collectBakeableMeshes, applyBakedLightmapsToMeshes, markBakedLayers,
@@ -505,7 +506,12 @@ export function createEditor() {
     lOnFrom: document.getElementById('lOnFrom'),
     lOnTo: document.getElementById('lOnTo'),
     lDel: document.getElementById('lDel'),
+    btnRig: document.getElementById('tRig'),
+    rigPanel: document.getElementById('rigPanel'),
   };
+
+  // 骨骼校准页签：按 boy/girl 分别编辑程序化绑骨坐标（配置写在 src/player/rigPresets.json）
+  const rigEditor = createRigEditor({ scene, camera, controls });
 
   // ---------- 可编辑对象：游戏景物 + 地形/道路/墙体 ----------
   function adoptGameScenery() {
@@ -3684,13 +3690,13 @@ export function createEditor() {
 
   function setMode(m) {
     // 切到「边界 / 赛道 / 道具 / 家具 / 兑换码」前先退出组合编辑（草稿会顶替主场景，不能同时进行）
-    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn' || m === 'codes')) exitComboMode();
+    if (state.comboMode && (m === 'bound' || m === 'track' || m === 'shop' || m === 'furn' || m === 'codes' || m === 'rig')) exitComboMode();
     state.mode = m;
-    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes', 'window'].forEach((id) => {
+    ['select', 'place', 'move', 'rot', 'scale', 'ruler', 'del', 'bound', 'track', 'shop', 'furn', 'codes', 'window', 'rig'].forEach((id) => {
       const btn = document.getElementById('t' + id.charAt(0).toUpperCase() + id.slice(1)) || document.getElementById('tDel');
       if (btn) btn.classList.remove('active');
     });
-    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes, window: StepUI.btnWindow };
+    const map = { select: StepUI.btnSelect, place: StepUI.btnPlace, move: StepUI.btnMove, rot: StepUI.btnRot, scale: StepUI.btnScale, del: StepUI.btnDel, ruler: StepUI.btnRuler, bound: StepUI.btnBound, track: StepUI.btnTrack, shop: StepUI.btnShop, furn: StepUI.btnFurn, codes: StepUI.btnCodes, window: StepUI.btnWindow, rig: StepUI.btnRig };
     (map[m] || StepUI.btnSelect).classList.add('active');
     if (m === 'ruler') {
       clearRuler();
@@ -3707,7 +3713,9 @@ export function createEditor() {
       StepUI.hint.textContent = '兑换码管理：码表存在服务端，改完即时生效（玩家进游戏输入即可兑换）';
     } else if (m === 'window') {
       StepUI.hint.textContent = '点「添加窗户」放一扇 · 用选择/移动/旋转轴贴到墙上 · 右侧面板可调尺寸/朝向/玻璃色';
-    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('已摆家具') || StepUI.hint.textContent.includes('兑换码管理') || StepUI.hint.textContent.includes('添加窗户')) {
+    } else if (m === 'rig') {
+      StepUI.hint.textContent = '骨骼校准：右侧切换 boy/girl，选骨改 XYZ · 白球=当前骨 · 右键拖拽转视角';
+    } else if (StepUI.hint.textContent.includes('Shift') || StepUI.hint.textContent.includes('青绿板') || StepUI.hint.textContent.includes('个门') || StepUI.hint.textContent.includes('已摆家具') || StepUI.hint.textContent.includes('兑换码管理') || StepUI.hint.textContent.includes('添加窗户') || StepUI.hint.textContent.includes('骨骼校准')) {
       StepUI.hint.textContent = '';
     }
 
@@ -3718,6 +3726,7 @@ export function createEditor() {
     const isFurn = m === 'furn';
     const isCodes = m === 'codes';
     const isWindow = m === 'window';
+    const isRig = m === 'rig';
     boundaryGroup.visible = isBound;
     trackGroup.visible = isTrack;
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = isBound ? 'block' : 'none';
@@ -3726,6 +3735,8 @@ export function createEditor() {
     if (StepUI.furnPanel) StepUI.furnPanel.style.display = isFurn ? 'block' : 'none';
     if (StepUI.codesPanel) StepUI.codesPanel.style.display = isCodes ? 'block' : 'none';
     if (StepUI.windowPanel) StepUI.windowPanel.style.display = isWindow ? 'block' : 'none';
+    if (StepUI.rigPanel) StepUI.rigPanel.style.display = isRig ? 'block' : 'none';
+    if (!isRig) rigEditor.deactivate(); // 离开骨骼模式先还机位，后面 bound/track 的取景才基于正确相机
     buildVizGroup.visible = isFurn;
     areaVizGroup.visible = isFurn;
     if (isFurn) fetchBuilds(); // 进入即拉一次全服已摆家具 + 建造范围
@@ -3765,8 +3776,8 @@ export function createEditor() {
       tCtl.detach(); tCtl.enabled = false;
       resetGhost();
       if (!state.placingEmpty) StepUI.hint.textContent = '';
-    } else if (isBound || isTrack || isShop || isFurn) {
-      // 边界 / 赛道 / 商店模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
+    } else if (isBound || isTrack || isShop || isFurn || isRig) {
+      // 边界 / 赛道 / 商店 / 骨骼模式不挂 3D 轴、也不放幽灵（选中物件只影响右侧普通面板）
       state.placingEmpty = false;
       if (state.ghost) { scene.remove(state.ghost); state.ghost = null; }
       tCtl.detach(); tCtl.enabled = false;
@@ -3788,6 +3799,9 @@ export function createEditor() {
         tCtl.detach(); tCtl.enabled = false;
       }
     }
+    // 骨骼预览放在最后：上面的 else 分支可能刚把边界/赛道俯视机位还原，
+    // 必须等它做完再存 camBackup，否则退出骨骼模式会回到「俯视」而不是最初的机位。
+    if (isRig) rigEditor.activate();
   }
   StepUI.btnSelect.onclick = () => setMode('select');
   StepUI.btnPlace.onclick = () => { state.placingEmpty = false; setMode('place'); };
@@ -3799,6 +3813,7 @@ export function createEditor() {
   if (StepUI.btnTrack) StepUI.btnTrack.onclick = () => setMode('track'); // 赛道编辑模式（校园狂飙）
   // ⚠ 编辑器工具按钮**不是遍历自动绑**的，必须手写这一行，漏了就是「点都点不了」
   if (StepUI.btnWindow) StepUI.btnWindow.onclick = () => setMode('window'); // 障眼法窗户
+  if (StepUI.btnRig) StepUI.btnRig.onclick = () => setMode('rig'); // 骨骼校准（boy/girl 分套）
 
   // ---------- 商店管理（在线改价格 / 导入模型） ----------
   // 与后端 /api/shop 对接：GET 公开读、POST 带管理员密钥改（add/update/del）。
@@ -4283,6 +4298,8 @@ export function createEditor() {
     if (StepUI.boundaryPanel) StepUI.boundaryPanel.style.display = 'none';
     if (StepUI.trackPanel) StepUI.trackPanel.style.display = 'none';
     if (StepUI.shopPanel) StepUI.shopPanel.style.display = 'none';
+    if (StepUI.rigPanel) StepUI.rigPanel.style.display = 'none';
+    rigEditor.deactivate(); // 组合草稿不能和骨骼预览同屏
     state.placed = [];   // 空草稿
     state.lights = [];
     state.scenery = [];

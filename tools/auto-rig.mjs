@@ -62,9 +62,12 @@ function readF32(json, bin, idx) {
   return out;
 }
 
-// ---------------- 骨架定义（mesh 局部空间绝对 bind-pose 坐标；模型 y∈[-0.5,0.5]）----------------
+// ---------------- 骨架定义 ----------------
+// 默认骨架（mesh 局部空间绝对 bind-pose 坐标；模型 y∈[-0.5,0.5]）。
+// 实际烘焙优先读 src/player/rigPresets.json —— 编辑器「骨骼」页签按 boy/girl 分别编辑的就是它。
+// 文件缺失或字段不全时回退到这里，保证命令行单独跑脚本也能出结果。
 // 命名不带前缀点号，纯小写+下划线，避免任何解析歧义。
-const BONE_DEF = [
+const DEFAULT_BONES = [
   ['hips', null, [0, -0.15, 0]],
   ['spine', 'hips', [0, -0.05, 0]],
   ['chest', 'spine', [0, 0.06, 0]],
@@ -83,7 +86,31 @@ const BONE_DEF = [
   ['r_knee', 'r_hip', [0, -0.32, 0.10]],
   ['r_ankle', 'r_hip', [0, -0.49, 0.10]],
 ];
-const N_BONES = BONE_DEF.length;
+const DEFAULT_ANIMS = [
+  { name: 'Idle', period: 4.0, A: 0.0, A2: 0.05, A3: 0.03, knee: false },
+  { name: 'Walk', period: 1.1, A: 0.38, A2: 0.26, A3: 0.08, knee: true },
+  { name: 'Run', period: 0.7, A: 0.72, A2: 0.46, A3: 0.12, knee: true },
+];
+
+// 按性别取配置：bones 必须是 [name, parent|null, [x,y,z]]，anims 字段齐全才采用。
+// ⚠ 这里只校验长度与主字段，坐标数值交给编辑器里的人肉校准（脚本不做猜测式修正）。
+function presetsFor(gender) {
+  let file = null;
+  try {
+    file = JSON.parse(fs.readFileSync(new URL('../src/player/rigPresets.json', import.meta.url), 'utf8'));
+  } catch (e) {
+    console.warn(`[cfg] 读不到 rigPresets.json，${gender} 用内置默认：`, e && e.message);
+  }
+  const cfg = file && file[gender] ? file[gender] : null;
+  const bones = cfg && Array.isArray(cfg.bones) && cfg.bones.length === DEFAULT_BONES.length &&
+    cfg.bones.every((b) => Array.isArray(b) && typeof b[0] === 'string' && Array.isArray(b[2]) && b[2].length === 3)
+    ? cfg.bones : DEFAULT_BONES;
+  const anims = cfg && Array.isArray(cfg.anims) && cfg.anims.length &&
+    cfg.anims.every((a) => a && typeof a.name === 'string' &&
+      ['period', 'A', 'A2', 'A3'].every((k) => Number.isFinite(a[k])))
+    ? cfg.anims : DEFAULT_ANIMS;
+  return { bones: bones.map((b) => [b[0], b[1], [Number(b[2][0]), Number(b[2][1]), Number(b[2][2])]]), anims };
+}
 
 // 点到「线段 a-b」最近距离（a===b 时退化为点到点）
 function distToSeg(p, a, b) {
@@ -100,6 +127,12 @@ function distToSeg(p, a, b) {
 }
 
 function bake(gender) {
+  // boy/girl 各读各的一套骨骼与动画参数（编辑器「骨骼」页签写入 rigPresets.json）
+  const cfg = presetsFor(gender);
+  const BONE_DEF = cfg.bones;
+  const N_BONES = BONE_DEF.length;
+  const anims = cfg.anims;
+  console.log(`[cfg] ${gender}: bones=${N_BONES}, anims=${anims.length}`);
   const glbPath = `public/assets/${gender}.glb`;
   const outPath = `public/assets/${gender}-rig.glb`;
   console.log(`\n=== ${gender} ===`);
@@ -206,12 +239,6 @@ function bake(gender) {
   // 每运动骨：轴 + 幅度函数(相位 s∈[0,1))
   function legAng(s, amp) { return amp * Math.sin(2 * Math.PI * s); }
   function kneeAng(s, amp) { const h = amp * Math.sin(2 * Math.PI * s); return Math.max(0, -h) * 0.9; }
-  // moveBones: name -> (axisChar, ampScale 乘数, periodSec)
-  const anims = [
-    { name: 'Idle', period: 4.0, A: 0.0, A2: 0.05, A3: 0.03, knee: false },
-    { name: 'Walk', period: 1.1, A: 0.38, A2: 0.26, A3: 0.08, knee: true },
-    { name: 'Run', period: 0.7, A: 0.72, A2: 0.46, A3: 0.12, knee: true },
-  ];
   // 骨运动定义（按骨名）
   function boneMotion(name, s, clip) {
     const ph = s; // 相位

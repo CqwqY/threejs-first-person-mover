@@ -58,6 +58,29 @@ export default {
             return;
           }
 
+          // 骨骼校准：编辑器「骨骼」页签把 boy/girl 两套坐标写回源码配置，
+          // 之后跑 node tools/auto-rig.mjs 重烘焙 -rig.glb 才会在游戏里生效。
+          if (req.method === 'POST' && url === '/api/rig-presets') {
+            let body = '';
+            req.on('data', (c) => { body += c; });
+            req.on('end', () => {
+              try {
+                const data = JSON.parse(body);
+                if (!data || !data.boy || !data.girl || !Array.isArray(data.boy.bones) || !Array.isArray(data.girl.bones)) {
+                  throw new Error('缺少 boy/girl 骨骼数据');
+                }
+                fs.writeFileSync(path.join(root, 'src', 'player', 'rigPresets.json'), JSON.stringify(data, null, 2) + '\n', 'utf8');
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ ok: true }));
+              } catch (e) {
+                res.statusCode = 400;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ ok: false, error: String(e) }));
+              }
+            });
+            return;
+          }
+
           // 模型清单：读取 public/models 目录下所有 .glb，供素材库使用
           if (req.method === 'GET' && url === '/api/models') {
             try {
