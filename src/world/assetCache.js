@@ -13,7 +13,8 @@
 // 本轮改用 tools/auto-rig.mjs 程序化自绑骨（放弃 Mixamo 重定向，骨与动画同坐标系），
 // rig.glb 内容彻底重做，升到 v5 强制重新下载
 // 2026-11-08：编辑器骨骼校准改了 boy 的骨坐标，boy-rig.glb 重新烘焙 → 升 v7
-const CACHE_NAME = 'fpm-assets-v7';
+// 同日：girl 也同步 boy 那套骨骼，girl-rig.glb 重新烘焙 → 升 v8（v7 已被部分玩家缓存，不能沿用）
+const CACHE_NAME = 'fpm-assets-v8';
 const PREFIX = 'fpm-assets-';
 
 // 单件上限：超过就不缓存（正常模型最多几 MB，这里是防异常大文件把配额撑爆）

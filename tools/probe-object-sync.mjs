@@ -91,7 +91,7 @@ has(rtc, 'if (sent !== false)', '检查 DataChannel 发送返回值');
 has(rtc, "console.warn('[rtc] DataChannel 消息处理异常", 'DC 消息异常出声');
 
 // ---- ⑥ boy-rig 重烘焙后必须升缓存版本 ----
-has(cache, "const CACHE_NAME = 'fpm-assets-v7'", '缓存版本已升 v7');
+has(cache, "const CACHE_NAME = 'fpm-assets-v8'", '缓存版本已升 v8');
 
 // ---- ⑦ 运行时：事件 hook 不回环、纯本地不广播 ----
 clearSceneEvents();
