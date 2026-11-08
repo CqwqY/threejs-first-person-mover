@@ -15,10 +15,14 @@ const STUN_SERVERS = [
   'stun:stun.cloudflare.com:3478',
 ];
 
-// 直连失败后自动重试的次数与间隔：源站处运营商多出口 NAT，同一会话有概率绑到不可用的出口，
-// 重建一次会重新选出口（实测：失败后手动刷新一次即通）。有了重试，用户不必自己去刷新页面。
-const RTC_MAX_RETRY = 2;
-const RTC_RETRY_DELAY = 1200;
+// 直连失败后自动重试：源站处运营商多出口 NAT + 客户端 NAT 打洞都是**概率事件**，
+// 每次重建都会拿新的本地端口 → 新的 NAT 映射 → 新的运气。所以「重试次数」直接决定成功率。
+// 之前只重试 2 次，一失败整场就再也连不上（用户「怎么重试都不行」），下面改成快重试 + 慢速兜底。
+const RTC_MAX_RETRY = 6;          // 快重试上限（每次间隔递增，避免雪崩）
+const RTC_RETRY_DELAY = 1200;     // 首次重试延迟，之后按次数递增
+const RTC_RETRY_MAX_DELAY = 6000; // 快重试的单次间隔上限
+const RTC_MAX_SLOW = 4;           // 快重试用尽后，慢速兜底的轮数（30s/60s/120s/240s）
+const RTC_SLOW_BASE_DELAY = 30000; // 慢速兜底起始间隔
 
 export class Network {
   constructor(url, token) {
@@ -55,7 +59,7 @@ export class Network {
     // WebRTC 直连状态：wss 连上后尝试建 DataChannel(UDP) 直连源站，绕开 CF 降延迟。
     // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
     this._transport = 'wss';          // 'wss' | 'webrtc'，供 UI / 调试查询
-    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false, retries: 0, retryTimer: null };
+    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false, retries: 0, retryTimer: null, slowRound: 0, slowTimer: null };
     this._stunRanked = null;          // 实测延迟后按快慢排序的 STUN 服务器 URL 列表
 
     // 玩家↔玩家 P2P 网格（**默认关闭**；?p2p=1 才启用）。
@@ -123,6 +127,14 @@ export class Network {
       网格: !!this._mesh,
       资源: asset,
     });
+    // 手动重试直连的全局入口：HUD 显示「CF」（仍在走 Cloudflare）时可随时再打一次洞。
+    // 自动慢速兜底一直在跑，这里只是给用户/调试一个「立刻再试」的开关。
+    if (typeof window !== 'undefined') {
+      window.__netRetryDirect = () => {
+        console.log('[net] 手动重试直连…');
+        this.retryDirect();
+      };
+    }
   }
 
   // 当前连接状态（供 UI 主动查询）
@@ -160,7 +172,8 @@ export class Network {
     if (this._rtc.dc) { try { this._rtc.dc.close(); } catch {} }
     if (this._rtc.timer) { clearTimeout(this._rtc.timer); }
     if (this._rtc.retryTimer) { clearTimeout(this._rtc.retryTimer); }
-    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false, retries: 0, retryTimer: null };
+    if (this._rtc.slowTimer) { clearTimeout(this._rtc.slowTimer); }
+    this._rtc = { pc: null, dc: null, open: false, timer: null, early: [], remoteDescribed: false, retries: 0, retryTimer: null, slowRound: 0, slowTimer: null };
     this._transport = 'wss';
     // 首次连接与断线重连对外状态不同：重连时 UI 要显示「重连中 (n/5)」
     this._setStatus(this._everOpened || this._reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
@@ -344,6 +357,10 @@ export class Network {
       if (this._rtc.dc !== dc) return; // 旧连接的迟到事件，忽略
       this._rtc.open = true;
       this._rtc.retries = 0;      // 连上了就把重试计数清零，下次断开还能再试
+      this._rtc.slowRound = 0;    // 慢速兜底轮数也清零
+      if (this._rtc.timer) { clearTimeout(this._rtc.timer); this._rtc.timer = null; }
+      if (this._rtc.retryTimer) { clearTimeout(this._rtc.retryTimer); this._rtc.retryTimer = null; }
+      if (this._rtc.slowTimer) { clearTimeout(this._rtc.slowTimer); this._rtc.slowTimer = null; }
       this._transport = 'webrtc';
       console.log('[net] WebRTC 直连已建立，多人数据走 UDP 直连');
       this._reportSelectedPair();
@@ -461,15 +478,15 @@ export class Network {
   // 内网 IPv4、CGNAT(100.64/10)、mDNS(.local)、IPv6 ULA(fd)/link-local(fe80) 一律丢弃。
   // 直连失败后自动重建，用户不必再手动刷新页面。
   // 源站出口在运营商多出口 NAT 后面，同一会话有概率绑到打不通的那个出口；重建会话会重新选出口。
+  //
+  // ⚠ 关键：打洞是**概率事件**，之前只重试 2 次就彻底放弃 → 用户「怎么重试都不行」（其实是没有再试了）。
+  //   现在分两段：① 快重试 6 次（间隔 1.2/2.4/3.6/4.8/6/6s）；② 用尽后转慢速兜底 4 轮
+  //   （30/60/120/240s），每轮都是全新本地端口/映射。全部失败才安静地保持 wss。
   _retryRtc(reason) {
     const r = this._rtc;
-    if (r.retryTimer) return;                 // 已安排过重试，不叠加
+    if (r.retryTimer || r.slowTimer) return;  // 已排过重试，不叠加
     if (r.pc && r.open) return;               // 已经连上，无需重试
-    if (r.retries >= RTC_MAX_RETRY) {
-      console.warn('[net] 直连重试 ' + r.retries + ' 次仍失败（' + reason + '），本次保持走 wss');
-      return;
-    }
-    r.retries++;
+    // 先拆掉本轮（无论快慢都先清干净，否则下一次协商会复用已 failed 的 PC）
     if (r.timer) { clearTimeout(r.timer); r.timer = null; }
     try { if (r.dc) r.dc.close(); } catch { /* 忽略 */ }
     try { if (r.pc) r.pc.close(); } catch { /* 忽略 */ }
@@ -480,14 +497,50 @@ export class Network {
     r.early = [];
     this._transport = 'wss';
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return; // wss 也断了：等它重连后再发起
-    console.log('[net] 直连失败（' + reason + '），' + (RTC_RETRY_DELAY / 1000) + 's 后自动重试 ' + r.retries + '/' + RTC_MAX_RETRY);
-    r.retryTimer = setTimeout(() => {
-      r.retryTimer = null;
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      // 先让服务端把旧 PC 释放，否则它会复用已 failed 的连接
-      this.send({ t: 'rtc_reset' });
-      this._startWebRtc();
-    }, RTC_RETRY_DELAY);
+
+    if (r.retries < RTC_MAX_RETRY) {
+      r.retries++;
+      const delay = Math.min(RTC_RETRY_DELAY * r.retries, RTC_RETRY_MAX_DELAY);
+      console.log('[net] 直连失败（' + reason + '），' + delay + 'ms 后自动重试 ' + r.retries + '/' + RTC_MAX_RETRY);
+      r.retryTimer = setTimeout(() => { r.retryTimer = null; this._restartRtc(); }, delay);
+      return;
+    }
+    // 快重试用尽 → 慢速兜底（避免「一次失败整场再也连不上」），轮数用尽才彻底放弃
+    if (r.slowRound >= RTC_MAX_SLOW) {
+      console.warn('[net] 直连重试 ' + RTC_MAX_RETRY + ' 次 + 兜底 ' + r.slowRound + ' 轮仍失败（' + reason + '），本次保持走 wss');
+      return;
+    }
+    r.slowRound++;
+    r.retries = 0; // 下一轮兜底重新获得 6 次快重试
+    const delay = Math.min(RTC_SLOW_BASE_DELAY * Math.pow(2, r.slowRound - 1), 240000);
+    console.warn('[net] 直连快重试用尽（' + reason + '），' + (delay / 1000) + 's 后慢速兜底第 ' + r.slowRound + '/' + RTC_MAX_SLOW + ' 轮');
+    r.slowTimer = setTimeout(() => { r.slowTimer = null; this._restartRtc(); }, delay);
+  }
+
+  // 真正发起一轮全新的直连协商：先让服务端释放旧 PC，再建新的。
+  // 由快重试 / 慢速兜底 / 手动 retryDirect 共用，保证「拆旧 → 建新」永远成对。
+  _restartRtc() {
+    const r = this._rtc;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return; // wss 断了就等它重连
+    if (r.pc || r.open) return;                                     // 已在进行或已连上，不叠加
+    this.send({ t: 'rtc_reset' });
+    this._startWebRtc();
+  }
+
+  // 手动重试直连（用户点 HUD 的「CF」或其它入口）：清零计数，立刻来一轮。
+  retryDirect() {
+    const r = this._rtc;
+    if (r.open) return;                                   // 已经直连了，无需重试
+    if (r.timer) { clearTimeout(r.timer); r.timer = null; }
+    if (r.retryTimer) { clearTimeout(r.retryTimer); r.retryTimer = null; }
+    if (r.slowTimer) { clearTimeout(r.slowTimer); r.slowTimer = null; }
+    r.retries = 0;
+    r.slowRound = 0;
+    // 拆掉可能残留的 pc，再走统一的重启
+    try { if (r.dc) r.dc.close(); } catch { /* 忽略 */ }
+    try { if (r.pc) r.pc.close(); } catch { /* 忽略 */ }
+    r.pc = null; r.dc = null; r.open = false; r.remoteDescribed = false; r.early = [];
+    this._restartRtc();
   }
 
   // 用 getStats() 找出「实际被采用的候选对」，直接回答「这条路是怎么通的」：
