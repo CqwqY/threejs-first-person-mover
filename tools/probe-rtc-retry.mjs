@@ -39,9 +39,22 @@ function blockAt(src, signature) {
 console.log('[probe-rtc-retry] WebRTC 直连重试守卫');
 
 // ---- 客户端：常量 ----
-has(net, 'const RTC_MAX_RETRY = 6', '快重试上限已提到 6（不再是 2）');
+has(net, 'const RTC_MAX_RETRY = 30', '快重试上限已提到 30（单轮成功率 10%~30%，30 轮累计 96%~99.9%）');
 has(net, 'const RTC_MAX_SLOW = 4', '慢速兜底轮数常量存在');
 has(net, 'const RTC_SLOW_BASE_DELAY = 30000', '慢速兜底起始间隔存在');
+has(net, 'const RTC_LOG_EVERY = 5', '重试日志节流常量存在（30 轮不刷屏）');
+
+// ---- 客户端：单轮超时必须短 ----
+// 实测：成功的轮次全部在 600~900ms 内握手完成，失败的轮次 8s 也毫无进展（respRecv=0）。
+// 所以单轮等 12s 是纯浪费，会让 20 次重试拖到四分钟以上。这里钉死 ≤ 5s。
+const attempt = net.match(/const RTC_ATTEMPT_TIMEOUT = (\d+)/);
+has(net, 'const RTC_ATTEMPT_TIMEOUT = 2500', '单轮协商超时常量存在且为 2.5s');
+if (attempt && Number(attempt[1]) > 5000) { fails++; console.log('  ✗ 单轮超时 ' + attempt[1] + 'ms 过长（实测成功都在 1s 内，必须 ≤ 5000ms）'); }
+else if (attempt) console.log('  ok    单轮超时 ' + attempt[1] + 'ms 在合理范围');
+// 超时回调必须用常量，不能又写回硬编码
+has(net, '}, RTC_ATTEMPT_TIMEOUT);', '超时定时器使用 RTC_ATTEMPT_TIMEOUT 常量');
+if (/\}\s*,\s*12000\s*\)/.test(net)) { fails++; console.log('  ✗ 仍存在硬编码 12000ms 的 RTC 超时'); }
+else console.log('  ok    已无硬编码 12000ms 的 RTC 超时');
 
 // ---- 客户端：_rtc 状态机含 slowRound / slowTimer ----
 has(net, 'slowRound: 0, slowTimer: null', '_rtc 初始化含 slowRound/slowTimer');

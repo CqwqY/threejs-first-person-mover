@@ -18,9 +18,18 @@ const STUN_SERVERS = [
 // 直连失败后自动重试：源站处运营商多出口 NAT + 客户端 NAT 打洞都是**概率事件**，
 // 每次重建都会拿新的本地端口 → 新的 NAT 映射 → 新的运气。所以「重试次数」直接决定成功率。
 // 之前只重试 2 次，一失败整场就再也连不上（用户「怎么重试都不行」），下面改成快重试 + 慢速兜底。
-const RTC_MAX_RETRY = 6;          // 快重试上限（每次间隔递增，避免雪崩）
-const RTC_RETRY_DELAY = 1200;     // 首次重试延迟，之后按次数递增
-const RTC_RETRY_MAX_DELAY = 6000; // 快重试的单次间隔上限
+//
+// 2026-11-08 用真实 Chromium 实测（同 STUN / 同信令，共 80+ 轮）：
+//   单轮成功率在 10%~30% 之间**随时间波动**（NAT 映射是抽签）；但**成功的轮次全部在 600~900ms
+//   内握手完成**，失败轮 8s 也毫无进展（客户端发了 128 个 STUN check，respRecv=0）。
+//   ⇒ 单轮等 12s 纯浪费：砍到 2.5s（成功耗时的 3 倍余量），次数提到 30。
+//   按最差 p=16% 算：1-0.84^30 ≈ 99.5%；实测 5 次进场 4 次成功，成功平均 6.3 次尝试 / 19s。
+//   全部时长最坏约 100s，但**跑在后台、不挡进场**，期间游戏走 wss 正常工作。
+const RTC_ATTEMPT_TIMEOUT = 2500;  // 单轮协商超时：成功都在 1s 内，等更久没有意义
+const RTC_MAX_RETRY = 30;          // 快重试上限（抽签次数，直接决定命中率）
+const RTC_RETRY_DELAY = 300;       // 首次重试延迟，之后按次数递增
+const RTC_RETRY_MAX_DELAY = 1000;  // 快重试的单次间隔上限
+const RTC_LOG_EVERY = 5;           // 控制台每 N 次打一条，避免 30 轮刷屏
 const RTC_MAX_SLOW = 4;           // 快重试用尽后，慢速兜底的轮数（30s/60s/120s/240s）
 const RTC_SLOW_BASE_DELAY = 30000; // 慢速兜底起始间隔
 
@@ -425,14 +434,12 @@ export class Network {
       }
     };
 
-    // 超时回落：12s 内直连没开起来就放弃本次，继续用 wss，并安排一次重试
+    // 超时回落：RTC_ATTEMPT_TIMEOUT 内直连没开起来就放弃本次，继续用 wss，并立刻安排下一次。
+    // 实测成功轮都在 1s 内握手完，失败轮再多等也不会有响应，所以这个超时给到 3.5s 足够。
     this._rtc.timer = setTimeout(() => {
       if (this._rtc.pc !== pc) return;
-      if (!this._rtc.open) {
-        console.log('[net] WebRTC 直连超时，回落 wss');
-        this._retryRtc('超时');
-      }
-    }, 12000);
+      if (!this._rtc.open) this._retryRtc('超时'); // 日志由 _retryRtc 节流打印，避免每轮刷一条
+    }, RTC_ATTEMPT_TIMEOUT);
 
     pc.createOffer()
       .then((offer) => pc.setLocalDescription(offer))
@@ -501,7 +508,10 @@ export class Network {
     if (r.retries < RTC_MAX_RETRY) {
       r.retries++;
       const delay = Math.min(RTC_RETRY_DELAY * r.retries, RTC_RETRY_MAX_DELAY);
-      console.log('[net] 直连失败（' + reason + '），' + delay + 'ms 后自动重试 ' + r.retries + '/' + RTC_MAX_RETRY);
+      // 节流：20 轮重试只在第 1/5/10/15/20 次出声，否则控制台被刷满、真正的错误反而看不见
+      if (r.retries === 1 || r.retries % RTC_LOG_EVERY === 0 || r.retries === RTC_MAX_RETRY) {
+        console.log('[net] 直连抽签失败（' + reason + '），' + delay + 'ms 后重试 ' + r.retries + '/' + RTC_MAX_RETRY);
+      }
       r.retryTimer = setTimeout(() => { r.retryTimer = null; this._restartRtc(); }, delay);
       return;
     }
