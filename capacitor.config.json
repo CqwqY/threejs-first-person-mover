@@ -3,7 +3,7 @@
   "appName": "花草中学",
   "webDir": "dist",
   "server": {
-    "url": "https://play.caiyz.dpdns.org",
+    "url": "https://play.wenyazw.top",
     "androidScheme": "https",
     "cleartext": false,
     "errorPath": "error.html"

@@ -122,7 +122,7 @@ npx vite build --outDir "$TEMP/_vite_xxx"
 
 | 部分 | 方式 | 备注 |
 |---|---|---|
-| **前端** | push 到 `main` → GitHub Pages **自动部署** | `play.caiyz.dpdns.org`；⚠ CI `node-version` **必须 ≥22**，否则 `npm ci` 遇 `EBADENGINE` → **Pages 静默永不部署** |
+| **前端** | push 到 `main` → GitHub Pages **自动部署** | `play.wenyazw.top`；⚠ CI `node-version` **必须 ≥22**，否则 `npm ci` 遇 `EBADENGINE` → **Pages 静默永不部署** |
 | **服务端** | **用户手动** scp + `pm2 restart fp-relay` | ⚠ 服务器只开密码登录，本机公钥没装 |
 | 移动端 | Capacitor Android | `@capacitor/*` 8.x |
 

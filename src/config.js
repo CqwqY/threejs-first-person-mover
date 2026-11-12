@@ -115,7 +115,7 @@ export const Config = {
   WALL_OPACITY: 0.35,
   // 多人在线中继地址（后端已迁到远程，支持 HTTPS/wss，wss 走 443）。
   // 纯本地调试可改回 'ws://localhost:9000'。
-  RELAY_URL: 'wss://game666.lshserver.dpdns.org',
+  RELAY_URL: 'wss://game666.wenyazw.top',
 
   // 一键隐藏 / 显示全部游戏 UI 的键（e.code）。截图、录屏、沉浸看画面用。
   // 见 src/util/UiVisibility.js（body 加类 + CSS 隐藏 body 直属 UI，加载屏豁免）。
@@ -486,4 +486,4 @@ export const Config = {
 
 // 后端 HTTP 地址：编辑器保存/读取场景、素材清单、模型上传，以及游戏运行时拉取场景都走这里。
 // 部署到 GitHub Pages 后仍指向这个远程后端，从而实现「编辑器改完 → 线上游戏即生效」的在线同步。
-export const API_BASE = 'https://game666.lshserver.dpdns.org';
+export const API_BASE = 'https://game666.wenyazw.top';

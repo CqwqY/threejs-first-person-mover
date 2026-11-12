@@ -1,7 +1,7 @@
 // 云控数据「终端查看器」：从 stdin（或文件路径）读服务端 JSON，打成人类可读的表格直接看，不落盘。
 //
 // 用法（git-bash / cmd 都行）：
-//   B=https://game666.lshserver.dpdns.org
+//   B=https://game666.wenyazw.top
 //   N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-6/node.exe"
 //
 //   curl -s --noproxy '*' "$B/api/shop"  | "$N" tools/cloud-view.mjs shop

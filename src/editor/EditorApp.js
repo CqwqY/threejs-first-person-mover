@@ -67,7 +67,7 @@ function defaultCollider() {
 }
 // 编辑器读写自己的场景文件与模型上传；统一走远程后端（API_BASE），实现线上同步。
 // 保存/读取场景、素材清单、模型上传都指向同一台后端，编辑器改完线上游戏即可读到。
-// API_BASE 正常是 https://game666.lshserver.dpdns.org；万一没配到，就退回同源（见 UPLOAD_URL 兜底）。
+// API_BASE 正常是 https://game666.wenyazw.top；万一没配到，就退回同源（见 UPLOAD_URL 兜底）。
 const API_ROOT = String(API_BASE || '').replace(/\/+$/, '');
 const MAP_URL = API_ROOT + '/api/scene';
 const SAVE_URL = API_ROOT + '/api/scene';
