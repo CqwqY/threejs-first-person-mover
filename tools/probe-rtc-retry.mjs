@@ -83,6 +83,16 @@ const onopen = blockAt(net, 'dc.onopen = () => {');
 has(onopen, 'clearTimeout(this._rtc.slowTimer)', 'dc.onopen 清 slowTimer');
 has(onopen, 'clearTimeout(this._rtc.retryTimer)', 'dc.onopen 清 retryTimer');
 
+// ---- 开关：UDP 直连隧道默认关闭，只有 ?rtc=1 才启用 ----
+// 2026-11-12：宽带重拨后源站变对称 NAT，24 次协商 0 次打通 → 默认固定走 wss。
+// 谁把默认值改回「无条件启动」，这条会立刻失败。
+has(net, 'this._rtcEnabled = /(?:^|[?&])rtc=1(?:&|$)/.test(q)', '直连隧道默认关闭，?rtc=1 才启用');
+const onWssOpen = blockAt(net, 'this.ws.onopen = () => {');
+if (/if \(this\._rtcEnabled\)[^;]*_startWebRtc\(\)/.test(onWssOpen)) console.log('  ok    wss 连上后按开关决定是否发起直连');
+else { fails++; console.log('  ✗ wss.onopen 里没有 _rtcEnabled 门禁（会无条件打洞）'); }
+const startRtc = blockAt(net, '_startWebRtc() {');
+has(startRtc, 'if (!this._rtcEnabled) return', '_startWebRtc 入口也有开关兜底');
+
 // ---- 服务端：PeerConnection 名字必须每次唯一 ----
 has(rtc, '__rtcSeq = (ws.__rtcSeq || 0) + 1', '服务端自增 rtc 序号');
 has(rtc, "'peer-' + ws.__id + '-' + ws.__rtcSeq", '服务端 peer 名带序号（避免同名重建失败）');

@@ -76,7 +76,14 @@ export class Network {
     // 所以主力走客户端↔源站直连，P2P 网格只作实验开关。
     const q = typeof location !== 'undefined' ? location.search : '';
     this._p2pEnabled = /(?:^|[?&])p2p=1(?:&|$)/.test(q);
-    if (!this._p2pEnabled) this._rankStun(); // 主力路径需要 STUN 排序
+
+    // 客户端↔源站 UDP 直连（DataChannel 隧道）：**默认关闭**，固定走 wss。
+    // 2026-11-12 实测：家庭宽带重拨后服务端出口变成对称 NAT，与客户端不在同一出口，
+    // 24 次协商 0 次打通（历史成功率也仅 14%），保留只会白刷日志/白试 30 轮。
+    // 代码保留，带 ?rtc=1 可临时启用（以后上 TURN / 固定端口转发方案时用它验证）。
+    this._rtcEnabled = /(?:^|[?&])rtc=1(?:&|$)/.test(q);
+
+    if (!this._p2pEnabled && this._rtcEnabled) this._rankStun(); // 只有真要打洞时才需要 STUN 排序
 
     // 延迟测量（应用层 ping/pong，走当前数据通道）
     this._rtt = 0;
@@ -208,9 +215,9 @@ export class Network {
       if (this.token) {
         this.send({ t: 'auth', token: this.token });
       }
-      // wss 已通：同时尝试「客户端↔源站」直连。源站有公网 IPv6，同局域网也走 host 候选，
-      // 成功后上行全部走 UDP、绕开 Cloudflare；失败自动回落 wss，不影响现有功能。
-      this._startWebRtc();
+      // wss 已通：仅在显式开启（?rtc=1）时尝试「客户端↔源站」UDP 直连。
+      // 默认关闭：对称 NAT 下打洞 0%，白试 30 轮还刷日志；关掉后固定走 wss，行为可预期。
+      if (this._rtcEnabled) this._startWebRtc();
     };
 
     this.ws.onmessage = (event) => {
@@ -350,6 +357,7 @@ export class Network {
   // 尝试建立 WebRTC 直连：经现有 wss 交换信令，DataChannel(UDP) 通了就接管游戏数据。
   // 失败 / 超时 / 不支持：静默回落 wss（绝不比现在更差）。
   _startWebRtc() {
+    if (!this._rtcEnabled) return;                        // 隧道默认关闭（?rtc=1 才启用）
     if (typeof RTCPeerConnection === 'undefined') return; // 非浏览器或老浏览器：直接跳过
     if (this._rtc.pc) return; // 已经有一轮协商在进行，别叠加
     let pc, dc;
@@ -531,6 +539,7 @@ export class Network {
   // 由快重试 / 慢速兜底 / 手动 retryDirect 共用，保证「拆旧 → 建新」永远成对。
   _restartRtc() {
     const r = this._rtc;
+    if (!this._rtcEnabled) return;                                  // 隧道关闭：任何重试入口都直接返回
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return; // wss 断了就等它重连
     if (r.pc || r.open) return;                                     // 已在进行或已连上，不叠加
     this.send({ t: 'rtc_reset' });
@@ -540,6 +549,7 @@ export class Network {
   // 手动重试直连（用户点 HUD 的「CF」或其它入口）：清零计数，立刻来一轮。
   retryDirect() {
     const r = this._rtc;
+    if (!this._rtcEnabled) { console.log('[net] UDP 直连已关闭（地址后加 ?rtc=1 可临时启用）'); return; }
     if (r.open) return;                                   // 已经直连了，无需重试
     if (r.timer) { clearTimeout(r.timer); r.timer = null; }
     if (r.retryTimer) { clearTimeout(r.retryTimer); r.retryTimer = null; }
